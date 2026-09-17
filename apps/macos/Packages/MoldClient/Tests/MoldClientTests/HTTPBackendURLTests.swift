@@ -119,6 +119,14 @@ private let backend = HTTPBackend(
     #expect(url?.path() == "/api/config/models.flux-dev:q8.default_steps")
 }
 
+/// `GET /api/loras?model=<name>` is the whole compatibility decision --
+/// `catalog_api.rs:1098-1115` resolves the family and filters ON THE SERVER,
+/// so the model name is the only thing this URL carries.
+@Test func anAdapterListIsAskedForOneModel() {
+    let url = backend.request(backend.loraPath(model: "z-image-turbo:q8")).url
+    #expect(url?.absoluteString == "http://plato:7680/api/loras?model=z-image-turbo:q8")
+}
+
 /// A print in the trash lives behind `?view=trash`, exactly as the listing
 /// does. Fetching it from the live view answers 404 on a print that is right
 /// there.

@@ -107,7 +107,9 @@ final class GenerateController {
     func refreshPlacement(on host: MoldHost) {
         placementTask?.cancel()
         guard let modelName else { return }
-        let request = draft.placementRequest(model: modelName)
+        let request = draft.placementRequest(
+            model: modelName, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
+        )
         let copies = draft.batchSize
         let client = hosts.backend(for: host)
         placementTask = Task {

@@ -87,7 +87,7 @@ struct PromptPanel: View {
                 if let references = recipe.capabilities.referenceImages,
                    references.mode.isVisible {
                     ReferenceStrip(capability: references, draft: $draft)
-                } else if recipe.capabilities.sourceImage?.isSupported == true {
+                } else if Self.showsSourceWell(for: recipe) {
                     SourceImageWell(draft: $draft)
                 }
             }
@@ -99,6 +99,9 @@ struct PromptPanel: View {
     private func placeholder(_ recipe: GenerationRecipe) -> String {
         recipe.temporal == nil ? "Describe a picture…" : "Describe a clip…"
     }
+
+    /// Absence of `sourceImage` means YES -- raw `sourceImage?.isSupported` had it backwards.
+    static func showsSourceWell(for recipe: GenerationRecipe) -> Bool { recipe.capabilities.readsSourceImage }
 
     @ViewBuilder private func wand(_ recipe: GenerationRecipe) -> some View {
         if let host {

@@ -221,6 +221,25 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return ConfigEntry(key: key, value: .null, source: "default")
     }
 
+    /// Answered per MODEL -- a model absent from this dictionary is
+    /// unplanted, the same "throw when nothing was planted" rule every other
+    /// route follows. `[]` is a real empty answer: a family with no adapter
+    /// support.
+    nonisolated(unsafe) var loraRows: [String: [LoraInfo]] = [:]
+    /// Per-model overrides, e.g. `400 UNKNOWN_MODEL` -- distinct from
+    /// `refuses`'s fixed 409, the way `plantedErrors` already is for a route.
+    nonisolated(unsafe) var loraErrors: [String: Error] = [:]
+    /// Every model this was asked to list adapters for, in call order.
+    nonisolated(unsafe) var loraModelsRequested: [String] = []
+
+    func loras(compatibleWith model: String) async throws -> [LoraInfo] {
+        try record("loras")
+        loraModelsRequested.append(model)
+        if let error = loraErrors[model] { throw error }
+        guard let rows = loraRows[model] else { throw notPlanted() }
+        return rows
+    }
+
     // MARK: - Queue
 
     func queue() async throws -> QueueListing {

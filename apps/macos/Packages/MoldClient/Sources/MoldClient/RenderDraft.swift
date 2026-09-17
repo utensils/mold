@@ -10,7 +10,22 @@ public struct RenderDraft: Hashable, Sendable {
     public var negativePrompt: String = ""
     public var width: Int = 1024
     public var height: Int = 1024
-    public var steps: Int = 20
+    /// `didSet` clamps a staged identity's `startStep` below the new count --
+    /// the identity and steps controls live in different places on screen,
+    /// so dragging Steps down after Start step was set must not silently
+    /// arm a 422 (`identity.rs:560-566`). `applyIdentity` clamps again at
+    /// request time as a belt; this is what keeps the ON-SCREEN bound in
+    /// sync as it happens rather than only at submit.
+    public var steps: Int = 20 {
+        didSet {
+            guard var conditioning = identity else { return }
+            let range = Identity.startStepRange(steps: steps)
+            let clamped = Swift.min(Swift.max(conditioning.startStep, range.lowerBound), range.upperBound)
+            guard clamped != conditioning.startStep else { return }
+            conditioning.startStep = clamped
+            identity = conditioning
+        }
+    }
     public var guidance: Double = 3.5
     public var batchSize: Int = 1
     /// nil means "let the host pick", which is the default and what makes

@@ -18,7 +18,8 @@ extension GenerateController {
         let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
         let admission = BatchAdmission(requests: draft.requests(
             model: modelName, copies: copies,
-            randomBase: .random(in: 0 ... UInt64(UInt32.max))
+            randomBase: .random(in: 0 ... UInt64(UInt32.max)),
+            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         ))
         PendingBatch.remember(admission.clientBatchId, host: host.id)
 

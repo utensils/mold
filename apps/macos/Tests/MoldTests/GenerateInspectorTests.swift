@@ -67,4 +67,13 @@ struct GenerateInspectorTests {
         draft.title = "   "
         #expect(draft.request(model: "m").title == nil)
     }
+
+    /// Fact 1 in the M4 design: an absent `source_image` block means the
+    /// recipe reads a still (every installed still model on plato), not "no
+    /// source path at all" -- `PromptPanel` used to read the raw optional
+    /// backwards and hid the well on every one of them.
+    @Test func theSourceWellAppearsOnAStillModelWhoseRecipeOmitsTheBlock() {
+        let recipe = FakeFixtures.recipe()
+        #expect(PromptPanel.showsSourceWell(for: recipe))
+    }
 }

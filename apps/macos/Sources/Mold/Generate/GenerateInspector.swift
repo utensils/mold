@@ -20,6 +20,10 @@ struct GenerateInspector: View {
     @Environment(LibraryStore.self) private var library
     @Environment(GenerateController.self) private var controller
 
+    @AppStorage("createShowsAdapters", store: AppStorageSuite.defaults)
+    private var showsAdapters = true
+    @AppStorage("createShowsIdentity", store: AppStorageSuite.defaults)
+    private var showsIdentity = true
     @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
     private var showsOutput = true
     @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
@@ -40,6 +44,20 @@ struct GenerateInspector: View {
 
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if let recipe, let stack = recipe.capabilities.loraStack, let model, let host {
+                DisclosureGroup("Adapters", isExpanded: $showsAdapters) {
+                    AdaptersGroup(modelName: model.name, host: host, maxCount: stack.maxCount, draft: $draft)
+                        .padding(.top, 6)
+                }
+                .font(.callout)
+            }
+            if let recipe, IdentityGroup.isShown(recipe: recipe, host: capabilities) {
+                DisclosureGroup("Identity", isExpanded: $showsIdentity) {
+                    IdentityGroup(maxPhotos: capabilities?.maxIdentityPhotos ?? 0, draft: $draft)
+                        .padding(.top, 6)
+                }
+                .font(.callout)
+            }
             DisclosureGroup("Output", isExpanded: $showsOutput) {
                 OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
                     .padding(.top, 6)

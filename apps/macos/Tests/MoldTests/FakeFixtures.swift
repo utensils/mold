@@ -54,6 +54,15 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
+    /// The whole `identity` block present or entirely absent -- absence is
+    /// the definitive no `supportsIdentity` reads (`types.rs:11555-11557`).
+    static func capabilities(identity: Bool) -> Capabilities {
+        let json = identity
+            ? #"{"identity": {"multi_photo": true, "max_photos": 4, "true_cfg": true}}"#
+            : "{}"
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
+    }
+
     /// A host that HAS said something about prompt expansion. Omitting the
     /// whole `expand` key (rather than calling this) is how a test plants the
     /// "hasn't said" host `mayExpandPrompts` treats as unknown-not-no.
@@ -71,10 +80,13 @@ extension FakeFixtures {
     }
 
     /// One recipe, decoded rather than built -- `GenerationRecipe` has no
-    /// public memberwise init either. `prompt` and `stepsMax` are the only
-    /// things that vary across the tests that need one at all -- the latter
-    /// for a test pinning a stored default gets CLAMPED, not just applied.
-    static func recipe(prompt: PromptRequirement = .required, stepsMax: Int = 100) -> GenerationRecipe {
+    /// public memberwise init either. `prompt`, `stepsMax` and
+    /// `supportsIdentity` are the only things that vary across the tests
+    /// that need one at all -- `stepsMax` for a test pinning a stored default
+    /// gets CLAMPED, not just applied.
+    static func recipe(
+        prompt: PromptRequirement = .required, stepsMax: Int = 100, supportsIdentity: Bool? = nil
+    ) -> GenerationRecipe {
         let json = #"""
         {"id": "r", "label": "R",
          "defaults": {"width": 1024, "height": 1024, "steps": 20, "guidance": 3.5,
@@ -86,7 +98,8 @@ extension FakeFixtures {
          "temporal": null,
          "capabilities": {"prompt": {"mode": "\#(prompt.rawValue)", "reason": null}, "negative_prompt": null,
                           "output": null, "reference_images": null, "supports_strength": null,
-                          "supports_lora": null, "supports_identity": null, "supports_sequence": null,
+                          "supports_lora": null, "supports_identity": \#(supportsIdentity.map { "\($0)" } ?? "null"),
+                          "supports_sequence": null,
                           "supports_extend": null, "supports_audio": null, "source_image": null}}
         """#
         return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))

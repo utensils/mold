@@ -60,6 +60,9 @@ public protocol MoldBackend: Sendable {
     /// Drops the DB row so the key falls back to file/env/default.
     @discardableResult
     func resetConfig(_ key: String) async throws -> ConfigEntry
+    /// Installed adapters a model can take, filtered by the machine
+    /// (`catalog_api.rs:1098-1115`). Refuses an unknown model.
+    func loras(compatibleWith model: String) async throws -> [LoraInfo]
 
     // MARK: - Queue
 

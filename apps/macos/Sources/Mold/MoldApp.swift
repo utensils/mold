@@ -22,6 +22,7 @@ struct MoldApp: App {
     @State private var machines: MachineStore
     @State private var promptHistory: PromptHistoryStore
     @State private var modelDefaults: ModelDefaultsStore
+    @State private var adapters: LoraStore
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -41,6 +42,7 @@ struct MoldApp: App {
         _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
         _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))
         _machines = State(initialValue: MachineStore(hosts: hosts))
+        _adapters = State(initialValue: LoraStore(hosts: hosts))
     }
 
     var body: some Scene {
@@ -66,6 +68,7 @@ struct MoldApp: App {
                 .environment(machines)
                 .environment(promptHistory)
                 .environment(modelDefaults)
+                .environment(adapters)
                 .environment(engine)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.
