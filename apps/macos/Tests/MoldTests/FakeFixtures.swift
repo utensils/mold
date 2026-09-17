@@ -46,6 +46,43 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
+    /// A host that HAS said something about prompt expansion. Omitting the
+    /// whole `expand` key (rather than calling this) is how a test plants the
+    /// "hasn't said" host `mayExpandPrompts` treats as unknown-not-no.
+    static func expandCapabilities(
+        configured: Bool = true, modelPresent: Bool? = true,
+        remix: Bool? = true, model: String? = nil
+    ) -> Capabilities {
+        let json = #"""
+        {"expand": {"configured": \#(configured),
+         "model_present": \#(modelPresent.map { "\($0)" } ?? "null"),
+         "backend": null, "remix": \#(remix.map { "\($0)" } ?? "null"),
+         "model": \#(model.map { "\"\($0)\"" } ?? "null")}}
+        """#
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
+    }
+
+    /// One recipe, decoded rather than built -- `GenerationRecipe` has no
+    /// public memberwise init either. Only `prompt` varies across the tests
+    /// that need one at all.
+    static func recipe(prompt: PromptRequirement = .required) -> GenerationRecipe {
+        let json = #"""
+        {"id": "r", "label": "R",
+         "defaults": {"width": 1024, "height": 1024, "steps": 20, "guidance": 3.5,
+                      "frames": null, "fps": null, "negative_prompt": null},
+         "resolution": {"domain": "dynamic", "alignment": 16, "min_width": 256, "min_height": 256,
+                        "max_pixels": null, "max_axis_pixels": null, "off_bucket": null, "aspect_groups": null},
+         "steps": {"default": 20, "min": 1, "max": 100, "step": 1, "recommended": null, "mode": "adjustable", "note": null},
+         "guidance": {"default": 3.5, "min": 0, "max": 10, "step": 0.1, "mode": "adjustable", "note": null},
+         "temporal": null,
+         "capabilities": {"prompt": {"mode": "\#(prompt.rawValue)", "reason": null}, "negative_prompt": null,
+                          "output": null, "reference_images": null, "supports_strength": null,
+                          "supports_lora": null, "supports_identity": null, "supports_sequence": null,
+                          "supports_extend": null, "supports_audio": null, "source_image": null}}
+        """#
+        return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))
+    }
+
     static func exportOptions(_ formats: [String] = ["png"]) -> ExportOptions {
         let list = formats.map { "\"\($0)\"" }.joined(separator: ",")
         return try! MoldJSON.decoder.decode(ExportOptions.self, from: Data(#"{"formats": [\#(list)]}"#.utf8))

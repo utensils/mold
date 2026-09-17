@@ -12,10 +12,23 @@ final class GenerateController {
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
+    /// The chosen model's family, e.g. `"flux"` -- what an expand or remix
+    /// request resolves through the prompting registry. Kept alongside
+    /// `modelName` rather than re-derived, because the controller does not
+    /// otherwise hold the `Model` it was chosen from.
+    var modelFamily: String?
 
     private(set) var placement: PlacementPreview?
     private(set) var placementError: String?
     private var placementTask: Task<Void, Never>?
+
+    /// Where a prompt rewrite stands. `GenerateController+Expand` reads and
+    /// writes this; it lives here because every other piece of the pane's
+    /// state does.
+    var expansion: Expansion = .idle
+    /// What `revertExpansion()` puts back, and until when -- see
+    /// `canRevertExpansion`.
+    var lastAcceptedPrompt: LastAcceptedPrompt?
 
     /// Whether the prompt capsule has slid off the bottom edge so the
     /// picture can be looked at. Visual only -- nothing about the draft or
@@ -37,6 +50,7 @@ final class GenerateController {
     /// overwrite them with the recipe's defaults.
     func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool) {
         modelName = model.name
+        modelFamily = model.family
         hostID = host
         if let recipe = model.defaultRecipe {
             draft = draft.adopting(recipe, isNewModel: !keepingDraft)
@@ -47,6 +61,7 @@ final class GenerateController {
     func select(model: Model, on host: MoldHost.ID) {
         let isNewModel = model.name != modelName
         modelName = model.name
+        modelFamily = model.family
         hostID = host
         if let recipe = model.defaultRecipe {
             draft = draft.adopting(recipe, isNewModel: isNewModel)
