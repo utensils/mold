@@ -18,6 +18,7 @@ struct MoldApp: App {
     @State private var models: ModelStore
     @State private var generate: GenerateController
     @State private var queue: QueueStore
+    @State private var licenses: LicenseStore
     @State private var downloads: DownloadStore
     @State private var machines: MachineStore
     @State private var promptHistory: PromptHistoryStore
@@ -36,7 +37,9 @@ struct MoldApp: App {
         _library = State(initialValue: LibraryStore(hosts: hosts))
         _models = State(initialValue: ModelStore(hosts: hosts))
         _queue = State(initialValue: QueueStore(hosts: hosts))
-        _downloads = State(initialValue: DownloadStore(hosts: hosts))
+        let licenses = LicenseStore(hosts: hosts)
+        _licenses = State(initialValue: licenses)
+        _downloads = State(initialValue: DownloadStore(hosts: hosts, licenses: licenses))
         let modelDefaults = ModelDefaultsStore(hosts: hosts)
         _modelDefaults = State(initialValue: modelDefaults)
         _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
@@ -64,6 +67,7 @@ struct MoldApp: App {
                 .environment(models)
                 .environment(generate)
                 .environment(queue)
+                .environment(licenses)
                 .environment(downloads)
                 .environment(machines)
                 .environment(promptHistory)

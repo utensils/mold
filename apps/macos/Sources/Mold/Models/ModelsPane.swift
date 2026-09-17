@@ -99,7 +99,7 @@ struct ModelsPane: View {
     private func install(_ model: Model) {
         guard let host else { return }
         Task {
-            await downloads.install(model, on: host)
+            await downloads.install(model.name, on: host)
         }
     }
 

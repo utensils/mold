@@ -133,18 +133,92 @@ extension FakeFixtures {
     }
 
     static func model(
-        _ name: String, family: String = "flux", sizeGb: Double? = nil, downloaded: Bool? = nil
+        _ name: String, family: String = "flux", sizeGb: Double? = nil, downloaded: Bool? = nil,
+        remainingDownloadBytes: Int? = nil, isLoaded: Bool? = nil
     ) -> Model {
         let json = #"""
         {"name": "\#(name)", "family": "\#(family)", "description": "\#(name) — fake",
          "size_gb": \#(sizeGb.map { "\($0)" } ?? "null"),
-         "downloaded": \#(downloaded.map { "\($0)" } ?? "null")}
+         "downloaded": \#(downloaded.map { "\($0)" } ?? "null"),
+         "remaining_download_bytes": \#(remainingDownloadBytes.map { "\($0)" } ?? "null"),
+         "is_loaded": \#(isLoaded.map { "\($0)" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(Model.self, from: Data(json.utf8))
     }
 
     static func downloadTicket(_ id: String) -> DownloadTicket {
         try! MoldJSON.decoder.decode(DownloadTicket.self, from: Data(#"{"id": "\#(id)"}"#.utf8))
+    }
+
+    /// `POST /api/catalog/:id/download`'s 202 -- `CatalogInstall` has no
+    /// public memberwise init, so this decodes it the way the wire produces
+    /// one. A `nil` primary with non-empty companions is the "only
+    /// companions were missing" answer, not a failure (design fact 2, M5).
+    static func catalogInstall(primary: String?, companions: [(name: String, jobId: String)] = []) -> CatalogInstall {
+        let companionJSON = companions
+            .map { #"{"name": "\#($0.name)", "job_id": "\#($0.jobId)"}"# }
+            .joined(separator: ",")
+        let json = #"""
+        {"primary_job_id": \#(primary.map { "\"\($0)\"" } ?? "null"), "companion_jobs": [\#(companionJSON)]}
+        """#
+        return try! MoldJSON.decoder.decode(CatalogInstall.self, from: Data(json.utf8))
+    }
+
+    /// `DELETE /api/models/:model`'s answer -- `ModelRemoval` has no public
+    /// memberwise init either.
+    static func modelRemoval(
+        removed: [String] = [], kept: [(component: String, usedBy: [String])] = [], freedBytes: Int64 = 0
+    ) -> ModelRemoval {
+        let keptJSON = kept.map {
+            let usedByJSON = $0.usedBy.map { "\"\($0)\"" }.joined(separator: ",")
+            return #"{"component": "\#($0.component)", "used_by": [\#(usedByJSON)]}"#
+        }.joined(separator: ",")
+        let removedJSON = removed.map { "\"\($0)\"" }.joined(separator: ",")
+        let json = #"{"removed": [\#(removedJSON)], "kept": [\#(keptJSON)], "freed_bytes": \#(freedBytes)}"#
+        return try! MoldJSON.decoder.decode(ModelRemoval.self, from: Data(json.utf8))
+    }
+
+    /// `GET /api/models/:model/components`'s answer, one row per component
+    /// -- `ModelComponentsResponse` and `ModelComponentStatus` have no public
+    /// memberwise init either.
+    static func modelComponents(
+        _ model: String, rows: [(kind: String, name: String, present: Bool)]
+    ) -> ModelComponentsResponse {
+        let rowsJSON = rows.map {
+            #"""
+            {"kind": "\#($0.kind)", "name": "\#($0.name)", "present": \#($0.present),
+             "path": null, "repair_model": null, "options": null}
+            """#
+        }.joined(separator: ",")
+        let json = #"{"model": "\#(model)", "components": [\#(rowsJSON)]}"#
+        return try! MoldJSON.decoder.decode(ModelComponentsResponse.self, from: Data(json.utf8))
+    }
+
+    /// A frame from `GET /api/downloads/stream` -- `DownloadEvent` has no
+    /// public memberwise init either. `listing` is what a `snapshot` frame
+    /// carries; every other frame leaves it `nil`.
+    static func downloadEvent(
+        type: String, id: String? = nil, model: String? = nil,
+        bytesDone: Int64? = nil, bytesTotal: Int64? = nil, error: String? = nil,
+        listing: DownloadsListing? = nil
+    ) -> DownloadEvent {
+        let listingJSON = listing.map { String(data: try! MoldJSON.encoder.encode($0), encoding: .utf8)! } ?? "null"
+        let json = """
+        {"type": "\(type)", "id": \(id.map { "\"\($0)\"" } ?? "null"),
+         "model": \(model.map { "\"\($0)\"" } ?? "null"), "position": null,
+         "files_done": null, "files_total": null,
+         "bytes_done": \(bytesDone.map { "\($0)" } ?? "null"),
+         "bytes_total": \(bytesTotal.map { "\($0)" } ?? "null"),
+         "current_file": null, "error": \(error.map { "\"\($0)\"" } ?? "null"),
+         "listing": \(listingJSON)}
+        """
+        return try! MoldJSON.decoder.decode(DownloadEvent.self, from: Data(json.utf8))
+    }
+
+    /// `capabilities.licenses` -- a bare bool, not a block (design fact, M5).
+    static func capabilities(licenses: Bool) -> Capabilities {
+        let json = #"{"licenses": \#(licenses)}"#
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
     /// One GPU, as `MachineStore` sees it. `DeviceInfo` has no public

@@ -48,9 +48,10 @@ struct StoreLifecycleTests {
         let backend = FakeBackend(host: plato)
         backend.downloadTicket = FakeFixtures.downloadTicket("job-1")
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let downloads = DownloadStore(hosts: hosts)
+        let licenses = LicenseStore(hosts: hosts)
+        let downloads = DownloadStore(hosts: hosts, licenses: licenses)
 
-        await downloads.install(FakeFixtures.model("flux-dev:q4"), on: plato)
+        await downloads.install("flux-dev:q4", on: plato)
         await settle { backend.callCount("downloadEvents") == 1 }
         #expect(downloads.streams[plato.id] != nil)
 

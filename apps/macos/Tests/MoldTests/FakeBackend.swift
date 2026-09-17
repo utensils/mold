@@ -51,6 +51,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var capabilityBlock: Capabilities?
     nonisolated(unsafe) var exportBlock: ExportOptions?
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
+    /// Every model name `startDownload` was asked to fetch, in call order --
+    /// what a licence retry actually resent.
+    nonisolated(unsafe) var startedDownloads: [String] = []
     nonisolated(unsafe) var modelRows: [Model] = []
     // MARK: - Models (M5 S1b)
 
@@ -288,6 +291,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func startDownload(_ request: DownloadRequest) async throws -> DownloadTicket {
         try record("startDownload")
+        startedDownloads.append(request.model)
         guard let downloadTicket else { throw notPlanted() }
         return downloadTicket
     }

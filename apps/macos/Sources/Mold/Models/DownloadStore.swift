@@ -1,7 +1,11 @@
 import Foundation
 import MoldClient
 
-/// Model fetches in progress, per machine.
+/// Model fetches in progress, per machine -- and, briefly, what just
+/// finished. Installing and licence recovery are `DownloadStore+Install.swift`,
+/// and watching the live stream is `DownloadStore+Stream.swift`, both split
+/// out for size; the stored properties live here because an extension cannot
+/// add one.
 @MainActor
 @Observable
 final class DownloadStore {
@@ -14,13 +18,38 @@ final class DownloadStore {
         var failed: String?
     }
 
-    private let hosts: HostStore
-    /// Keyed by host then by the host's job id.
-    private(set) var active: [MoldHost.ID: [String: Progress]] = [:]
-    private(set) var streams: [MoldHost.ID: Task<Void, Never>] = [:]
+    /// A machine won't fetch a gated model until somebody accepts its
+    /// terms. Held rather than reported through the usual funnel, because it
+    /// is the one failure the app can resolve on the spot: a sheet shows the
+    /// terms and `accepted(_:)` retries the SAME install.
+    struct PendingLicense: Identifiable {
+        let refusal: LicenseRefusal
+        let mismatch: Bool
+        let host: MoldHost.ID
+        let retry: () async -> Void
+        var id: String { refusal.id }
+    }
 
-    init(hosts: HostStore) {
+    let hosts: HostStore
+    let licenses: LicenseStore
+    /// Keyed by host then by the host's job id. Not `private(set)`:
+    /// `DownloadStore+Install.swift` writes it too, and `private` does not
+    /// cross a file boundary even within one type.
+    internal(set) var active: [MoldHost.ID: [String: Progress]] = [:]
+    /// Jobs this app watched go terminal, newest first, 16 per machine --
+    /// the popover's own record, since plato retains no server-side history
+    /// for it to re-read. Cleared by `clearFinished(on:)`; written from
+    /// `DownloadStore+Stream.swift`.
+    internal(set) var finished: [MoldHost.ID: [DownloadJob]] = [:]
+    /// Written from `DownloadStore+Stream.swift` too.
+    internal(set) var streams: [MoldHost.ID: Task<Void, Never>] = [:]
+    /// Held rather than reported -- see `PendingLicense`. Written from
+    /// `DownloadStore+Install.swift`.
+    internal(set) var pendingLicense: PendingLicense?
+
+    init(hosts: HostStore, licenses: LicenseStore) {
         self.hosts = hosts
+        self.licenses = licenses
     }
 
     func progress(for model: String, on host: MoldHost.ID) -> Progress? {
@@ -31,22 +60,8 @@ final class DownloadStore {
         progress(for: model, on: host) != nil
     }
 
-    /// Asks a machine to fetch a model.
-    ///
-    /// A 409 means it is already queued there, which is the outcome the click
-    /// wanted -- the client treats it as success and starts watching.
-    func install(_ model: Model, on host: MoldHost) async {
-        let client = hosts.backend(for: host)
-        do {
-            let ticket = try await client.startDownload(DownloadRequest(model: model.name))
-            var forHost = active[host.id] ?? [:]
-            forHost[ticket.id] = Progress(model: model.name)
-            active[host.id] = forHost
-            hosts.succeeded(on: host.id)
-            reconcile()
-        } catch {
-            hosts.report(error, on: host.id, doing: "start that download")
-        }
+    func clearFinished(on host: MoldHost.ID) {
+        finished[host] = nil
     }
 
     func cancel(jobID: String, on host: MoldHost) async {
@@ -60,11 +75,29 @@ final class DownloadStore {
         reconcile()
     }
 
+    /// Replaces this host's active rows wholesale, from whichever door
+    /// answered a full listing: `refresh(on:)`'s GET, or a stream's own
+    /// `snapshot` frame. Keyed by job id either way, so a `mold pull` at a
+    /// terminal lands on the same row a later frame updates.
+    func adopt(_ listing: DownloadsListing, on host: MoldHost.ID) {
+        var forHost: [String: Progress] = [:]
+        for job in listing.activeJobs + listing.queued {
+            forHost[job.id] = Progress(
+                model: job.model,
+                fraction: job.bytesTotal > 0 ? Double(job.bytesDone) / Double(job.bytesTotal) : nil,
+                bytesDone: job.bytesDone, bytesTotal: job.bytesTotal,
+                currentFile: job.currentFile, failed: job.error)
+        }
+        active[host] = forHost.isEmpty ? nil : forHost
+    }
+
     /// One stream per machine with something in flight, and none for a
     /// machine that is gone. The same rule `HostStore` reconciles its event
     /// watchers by, rather than a second mechanism -- and the reason nothing
     /// has to remember to STOP a stream: the method that did had no callers,
     /// so a removed machine kept a live connection for the rest of the launch.
+    /// `finished` never keeps a stream open on its own: a host with rows
+    /// there and none in `active` is already outside `wanted`.
     ///
     /// Called after every change to `active`, and by the root when the machine
     /// list changes.
@@ -78,44 +111,4 @@ final class DownloadStore {
             streams[id] = watch(host: host)
         }
     }
-
-    private func watch(host: MoldHost) -> Task<Void, Never> {
-        Task { [weak self] in
-            // A cancelled task was already taken out of `streams` by
-            // `reconcile`, which may have replaced it -- clearing the entry
-            // here would take the successor's. Any other exit is a dropped
-            // connection nobody knows about yet, so it says so.
-            defer { if !Task.isCancelled { self?.streams[host.id] = nil } }
-            // A dropped stream just stops the live figures; the download
-            // itself belongs to the host and carries on.
-            guard let backend = self?.hosts.backend(for: host) else { return }
-            do {
-                for try await event in backend.downloadEvents() {
-                    self?.apply(event, on: host.id)
-                }
-            } catch {
-                self?.active[host.id] = nil
-            }
-        }
-    }
-
-    private func apply(_ event: DownloadEvent, on host: MoldHost.ID) {
-        guard let id = event.id else { return }
-        var forHost = active[host] ?? [:]
-
-        if event.isTerminal {
-            forHost.removeValue(forKey: id)
-        } else {
-            var progress = forHost[id] ?? Progress(model: event.model ?? "")
-            if let model = event.model { progress.model = model }
-            progress.fraction = event.fraction ?? progress.fraction
-            progress.bytesDone = event.bytesDone ?? progress.bytesDone
-            progress.bytesTotal = event.bytesTotal ?? progress.bytesTotal
-            progress.currentFile = event.currentFile ?? progress.currentFile
-            forHost[id] = progress
-        }
-        active[host] = forHost.isEmpty ? nil : forHost
-        reconcile()
-    }
-
 }

@@ -37,6 +37,30 @@ public struct DownloadJob: Codable, Hashable, Sendable, Identifiable {
     public let startedAt: Int64?
     public let completedAt: Int64?
     public let error: String?
+
+    /// A client-side record of what a live stream frame already said, for a
+    /// job that just went terminal -- `DownloadStore` builds one of these to
+    /// keep in its bounded `finished` list, since the server itself retains
+    /// no history for the popover to re-read (design fact/decision 15, M5).
+    public init(
+        id: String, model: String, catalogId: String? = nil, status: JobStatus,
+        filesDone: Int = 0, filesTotal: Int = 0, bytesDone: Int64 = 0, bytesTotal: Int64 = 0,
+        currentFile: String? = nil, startedAt: Int64? = nil, completedAt: Int64? = nil,
+        error: String? = nil
+    ) {
+        self.id = id
+        self.model = model
+        self.catalogId = catalogId
+        self.status = status
+        self.filesDone = filesDone
+        self.filesTotal = filesTotal
+        self.bytesDone = bytesDone
+        self.bytesTotal = bytesTotal
+        self.currentFile = currentFile
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.error = error
+    }
 }
 
 /// A download's lifecycle state (`types.rs:13031-13039`), decoded leniently:
