@@ -5,8 +5,8 @@ import SwiftUI
 ///
 /// Credentials live on the MACHINE, not on this Mac (design fact 9): a
 /// catalog token authenticates that machine to a provider, the same way a
-/// machine key authenticates this Mac to that machine, and neither one is a
-/// Keychain item. The pane is keyed on the same `selectedMachine` preference
+/// machine key authenticates this Mac to that machine -- and this Mac keeps
+/// none of them here. The pane is keyed on the same `selectedMachine` preference
 /// every other machine-scoped view shares, and reads through the same
 /// `CatalogStore` Discover already uses.
 struct AccountsSettings: View {

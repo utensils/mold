@@ -77,7 +77,8 @@ struct HostEditor: View {
                             .onSubmit(commit)
                         Text(verbatim: "A name or IP is enough — Mold fills in http:// and "
                              + "port 7680 unless you say otherwise. A key is only needed if "
-                             + "the server sets MOLD_API_KEY; it is kept in your keychain.")
+                             + "the server sets MOLD_API_KEY; it is kept in a file only you "
+                             + "can read, never in your preferences.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
