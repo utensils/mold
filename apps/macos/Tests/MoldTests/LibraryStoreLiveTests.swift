@@ -85,6 +85,54 @@ struct LibraryStoreLiveTests {
         #expect(fake.calls.filter { $0 == "mutate" }.count == 2)
     }
 
+    /// **Fails today**: `relist` assigns the listing it fetched over
+    /// `perHost` wholesale (`LibraryStore+Live.swift:111`), so a print that
+    /// landed while that round trip was in flight -- which the answer was
+    /// composed before -- is discarded, and nothing re-lists again. Only ⌘R
+    /// brings it back.
+    @Test func aPrintLandingDuringARelistSurvivesIt() async {
+        let machine = host("plato")
+        let fake = FakeBackend(host: machine)
+        fake.prints = [FakeFixtures.print("old.png")]
+        fake.delays["gallery"] = .milliseconds(150)
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        library.perHost[machine.id] = [LibraryEntry(host: machine,
+                                                    print: FakeFixtures.print("old.png"))]
+
+        hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
+        await settle(until: { fake.calls.contains("gallery") })
+        // Mid-flight: the answer on its way cannot know about this one.
+        hosts.listeners.forEach {
+            $0(machine.id, .gallery(.added(filename: "landed.png",
+                                           row: FakeFixtures.print("landed.png"))))
+        }
+
+        await settle(until: {
+            library.perHost[machine.id]?.count == 2
+        })
+        #expect(library.perHost[machine.id]?.map(\.print.filename).sorted()
+            == ["landed.png", "old.png"])
+    }
+
+    /// The other half of the same rule: a row the machine says is GONE stays
+    /// gone. Only a row that arrived after we asked is carried over.
+    @Test func aRelistStillDropsWhatTheMachineNoLongerLists() async {
+        let machine = host("plato")
+        let fake = FakeBackend(host: machine)
+        fake.prints = [FakeFixtures.print("kept.png")]
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        library.perHost[machine.id] = ["kept.png", "deleted-elsewhere.png"].map {
+            LibraryEntry(host: machine, print: FakeFixtures.print($0))
+        }
+
+        hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
+        await settle(until: { library.perHost[machine.id]?.count == 1 })
+
+        #expect(library.perHost[machine.id]?.map(\.print.filename) == ["kept.png"])
+    }
+
     /// A frame skipped as our own echo may ALSO have been another client
     /// editing that row. Once our chain is settled, that is the only thing it
     /// could still have been saying, so the machine is read again.
