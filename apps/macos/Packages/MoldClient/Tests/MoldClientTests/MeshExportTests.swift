@@ -264,7 +264,9 @@ import Testing
             format: "GIF", MeshTurntableOptions(frames: 72, fps: 24, maxDimension: 1024,
                                                 transparent: true)))
         #expect(body["format"] as? String == "gif")
-        #expect(body["frames"] as? Int == 72)
+        // 72 views at 1024 px with a transparent backdrop is 301 MiB, past
+        // the 256 MiB budget, so the sweep is shortened to what it buys.
+        #expect(body["frames"] as? Int == 64)
         #expect(body["fps"] as? Int == 24)
         #expect(body["max_dimension"] as? Int == 1024)
         #expect(body["transparent"] as? Bool == true)
@@ -278,18 +280,85 @@ import Testing
             == ["format"])
     }
 
-    /// A stepper can only ever post a value the server accepts.
-    @Test func clampsEveryTurntableValueIntoTheServersBounds() throws {
+    /// The server's own literals, not this app's constants read back at
+    /// themselves: `FRAMES_RANGE` 8...180 and `FPS_RANGE` 1...30
+    /// (`crates/mold-inference/src/hunyuan3d/turntable.rs:36,41`), the
+    /// turntable floor of 240 (`routes.rs:10116`), `MAX_POSTER_SIZE` 2048
+    /// (`poster.rs:61`) and `MAX_TURNTABLE_RGB_BYTES` (`turntable.rs:51`).
+    @Test func carriesTheServersOwnBounds() {
+        #expect(MeshTurntableOptions.frameBounds == 8...180)
+        #expect(MeshTurntableOptions.fpsBounds == 1...30)
+        #expect(MeshTurntableOptions.dimensionBounds == 240...2048)
+        #expect(MeshTurntableOptions.maximumFrameBytes == 268_435_456)
+    }
+
+    /// **Fails today**: `clamped` modelled the per-field ranges and nothing
+    /// else, and its dimension floor was 16 where the server's turntable
+    /// floor is 240 -- so the smallest offer was refused too. A whole sweep
+    /// is ALSO refused before a frame renders when its frame buffer exceeds
+    /// 256 MiB, and the sheet's own default (36 views) at its own offered
+    /// 2048 px is 432 MiB: the defaults the app shipped were a 422.
+    @Test func clampsEveryTurntableValueIntoTheServersBoundsAndItsBudget() throws {
         let large = try body(.turntable(
             format: "gif",
             MeshTurntableOptions(frames: 900, fps: 120, maxDimension: 8192)))
-        #expect(large["frames"] as? Int == MeshTurntableOptions.frameBounds.upperBound)
-        #expect(large["fps"] as? Int == MeshTurntableOptions.maximumFPS)
-        #expect(large["max_dimension"] as? Int == MeshTurntableOptions.maximumDimension)
+        #expect(large["fps"] as? Int == 30)
+        #expect(large["max_dimension"] as? Int == 2048)
+        // 180 frames at 2048 px is 2.1 GiB; the budget buys twenty-one.
+        #expect(large["frames"] as? Int == 21)
 
         let small = try body(.turntable(
             format: "gif", MeshTurntableOptions(frames: 1, fps: 0, maxDimension: 1)))
-        #expect(small["frames"] as? Int == MeshTurntableOptions.frameBounds.lowerBound)
+        #expect(small["frames"] as? Int == 8)
         #expect(small["fps"] as? Int == 1)
+        #expect(small["max_dimension"] as? Int == 240)
+    }
+
+    /// The numbers the server would compute, arrived at independently: the
+    /// budget divided by one frame's bytes, three a pixel opaque and four
+    /// transparent (`turntable.rs:98-104`).
+    @Test func countsTheFramesTheBudgetBuysAtEverySizeItOffers() {
+        func affordable(_ edge: Int, _ transparent: Bool) -> Int {
+            MeshTurntableOptions.maximumFrames(atDimension: edge, transparent: transparent)
+        }
+        // 256 MiB / (512 x 512 x 3) = 341, past the 180-frame field bound.
+        #expect(affordable(512, false) == 180)
+        #expect(affordable(1024, false) == 85)
+        #expect(affordable(2048, false) == 21)
+        // Transparency is a quarter of the budget, which is why the server
+        // names it in its own refusal.
+        #expect(affordable(1024, true) == 64)
+        #expect(affordable(2048, true) == 16)
+        // Never below the floor, at any size the server accepts.
+        #expect(affordable(2048, true) >= MeshTurntableOptions.frameBounds.lowerBound)
+    }
+
+    /// The default the sheet opens on must be exportable AS IT STANDS at
+    /// every size it offers -- that is the whole point of modelling the
+    /// budget rather than waiting for the 422.
+    @Test func everySizeTheSheetOffersIsExportableAtItsOwnDefault() {
+        for edge in [240, 512, 1024, 2048] {
+            for transparent in [false, true] {
+                var options = MeshTurntableOptions(maxDimension: edge,
+                                                   transparent: transparent).clamped
+                options.frames = MeshTurntableOptions.maximumFrames(
+                    atDimension: edge, transparent: transparent)
+                let bytes = options.frames * options.maxDimension * options.maxDimension
+                    * MeshTurntableOptions.channels(transparent: transparent)
+                #expect(bytes <= MeshTurntableOptions.maximumFrameBytes,
+                        "\(edge) px transparent=\(transparent)")
+                #expect(MeshTurntableOptions.frameBounds.contains(options.frames))
+            }
+        }
+    }
+
+    /// A reduced range says WHY, in the server's own terms, before the export
+    /// is attempted -- and says nothing when nothing was taken away.
+    @Test func namesTheLimitOnlyWhenItHasTakenViewsAway() {
+        #expect(MeshTurntableOptions(maxDimension: 512).budgetNote == nil)
+        let note = MeshTurntableOptions(maxDimension: 2048, transparent: true).budgetNote
+        #expect(note?.contains("2048 px") == true)
+        #expect(note?.contains("transparent") == true)
+        #expect(note?.contains("16") == true)
     }
 }

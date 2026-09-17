@@ -57,20 +57,39 @@ extension MeshExportSheet {
     }
 
     @ViewBuilder var turntableBody: some View {
+        // The stepper's ceiling is the BUDGET's, not the field's: the server
+        // refuses a whole sweep whose frame buffer is over 256 MiB, and 36
+        // views at 2048 px is 432 MiB. Re-derived as the size and the
+        // backdrop change, and the held value follows it down.
         Stepper(value: $turntable.frames,
-                in: MeshTurntableOptions.frameBounds, step: 4) {
+                in: MeshTurntableOptions.frameBounds.lowerBound...frameCeiling, step: 4) {
             Text("\(turntable.frames) views around the mesh")
         }
-        Stepper(value: $turntable.fps, in: 1...MeshTurntableOptions.maximumFPS) {
+        Stepper(value: $turntable.fps, in: MeshTurntableOptions.fpsBounds) {
             Text("\(turntable.fps) frames a second")
         }
         Picker("Size", selection: $turntable.maxDimension) {
-            ForEach([512, 1024, MeshTurntableOptions.maximumDimension], id: \.self) { edge in
+            ForEach(Self.offeredDimensions, id: \.self) { edge in
                 Text("\(edge) px").tag(edge)
             }
         }
         Toggle("Transparent background", isOn: $turntable.transparent)
         Text(duration).font(.callout).foregroundStyle(.secondary)
+        if let note = turntable.budgetNote {
+            Text(note).font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Every size worth offering between the server's own floor and ceiling.
+    static var offeredDimensions: [Int] {
+        [MeshTurntableOptions.dimensionBounds.lowerBound, 512, 1024,
+         MeshTurntableOptions.dimensionBounds.upperBound]
+    }
+
+    /// The most views this size and this backdrop can afford.
+    var frameCeiling: Int {
+        MeshTurntableOptions.maximumFrames(atDimension: turntable.maxDimension,
+                                           transparent: turntable.transparent)
     }
 
     /// How long the clip will run, which is the thing the two steppers

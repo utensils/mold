@@ -81,6 +81,10 @@ struct MeshExportSheet: View {
         }
         .padding(20)
         .frame(width: 380)
+        // A bigger frame or a transparent backdrop takes views off the table;
+        // the held value follows rather than waiting to be refused.
+        .onChange(of: turntable.maxDimension) { _, _ in turntable = turntable.clamped }
+        .onChange(of: turntable.transparent) { _, _ in turntable = turntable.clamped }
     }
 
     private var title: String {
