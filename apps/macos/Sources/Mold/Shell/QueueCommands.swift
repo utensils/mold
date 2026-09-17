@@ -28,7 +28,11 @@ struct QueueCommands: Commands {
                 }
                 if job.canCancel {
                     Divider()
+                    // ⌘⌫, the Library's own Move to Trash chord: the selected
+                    // row leaves the queue from the keyboard, and Help ▸
+                    // Search finds it.
                     Button("Cancel Job", role: .destructive, action: job.cancel)
+                        .keyboardShortcut(.delete, modifiers: .command)
                 }
             }
             if let emptyQueue = selection?.emptyQueue {

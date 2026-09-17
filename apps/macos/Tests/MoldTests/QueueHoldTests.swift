@@ -31,6 +31,23 @@ struct QueueHoldTests {
         #expect(QueueHoldRow.actions(for: hold).isEmpty)
     }
 
+    /// **Fails today**: a held row draws Try Again and Move to and nothing
+    /// else, so a hold the machine says retrying will not fix, on a fleet
+    /// with nowhere to send it, cannot be cleared from the row at all --
+    /// though `DELETE /api/queue/:id` is the documented way to clear one
+    /// (`routes.rs:7495-7499`). Cancel Job is always offered, always last.
+    @Test func everyHoldCanBeCancelledFromItsOwnMenu() {
+        let stuck = QueueHold.prose("Something needs repair on the host.", retryable: false)
+        #expect(QueueHoldRow.menuTitles(for: stuck, canMoveTo: false) == ["Cancel Job"])
+
+        let oom = QueueHold.prose("GPU ran out of memory.", retryable: true)
+        #expect(QueueHoldRow.menuTitles(for: oom, canMoveTo: true) == ["Try Again", "Move to", "Cancel Job"])
+
+        let missing = QueueHold.missingModel("z-image-turbo", sentence: "Mold can't find z-image-turbo.")
+        #expect(QueueHoldRow.menuTitles(for: missing, canMoveTo: false)
+            == ["Pull z-image-turbo, then Retry", "Cancel Job"])
+    }
+
     // MARK: - Pull-then-Retry
 
     /// **Fails today**: `DownloadStore.awaitSettlement` and

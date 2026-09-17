@@ -19,6 +19,11 @@ struct QueueHoldRow: View {
     let tryAgain: () -> Void
     let moveToDestinations: [TransferStore.TransferDestination]
     let moveTo: (MoldHost.ID) -> Void
+    /// `DELETE /api/queue/:id` is the documented way to clear a held row
+    /// (`routes.rs:7495-7499`), and it is the one action EVERY hold has --
+    /// a hold the machine says retrying will not fix, on a fleet with
+    /// nowhere to send it, used to offer nothing at all.
+    let cancel: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -40,9 +45,41 @@ struct QueueHoldRow: View {
                 .controlSize(.small)
             }
             Spacer(minLength: 12)
+            // The same glyph, in the same place, as every other row's --
+            // so the eye finds Cancel at one edge whatever the row is.
+            Button(action: cancel) { Image(systemName: "xmark") }
+                .buttonStyle(.borderless)
+                .help("Cancel this job")
         }
         .padding(.vertical, 4)
+        .contextMenu { menu }
         .help(entry.id)
+    }
+
+    /// The row's own buttons a second way -- a contextual menu is where a
+    /// Mac user looks first for "get rid of this", and the row had none.
+    @ViewBuilder private var menu: some View {
+        ForEach(Self.actions(for: hold), id: \.self) { action in
+            button(for: action)
+        }
+        MoveToMenu(destinations: moveToDestinations, send: moveTo)
+        Divider()
+        Button("Cancel Job", role: .destructive, action: cancel)
+    }
+
+    /// The titles `menu` draws, in order, so a test can pin that Cancel Job
+    /// is always there and always last without rendering a menu --
+    /// `QueueSelection.offeredTitles`'s shape.
+    static func menuTitles(for hold: QueueHold, canMoveTo: Bool) -> [String] {
+        var titles: [String] = actions(for: hold).map { action in
+            switch action {
+            case let .pullThenRetry(model): "Pull \(model), then Retry"
+            case .tryAgain: "Try Again"
+            }
+        }
+        if canMoveTo { titles.append("Move to") }
+        titles.append("Cancel Job")
+        return titles
     }
 
     private var sentence: String {

@@ -96,7 +96,8 @@ struct QueuePane: View {
                     pullThenRetry: { model in pullThenRetry(model, entry: entry, host: host) },
                     tryAgain: { act(.retry, on: entry, host: host) },
                     moveToDestinations: transfers.transferDestinations(from: host.id),
-                    moveTo: { moveTo(entry, from: host, to: $0) })
+                    moveTo: { moveTo(entry, from: host, to: $0) },
+                    cancel: { act(.cancel, on: entry, host: host) })
             } else {
                 let reorderable = canReorder && entry.state.isReorderable
                 QueueRow(
