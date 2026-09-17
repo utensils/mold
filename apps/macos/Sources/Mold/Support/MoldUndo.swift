@@ -56,9 +56,15 @@ final class MoldUndo {
         }
     }
 
-    /// Forgets everything. For a change that makes the stack meaningless --
-    /// removing the machine an edit was about, say.
+    /// Forgets OUR entries. For a change that makes them meaningless -- a tag
+    /// deleted everywhere, or an edit a machine refused.
+    ///
+    /// Scoped to this target, because `manager` is the WINDOW's and is shared
+    /// with every `NSTextField` field editor in it: `removeAllActions()` threw
+    /// away the rename you were about to undo and whatever a focused field had
+    /// recorded. `register` already registers `withTarget: self`, so the
+    /// targeted form removes exactly what this object put there.
     func forget() {
-        manager?.removeAllActions()
+        manager?.removeAllActions(withTarget: self)
     }
 }

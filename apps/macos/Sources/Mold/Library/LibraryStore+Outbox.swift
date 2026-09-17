@@ -79,6 +79,15 @@ extension LibraryStore {
             } else {
                 hosts.report(error, on: host, doing: entry.change.verb)
                 outbox.failed(entry.id)
+                // The inverse was registered synchronously, before anything
+                // was sent -- it has to be, or `UndoManager` files it on the
+                // undo stack instead of the redo one. The machine has now
+                // refused, and `relist` is about to put the row back, so "Undo
+                // Favorite" would offer to reverse a favourite that never
+                // happened: a local no-op and a redundant mutation, and worse
+                // the day a change is not idempotent. Only THIS store's
+                // entries go; a field editor's are its own.
+                undo.forget()
                 await relist(host)
             }
             return error
