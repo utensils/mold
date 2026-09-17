@@ -79,6 +79,16 @@ struct HostSecretsTests {
                               delete: { deletions.ids.insert($0) })
     }
 
+    /// Every migration test below is an ORDINARY launch. The test scheme sets
+    /// `MOLD_NATIVE_FRESH`, under which the real migration deliberately does
+    /// nothing at all -- which `aFreshRunNeverTouchesTheRealKeychain` is the
+    /// test for.
+    private func migrate(_ hosts: [StoredHost], into secrets: SecretStore,
+                         defaults: UserDefaults, from source: LegacyKeychain.Source) {
+        LegacyKeychain.migrateIfNeeded(hosts, into: secrets, defaults: defaults,
+                                       from: source, isFresh: false)
+    }
+
     @Test func everyKeychainKeyMovesToTheFileAndTheItemGoes() throws {
         let (defaults, secrets) = try scratch()
         let plato = StoredHost(host("plato"))
@@ -86,7 +96,7 @@ struct HostSecretsTests {
         let deleted = Deletions()
         let source = source([plato.id: .found("k-plato"), hal.id: .found("k-hal")], into: deleted)
 
-        LegacyKeychain.migrateIfNeeded([plato, hal], into: secrets, defaults: defaults, from: source)
+        migrate([plato, hal], into: secrets, defaults: defaults, from: source)
 
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == "k-plato")
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: hal.id)) == "k-hal")
@@ -99,11 +109,11 @@ struct HostSecretsTests {
     @Test func theMoveHappensOnce() throws {
         let (defaults, secrets) = try scratch()
         let plato = StoredHost(host("plato"))
-        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+        migrate([plato], into: secrets, defaults: defaults,
                                        from: source([plato.id: .found("k-plato")]))
         try secrets.clear(SecretStore.remoteAPIKeyName(for: plato.id))
 
-        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+        migrate([plato], into: secrets, defaults: defaults,
                                        from: source([plato.id: .found("k-plato")]))
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == nil)
     }
@@ -122,7 +132,7 @@ struct HostSecretsTests {
         let name = SecretStore.remoteAPIKeyName(for: plato.id)
 
         // Launch 1: the item will not read, so the move stays unfinished.
-        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+        migrate([plato], into: secrets, defaults: defaults,
                                        from: source([plato.id: .unreadable]))
         #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey))
 
@@ -131,12 +141,34 @@ struct HostSecretsTests {
 
         // Launch 2: the item reads at last -- and holds the rotated key.
         let deleted = Deletions()
-        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+        migrate([plato], into: secrets, defaults: defaults,
                                        from: source([plato.id: .found("k-rotated")], into: deleted))
 
         #expect(try secrets.value(for: name) == "k-typed")
         #expect(deleted.ids == [plato.id], "the stale item still goes")
         #expect(defaults.bool(forKey: LegacyKeychain.migratedKey))
+    }
+
+    /// **Fails today**: `SecretStore` swaps to a throwaway DIRECTORY under
+    /// `MOLD_NATIVE_FRESH`, so its comment claims a fresh run "can never read
+    /// -- or delete -- anybody's real keys". The migration had no such gate:
+    /// it read and `SecItemDelete`d against the REAL service whenever the
+    /// fresh prefs suite happened to hold a saved host list. Seeded hosts get
+    /// fresh UUIDs that match no real item, so nothing was destroyed in
+    /// practice -- but a comment about credentials should not be an overclaim.
+    @Test func aFreshRunNeverTouchesTheRealKeychain() throws {
+        let (defaults, secrets) = try scratch()
+        let plato = StoredHost(host("plato"))
+        let deleted = Deletions()
+
+        LegacyKeychain.migrateIfNeeded(
+            [plato], into: secrets, defaults: defaults,
+            from: source([plato.id: .found("k-real")], into: deleted), isFresh: true)
+
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == nil)
+        #expect(deleted.ids.isEmpty)
+        #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey),
+                "and it is not recorded as done, so a real launch still moves them")
     }
 
     /// The Keychain item is the only other copy, so it is deleted only once
@@ -164,14 +196,14 @@ struct HostSecretsTests {
         let locked = StoredHost(host("plato"))
         let readable = StoredHost(host("hal9000"))
 
-        LegacyKeychain.migrateIfNeeded([locked, readable], into: secrets, defaults: defaults,
+        migrate([locked, readable], into: secrets, defaults: defaults,
                                        from: source([locked.id: .unreadable,
                                                      readable.id: .found("k-hal")]))
 
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: readable.id)) == "k-hal")
         #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey))
 
-        LegacyKeychain.migrateIfNeeded([locked, readable], into: secrets, defaults: defaults,
+        migrate([locked, readable], into: secrets, defaults: defaults,
                                        from: source([locked.id: .found("k-plato"),
                                                      readable.id: .absent]))
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: locked.id)) == "k-plato")

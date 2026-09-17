@@ -35,8 +35,20 @@ enum LegacyKeychain {
         static let keychain = Source(read: readItem, delete: deleteItem)
     }
 
+    /// A UAT run does not touch the real Keychain at all.
+    ///
+    /// `SecretStore` swaps to a throwaway DIRECTORY under `MOLD_NATIVE_FRESH`,
+    /// so its claim that a fresh run "can never read -- or delete --
+    /// anybody's real keys" was true of the store and not of this: the
+    /// migration reads and `SecItemDelete`s against the real service whenever
+    /// the fresh prefs suite happens to hold a saved host list. Seeded hosts
+    /// get fresh UUIDs that match no real item, so nothing was destroyed in
+    /// practice -- but an overclaim in a comment about credentials is one
+    /// `guard` away from being true.
     static func migrateIfNeeded(_ hosts: [StoredHost], into secrets: SecretStore,
-                                defaults: UserDefaults, from source: Source = .keychain) {
+                                defaults: UserDefaults, from source: Source = .keychain,
+                                isFresh: Bool = NativeUAT.fresh.isSet()) {
+        guard !isFresh else { return }
         guard !defaults.bool(forKey: migratedKey) else { return }
         defaults.set(migrate(hosts, into: secrets, from: source), forKey: migratedKey)
     }
