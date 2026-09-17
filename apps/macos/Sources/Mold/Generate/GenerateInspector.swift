@@ -18,12 +18,12 @@ struct GenerateInspector: View {
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
     @Environment(LibraryStore.self) private var library
+    @Environment(GenerateController.self) private var controller
 
     @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
     private var showsOutput = true
     @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
     private var showsFileUnder = false
-    // M4 appends a Recent group here, behind this same key.
     @AppStorage("createShowsRecent", store: AppStorageSuite.defaults)
     private var showsRecent = false
 
@@ -52,6 +52,7 @@ struct GenerateInspector: View {
                 }
                 .font(.callout)
             }
+            RecentGroup(host: host, draft: $draft, isExpanded: $showsRecent, isBusy: controller.run.isBusy)
         }
     }
 

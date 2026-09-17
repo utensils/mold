@@ -11,6 +11,8 @@ struct PromptPanel: View {
     let recipe: GenerationRecipe?
     @Binding var draft: RenderDraft
     let model: Model?
+    let host: MoldHost?
+    @Binding var destination: Destination
     let submit: () -> Void
     let cancel: () -> Void
     let maxBatch: Int
@@ -61,6 +63,7 @@ struct PromptPanel: View {
                         .font(.body)
                         .lineLimit(2...6)
                         .focused($promptFocused)
+                        .overlay(alignment: .bottomTrailing) { wand(recipe) }
                     if recipe.capabilities.negativePrompt?.isAvailable == true {
                         TextField("Avoid…", text: $draft.negativePrompt, axis: .vertical)
                             .textFieldStyle(.plain)
@@ -73,6 +76,12 @@ struct PromptPanel: View {
                             // exactly what a caret's claim on an arrow key
                             // needs.
                             .focused($promptFocused)
+                    }
+                    if controller.canRevertExpansion {
+                        Button("\(undoLabel) · Undo") { controller.revertExpansion() }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 if let references = recipe.capabilities.referenceImages,
@@ -91,15 +100,32 @@ struct PromptPanel: View {
         recipe.temporal == nil ? "Describe a picture…" : "Describe a clip…"
     }
 
+    @ViewBuilder private func wand(_ recipe: GenerationRecipe) -> some View {
+        if let host {
+            PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination)
+                .padding(6)
+        }
+    }
+
+    /// What `canRevertExpansion`'s affordance says was just done to the
+    /// prompt -- the operation the accepted choice actually carried out.
+    private var undoLabel: String {
+        draft.promptTransform?.operation == .remix ? "remixed" : "expanded"
+    }
+
     private func actions(_ recipe: GenerationRecipe) -> some View {
         HStack(spacing: 10) {
-            PlacementHint(
-                placement: controller.placement,
-                error: controller.placementError
-            )
+            // The flexible member: plato's own "infeasible" answer names
+            // every GPU and runs to hundreds of characters. Letting THIS
+            // absorb the row's width (and truncate) is what keeps the
+            // capsule -- and the window's minimum width behind it -- from
+            // being dragged past `Self.maxWidth` and off the screen.
+            PlacementHint(placement: controller.placement, error: controller.placementError)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             if controller.run.isBusy {
                 Button("Stop", role: .destructive, action: cancel)
                     .controlSize(.large)
+                    .fixedSize()
             } else {
                 Button(action: submit) {
                     HStack(spacing: 6) {
@@ -112,38 +138,8 @@ struct PromptPanel: View {
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(draft.refusal(for: recipe) != nil)
                 .help(draft.refusal(for: recipe) ?? "Render this")
+                .fixedSize()
             }
         }
-        .fixedSize()
-    }
-}
-
-/// What the host says about a render before it is asked for.
-struct PlacementHint: View {
-    let placement: PlacementPreview?
-    let error: String?
-
-    var body: some View {
-        Group {
-            if let error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .lineLimit(1)
-            } else if let candidate = placement?.candidate,
-                      let duration = candidate.predictedDuration {
-                // A low-confidence estimate is stated as approximate. Showing
-                // a guess as a measurement is how a progress bar starts lying.
-                Label(
-                    "about \(duration.formatted(.units(allowed: [.minutes, .seconds])))",
-                    systemImage: candidate.setupKind == "cold" ? "snowflake" : "bolt"
-                )
-                .help(candidate.estimateConfidence == "low"
-                      ? "A rough estimate — this model hasn't run here recently."
-                      : "Estimated from recent runs on this machine.")
-            } else if let reason = placement?.reason {
-                Label(reason, systemImage: "exclamationmark.triangle").lineLimit(1)
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
     }
 }

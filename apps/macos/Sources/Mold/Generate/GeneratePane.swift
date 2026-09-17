@@ -29,6 +29,7 @@ struct GeneratePane: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             PromptTuck(tucked: $controller.promptTucked, steps: controller.run.steps) {
                 PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
+                            host: host, destination: $destination,
                             submit: startRun, cancel: cancelRun, maxBatch: maxBatch)
             }
         }
