@@ -1,0 +1,103 @@
+import Foundation
+import MoldClient
+
+/// M8 decision 8: Generate never turns into Stop. The host's queue is
+/// durable and one Generate press is one batch, so a press while another is
+/// on screen ADMITS a second batch (`submit(on:backend:)`) instead of being
+/// refused, and this is where it waits and advances.
+@MainActor
+extension GenerateController {
+    /// One admitted batch: what `submit(on:backend:)` got back, kept so
+    /// `followNext` can start following it without a second read.
+    struct ActiveBatch: Equatable {
+        let id: String
+        let clientBatchId: String
+        let host: MoldHost.ID
+        /// The 202 answer `submit(on:backend:)` got back for this batch.
+        let admitted: BatchStatus
+    }
+
+    /// What the capsule's caption names -- "2 more queued".
+    var queuedCount: Int { queued.count }
+
+    /// Not `private`: `GenerateController+Run.follow(_:backend:host:)` calls
+    /// this at both places a batch's status can land.
+    func settle(_ status: BatchStatus, host: MoldHost.ID) {
+        if let outcome = BatchOutcome(settling: status) {
+            // Settled with any result at all is shown; settled with none is
+            // the failure -- the fence is held until every child is in,
+            // never on the first one to arrive.
+            if outcome.results.isEmpty {
+                run = .failed(outcome.failures.first ?? "The render didn't finish.")
+            } else {
+                run = .finished(outcome, host: host)
+            }
+            PendingBatch.forget(status.clientBatchId)
+            // M8 decision 8: the `.finished`/`.failed` write above lands
+            // first, so it is observed for at least one beat before
+            // `followNext` replaces it with the next batch's `.running`.
+            followNext()
+        } else if case let .running(_, progress) = run {
+            run = .running(status, progress)
+        } else {
+            run = .running(status, nil)
+        }
+    }
+
+    /// Pops the head of `queued`, if there is one, and follows it in place
+    /// of whatever the canvas was just showing. Called the instant the
+    /// followed batch settles (`settle(_:host:)` above) or is stopped
+    /// (`stop()` below) -- never before.
+    ///
+    /// The connection is resolved from the BATCH's own machine, never
+    /// carried over from the one just followed: the Machine control can be
+    /// moved between two presses, so two queued batches can belong to two
+    /// machines. A batch whose machine has since been removed is dropped --
+    /// there is nothing left to follow it on.
+    func followNext() {
+        while !queued.isEmpty {
+            let next = queued.removeFirst()
+            guard let backend = hosts.backend(for: next.host) else {
+                PendingBatch.forget(next.clientBatchId)
+                continue
+            }
+            activeBatch = next
+            runTask = Task { [weak self] in
+                await self?.follow(next.admitted, backend: backend, host: next.host)
+            }
+            return
+        }
+    }
+
+    /// Stops the batch on screen -- exactly what `cancel(backend:)` used to
+    /// do -- then moves on to whatever is next in `queued`.
+    func stop() {
+        guard let active = activeBatch else { return }
+        runTask?.cancel()
+        runTask = nil
+        // Cancelled by the user, not lost: nothing to recover on relaunch.
+        PendingBatch.forget(active.clientBatchId)
+        cancelOnItsMachine(active)
+        run = .idle
+        followNext()
+    }
+
+    /// Stops everything this pane admitted: every batch still waiting in
+    /// `queued`, then the one on screen.
+    func stopAll() {
+        for batch in queued {
+            PendingBatch.forget(batch.clientBatchId)
+            cancelOnItsMachine(batch)
+        }
+        queued.removeAll()
+        stop()
+    }
+
+    private func cancelOnItsMachine(_ batch: ActiveBatch) {
+        guard let backend = hosts.backend(for: batch.host) else { return }
+        Task { [weak self] in
+            do { try await backend.cancelBatch(id: batch.id) }
+            catch { self?.hosts.report(error, on: batch.host, doing: "cancel that render") }
+        }
+    }
+}

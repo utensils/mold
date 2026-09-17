@@ -88,9 +88,24 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// four actually looked like on the wire.
     nonisolated(unsafe) var submittedAdmissions: [BatchAdmission] = []
     nonisolated(unsafe) var submitAnswer: BatchStatus?
+    /// Consumed FIFO, ahead of `submitAnswer` -- for a test where two
+    /// `submit` calls must come back with DIFFERENT ids (e.g. a queued
+    /// second batch), since `submitAnswer` alone can only ever answer the
+    /// same one. Empty falls back to `submitAnswer`, so every existing test
+    /// is unaffected.
+    nonisolated(unsafe) var submitAnswers: [BatchStatus] = []
     /// Planted per `id`, since a test drives `submit` then reads the same
     /// batch back through `batchStatus(id:)` once its events stream ends.
     nonisolated(unsafe) var batchStatusAnswers: [String: BatchStatus] = [:]
+    /// Ids this fake holds `batchEvents(id:)` open for, the same pattern as
+    /// `eventStream`: a test pushes frames at its own pace with
+    /// `emitBatchEvent(_:for:)` instead of the stream finishing before the
+    /// next `submit` has had a chance to land in `queued`. An id absent here
+    /// keeps the old behaviour -- an empty stream that finishes at once, so
+    /// `follow()` falls through to its one-shot `batchStatus` read.
+    nonisolated(unsafe) var batchEventsHeldOpen: Set<String> = []
+    nonisolated(unsafe) var batchEventsContinuations:
+        [String: AsyncThrowingStream<BatchStatus, Error>.Continuation] = [:]
     /// `jobId` asked, in call order -- which child the preview poll followed.
     nonisolated(unsafe) var jobPreviewCalls: [String] = []
     nonisolated(unsafe) var mediaAnswer: Data?
@@ -185,6 +200,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
         try record("submit")
         submittedAdmissions.append(admission)
+        if !submitAnswers.isEmpty { return submitAnswers.removeFirst() }
         guard let submitAnswer else { throw notPlanted() }
         return submitAnswer
     }
@@ -498,7 +514,22 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error> {
         callsLock.withLock { recorded.append("batchEvents") }
-        return AsyncThrowingStream { $0.finish() }
+        guard batchEventsHeldOpen.contains(id) else {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        return AsyncThrowingStream { continuation in
+            self.batchEventsContinuations[id] = continuation
+        }
+    }
+    /// Pushes one frame into an id's held-open `batchEvents` stream.
+    func emitBatchEvent(_ status: BatchStatus, for id: String) {
+        batchEventsContinuations[id]?.yield(status)
+    }
+    /// Ends an id's held-open `batchEvents` stream -- with no settled frame
+    /// pushed, `follow()` falls through to its one-shot `batchStatus` read,
+    /// exactly like the default unplanted stream.
+    func finishBatchEvents(for id: String) {
+        batchEventsContinuations[id]?.finish()
     }
     func downloadEvents() -> AsyncThrowingStream<DownloadEvent, Error> {
         callsLock.withLock { recorded.append("downloadEvents") }

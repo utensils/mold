@@ -5,14 +5,17 @@ import MoldClient
 @MainActor
 extension GenerateController {
 
-
-    /// Submits the draft and follows it to settlement.
+    /// Submits the draft. When nothing is being followed, follows this one
+    /// to settlement; when a batch is already on screen (M8 decision 8), the
+    /// new admission is still sent -- the host's queue is durable, so a
+    /// second press must not waste the reservation the first one already
+    /// made -- and waits in `queued` instead of displacing what is showing.
     ///
     /// The client batch id is minted and PERSISTED BEFORE the request goes
-    /// out. If the response is lost, the work is recovered by asking the host
-    /// about that id -- submitting again would render twice.
+    /// out either way. If the response is lost, the work is recovered by
+    /// asking the host about that id -- submitting again would render twice.
     func submit(on host: MoldHost, backend: any MoldBackend) {
-        guard let modelName, !run.isBusy else { return }
+        guard let modelName else { return }
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
@@ -23,22 +26,45 @@ extension GenerateController {
         ))
         PendingBatch.remember(admission.clientBatchId, host: host.id)
 
-        run = .submitting
-        runTask?.cancel()
-        runTask = Task { [weak self] in
+        // Decided HERE, synchronously, before the `Task` below is even
+        // scheduled -- so a second `submit()` called right after this one
+        // still queues correctly no matter how the two `Task`s interleave.
+        let followingNow = !run.isBusy
+        if followingNow {
+            run = .submitting
+            runTask?.cancel()
+        }
+        let task = Task { [weak self] in
             do {
                 let accepted = try await backend.submit(admission)
-                self?.activeBatch = (accepted.id, admission.clientBatchId, host.id)
-                await self?.follow(accepted, backend: backend, host: host.id)
+                guard let self else { return }
+                let active = ActiveBatch(
+                    id: accepted.id, clientBatchId: admission.clientBatchId,
+                    host: host.id, admitted: accepted)
+                if followingNow {
+                    self.activeBatch = active
+                    await self.follow(accepted, backend: backend, host: host.id)
+                } else {
+                    self.queued.append(active)
+                }
             } catch {
-                self?.run = .failed(error.sentence)
                 PendingBatch.forget(admission.clientBatchId)
+                guard let self else { return }
+                if followingNow {
+                    self.run = .failed(error.sentence)
+                } else {
+                    // The render on screen is unaffected by a second one
+                    // failing to be admitted -- report it, don't replace `run`.
+                    self.hosts.report(error, on: host.id, doing: "queue that render")
+                }
             }
         }
+        if followingNow { runTask = task }
     }
 
     // Not `private`: `GenerateController+Recover` re-enters here for a batch
-    // still live after a relaunch.
+    // still live after a relaunch, and `GenerateController+Queue` re-enters
+    // here for the next queued batch.
     func follow(_ initial: BatchStatus, backend: any MoldBackend,
                 host: MoldHost.ID) async {
         run = .running(initial, nil)
@@ -62,32 +88,15 @@ extension GenerateController {
             // when the batch settled. See `LineAccumulator`.
             settle(try await backend.batchStatus(id: initial.id), host: host)
         } catch {
-            // Cancelling is not losing contact -- `cancel()` already set
+            // Cancelling is not losing contact -- `stop()` already set
             // `.idle` and reported anything worth reporting. Without this
             // guard, the task's own cancellation raced that assignment and
             // overwrote it with a failure on every Stop.
             guard !Task.isCancelled else { return }
             // A dropped stream does NOT mean the work stopped: on a durable
-            // host the job is still going to run.
+            // host the job is still going to run. Not a settlement -- the
+            // queue does not advance on its own here.
             run = .failed("Lost contact while rendering. The job may still be running — check the Queue.")
-        }
-    }
-
-    private func settle(_ status: BatchStatus, host: MoldHost.ID) {
-        if let outcome = BatchOutcome(settling: status) {
-            // Settled with any result at all is shown; settled with none is
-            // the failure -- the fence is held until every child is in,
-            // never on the first one to arrive.
-            if outcome.results.isEmpty {
-                run = .failed(outcome.failures.first ?? "The render didn't finish.")
-            } else {
-                run = .finished(outcome, host: host)
-            }
-            PendingBatch.forget(status.clientBatchId)
-        } else if case let .running(_, progress) = run {
-            run = .running(status, progress)
-        } else {
-            run = .running(status, nil)
         }
     }
 
@@ -113,19 +122,6 @@ extension GenerateController {
                 try? await Task.sleep(for: .milliseconds(700))
             }
         }
-    }
-
-    func cancel(backend: any MoldBackend) {
-        guard let active = activeBatch else { return }
-        runTask?.cancel()
-        runTask = nil
-        // Cancelled by the user, not lost: nothing to recover on relaunch.
-        PendingBatch.forget(active.clientBatchId)
-        Task { [weak self] in
-            do { try await backend.cancelBatch(id: active.id) }
-            catch { self?.hosts.report(error, on: active.host, doing: "cancel that render") }
-        }
-        run = .idle
     }
 
     func dismissResult() { run = .idle }

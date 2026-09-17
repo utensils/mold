@@ -27,7 +27,7 @@ extension GenerateController {
                     PendingBatch.forget(clientBatchId)
                     continue
                 }
-                activeBatch = (status.id, clientBatchId, host.id)
+                activeBatch = ActiveBatch(id: status.id, clientBatchId: clientBatchId, host: host.id, admitted: status)
                 await follow(status, backend: backend, host: host.id)
             } catch let error as MoldClientError where !error.isTransient {
                 // Unknown to the host (e.g. a 404) or refused outright --

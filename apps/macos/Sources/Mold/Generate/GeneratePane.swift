@@ -137,10 +137,7 @@ struct GeneratePane: View {
         controller.submit(on: host, backend: hosts.backend(for: host))
     }
 
-    private func cancelRun() {
-        guard let host else { return }
-        controller.cancel(backend: hosts.backend(for: host))
-    }
+    private func cancelRun() { controller.stop() }
 
     private func refreshPlacement() {
         guard let host else { return }

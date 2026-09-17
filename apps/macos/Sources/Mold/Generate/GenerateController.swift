@@ -50,7 +50,15 @@ final class GenerateController {
 
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
-    var activeBatch: (id: String, clientBatchId: String, host: MoldHost.ID)?
+    var activeBatch: ActiveBatch?
+    /// Batches this pane admitted while another was still on screen, in
+    /// admission order. The canvas follows `activeBatch`; when it settles or
+    /// is stopped, the head of this list is followed next (M8 decision 8).
+    ///
+    /// `internal(set)`, not `private(set)`: mutated from
+    /// `GenerateController+Run` and `GenerateController+Queue`, different
+    /// files -- the same reason `HostStore.failures` is `internal(set)`.
+    internal(set) var queued: [ActiveBatch] = []
 
     init(hosts: HostStore, defaults: ConfigStore) {
         self.hosts = hosts
