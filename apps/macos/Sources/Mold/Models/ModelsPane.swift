@@ -34,6 +34,9 @@ struct ModelsPane: View {
     }
 
     var body: some View {
+        // A local binding, the way `LibraryPane+Toolbar` reads `navigation`:
+        // `downloads.pendingLicense` is `internal(set)`, not `@State` here.
+        @Bindable var downloads = downloads
         VStack(spacing: 0) {
             content
             ModelsFooter(count: candidates.count, host: host, status: status)
@@ -43,6 +46,9 @@ struct ModelsPane: View {
         .navigationSubtitle(subtitle)
         .searchable(text: $query, prompt: "Search models")
         .toolbar { toolbar }
+        .sheet(item: $downloads.pendingLicense) { pending in
+            LicenseSheet(pending: pending)
+        }
         .task { await load() }
         .onChange(of: hosts.reachability) { _, _ in adoptPreferredHost() }
     }
@@ -80,6 +86,9 @@ struct ModelsPane: View {
         // The Discover scope lands in S6 alongside the catalog browser it
         // has something to show; a one-segment picker in the meantime would
         // be a control with nothing to switch.
+        if let host {
+            ToolbarItem { DownloadsButton(host: host) }
+        }
     }
 
     func progress(_ model: Model) -> DownloadStore.Progress? {
