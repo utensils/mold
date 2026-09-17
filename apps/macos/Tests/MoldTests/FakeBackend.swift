@@ -132,6 +132,37 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func jobPreview(jobId: String) async throws -> JobProgress? { try record("jobPreview"); return nil }
     func cancelBatch(id: String) async throws { try record("cancelBatch") }
 
+    // MARK: - Create
+
+    nonisolated(unsafe) var expandAnswer: ExpandResponse?
+    nonisolated(unsafe) var remixAnswer: RemixResponse?
+    /// `nil` throws as unplanted; `[]` is a real empty history, same rule as
+    /// every other listing on this fake.
+    nonisolated(unsafe) var historyRows: [HistoryEntry]?
+    /// What `clearHistory` was asked, in call order -- `nil` is "clear
+    /// everything", a number is the `keep` it trimmed to.
+    nonisolated(unsafe) var historyCleared: [Int?] = []
+
+    func expand(_ request: ExpandRequest) async throws -> ExpandResponse {
+        try record("expand")
+        guard let expandAnswer else { throw notPlanted() }
+        return expandAnswer
+    }
+    func remix(_ request: RemixRequest) async throws -> RemixResponse {
+        try record("remix")
+        guard let remixAnswer else { throw notPlanted() }
+        return remixAnswer
+    }
+    func history(limit: Int) async throws -> HistoryListing {
+        try record("history")
+        guard let historyRows else { throw notPlanted() }
+        return HistoryListing(entries: historyRows)
+    }
+    func clearHistory(keeping keep: Int?) async throws {
+        try record("clearHistory")
+        historyCleared.append(keep)
+    }
+
     // MARK: - Queue
 
     func queue() async throws -> QueueListing {

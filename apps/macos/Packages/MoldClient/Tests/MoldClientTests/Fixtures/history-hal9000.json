@@ -1,0 +1,19 @@
+{
+    "entries": [
+        {
+            "prompt": "probe",
+            "model": "not-a-real-model-probe",
+            "used_at": 1789614459994
+        },
+        {
+            "prompt": "A 360 view of this twin engine aircract in a hanger - the camera rotates fully around the airplane in a single clip",
+            "model": "ltx-2.5-22b-distilled:q8",
+            "used_at": 1789532448086
+        },
+        {
+            "prompt": "Straight-on aerial shot of a vintage twin engine aircraft on display in a clean hanger, fully in frame as shot from slightly above the aircraft. The plane has a sleek, polished surface with faded paint and subtle wear. The hanger is modern and clean, with a minimalist design and a large window for visibility. The light comes from the front, casting soft shadows across the plane's surface. The composition is balanced and symmetrical, with the plane centered in the frame. Ultra HD, 4K, cinematic composition.",
+            "model": "qwen-image:q8",
+            "used_at": 1789531564150
+        }
+    ]
+}

@@ -1,0 +1,6 @@
+{
+    "original": "a brass gear",
+    "expanded": [
+        "hunyuan3d reads no prompt: the image is the whole conditioning, so there is nothing to expand or remix. Prepare the image instead.\n\nThree properties of the image move the result, and none of them are prose.\n\n- One object, centred, filling most of the frame. The model reconstructs what\n  it can see; a subject occupying a tenth of the frame reconstructs at a tenth\n  of the detail.\n- A plain or removed background. There is no segmentation stage, so a busy\n  background is read as geometry. An image with an alpha channel is the best\n  input, because mold letterboxes on the cutout.\n- A three-quarter view. A straight-on photograph gives no depth cue for the\n  sides."
+    ]
+}

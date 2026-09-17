@@ -37,6 +37,20 @@ public protocol MoldBackend: Sendable {
     func jobPreview(jobId: String) async throws -> JobProgress?
     func cancelBatch(id: String) async throws
 
+    // MARK: - Create
+
+    /// Rewrites a prompt. A family that reads no prompt is answered with the
+    /// family guide's own advice rather than an LLM rewrite.
+    func expand(_ request: ExpandRequest) async throws -> ExpandResponse
+    /// Subject-preserving alternatives. Separate from `expand` so a host too
+    /// old to remix fails closed instead of silently expanding.
+    func remix(_ request: RemixRequest) async throws -> RemixResponse
+    /// Newest first. What somebody typed, not what was made.
+    func history(limit: Int) async throws -> HistoryListing
+    /// `nil` clears everything; otherwise trims to the most recent N. There
+    /// is no per-row delete -- a `HistoryEntry` carries no id to name one.
+    func clearHistory(keeping keep: Int?) async throws
+
     // MARK: - Queue
 
     func queue() async throws -> QueueListing

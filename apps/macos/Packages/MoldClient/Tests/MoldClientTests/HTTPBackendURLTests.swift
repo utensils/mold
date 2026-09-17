@@ -80,6 +80,11 @@ private let backend = HTTPBackend(
         _ = try await backend.playableURL(for: "a.png")
         _ = try await backend.startDownload(DownloadRequest(model: "m"))
         _ = try await backend.trashedPrints(etag: nil)
+        _ = try await backend.expand(ExpandRequest(prompt: "a cat"))
+        _ = try await backend.remix(RemixRequest(sourcePrompt: "a cat"))
+        _ = try await backend.history(limit: 10)
+        try await backend.clearHistory(keeping: 5)
+        try await backend.clearHistory()
     }
     #expect(backend.host.name == "plato")
 }
@@ -91,6 +96,14 @@ private let backend = HTTPBackend(
     #expect(path == "/api/devices/cuda:9ffc81c539446490bfd9f68366f98226")
     let url = backend.request(path, method: "PATCH").url
     #expect(url?.path() == "/api/devices/cuda:9ffc81c539446490bfd9f68366f98226")
+}
+
+/// `keep` trims to the most recent N instead of clearing everything; there is
+/// no per-row delete, so a nil `keep` is the whole-clear route.
+@Test func historyIsAskedForNewestFirstWithALimit() {
+    #expect(backend.historyPath(limit: 50) == "/api/history?limit=50")
+    #expect(backend.clearHistoryPath(keeping: 5) == "/api/history?keep=5")
+    #expect(backend.clearHistoryPath(keeping: nil) == "/api/history")
 }
 
 /// A print in the trash lives behind `?view=trash`, exactly as the listing
