@@ -134547,7 +134547,7 @@
       "type": "pipeline",
       "name": "nix-cache.yml",
       "filePath": ".github/workflows/nix-cache.yml",
-      "summary": "GitHub Actions workflow that automates nix cache validation, build, or release work.",
+      "summary": "Tag-triggered or manually dispatched Cachix publication workflow that builds Mold's public Nix closures from the immutable release revision, preserves sibling build results, and reports cache-build failures without becoming a dependency of native release publication.",
       "tags": [
         "ci-cd",
         "automation",
@@ -275315,7 +275315,7 @@
       "type": "pipeline",
       "name": "ci.yml",
       "filePath": ".github/workflows/ci.yml",
-      "summary": "Primary pull-request CI pipeline that classifies relevant changes and runs Rust, frontend, documentation, packaging, signing, and release contracts, including the Docker release validation regression suite.",
+      "summary": "Primary pull-request CI pipeline that classifies relevant changes and runs Rust, frontend, documentation, packaging, signing, and release contracts, including Docker release validation and real Nix vendor-derivation crate URL checks.",
       "tags": [
         "ci-cd",
         "build-system",
@@ -276683,7 +276683,7 @@
       "type": "file",
       "name": "cuda-distribution-contract.sh",
       "filePath": "scripts/tests/cuda-distribution-contract.sh",
-      "summary": "Exercises CUDA distribution and release integration contracts, including required Docker builder dependencies, GPU feature selection, provenance sealing, and release image wiring.",
+      "summary": "Exercises CUDA and release integration contracts, including Docker builder dependencies, GPU feature selection, provenance sealing, release image wiring, and fail-visible manually dispatchable Nix cache publication.",
       "tags": [
         "test",
         "regression",
@@ -279214,7 +279214,7 @@
       "type": "file",
       "name": "flake.nix",
       "filePath": "flake.nix",
-      "summary": "Implements flake behavior within Mold's local AI generation system and multi-surface application.",
+      "summary": "Defines Mold's Nix packages, development environments, checks, and release closures. Cargo lock imports for Crane's helper and the desktop package route checksum-verified crates through static.crates.io instead of the rate-limited crates.io API endpoint.",
       "tags": [
         "code",
         "build-system",
@@ -290420,6 +290420,34 @@
       "complexity": "simple"
     },
     {
+      "id": "file:scripts/tests/nix-crate-downloads.sh",
+      "type": "file",
+      "name": "nix-crate-downloads.sh",
+      "filePath": "scripts/tests/nix-crate-downloads.sh",
+      "summary": "Evaluates the Mold CLI and desktop Cargo vendor derivations for the selected Nix system, locates Crane's helper cargoDeps where needed, walks each importCargoLock vendor input through unpacked packages to its crate archive, and requires every vendored archive to use the static crates.io endpoint while ignoring unrelated derivation tools.",
+      "tags": [
+        "test",
+        "nix",
+        "release-validation",
+        "shell"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:changelog.d/nix-release-downloads.md",
+      "type": "document",
+      "name": "nix-release-downloads.md",
+      "filePath": "changelog.d/nix-release-downloads.md",
+      "summary": "Release-note fragment describing reliable static crates.io downloads for Nix release dependencies and fail-visible cache publication independent from native release delivery.",
+      "tags": [
+        "documentation",
+        "release-notes",
+        "nix",
+        "ci-cd"
+      ],
+      "complexity": "simple"
+    },
+    {
       "id": "pipeline:.github/workflows/docker-validation.yml",
       "type": "pipeline",
       "name": "docker-validation.yml",
@@ -290480,6 +290508,41 @@
     }
   ],
   "edges": [
+    {
+      "source": "pipeline:.github/workflows/nix-cache.yml",
+      "target": "file:flake.nix",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "pipeline:.github/workflows/ci.yml",
+      "target": "file:scripts/tests/nix-crate-downloads.sh",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:flake.nix",
+      "target": "file:scripts/tests/nix-crate-downloads.sh",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "pipeline:.github/workflows/nix-cache.yml",
+      "target": "file:scripts/tests/cuda-distribution-contract.sh",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:changelog.d/nix-release-downloads.md",
+      "target": "file:flake.nix",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
     {
       "source": "pipeline:.github/workflows/docker-validation.yml",
       "target": "service:Dockerfile",
@@ -517375,6 +517438,7 @@
         "file:scripts/tests/minimax-h3-transformer-capture-contract.py",
         "file:scripts/tests/minimax-h3-visual-vae-capture-contract.py",
         "file:scripts/tests/multi-gpu-deterministic-acceptance.sh",
+        "file:scripts/tests/nix-crate-downloads.sh",
         "file:scripts/tests/prune-desktop-nightly-assets.sh",
         "file:scripts/tests/regression-matrix-aggregate-failures.sh",
         "file:scripts/tests/regression-matrix-concurrency.sh",
@@ -517660,6 +517724,7 @@
         "document:changelog.d/mobile-source-library-touch.md",
         "document:changelog.d/mobile-wide-responsive-layout.md",
         "document:changelog.d/no-legacy-generation-clients.md",
+        "document:changelog.d/nix-release-downloads.md",
         "document:changelog.d/notification-download-retry.md",
         "document:changelog.d/one-generation-admission-path.md",
         "document:changelog.d/pulid-family-wide.md",

@@ -5,6 +5,7 @@ on:
     # Cachix is a release convenience, not a per-commit validation signal.
     # Build each public closure once for the immutable full release revision.
     tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   # Full release tags are immutable. Let their cache publication finish rather
@@ -17,9 +18,8 @@ permissions:
 
 jobs:
   publish:
-    # Cache availability is an optimization. This separate best-effort workflow
-    # can never delay or fail rolling nightlies or stable releases.
-    continue-on-error: true
+    # Cache availability is an optimization. Report failures here without
+    # making this separate workflow a dependency of native publication.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

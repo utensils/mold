@@ -376,7 +376,10 @@ require_text "$cache_workflow" 'group: nix-cache-${{ github.ref }}'
 require_text "$cache_workflow" 'cancel-in-progress: false'
 require_text "$cache_workflow" 'permissions:'
 require_text "$cache_workflow" 'contents: read'
-require_text "$cache_workflow" 'continue-on-error: true'
+if grep -Fq 'continue-on-error: true' "$repo_root/$cache_workflow"; then
+  fail "$cache_workflow must report failed cache builds honestly"
+fi
+require_text "$cache_workflow" 'workflow_dispatch:'
 require_text "$cache_workflow" 'uses: cachix/cachix-action@v17'
 require_text "$cache_workflow" 'name: mold'
 require_text "$cache_workflow" 'authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}'

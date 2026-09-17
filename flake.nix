@@ -112,7 +112,22 @@
               ];
           };
 
-          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
+          # importCargoLock defaults to the crates.io API, which rejected hosted
+          # release runners with HTTP 403. The static endpoint serves the same
+          # checksum-verified archives and is already Crane's registry default.
+          cratesIoDownloads = {
+            "https://github.com/rust-lang/crates.io-index" = "https://static.crates.io/crates";
+          };
+          craneLib = ((inputs.crane.mkLib pkgs).overrideToolchain rustToolchain).overrideScope (
+            _final: prev: {
+              craneUtils = prev.craneUtils.overrideAttrs {
+                cargoDeps = pkgs.rustPlatform.importCargoLock {
+                  lockFile = "${inputs.crane}/pkgs/crane-utils/Cargo.lock";
+                  extraRegistries = cratesIoDownloads;
+                };
+              };
+            }
+          );
 
           src = craneLib.path ./.;
 
@@ -699,6 +714,7 @@
               buildAndTestSubdir = "desktop/src-tauri";
               cargoLock = {
                 lockFile = ./desktop/src-tauri/Cargo.lock;
+                extraRegistries = cratesIoDownloads;
                 outputHashes = {
                   "candle-core-mold-0.11.1" = "sha256-yCwX+XdtJKY6oXp++9d9kw6opSJlRHV69Khc9LwaSQo=";
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
