@@ -1,6 +1,6 @@
 # Mold CLI workflows
 
-Current Mold versions are distributed through GitHub releases, Nix/FlakeHub,
+Current Mold versions are distributed through GitHub releases, Nix,
 Docker, AUR, and source builds. crates.io publishing is retired; registry
 versions are historical and should not be recommended for installation.
 

@@ -248534,6 +248534,83 @@
       "totalLines": 996,
       "hasStructuralAnalysis": true
     },
+    "scripts/tests/docker-release-validation.py": {
+      "filePath": "scripts/tests/docker-release-validation.py",
+      "contentHash": "14bd6b2160626bc952894951b7631f533787b07a7973bbbc8564df1ffe2c576d",
+      "functions": [
+        {
+          "name": "run_step",
+          "params": [
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "DockerReleaseValidation",
+          "methods": [
+            "select",
+            "test_pr_builds_both_feature_paths_even_with_existing_tag",
+            "test_unpublished_main_candidate_builds_all_targets",
+            "test_published_main_does_not_rebuild",
+            "test_manual_validation_builds_all_targets",
+            "test_aggregate_rejects_failed_cancelled_or_skipped_candidate_builds",
+            "test_tag_waits_for_exact_sha_and_mints_fresh_token",
+            "test_protoc_is_installed_in_builder_not_only_runtime",
+            "test_both_matrices_preserve_sibling_results"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 73
+        }
+      ],
+      "imports": [
+        {
+          "source": "os",
+          "specifiers": [
+            "os"
+          ]
+        },
+        {
+          "source": "pathlib",
+          "specifiers": [
+            "Path"
+          ]
+        },
+        {
+          "source": "subprocess",
+          "specifiers": [
+            "subprocess"
+          ]
+        },
+        {
+          "source": "tempfile",
+          "specifiers": [
+            "tempfile"
+          ]
+        },
+        {
+          "source": "textwrap",
+          "specifiers": [
+            "textwrap"
+          ]
+        },
+        {
+          "source": "unittest",
+          "specifiers": [
+            "unittest"
+          ]
+        }
+      ],
+      "exports": [
+        "run_step",
+        "DockerReleaseValidation"
+      ],
+      "totalLines": 103,
+      "hasStructuralAnalysis": true
+    },
     "scripts/tests/local_multi_gpu_qualification_test.py": {
       "filePath": "scripts/tests/local_multi_gpu_qualification_test.py",
       "contentHash": "db9f5ff7bbd9a42e10bc681b1f420e008fc5ac3a7524952b48cd1fe2f7896f18",

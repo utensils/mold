@@ -24,6 +24,7 @@ grep -qx 'git_tag_name = "v{{ version }}"' <<< "$workspace_config" \
 # Track the canonical docs, including nested website and agent references.
 # Git's file list avoids scanning generated site output or node_modules.
 while IFS= read -r doc; do
+  [[ -f "$doc" ]] || continue
   if grep -En 'cargo[[:space:]]+install[[:space:]]+mold-ai([^[:alnum:]_-]|$)' "$doc"; then
     fail "$doc advertises the retired registry distribution"
   fi

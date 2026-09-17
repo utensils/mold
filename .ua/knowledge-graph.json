@@ -134413,7 +134413,7 @@
       "type": "service",
       "name": "Dockerfile",
       "filePath": "Dockerfile",
-      "summary": "Infrastructure definition for building or packaging the dockerfile part of Mold.",
+      "summary": "Multi-stage CUDA container definition that builds Mold and its embedded web UI for specific GPU compute capabilities, installs compile-time tools including protoc, and produces the runtime image published by the release workflow.",
       "tags": [
         "infrastructure",
         "deployment",
@@ -134447,7 +134447,7 @@
         39,
         180
       ],
-      "summary": "CUDA binary build stage: caches dependencies with stub crates, then builds each GPU target with mesh-texture, mesh-matting and mesh-delight. SM89 selects h3-cuda, SM120 selects cuda, other targets select cuda plus flash-attn. Seals and validates embedded PTX and H3 release provenance.",
+      "summary": "CUDA binary build stage: installs Rust and native build dependencies including protobuf-compiler, caches base dependencies with stub crates, then builds the complete shipping feature set for the selected GPU target. SM89 selects h3-cuda, SM120 selects cuda, other targets select cuda plus flash-attn; the stage seals and validates embedded PTX and H3 release provenance.",
       "tags": [
         "infrastructure",
         "containerization",
@@ -134517,19 +134517,6 @@
       "complexity": "complex"
     },
     {
-      "id": "pipeline:.github/workflows/flakehub-publish-tagged.yml",
-      "type": "pipeline",
-      "name": "flakehub-publish-tagged.yml",
-      "filePath": ".github/workflows/flakehub-publish-tagged.yml",
-      "summary": "GitHub Actions workflow that automates flakehub publish tagged validation, build, or release work.",
-      "tags": [
-        "ci-cd",
-        "automation",
-        "mold"
-      ],
-      "complexity": "simple"
-    },
-    {
       "id": "pipeline:.github/workflows/ios.yml",
       "type": "pipeline",
       "name": "ios.yml",
@@ -134586,7 +134573,7 @@
       "type": "pipeline",
       "name": "release-plz.yml",
       "filePath": ".github/workflows/release-plz.yml",
-      "summary": "GitHub Actions workflow that automates release plz validation, build, or release work.",
+      "summary": "Release orchestration workflow that opens release PRs and, after merge, gives exact-main-revision macOS, TestFlight, and Docker candidate checks a shared 180-minute deadline within a 210-minute job budget before minting a fresh GitHub App token and pushing the version tag.",
       "tags": [
         "ci-cd",
         "automation",
@@ -138644,7 +138631,7 @@
       "type": "file",
       "name": "crates-publish-contract.sh",
       "filePath": "scripts/tests/crates-publish-contract.sh",
-      "summary": "Automates contract or regression checks for crates publish contract.",
+      "summary": "Checks the crates.io release configuration and scans existing tracked documentation for retired cargo-install guidance while tolerating files removed by the current release repair.",
       "tags": [
         "automation",
         "test",
@@ -139036,7 +139023,7 @@
       "type": "file",
       "name": "release-sync-pr.sh",
       "filePath": "scripts/tests/release-sync-pr.sh",
-      "summary": "Automates contract or regression checks for release sync pr.",
+      "summary": "Exercises release PR synchronization and asserts that stable tagging waits for exact-revision Apple delivery and the Docker validation completion job before release-plz creates the tag.",
       "tags": [
         "automation",
         "test",
@@ -275328,7 +275315,7 @@
       "type": "pipeline",
       "name": "ci.yml",
       "filePath": ".github/workflows/ci.yml",
-      "summary": "GitHub Actions ci pipeline that classifies relevant changes and runs the repository's build, test, packaging, signing, or release contracts for that target.",
+      "summary": "Primary pull-request CI pipeline that classifies relevant changes and runs Rust, frontend, documentation, packaging, signing, and release contracts, including the Docker release validation regression suite.",
       "tags": [
         "ci-cd",
         "build-system",
@@ -275354,7 +275341,7 @@
       "type": "pipeline",
       "name": "release.yml",
       "filePath": ".github/workflows/release.yml",
-      "summary": "GitHub Actions release pipeline that classifies relevant changes and runs the repository's build, test, packaging, signing, or release contracts for that target.",
+      "summary": "Tag and nightly release pipeline that builds and publishes platform artifacts and a six-target CUDA container matrix; Docker jobs preserve sibling results with fail-fast disabled.",
       "tags": [
         "ci-cd",
         "build-system",
@@ -276696,7 +276683,7 @@
       "type": "file",
       "name": "cuda-distribution-contract.sh",
       "filePath": "scripts/tests/cuda-distribution-contract.sh",
-      "summary": "Exercises the cuda distribution contract behavior and its integration contracts with focused regression scenarios.",
+      "summary": "Exercises CUDA distribution and release integration contracts, including required Docker builder dependencies, GPU feature selection, provenance sealing, and release image wiring.",
       "tags": [
         "test",
         "regression",
@@ -290433,6 +290420,48 @@
       "complexity": "simple"
     },
     {
+      "id": "pipeline:.github/workflows/docker-validation.yml",
+      "type": "pipeline",
+      "name": "docker-validation.yml",
+      "filePath": ".github/workflows/docker-validation.yml",
+      "summary": "Builds real, unpublished release images before tagging: pull requests cover the two divergent feature paths, untagged main candidates and manual runs cover all six CUDA targets, push builds warm trusted release caches, and a fail-closed aggregate job exposes exact-revision completion to release-plz.",
+      "tags": [
+        "ci-cd",
+        "docker",
+        "release-validation",
+        "cuda"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:scripts/tests/docker-release-validation.py",
+      "type": "file",
+      "name": "docker-release-validation.py",
+      "filePath": "scripts/tests/docker-release-validation.py",
+      "summary": "Unit-style release contract suite that executes extracted Docker workflow shell steps and checks candidate selection, fail-closed aggregation, exact-SHA release gating with bounded waits, delayed token minting, builder protoc availability, and non-fail-fast container matrices.",
+      "tags": [
+        "test",
+        "release-validation",
+        "docker",
+        "python"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:changelog.d/release-container-validation.md",
+      "type": "document",
+      "name": "release-container-validation.md",
+      "filePath": "changelog.d/release-container-validation.md",
+      "summary": "Release-note fragment describing pre-tag container validation, protobuf compiler availability, complete CUDA target coverage, preserved sibling results, and retirement of FlakeHub publication guidance.",
+      "tags": [
+        "documentation",
+        "release-notes",
+        "docker",
+        "ci-cd"
+      ],
+      "complexity": "simple"
+    },
+    {
       "id": "function:crates/mold-tui/src/ui/popup.rs:render_settings_input",
       "type": "function",
       "name": "render_settings_input",
@@ -290451,6 +290480,69 @@
     }
   ],
   "edges": [
+    {
+      "source": "pipeline:.github/workflows/docker-validation.yml",
+      "target": "service:Dockerfile",
+      "type": "validates",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "pipeline:.github/workflows/release-plz.yml",
+      "target": "pipeline:.github/workflows/docker-validation.yml",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "pipeline:.github/workflows/release.yml",
+      "target": "pipeline:.github/workflows/docker-validation.yml",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "pipeline:.github/workflows/ci.yml",
+      "target": "file:scripts/tests/docker-release-validation.py",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "pipeline:.github/workflows/docker-validation.yml",
+      "target": "file:scripts/tests/docker-release-validation.py",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "pipeline:.github/workflows/release-plz.yml",
+      "target": "file:scripts/tests/docker-release-validation.py",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "pipeline:.github/workflows/release.yml",
+      "target": "file:scripts/tests/docker-release-validation.py",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "service:Dockerfile",
+      "target": "file:scripts/tests/docker-release-validation.py",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:changelog.d/release-container-validation.md",
+      "target": "pipeline:.github/workflows/docker-validation.yml",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
     {
       "source": "file:crates/mold-server/src/catalog_api.rs",
       "target": "function:crates/mold-server/src/catalog_api.rs:repair_enqueue_error",
@@ -517262,6 +517354,7 @@
         "file:scripts/tests/desktop-candle-nix-source-hash.sh",
         "file:scripts/tests/desktop-dmg-packaging.sh",
         "file:scripts/tests/desktop-nightly-race-guards.sh",
+        "file:scripts/tests/docker-release-validation.py",
         "file:scripts/tests/docker-web-context.sh",
         "file:scripts/tests/frontend-architecture.sh",
         "file:scripts/tests/install-cuda-arch.sh",
@@ -517474,7 +517567,7 @@
         "pipeline:.github/workflows/ci.yml",
         "pipeline:.github/workflows/desktop-distribution.yml",
         "pipeline:.github/workflows/desktop.yml",
-        "pipeline:.github/workflows/flakehub-publish-tagged.yml",
+        "pipeline:.github/workflows/docker-validation.yml",
         "pipeline:.github/workflows/ios.yml",
         "pipeline:.github/workflows/minimax-h3-private-conformance.yml",
         "pipeline:.github/workflows/nix-cache.yml",
@@ -517574,6 +517667,7 @@
         "document:changelog.d/queue-entry-drawer-and-swipe.md",
         "document:changelog.d/ref2va-library-reference-hash.md",
         "document:changelog.d/reference-media-authoring.md",
+        "document:changelog.d/release-container-validation.md",
         "document:changelog.d/remix-library-hydration.md",
         "document:changelog.d/safelight-dark-defaults.md",
         "document:changelog.d/settled-batch-retention.md",

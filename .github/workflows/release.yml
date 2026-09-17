@@ -747,6 +747,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       # Keep nightly maintenance from reclaiming the daytime runner pool.
       # Full releases retain the existing parallel publication behavior.
       max-parallel: ${{ github.event_name == 'schedule' && 2 || 6 }}

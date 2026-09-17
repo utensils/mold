@@ -329,9 +329,9 @@ docker_source_sha_env_line="$(
 grep -Fq 'COPY .cargo/config.toml .cargo/config.toml' "$repo_root/Dockerfile" \
   || fail "Docker H3 runtime identity build omits .cargo/config.toml"
 docker_builder_packages="$(sed -n '/apt-get update && apt-get install/,/&& break/p' "$repo_root/Dockerfile")"
-for package in clang lld; do
+for package in clang lld protobuf-compiler; do
   grep -Eq "^[[:space:]]+${package}[[:space:]]*\\\\$" <<< "$docker_builder_packages" \
-    || fail "Docker builder omits ${package} required by .cargo/config.toml"
+    || fail "Docker builder omits required build dependency ${package}"
 done
 docker_dependency_build_line="$(
   grep -n -m1 -E '^RUN cargo build --release -p mold-ai([[:space:]]|$)' \

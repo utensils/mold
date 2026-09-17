@@ -274,6 +274,7 @@ jobs:
               - 'scripts/tests/android-apk-distribution.sh'
               - 'scripts/tests/windows-self-signing.sh'
               - 'scripts/tests/release-sync-pr.sh'
+              - 'scripts/tests/docker-release-validation.py'
               - 'scripts/tests/changelog-fragments-contract.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/actionlint.yaml'
