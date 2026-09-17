@@ -7,6 +7,8 @@ import SwiftUI
 /// map"), and a way back to a known layout for everything on this page that
 /// doesn't already have its own undo.
 struct GeneralSettings: View {
+    @AppStorage(Appearance.key, store: AppStorageSuite.defaults)
+    private var appearance = Appearance.system
     @AppStorage("badgeLandedPrints", store: AppStorageSuite.defaults)
     private var badgeLandedPrints = true
     @AppStorage("notifyRenders", store: AppStorageSuite.defaults)
@@ -24,6 +26,18 @@ struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(Appearance.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text("System follows the Mac's own light and dark setting. Colours are always the system's.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 Toggle("Badge the Dock icon with prints that arrive while Mold is in the background",
                        isOn: $badgeLandedPrints)
@@ -71,6 +85,9 @@ struct GeneralSettings: View {
         }
         .formStyle(.grouped)
         .task { used = materializer.usedBytes }
+        // Applied here as well as at launch (`MoldAppDelegate`): the picker
+        // writes the suite, and the whole app -- both windows -- follows.
+        .onChange(of: appearance) { _, choice in choice.apply() }
         .onChange(of: capMegabytes) { _, _ in
             materializer.enforceBudget()
             used = materializer.usedBytes

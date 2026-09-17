@@ -22,6 +22,9 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// `UNUserNotificationCenter` too, and outside a real `.app` that aborts
     /// the process just as posting would.
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before the bundle guard below: the appearance is a plain AppKit
+        // call and must land outside a real `.app` too (the test host).
+        Appearance.stored(in: AppStorageSuite.defaults).apply()
         guard MoldNotifications.isInsideBundle() else { return }
         UNUserNotificationCenter.current().delegate = self
     }

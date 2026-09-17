@@ -8,8 +8,9 @@ import Foundation
 /// sort/scope -- never anything a machine answers for and never the machine
 /// list itself (`HostPersistence`'s own `"hosts"` key, plus the API keys it
 /// keeps in the Keychain), which is the one thing in this suite somebody
-/// would mind losing. The media-cache cap (`PrintMaterializer.capKey`) and
-/// the two notification toggles (`GeneralSettings`) are also left alone --
+/// would mind losing. The media-cache cap (`PrintMaterializer.capKey`), the
+/// appearance (`Appearance.key`) and the two notification toggles
+/// (`GeneralSettings`) are also left alone --
 /// each already has its own control right on this same page, so a second,
 /// wholesale way to change them would only make the page harder to reason
 /// about.
