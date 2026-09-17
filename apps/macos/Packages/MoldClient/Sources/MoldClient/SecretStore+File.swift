@@ -6,13 +6,34 @@ import Foundation
 // lock -- `Loaded` is passed `inout` rather than read off `self` so that is
 // visible at the call site.
 extension SecretStore {
-    /// The document, read once per process and then held. A file that is not
-    /// there is an empty store; a file that does not parse is an empty store
-    /// that remembers it owes the original a rename (`secrets.rs:121-148`).
+    /// The document, read once per process and then held.
+    ///
+    /// Three outcomes, and the middle one is the whole point. A file that is
+    /// NOT THERE is an empty store -- a first run. A file that does not PARSE
+    /// is an empty store that remembers it owes the original a rename
+    /// (`secrets.rs:121-148`). A file that EXISTS but will not read -- the
+    /// wrong owner after a `sudo` launch, an ACL, a transient I/O error -- is
+    /// a refusal: treating it as empty is how the next `set` renamed a
+    /// one-entry document over every other machine's key (review E2). Parking
+    /// it would not help, because whatever stopped the read will stop the
+    /// rename; the store refuses, and `HostStore.report` says so.
+    ///
+    /// The refusal is never cached, so the moment the file reads again it
+    /// reads.
     func loaded(_ slot: inout Loaded?) throws -> Loaded {
         if let slot { return slot }
+        let path = url.path(percentEncoded: false)
+        var raw: Data?
+        do {
+            raw = try Data(contentsOf: url)
+        } catch {
+            guard !FileManager.default.fileExists(atPath: path) else {
+                throw SecretStoreError.unreadable(path: path, reason: error.localizedDescription)
+            }
+            raw = nil
+        }
         let fresh: Loaded
-        if let raw = try? Data(contentsOf: url) {
+        if let raw {
             if let map = try? MoldJSON.localDecoder.decode([String: String].self, from: raw) {
                 fresh = Loaded(map: map, corrupt: false)
             } else {

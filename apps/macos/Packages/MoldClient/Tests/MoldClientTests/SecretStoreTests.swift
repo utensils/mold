@@ -117,6 +117,43 @@ struct SecretStoreTests {
         #expect(try Data(contentsOf: dir.appending(path: "secrets.json")) == before)
     }
 
+    /// **Fails today**: `try? Data(contentsOf:)` made ENOENT and EACCES the
+    /// same answer, and only a PARSE failure set `corrupt`. A file that exists
+    /// but will not read -- the wrong owner after a `sudo` launch, an ACL, a
+    /// transient I/O error -- became an empty store, and the very next `set`
+    /// renamed a one-entry document over every other machine's key, with no
+    /// parked copy and nothing said (review E2).
+    ///
+    /// Parking is not enough either: whatever stopped the read will stop the
+    /// rename. The store refuses to read AND refuses to write, and the error
+    /// is the one `HostStore.report` puts in front of the person.
+    @Test func anUnreadableFileIsNeverWrittenOver() throws {
+        let (store, dir) = try scratch()
+        let name = hostName()
+        try store.set("kept", for: name)
+        let path = dir.appending(path: "secrets.json")
+        let before = try Data(contentsOf: path)
+
+        // A fresh store, so nothing is cached from the write above.
+        let cold = SecretStore(directory: dir)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                              ofItemAtPath: path.path(percentEncoded: false))
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: path.path(percentEncoded: false))
+        }
+
+        #expect(throws: SecretStoreError.self) { try cold.value(for: name) }
+        #expect(throws: SecretStoreError.self) { try cold.set("new", for: name) }
+        #expect(throws: SecretStoreError.self) { try cold.clear(name) }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                              ofItemAtPath: path.path(percentEncoded: false))
+        #expect(try Data(contentsOf: path) == before)
+        // Nothing was cached either: the moment it reads again, it reads.
+        #expect(try cold.value(for: name) == "kept")
+    }
+
     @Test func secretsFileIsOwnerOnly() throws {
         let (store, dir) = try scratch()
         try store.set("k1", for: hostName())
