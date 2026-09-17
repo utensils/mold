@@ -37,11 +37,10 @@ struct PairingSection: View {
     private var state: SectionState? { Self.resolve(pairing.byHost[host.id], authority: pairing.authority[host.id]) }
 
     var body: some View {
+        // No `.task` here: `content` is `EmptyView` until the store has an
+        // answer, and a task hung off an `EmptyView` never runs. The Machines
+        // pane loads the store in its own per-host task (`PairingStore.load`).
         content
-            // Runs across every state, including `nil` -- that IS the state
-            // that needs the fetch. A `PeerSection`-style task inside only
-            // the drawn branch would never run for a machine not asked yet.
-            .task(id: host.id) { await load() }
             .sheet(isPresented: $showingSheet) { PairingSheet(host: host) }
             .destructionDialog($pendingRevoke)
     }
@@ -65,15 +64,6 @@ struct PairingSection: View {
                 ForEach(clients) { client in row(client) }
                 Button("Pair a Phone…") { showingSheet = true }
             }
-        }
-    }
-
-    private func load() async {
-        guard !pairing.isSeeded else { return }
-        if let fixture = Self.fixtureIfRequested() {
-            pairing.seed(from: fixture)
-        } else {
-            await pairing.refresh(on: host.id)
         }
     }
 

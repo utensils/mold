@@ -61,9 +61,9 @@ struct GeneralSettings: View {
                 Button("Reset These Preferences…") { pendingReset = resetDestruction }
             } footer: {
                 Text("""
-                     Puts the window layout, the remembered destination and \
-                     machine, and every pane's own sort and sidebar state \
-                     back to how Mold first opened. Your machines are untouched.
+                     Puts the sidebar and inspector layout, the remembered \
+                     destination and machine, and every pane's own sort and \
+                     scope back to how Mold first opened. Your machines are untouched.
                      """)
                 .font(.caption)
                 .foregroundStyle(.secondary)

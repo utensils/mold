@@ -33,4 +33,21 @@ extension PairingTests {
         #expect(PairingSheet.Countdown.resolve(expiresAt: 1_700_000_030_000, now: now) == .remaining(30))
         #expect(PairingSheet.Countdown.resolve(expiresAt: 1_699_999_990_000, now: now) == .expired)
     }
+
+    /// Reopening the sheet inside an unexpired session's window shows that
+    /// code rather than minting another; a session for a DIFFERENT machine,
+    /// or an expired one, is no reason to skip the request.
+    @Test func theSheetReusesAnUnexpiredSessionForTheSameMachine() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let plato = machine(), other = machine("hal9000")
+        let live = PairingSession(
+            token: "t", expiresAt: 1_700_000_030_000, authRequired: true, instanceId: "i", hostname: "plato")
+        let dead = PairingSession(
+            token: "t", expiresAt: 1_699_999_990_000, authRequired: true, instanceId: "i", hostname: "plato")
+
+        #expect(!PairingSheet.needsFreshCode(session: live, sessionHost: plato.id, host: plato.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: live, sessionHost: other.id, host: plato.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: dead, sessionHost: plato.id, host: plato.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: nil, sessionHost: nil, host: plato.id, now: now))
+    }
 }

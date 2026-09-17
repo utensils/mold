@@ -26,6 +26,18 @@ struct PairingSheet: View {
         return .code(payload)
     }
 
+    /// Whether opening the sheet must mint a code: yes unless a session for
+    /// THIS machine is already in flight and unexpired -- reopening the
+    /// sheet inside the two-minute window shows the code a phone may already
+    /// be scanning, rather than killing it (M7 UAT: a seeded fixture session
+    /// was being replaced by a request the fixture then refused).
+    static func needsFreshCode(session: PairingSession?, sessionHost: MoldHost.ID?, host: MoldHost.ID, now: Date) -> Bool {
+        guard let session, sessionHost == host else { return true }
+        // No expiry on the wire reads as "still good": the machine set none.
+        guard let expiresAt = session.expiresAt else { return false }
+        return Countdown.resolve(expiresAt: expiresAt, now: now) == .expired
+    }
+
     /// Reads the MACHINE's own `expires_at`, never a client-side clock
     /// started when the sheet opened -- `resolve(_:now:)` takes `now`
     /// explicitly so a fixed instant is what a test pins.
@@ -82,7 +94,12 @@ struct PairingSheet: View {
         }
         .padding(24)
         .frame(width: 320)
-        .task { await pairing.createSession(on: host.id) }
+        .task {
+            guard Self.needsFreshCode(
+                session: pairing.session, sessionHost: pairing.sessionHost, host: host.id, now: .now)
+            else { return }
+            await pairing.createSession(on: host.id)
+        }
     }
 
     private var unavailable: some View {

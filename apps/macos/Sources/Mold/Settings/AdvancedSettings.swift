@@ -66,7 +66,17 @@ struct AdvancedSettings: View {
         let refusals = (store.refusals[machine.id] ?? [:]).mapValues(\.sentence)
         let rows = Self.rows(listing, query: query, refusals: refusals)
         VStack(alignment: .leading, spacing: 8) {
-            SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
+            HStack {
+                SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
+                Spacer()
+                // A plain field, not `.searchable`: a Settings window has no
+                // navigation toolbar, so `.searchable` surfaced as a toolbar
+                // item that read like a tenth tab (M7 UAT).
+                TextField("Search settings", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .accessibilityLabel("Search settings")
+            }
             ProfileHeader(profiles: store.profiles[machine.id])
             table(rows, machine: machine)
             Text(Self.subtitle(showing: rows.count, total: listing?.entries.count ?? 0))
@@ -74,7 +84,6 @@ struct AdvancedSettings: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .searchable(text: $query, prompt: "Search settings")
     }
 
     private func table(_ rows: [Row], machine: MoldHost) -> some View {

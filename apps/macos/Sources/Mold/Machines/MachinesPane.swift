@@ -15,6 +15,7 @@ struct MachinesPane: View {
     @Environment(MachineStore.self) var machines
     @Environment(QueueStore.self) var queue
     @Environment(ModelStore.self) var models
+    @Environment(PairingStore.self) var pairing
     /// The same key the sidebar declares, over the same suite. Two views
     /// sharing one preference by name stay in sync with no plumbing.
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) var selectedMachine = ""
@@ -50,6 +51,7 @@ struct MachinesPane: View {
             await machines.refresh(id)
             await queue.refresh(on: id)
             await models.refresh(on: id)
+            await pairing.load(on: id)
             machines.watchResources(on: id)
         }
         .onDisappear { machines.stopWatchingResources() }
