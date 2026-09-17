@@ -18,6 +18,9 @@ crate-type = ["staticlib"]
 [dependencies]
 anyhow = "1"
 libc = "0.2"
+# The engine's terminal error has to reach the log FILE `bootstrap` installs:
+# a windowed app has no console, so `eprintln!` went nowhere.
+tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 mold-core = { path = "../../../../crates/mold-core", package = "mold-ai-core" }
 mold-db = { path = "../../../../crates/mold-db", package = "mold-ai-db" }

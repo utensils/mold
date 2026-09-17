@@ -52,6 +52,36 @@ fn engine() -> &'static Mutex<Option<std::thread::JoinHandle<()>>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
+/// Clears `ALIVE` however the engine thread ends.
+///
+/// It used to be cleared by a store at the BOTTOM of the thread body, which a
+/// panic anywhere inside `run_server` skips: `mold_engine_is_alive` then
+/// answered true for the life of the process, `mold_engine_join` always burned
+/// its whole timeout, and the app kept "This Mac" in the machine list pointing
+/// at a port nothing was listening on (review 05-M1).
+struct AliveGuard;
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        ALIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Runs `body` so a panic can never cross the C ABI.
+///
+/// An unwind through an `extern "C"` frame aborts the process -- for an app
+/// that is a crash report with no engine in it. Every entry point answers its
+/// own failure value instead.
+fn guarded<T>(what: &'static str, fallback: T, body: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::error!("the mold engine panicked in {what}");
+            fallback
+        }
+    }
+}
+
 /// Borrows a C string. Returns `None` for null or non-UTF-8.
 unsafe fn str_arg<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -74,6 +104,16 @@ unsafe fn str_arg<'a>(ptr: *const c_char) -> Option<&'a str> {
 /// Every pointer must be null or a valid NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn mold_engine_bootstrap(
+    mold_home: *const c_char,
+    api_key: *const c_char,
+    log_dir: *const c_char,
+) -> i32 {
+    guarded("bootstrap", 1, || unsafe {
+        bootstrap(mold_home, api_key, log_dir)
+    })
+}
+
+unsafe fn bootstrap(
     mold_home: *const c_char,
     api_key: *const c_char,
     log_dir: *const c_char,
@@ -133,10 +173,12 @@ pub unsafe extern "C" fn mold_engine_bootstrap(
 /// upstream is `run_server_with_listener`.
 #[no_mangle]
 pub extern "C" fn mold_engine_alloc_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|probe| probe.local_addr())
-        .map(|addr| addr.port())
-        .unwrap_or(0)
+    guarded("alloc_port", 0, || {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|probe| probe.local_addr())
+            .map(|addr| addr.port())
+            .unwrap_or(0)
+    })
 }
 
 /// Starts the engine on its own thread. Returns 0 if it was started.
@@ -149,6 +191,10 @@ pub unsafe extern "C" fn mold_engine_start(
     port: u16,
     models_dir: *const c_char,
 ) -> i32 {
+    guarded("start", 1, || unsafe { start(bind, port, models_dir) })
+}
+
+unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i32 {
     let mut slot = match engine().lock() {
         Ok(slot) => slot,
         Err(_) => return 1,
@@ -174,36 +220,48 @@ pub unsafe extern "C" fn mold_engine_start(
     // down over a slow engine stop.
     mold_server::bound_http_drain(HTTP_DRAIN_GRACE);
 
+    // Set HERE, not at the top of the thread body: `mold_engine_join` polls
+    // this flag, and in the window between the spawn returning and the thread
+    // being scheduled the old placement made `join` see a dead engine and fall
+    // straight into an UNBOUNDED `handle.join()` (review 05-M9).
+    ALIVE.store(true, Ordering::SeqCst);
+
     let handle = std::thread::Builder::new()
         .name("mold-engine".into())
         .spawn(move || {
-            ALIVE.store(true, Ordering::SeqCst);
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .thread_name("mold-engine-worker")
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    ALIVE.store(false, Ordering::SeqCst);
-                    return;
+            // Cleared however this thread ends -- return, `Err`, or unwind.
+            let _alive = AliveGuard;
+            guarded("run_server", (), || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .thread_name("mold-engine-worker")
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::error!(%error, "the mold engine could not build its runtime");
+                        return;
+                    }
+                };
+                let result = runtime.block_on(mold_server::run_server(
+                    &bind,
+                    port,
+                    models,
+                    gpu_selection,
+                    queue_size,
+                ));
+                if let Err(error) = result {
+                    // Through tracing, which `bootstrap` has pointed at a
+                    // file: a windowed app has no console, so an `eprintln!`
+                    // here went nowhere and the terminal error was lost.
+                    tracing::error!(error = format!("{error:#}"), "the mold engine stopped");
                 }
-            };
-            let result = runtime.block_on(mold_server::run_server(
-                &bind,
-                port,
-                models,
-                gpu_selection,
-                queue_size,
-            ));
-            if let Err(error) = result {
-                tracing_error(&error);
-            }
-            // Plain `drop`, not `shutdown_timeout`: a GPU worker mid-render
-            // holds a blocking thread, and cutting the runtime out from under
-            // it is how you lose a job that was about to finish.
-            drop(runtime);
-            ALIVE.store(false, Ordering::SeqCst);
+                // Plain `drop`, not `shutdown_timeout`: a GPU worker
+                // mid-render holds a blocking thread, and cutting the runtime
+                // out from under it is how you lose a job that was about to
+                // finish.
+                drop(runtime);
+            });
         });
 
     match handle {
@@ -211,18 +269,18 @@ pub unsafe extern "C" fn mold_engine_start(
             *slot = Some(handle);
             0
         }
-        Err(_) => 1,
+        Err(error) => {
+            ALIVE.store(false, Ordering::SeqCst);
+            tracing::error!(%error, "the mold engine thread could not be spawned");
+            1
+        }
     }
-}
-
-fn tracing_error(error: &anyhow::Error) {
-    eprintln!("mold engine stopped: {error:#}");
 }
 
 /// Whether the engine thread is still running.
 #[no_mangle]
 pub extern "C" fn mold_engine_is_alive() -> bool {
-    ALIVE.load(Ordering::SeqCst)
+    guarded("is_alive", false, || ALIVE.load(Ordering::SeqCst))
 }
 
 /// Waits for the engine thread to finish, up to `timeout_ms`.
@@ -232,24 +290,104 @@ pub extern "C" fn mold_engine_is_alive() -> bool {
 /// for the thread that request already asked to stop.
 #[no_mangle]
 pub extern "C" fn mold_engine_join(timeout_ms: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    guarded("join", false, || join(Duration::from_millis(timeout_ms)))
+}
+
+fn join(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
     while ALIVE.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
     if ALIVE.load(Ordering::SeqCst) {
+        // Still draining. The lease is this process's claim on the gallery,
+        // and the app is about to end the process, so hand it back now rather
+        // than leave a file that says a server is publishing (review 05-M7).
+        mold_server::gallery_authority::release_gallery_writer_leases();
         return false;
     }
-    if let Ok(mut slot) = engine().lock() {
-        if let Some(handle) = slot.take() {
+    let handle = match engine().lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => None,
+    };
+    let Some(handle) = handle else { return true };
+    // `ALIVE` falls in a Drop guard, which runs BEFORE the thread's own
+    // teardown finishes, so this final join is not instantaneous and must
+    // carry its own bound -- it is on the quit path, where an unbounded wait
+    // hangs the app instead of the budget it promised (review 05-M9).
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    joined_within(handle, remaining.max(JOIN_TAIL))
+}
+
+/// The floor for the final `handle.join()`, so a caller whose whole budget has
+/// already elapsed still gives the thread a moment to leave.
+const JOIN_TAIL: Duration = Duration::from_millis(250);
+
+/// `std::thread::JoinHandle` has no timed join, so the wait happens on a
+/// reaper thread and this side waits on a channel.
+fn joined_within(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let (done, waited) = std::sync::mpsc::channel();
+    let reaper = std::thread::Builder::new()
+        .name("mold-engine-join".into())
+        .spawn(move || {
             let _ = handle.join();
-        }
+            let _ = done.send(());
+        });
+    if reaper.is_err() {
+        return false;
     }
-    true
+    waited.recv_timeout(timeout).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EMBEDDED_CORS_ORIGIN;
+    use super::{guarded, joined_within, AliveGuard, ALIVE, EMBEDDED_CORS_ORIGIN};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    /// `ALIVE` is process-wide, so the tests that move it take turns.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// **Fails today**: `ALIVE.store(false)` sat at the BOTTOM of the thread
+    /// body, which an unwind skips -- `mold_engine_is_alive` then answered
+    /// true for the life of the process.
+    #[test]
+    fn a_panicking_engine_thread_still_reports_dead() {
+        let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+        ALIVE.store(true, Ordering::SeqCst);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::thread::spawn(|| {
+            let _alive = AliveGuard;
+            panic!("the engine fell over");
+        })
+        .join();
+        std::panic::set_hook(previous);
+        assert!(outcome.is_err());
+        assert!(!ALIVE.load(Ordering::SeqCst));
+    }
+
+    /// **Fails today**: a panic crossing an `extern "C"` frame aborts the
+    /// process, so an engine that fell over took the app's crash report with
+    /// it instead of answering a failure.
+    #[test]
+    fn a_panic_inside_an_entry_point_becomes_its_failure_value() {
+        let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let answered = guarded("test", 7, || panic!("boom"));
+        std::panic::set_hook(previous);
+        assert_eq!(answered, 7);
+    }
+
+    /// **Fails today**: the final `handle.join()` carried no bound at all, on
+    /// the quit path.
+    #[test]
+    fn the_final_join_gives_up_rather_than_hanging_the_app() {
+        let slow = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(30)));
+        let started = Instant::now();
+        assert!(!joined_within(slow, Duration::from_millis(120)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     /// **Fails today**: nothing set `MOLD_CORS_ORIGIN`, so `build_cors_layer`
     /// took its `CorsLayer::permissive()` arm and any page that found the

@@ -2770,11 +2770,13 @@ name = "mold-macos-ffi"
 version = "0.29.0"
 dependencies = [
  "anyhow",
+ "http",
  "libc",
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-server",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
