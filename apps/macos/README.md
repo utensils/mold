@@ -12,7 +12,7 @@ generation and the library. No 3-D studio.
 | --- | --- |
 | **Generate** | Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Stills and clips (length in seconds, snapped to the family's frame grid), source images with strength, ordered reference images, batches, negative prompts. Durable submission, live step progress and denoise preview, then the picture with Save / Copy / Show in Library. Clicking the picture tucks the controls off the bottom edge, leaving a lip that still carries the step marks; clicking it again or pressing Escape brings them back. A wand on the prompt rewrites it or suggests other ways to say it, in place, with the original kept. The inspector holds the format, an upscaler, whether it is saved at all, what to file it under, and the prompts this machine was last asked for. Batch N is N variations of one idea, not N copies. The inspector also holds the adapters a model can take, a face to keep, a mask to repaint through, a ControlNet, and everything a clip is made of -- each appearing only when the chosen model says it reads that thing, and each parked, never lost, when you switch to one that does not. |
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Name a print, tag it, file it, and rename or delete a tag across every machine at once. Favourite, tag, filing and renaming are all **undoable** from the Edit menu. Space is Quick Look, and every print can be shared, saved or dragged out. File ▸ Import to adds a picture, clip or mesh from this Mac to a machine. Refreshes by ETag, and follows each machine's live event stream — a print favourited, tagged or trashed somewhere else appears here without a refresh. |
-| **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
+| **Queue** | Every machine's work, live from its event stream: a batch as one row with its children beneath, drag or Move Up/Down to reorder where the machine will actually put the job, Empty Queue for what is waiting (anything rendering keeps going), and a held row that asks in words -- Pull the missing model then Retry, or the machine's own sentence and Try Again where it says trying again would help. Move to… sends a held job to another machine in the three calls the web app makes, idempotently. The Dock icon counts prints that landed while Mold was in the background, and a finished render or a failed job can notify you. |
 | **Models** | Installed is a table grouped by family -- model, variant, the manifest's plain-English trade-off, size, state -- listing every installed model on the machine, with the machine's own disk figure underneath. Discover searches the catalog through the machine: family and sort come from what it advertises, a row installs, reads Installed, or offers its page when the machine cannot take it. Install, repair, cancel, load, unload, components and delete from the row, the Model menu or the keyboard; downloads in a toolbar popover; a gated model's licence rendered from the machine's own payload and accepted in place. Settings ▸ Accounts holds each machine's catalog tokens. |
 | **Machines** | Every machine's page: its GPUs with what each is holding and how much memory is gone, a switch per card where the machine's scheduler will honour one, live memory and CPU, what is queued and installed there, and its address. Machines on the local network that this one can see are offered to add. The machine picked here is the one the Models pane shows. |
 | **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. Storage sets how much disk the media cache may use. |
@@ -68,11 +68,12 @@ studio, pairing-based onboarding for keyed hosts, and large reference uploads --
 meshes, neither of which this app makes, so reference pictures always travel
 inline.
 
-## Six things about the wire that the docs do not say
+## Seven things about the wire that the docs do not say
 
 The first two were found by reading frames off a live host, and both fail
 silently; the third is a rule with two halves; the fourth is a refusal; the
-fifth is an absence that means yes; the sixth is three small traps in one.
+fifth is an absence that means yes; the sixth is three small traps in one; the
+seventh is about the queue.
 
 `GET /api/events` opens with `event: authority` and then sends **everything
 else** as the literal `event: event`, with the real tag in the payload's
@@ -116,6 +117,19 @@ install. And a catalog id like `hf:owner/repo` must be percent-encoded as part
 of its whole path: encoded alone, Foundation turns the colon before the first
 slash into `%3A` -- its guard against a leading segment that reads as a URI
 scheme -- and the wildcard route never matches.
+
+The queue. `GET /api/queue` has exactly four states -- `queued`, `running`,
+`paused`, `held` -- and `accepted` belongs to the batch endpoint alone; this app
+spelled the wrong one for four milestones and every waiting row decoded as
+unknown. A reorder's `position` indexes the machine's `queued` rows alone, not
+the row's listed `position` (which counts running rows) and not its place on
+screen; a batch moves as ascending single-row calls. A held row's typed cause
+lives only on the batch child, so `POST /api/generation-batches/status` -- a
+read despite the verb -- is what names it, and only a missing or unknown model
+is ever typed. A transfer is three calls this app makes -- export from the
+source, admit on the destination, complete on the source -- with the export
+kept as opaque bytes, because re-encoding it through this build's request type
+would drop the media it carries.
 
 ## Running it
 
@@ -178,7 +192,10 @@ variable reaches the app and its stdout stays on your terminal.
 
 `MOLD_NATIVE_DESTINATION` forces where the window opens: a destination name,
 `settings`, `machines` to open on the machine page, or `add-machine` /
-`edit-machine` to open the host sheet empty or on the first machine. The sheet ones exist so a UAT run can photograph it without
+`edit-machine` to open the host sheet empty or on the first machine. `MOLD_NATIVE_QUEUE_FIXTURE=<file>` seeds the queue from a
+machine-keyed JSON fixture and refuses every mutation, and
+`MOLD_NATIVE_SOURCE_IMAGE=<png>` seeds a source picture -- both so a run can be
+photographed without a generation. The sheet ones exist so a UAT run can photograph it without
 a script driving the mouse across the desktop.
 
 ## Layout
