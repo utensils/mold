@@ -39,8 +39,11 @@ struct EngineLifecycleTests {
         #expect(!MoldEngine.isDraining(.stopped))
         #expect(!MoldEngine.isDraining(.failed(.init(reason: "x", relaunchNeeded: true))))
         #expect(!MoldEngine.isDraining(.unavailable("no engine in this build")))
-        // A remote-only build has no engine thread and must never wait.
-        #expect(engine.isDraining == MoldEngine.isLinked)
+        // An engine nobody started has no thread in EITHER build -- `.stopped`
+        // when one is linked, `.unavailable` when none is -- so quitting never
+        // waits on it. (This read `== isLinked` when it was written in a
+        // build with no engine, where that is `false == false`.)
+        #expect(!engine.isDraining)
     }
 
     /// **Fails today**: the probe counted 480 ATTEMPTS, each costing its own
