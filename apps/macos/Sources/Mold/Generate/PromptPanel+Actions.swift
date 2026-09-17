@@ -1,10 +1,13 @@
 import MoldClient
 import SwiftUI
 
-/// The button cluster pinned to the controls row's trailing edge (M8
-/// decision 1): what the placement preview says, how many more renders are
-/// waiting, Stop while one is busy, and Generate itself -- which never turns
-/// into Stop (M8 decision 8), a second press just admits another batch.
+/// The capsule's last row (M8 decision 10): what the placement preview says
+/// at the leading edge, then how many more renders are waiting, Stop while
+/// one is busy, and Generate at the trailing edge -- a sheet's own button
+/// row. Generate never turns into Stop (M8 decision 8), a second press just
+/// admits another batch; and it never MOVES either: it is the trailing item
+/// of a row that is always there, so Stop appearing, the hint changing or a
+/// control wrapping shifts nothing under the pointer.
 extension PromptPanel {
     /// Whether Stop is a plain button or a split menu over "Stop All
     /// Queued" -- pure, so the capsule's busiest row is tested without a
@@ -18,15 +21,13 @@ extension PromptPanel {
     func actions(_ recipe: GenerationRecipe) -> some View {
         HStack(spacing: 10) {
             // plato's own "infeasible" answer names every GPU and runs to
-            // hundreds of characters. A fixed ceiling, not `.infinity`, is
-            // what keeps the capsule -- and the window's minimum width
-            // behind it -- from being dragged past `Self.maxWidth` and off
-            // the screen; it now sits in a pinned trailing group rather than
-            // claiming half the row.
+            // hundreds of characters: flexible and truncating, so it takes
+            // whatever the buttons leave and never widens the capsule (the
+            // buttons are `fixedSize`, so they are never the ones squeezed).
             PlacementHint(placement: controller.placement, error: controller.placementError)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(maxWidth: 260, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if controller.queuedCount > 0 {
                 Text("\(controller.queuedCount) more queued")
                     .font(.caption)

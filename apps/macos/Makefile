@@ -93,7 +93,9 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 
 test: gen ## Run every test bundle: the package, then the app's own store tests
 	@cd Packages/MoldClient && swift test
-	@$(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
+	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
+	@# passes on a red suite.
+	@set -o pipefail; $(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
 
 lint: lint-layers lint-color lint-size lint-type-size lint-a11y ## Run every architecture lint
 

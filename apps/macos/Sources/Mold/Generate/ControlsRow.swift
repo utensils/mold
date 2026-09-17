@@ -2,30 +2,21 @@ import MoldClient
 import MoldStyle
 import SwiftUI
 
-/// The controls a recipe actually has, plus the pinned trailing actions
-/// (M8 decision 1): the row wraps onto as many lines as it needs, and
-/// `actions` always rides the trailing edge of the last one instead of
-/// getting a mostly-empty row of its own.
+/// The controls a recipe actually has, wrapping onto as many lines as they
+/// need. The actions (the hint, Stop, Generate) are NOT among them: they
+/// take a row of their own under this one (M8 decision 10), so Generate
+/// never moves when a control appears, a run starts, or the hint changes.
 ///
 /// Nothing here is conditional on a model name or a family. The server says
 /// what each control may be and this renders that answer -- which is why a
 /// model added to mold tomorrow gets correct controls with no change here.
-struct ControlsRow<Actions: View>: View {
+struct ControlsRow: View {
     let recipe: GenerationRecipe
     let maxBatch: Int
     @Binding var draft: RenderDraft
-    @ViewBuilder let actions: Actions
-
-    init(recipe: GenerationRecipe, maxBatch: Int, draft: Binding<RenderDraft>,
-         @ViewBuilder actions: () -> Actions) {
-        self.recipe = recipe
-        self.maxBatch = maxBatch
-        self._draft = draft
-        self.actions = actions()
-    }
 
     var body: some View {
-        WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10, pinsLast: true) {
+        WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
             if let temporal = recipe.temporal {
@@ -46,7 +37,6 @@ struct ControlsRow<Actions: View>: View {
             }
             ControlLabel("Seed") { SeedControl(draft: $draft) }
             ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
-            actions
         }
     }
 
