@@ -48,6 +48,9 @@ struct MaskEditorSheet: View {
             canvas
                 .frame(width: canvasSize.width, height: canvasSize.height)
         }
+        // Never narrower than the toolbar's own words: a square source gives
+        // a 480pt canvas, and at that width Cancel truncated to "Can…".
+        .frame(minWidth: Self.maxCanvasSize.width)
         .background(hiddenShortcuts)
         .task { loadSource() }
         .destructionDialog($pendingDestruction)

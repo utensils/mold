@@ -33,11 +33,15 @@ extension MaskEditorSheet {
 
             Spacer()
 
+            // Sized to their words: at the sheet's width the row once
+            // truncated Cancel to "Can…".
             Button("Cancel") { requestCancel() }
                 .keyboardShortcut(.cancelAction)
+                .fixedSize()
             Button("Done") { finish() }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .fixedSize()
         }
     }
 

@@ -38,6 +38,15 @@ struct SourceImageWell: View {
             return true
         } isTargeted: { targeted = $0 }
         .help(draft.sourceImageName ?? "Drop a picture, or click to choose one")
+        // The preview follows the DRAFT, not this well's own load path: a
+        // source can arrive from a parked restore, a Reuse, or the UAT seed,
+        // and a well that only previews what it loaded itself showed the
+        // placeholder glyph over a picture that was really there.
+        .task(id: draft.sourceImage) {
+            preview = draft.sourceImage
+                .flatMap { Data(base64Encoded: $0) }
+                .flatMap { NSImage(data: $0) }
+        }
         .accessibilityLabel("Source picture")
     }
 
