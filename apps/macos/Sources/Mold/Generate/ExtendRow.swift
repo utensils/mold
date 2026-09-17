@@ -21,7 +21,7 @@ struct ExtendRow: View {
                 systemImage: "play.rectangle", allowedTypes: [.movie],
                 placeholder: "No clip", attachment: attachmentBinding
             )
-            if draft.extendVideo != nil { overlapControl }
+            if draft.media.extendVideo != nil { overlapControl }
         }
     }
 
@@ -31,7 +31,7 @@ struct ExtendRow: View {
                 Stepper(value: overlapBinding(temporal: temporal),
                         in: 1...Swift.max(temporal.frames.max - 1, 1),
                         step: Swift.max(temporal.frames.step, 1)) {
-                    Text((draft.extendOverlapFrames ?? draft.snappedOverlap(1, temporal: temporal)).formatted())
+                    Text((draft.media.extendOverlapFrames ?? draft.snappedOverlap(1, temporal: temporal)).formatted())
                         .monospacedDigit()
                 }
             }
@@ -49,20 +49,24 @@ struct ExtendRow: View {
     /// from the same "nothing set" state decision 12 asks for.
     private var attachmentBinding: Binding<MediaWell.Attachment?> {
         Binding(
-            get: { draft.extendVideo.map { MediaWell.Attachment(base64: $0, name: draft.extendVideoName ?? "") } },
+            get: {
+                draft.media.extendVideo.map {
+                    MediaWell.Attachment(base64: $0, name: draft.media.extendVideoName ?? "")
+                }
+            },
             set: { newValue in
                 if let newValue {
-                    draft.settingExtend(video: newValue.base64, name: newValue.name)
+                    draft.media.settingExtend(video: newValue.base64, name: newValue.name)
                 } else {
-                    draft.extendVideo = nil
-                    draft.extendVideoName = nil
-                    draft.extendOverlapFrames = nil
+                    draft.media.extendVideo = nil
+                    draft.media.extendVideoName = nil
+                    draft.media.extendOverlapFrames = nil
                     // Clearing the well is how a person leaves extend mode --
                     // bring back whatever `addingKeyframe` parked on the way
                     // in, the same rule that method applies in reverse.
-                    if draft.keyframes.isEmpty, !draft.parked.keyframes.isEmpty {
-                        draft.keyframes = draft.parked.keyframes
-                        draft.parked.keyframes = []
+                    if draft.media.keyframes.isEmpty, !draft.media.parked.keyframes.isEmpty {
+                        draft.media.keyframes = draft.media.parked.keyframes
+                        draft.media.parked.keyframes = []
                     }
                     overlapRevealed = false
                 }
@@ -75,8 +79,8 @@ struct ExtendRow: View {
     /// itself stays `nil` until this binding's setter actually fires.
     private func overlapBinding(temporal: TemporalProfile) -> Binding<Int> {
         Binding(
-            get: { draft.extendOverlapFrames ?? draft.snappedOverlap(1, temporal: temporal) },
-            set: { draft.extendOverlapFrames = draft.snappedOverlap($0, temporal: temporal) }
+            get: { draft.media.extendOverlapFrames ?? draft.snappedOverlap(1, temporal: temporal) },
+            set: { draft.media.extendOverlapFrames = draft.snappedOverlap($0, temporal: temporal) }
         )
     }
 }

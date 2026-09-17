@@ -18,11 +18,11 @@ extension RenderDraft {
     /// 12, M4 design) -- absence lets the server fill in the family's own
     /// default.
     func applyClip(to request: inout GenerateRequest) {
-        let isExtend = extendVideo != nil
-        request.keyframes = (!isExtend && !keyframes.isEmpty) ? keyframes : nil
-        request.extendVideo = extendVideo
-        request.extendOverlapFrames = isExtend ? extendOverlapFrames : nil
-        request.audioFile = audioFile
-        request.sourceVideo = isExtend ? nil : sourceVideo
+        let isExtend = media.extendVideo != nil
+        request.keyframes = (!isExtend && !media.keyframes.isEmpty) ? media.keyframes : nil
+        request.extendVideo = media.extendVideo
+        request.extendOverlapFrames = isExtend ? media.extendOverlapFrames : nil
+        request.audioFile = media.audioFile
+        request.sourceVideo = isExtend ? nil : media.sourceVideo
     }
 }

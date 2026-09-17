@@ -16,10 +16,10 @@ struct ReferenceStrip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(Array(draft.editImages.enumerated()), id: \.offset) { index, encoded in
+            ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
                 well(index: index, encoded: encoded)
             }
-            if draft.editImages.count < (capability.maxCount ?? 1) {
+            if draft.media.editImages.count < (capability.maxCount ?? 1) {
                 addWell
             }
         }
@@ -46,7 +46,7 @@ struct ReferenceStrip: View {
 
     private func remove(_ index: Int) -> some View {
         Button {
-            draft.editImages.remove(at: index)
+            draft.media.editImages.remove(at: index)
         } label: {
             Image(systemName: "xmark.circle.fill")
         }
@@ -66,7 +66,7 @@ struct ReferenceStrip: View {
                 for url in urls { append(url) }
                 return true
             } isTargeted: { targeted = $0 }
-            .help(capability.primaryIsTarget && draft.editImages.isEmpty
+            .help(capability.primaryIsTarget && draft.media.editImages.isEmpty
                   ? "Choose the picture to edit"
                   : "Add a reference picture")
     }
@@ -85,10 +85,10 @@ struct ReferenceStrip: View {
     }
 
     private func append(_ url: URL) {
-        guard draft.editImages.count < (capability.maxCount ?? 1),
+        guard draft.media.editImages.count < (capability.maxCount ?? 1),
               let data = try? Data(contentsOf: url)
         else { return }
-        draft.editImages.append(data.base64EncodedString())
+        draft.media.editImages.append(data.base64EncodedString())
     }
 }
 

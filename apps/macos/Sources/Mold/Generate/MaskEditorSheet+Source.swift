@@ -16,7 +16,7 @@ extension MaskEditorSheet {
 
     /// Not `private`: the main file's `.task` calls it.
     func loadSource() {
-        guard let base64 = draft.sourceImage, let data = Data(base64Encoded: base64) else { return }
+        guard let base64 = draft.media.sourceImage, let data = Data(base64Encoded: base64) else { return }
         source = NSImage(data: data)
         if let cgSource = CGImageSourceCreateWithData(data as CFData, nil),
            let properties = CGImageSourceCopyPropertiesAtIndex(cgSource, 0, nil) as? [CFString: Any],

@@ -22,8 +22,8 @@ public extension RenderDraft {
         VideoOnlyPolicy.Inputs(
             audioEnabled: enableAudio,
             audioOnlyPipeline: pipeline == "t2a",
-            hasConditioningAudio: audioFile != nil,
-            isExtend: extendVideo != nil
+            hasConditioningAudio: media.audioFile != nil,
+            isExtend: media.extendVideo != nil
         )
     }
 }

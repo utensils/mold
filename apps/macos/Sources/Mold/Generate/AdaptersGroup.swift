@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The adapter stack: what a checkpoint's weights are blended with.
 ///
-/// Every row is `draft.loras`, in the order it was added -- the request
+/// Every row is `draft.media.loras`, in the order it was added -- the request
 /// carries them the same way (`RenderDraft+Request.swift`). What can be
 /// ADDED comes from `LoraStore`, asked once per (machine, model) pair and
 /// never matched by family here: the server already did that
@@ -19,7 +19,7 @@ struct AdaptersGroup: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(draft.loras) { row($0) }
+            ForEach(draft.media.loras) { row($0) }
             addSection
         }
         .task(id: "\(host.id)-\(modelName)") {
@@ -36,7 +36,7 @@ struct AdaptersGroup: View {
                     .truncationMode(.tail)
                 Spacer()
                 Button {
-                    draft.loras.removeAll { $0.path == choice.path }
+                    draft.media.loras.removeAll { $0.path == choice.path }
                 } label: {
                     Image(systemName: "minus.circle")
                 }
@@ -56,7 +56,7 @@ struct AdaptersGroup: View {
     }
 
     @ViewBuilder private var addSection: some View {
-        switch Rows.resolve(installed: installed, chosen: draft.loras, maxCount: maxCount) {
+        switch Rows.resolve(installed: installed, chosen: draft.media.loras, maxCount: maxCount) {
         case .none:
             EmptyView()
         case .empty:
@@ -79,7 +79,7 @@ struct AdaptersGroup: View {
     private var installed: [LoraInfo]? { adapters.rows(for: modelName, on: host.id) }
 
     private func add(_ info: LoraInfo) {
-        draft.loras.append(LoraChoice(path: info.path, name: info.name))
+        draft.media.loras.append(LoraChoice(path: info.path, name: info.name))
     }
 
     private func insert(_ word: String) {
@@ -93,10 +93,10 @@ struct AdaptersGroup: View {
 
     private func scaleBinding(for choice: LoraChoice) -> Binding<Double> {
         Binding(
-            get: { draft.loras.first { $0.path == choice.path }?.scale ?? Lora.defaultScale },
+            get: { draft.media.loras.first { $0.path == choice.path }?.scale ?? Lora.defaultScale },
             set: { newValue in
-                guard let index = draft.loras.firstIndex(where: { $0.path == choice.path }) else { return }
-                draft.loras[index].scale = newValue
+                guard let index = draft.media.loras.firstIndex(where: { $0.path == choice.path }) else { return }
+                draft.media.loras[index].scale = newValue
             }
         )
     }

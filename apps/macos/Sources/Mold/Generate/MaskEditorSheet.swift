@@ -107,7 +107,7 @@ struct MaskEditorSheet: View {
     }
 
     func finish() {
-        draft.maskImage = MaskRender.png(strokes, size: sourcePixelSize)?.base64EncodedString()
+        draft.media.maskImage = MaskRender.png(strokes, size: sourcePixelSize)?.base64EncodedString()
         dismiss()
     }
 

@@ -27,11 +27,11 @@ struct RefineGroup: View {
             maskSection
             controlNetSection
         }
-        .task(id: draft.maskImage) { await loadMaskPreview() }
+        .task(id: draft.media.maskImage) { await loadMaskPreview() }
     }
 
     @ViewBuilder private var maskSection: some View {
-        switch Self.maskRow(capabilities: recipe?.capabilities, hasSource: draft.sourceImage != nil) {
+        switch Self.maskRow(capabilities: recipe?.capabilities, hasSource: draft.media.sourceImage != nil) {
         case .hidden:
             EmptyView()
         case .needsSource:
@@ -53,7 +53,7 @@ struct RefineGroup: View {
                         Text("Mask painted").font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Button {
-                            draft.maskImage = nil
+                            draft.media.maskImage = nil
                         } label: {
                             Image(systemName: "minus.circle")
                         }
@@ -66,7 +66,7 @@ struct RefineGroup: View {
     }
 
     private func loadMaskPreview() async {
-        guard let base64 = draft.maskImage, let data = Data(base64Encoded: base64) else {
+        guard let base64 = draft.media.maskImage, let data = Data(base64Encoded: base64) else {
             maskPreview = nil
             return
         }

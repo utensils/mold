@@ -46,7 +46,7 @@ struct IdentityGroup: View {
         }
     }
 
-    private var photos: [IdentityPhoto] { draft.identity?.photos ?? [] }
+    private var photos: [IdentityPhoto] { draft.media.identity?.photos ?? [] }
 
     private var addWell: some View {
         RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
@@ -71,35 +71,35 @@ struct IdentityGroup: View {
 
     private func append(_ url: URL) {
         guard photos.count < maxPhotos, let data = try? Data(contentsOf: url) else { return }
-        var conditioning = draft.identity ?? IdentityConditioning(photos: [])
+        var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
         conditioning.photos.append(IdentityPhoto(encoded: data.base64EncodedString(), name: url.lastPathComponent))
-        draft.identity = conditioning
+        draft.media.identity = conditioning
     }
 
     private func remove(_ photo: IdentityPhoto) {
-        guard var conditioning = draft.identity else { return }
+        guard var conditioning = draft.media.identity else { return }
         conditioning.photos.removeAll { $0.id == photo.id }
-        draft.identity = conditioning.photos.isEmpty ? nil : conditioning
+        draft.media.identity = conditioning.photos.isEmpty ? nil : conditioning
     }
 
     private var weightBinding: Binding<Double> {
         Binding(
-            get: { draft.identity?.weight ?? Identity.weightDefault },
+            get: { draft.media.identity?.weight ?? Identity.weightDefault },
             set: { newValue in
-                var conditioning = draft.identity ?? IdentityConditioning(photos: [])
+                var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
                 conditioning.weight = newValue
-                draft.identity = conditioning
+                draft.media.identity = conditioning
             }
         )
     }
 
     private var startStepBinding: Binding<Int> {
         Binding(
-            get: { draft.identity?.startStep ?? Identity.startStepDefault },
+            get: { draft.media.identity?.startStep ?? Identity.startStepDefault },
             set: { newValue in
-                var conditioning = draft.identity ?? IdentityConditioning(photos: [])
+                var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
                 conditioning.startStep = newValue
-                draft.identity = conditioning
+                draft.media.identity = conditioning
             }
         )
     }

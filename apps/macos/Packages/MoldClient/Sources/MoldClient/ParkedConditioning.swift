@@ -8,7 +8,7 @@ import Foundation
 /// own behaviour for a staged identity photo
 /// (`studio/lib/identityConditioning.test.ts:196-215`), and there is no
 /// reason a source image deserves less care than a face. See
-/// `RenderDraft+Park.swift` for the reconciliation rule this struct exists
+/// `DraftMedia+Park.swift` for the reconciliation rule this struct exists
 /// to hold state for.
 public struct ParkedConditioning: Hashable, Sendable {
     public var sourceImage: String?

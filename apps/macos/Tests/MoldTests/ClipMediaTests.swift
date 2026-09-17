@@ -14,8 +14,8 @@ struct ClipMediaTests {
     @Test func anOverlapNobodySetIsAbsentFromTheWire() throws {
         let auto = try Self.recipe("recipe-ltx2.json", "auto")
         var draft = RenderDraft().adopting(auto, isNewModel: true)
-        draft.settingExtend(video: "AAAA", name: "clip.mp4")
-        #expect(draft.extendOverlapFrames == nil)
+        draft.media.settingExtend(video: "AAAA", name: "clip.mp4")
+        #expect(draft.media.extendOverlapFrames == nil)
         #expect(draft.request(model: "ltx-2.5-22b-dev:bf16").extendVideo == "AAAA")
         #expect(draft.request(model: "ltx-2.5-22b-dev:bf16").extendOverlapFrames == nil)
     }
@@ -49,34 +49,34 @@ struct ClipMediaTests {
 
     @Test func keyframesAndAnExtendParkEachOther() {
         var draft = RenderDraft()
-        draft.addingKeyframe(KeyframeCondition(frame: 0, image: "AAAA"))
-        #expect(draft.keyframes.count == 1)
+        draft.media.addingKeyframe(KeyframeCondition(frame: 0, image: "AAAA"))
+        #expect(draft.media.keyframes.count == 1)
 
-        draft.settingExtend(video: "BBBB", name: "clip.mp4")
-        #expect(draft.extendVideo == "BBBB")
-        #expect(draft.keyframes.isEmpty)
-        #expect(draft.parked.keyframes.count == 1)
+        draft.media.settingExtend(video: "BBBB", name: "clip.mp4")
+        #expect(draft.media.extendVideo == "BBBB")
+        #expect(draft.media.keyframes.isEmpty)
+        #expect(draft.media.parked.keyframes.count == 1)
 
-        draft.addingKeyframe(KeyframeCondition(frame: 8, image: "CCCC"))
-        #expect(draft.extendVideo == nil)
-        #expect(draft.parked.extendVideo == "BBBB")
+        draft.media.addingKeyframe(KeyframeCondition(frame: 8, image: "CCCC"))
+        #expect(draft.media.extendVideo == nil)
+        #expect(draft.media.parked.extendVideo == "BBBB")
         // The keyframe parked when extend won is restored alongside the new one.
-        #expect(draft.keyframes.map(\.frame) == [0, 8])
+        #expect(draft.media.keyframes.map(\.frame) == [0, 8])
     }
 
     @Test func anExtendParksTheSourceImage() {
         var draft = RenderDraft()
-        draft.sourceImage = "AAAA"
-        draft.sourceImageName = "a.png"
+        draft.media.sourceImage = "AAAA"
+        draft.media.sourceImageName = "a.png"
 
-        draft.settingExtend(video: "BBBB", name: "clip.mp4")
-        #expect(draft.sourceImage == nil)
-        #expect(draft.sourceImageName == nil)
-        #expect(draft.parked.sourceImage == "AAAA")
+        draft.media.settingExtend(video: "BBBB", name: "clip.mp4")
+        #expect(draft.media.sourceImage == nil)
+        #expect(draft.media.sourceImageName == nil)
+        #expect(draft.media.parked.sourceImage == "AAAA")
 
         // The request-time belt refuses to send both even if the source
         // well was used again afterward with no knowledge of the extend.
-        draft.sourceImage = "STALE"
+        draft.media.sourceImage = "STALE"
         #expect(draft.request(model: "m").sourceImage == nil)
         #expect(draft.request(model: "m").extendVideo == "BBBB")
     }

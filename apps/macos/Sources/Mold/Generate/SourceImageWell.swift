@@ -37,13 +37,13 @@ struct SourceImageWell: View {
             load(url)
             return true
         } isTargeted: { targeted = $0 }
-        .help(draft.sourceImageName ?? "Drop a picture, or click to choose one")
+        .help(draft.media.sourceImageName ?? "Drop a picture, or click to choose one")
         // The preview follows the DRAFT, not this well's own load path: a
         // source can arrive from a parked restore, a Reuse, or the UAT seed,
         // and a well that only previews what it loaded itself showed the
         // placeholder glyph over a picture that was really there.
-        .task(id: draft.sourceImage) {
-            preview = draft.sourceImage
+        .task(id: draft.media.sourceImage) {
+            preview = draft.media.sourceImage
                 .flatMap { Data(base64Encoded: $0) }
                 .flatMap { NSImage(data: $0) }
         }
@@ -51,10 +51,10 @@ struct SourceImageWell: View {
     }
 
     @ViewBuilder private var clearButton: some View {
-        if draft.sourceImage != nil {
+        if draft.media.sourceImage != nil {
             Button {
-                draft.sourceImage = nil
-                draft.sourceImageName = nil
+                draft.media.sourceImage = nil
+                draft.media.sourceImageName = nil
                 preview = nil
             } label: {
                 Image(systemName: "xmark.circle.fill")
@@ -79,8 +79,8 @@ struct SourceImageWell: View {
         // mold takes every byte field as base64 on the wire, so the encode
         // happens here rather than at request time -- the draft holds exactly
         // what will be sent.
-        draft.sourceImage = data.base64EncodedString()
-        draft.sourceImageName = url.lastPathComponent
+        draft.media.sourceImage = data.base64EncodedString()
+        draft.media.sourceImageName = url.lastPathComponent
         preview = NSImage(data: data)
     }
 }

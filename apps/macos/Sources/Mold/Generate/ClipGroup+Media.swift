@@ -46,20 +46,26 @@ extension ClipGroup {
 
     private var audioFileBinding: Binding<MediaWell.Attachment?> {
         Binding(
-            get: { draft.audioFile.map { MediaWell.Attachment(base64: $0, name: draft.audioFileName ?? "") } },
+            get: {
+                draft.media.audioFile.map { MediaWell.Attachment(base64: $0, name: draft.media.audioFileName ?? "") }
+            },
             set: { newValue in
-                draft.audioFile = newValue?.base64
-                draft.audioFileName = newValue?.name
+                draft.media.audioFile = newValue?.base64
+                draft.media.audioFileName = newValue?.name
             }
         )
     }
 
     private var sourceVideoBinding: Binding<MediaWell.Attachment?> {
         Binding(
-            get: { draft.sourceVideo.map { MediaWell.Attachment(base64: $0, name: draft.sourceVideoName ?? "") } },
+            get: {
+                draft.media.sourceVideo.map {
+                    MediaWell.Attachment(base64: $0, name: draft.media.sourceVideoName ?? "")
+                }
+            },
             set: { newValue in
-                draft.sourceVideo = newValue?.base64
-                draft.sourceVideoName = newValue?.name
+                draft.media.sourceVideo = newValue?.base64
+                draft.media.sourceVideoName = newValue?.name
             }
         )
     }

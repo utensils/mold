@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 
 /// One row per keyframe: a frame number and a `MediaWell`.
 ///
-/// Rows stay sorted by frame (`RenderDraft.addingKeyframe`). A frame at or
+/// Rows stay sorted by frame (`DraftMedia.addingKeyframe`). A frame at or
 /// past the clip's own length is never reachable in the first place --
 /// `snappedFrame` clamps it the same way `TemporalProfile.snap` clamps a
 /// frame COUNT, rather than accepting an out-of-range value and failing
@@ -17,7 +17,7 @@ struct KeyframeTable: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(draft.keyframes.enumerated()), id: \.offset) { index, keyframe in
+            ForEach(Array(draft.media.keyframes.enumerated()), id: \.offset) { index, keyframe in
                 row(index: index, keyframe: keyframe)
             }
             addButton
@@ -38,7 +38,7 @@ struct KeyframeTable: View {
                     placeholder: "No picture", attachment: attachmentBinding(index: index)
                 )
                 Button {
-                    draft.keyframes.remove(at: index)
+                    draft.media.keyframes.remove(at: index)
                 } label: {
                     Image(systemName: "minus.circle")
                 }
@@ -67,21 +67,21 @@ struct KeyframeTable: View {
         guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
         let frame = nextFrame(temporal: temporal)
         let keyframe = KeyframeCondition(frame: frame, image: data.base64EncodedString(), name: url.lastPathComponent)
-        draft.addingKeyframe(keyframe)
+        draft.media.addingKeyframe(keyframe)
     }
 
     private func nextFrame(temporal: TemporalProfile) -> Int {
-        guard let last = draft.keyframes.map(\.frame).max() else { return 0 }
+        guard let last = draft.media.keyframes.map(\.frame).max() else { return 0 }
         return Self.snappedFrame(last + Swift.max(temporal.frames.step, 1), temporal: temporal, frames: clipFrames)
     }
 
     private func frameBinding(index: Int, temporal: TemporalProfile) -> Binding<Int> {
         Binding(
-            get: { draft.keyframes.indices.contains(index) ? draft.keyframes[index].frame : 0 },
+            get: { draft.media.keyframes.indices.contains(index) ? draft.media.keyframes[index].frame : 0 },
             set: { newValue in
-                guard draft.keyframes.indices.contains(index) else { return }
-                draft.keyframes[index].frame = Self.snappedFrame(newValue, temporal: temporal, frames: clipFrames)
-                draft.keyframes.sort { $0.frame < $1.frame }
+                guard draft.media.keyframes.indices.contains(index) else { return }
+                draft.media.keyframes[index].frame = Self.snappedFrame(newValue, temporal: temporal, frames: clipFrames)
+                draft.media.keyframes.sort { $0.frame < $1.frame }
             }
         )
     }
@@ -89,14 +89,14 @@ struct KeyframeTable: View {
     private func attachmentBinding(index: Int) -> Binding<MediaWell.Attachment?> {
         Binding(
             get: {
-                guard draft.keyframes.indices.contains(index) else { return nil }
-                let keyframe = draft.keyframes[index]
+                guard draft.media.keyframes.indices.contains(index) else { return nil }
+                let keyframe = draft.media.keyframes[index]
                 return MediaWell.Attachment(base64: keyframe.image, name: keyframe.name ?? "")
             },
             set: { newValue in
-                guard draft.keyframes.indices.contains(index), let newValue else { return }
-                draft.keyframes[index].image = newValue.base64
-                draft.keyframes[index].name = newValue.name
+                guard draft.media.keyframes.indices.contains(index), let newValue else { return }
+                draft.media.keyframes[index].image = newValue.base64
+                draft.media.keyframes[index].name = newValue.name
             }
         )
     }

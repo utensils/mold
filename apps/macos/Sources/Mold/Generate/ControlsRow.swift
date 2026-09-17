@@ -26,7 +26,7 @@ struct ControlsRow: View {
             if recipe.guidance.hasSomethingToShow {
                 ControlLabel("Guidance") { guidance }
             }
-            if draft.sourceImage != nil, recipe.capabilities.supportsStrength == true {
+            if draft.media.sourceImage != nil, recipe.capabilities.supportsStrength == true {
                 ControlLabel("Strength") {
                     SliderControl(value: $draft.strength, range: 0...1, step: 0.05) {
                         Text(draft.strength, format: .number.precision(.fractionLength(2)))

@@ -12,11 +12,11 @@ extension GeneratePane {
     ///
     /// Not `private`: the main file's `.task` calls it.
     func seedSourceImageIfRequested() {
-        guard controller.draft.sourceImage == nil,
+        guard controller.draft.media.sourceImage == nil,
               let path = ProcessInfo.processInfo.environment["MOLD_NATIVE_SOURCE_IMAGE"],
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         else { return }
-        controller.draft.sourceImage = data.base64EncodedString()
-        controller.draft.sourceImageName = URL(fileURLWithPath: path).lastPathComponent
+        controller.draft.media.sourceImage = data.base64EncodedString()
+        controller.draft.media.sourceImageName = URL(fileURLWithPath: path).lastPathComponent
     }
 }

@@ -32,10 +32,10 @@ extension RefineGroup {
             }
         }
         .labelsHidden()
-        if draft.control?.model != nil {
+        if draft.media.control?.model != nil {
             HStack(spacing: 8) {
                 ControlPictureWell(draft: $draft)
-                if draft.control?.image == nil {
+                if draft.media.control?.image == nil {
                     Text("Pick a control picture too.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -53,19 +53,19 @@ extension RefineGroup {
     /// to leave sitting in the draft.
     private var controlModelBinding: Binding<String?> {
         Binding(
-            get: { draft.control?.model },
+            get: { draft.media.control?.model },
             set: { newValue in
-                var control = draft.control ?? ControlConditioning()
+                var control = draft.media.control ?? ControlConditioning()
                 control.model = newValue
-                draft.control = (control.image == nil && control.model == nil) ? nil : control
+                draft.media.control = (control.image == nil && control.model == nil) ? nil : control
             }
         )
     }
 
     private var controlScaleBinding: Binding<Double> {
         Binding(
-            get: { draft.control?.scale ?? Control.defaultScale },
-            set: { draft.control?.scale = Swift.max($0, 0) }
+            get: { draft.media.control?.scale ?? Control.defaultScale },
+            set: { draft.media.control?.scale = Swift.max($0, 0) }
         )
     }
 }

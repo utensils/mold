@@ -4,7 +4,7 @@ import MoldStyle
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The still that steers a ControlNet render, bound to `draft.control`.
+/// The still that steers a ControlNet render, bound to `draft.media.control`.
 ///
 /// A second instance of `SourceImageWell`'s idiom rather than a genericized
 /// one: the two wells bind to different halves of the draft (`sourceImage`/
@@ -40,17 +40,17 @@ struct ControlPictureWell: View {
             load(url)
             return true
         } isTargeted: { targeted = $0 }
-        .help(draft.control?.name ?? "Drop a control picture, or click to choose one")
+        .help(draft.media.control?.name ?? "Drop a control picture, or click to choose one")
         .accessibilityLabel("Control picture")
     }
 
     @ViewBuilder private var clearButton: some View {
-        if draft.control?.image != nil {
+        if draft.media.control?.image != nil {
             Button {
-                draft.control?.image = nil
-                draft.control?.name = nil
+                draft.media.control?.image = nil
+                draft.media.control?.name = nil
                 preview = nil
-                if draft.control?.model == nil { draft.control = nil }
+                if draft.media.control?.model == nil { draft.media.control = nil }
             } label: {
                 Image(systemName: "xmark.circle.fill")
             }
@@ -71,10 +71,10 @@ struct ControlPictureWell: View {
 
     private func load(_ url: URL) {
         guard let data = try? Data(contentsOf: url) else { return }
-        var control = draft.control ?? ControlConditioning()
+        var control = draft.media.control ?? ControlConditioning()
         control.image = data.base64EncodedString()
         control.name = url.lastPathComponent
-        draft.control = control
+        draft.media.control = control
         preview = NSImage(data: data)
     }
 }

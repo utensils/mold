@@ -1,9 +1,9 @@
 import Foundation
 
 // Parking and restoring the S6b clip-media fields across a recipe switch --
-// split from `RenderDraft+Park.swift` purely for size. Same rule as every
+// split from `DraftMedia+Park.swift` purely for size. Same rule as every
 // other reconciliation here: a live value always wins over a parked one.
-public extension RenderDraft {
+public extension DraftMedia {
     /// Parks/restores the keyframe list, same shape as `reconcileEditImages`
     /// minus the count cap -- there is no per-recipe keyframe limit.
     mutating func reconcileKeyframes(supported: Bool) {

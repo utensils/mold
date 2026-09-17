@@ -95,11 +95,11 @@ struct AdaptersTests {
 
     @Test func identityStartStepFollowsTheStepControlDown() {
         var draft = RenderDraft()
-        draft.identity = IdentityConditioning(
+        draft.media.identity = IdentityConditioning(
             photos: [IdentityPhoto(encoded: "x", name: "a")], startStep: 12
         )
         draft.steps = 4
-        #expect(draft.identity?.startStep == 3)
+        #expect(draft.media.identity?.startStep == 3)
     }
 
     @Test func theIdentityGroupNeedsBothTheRecipeAndTheHost() {

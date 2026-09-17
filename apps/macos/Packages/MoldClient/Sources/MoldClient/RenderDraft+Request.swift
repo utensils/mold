@@ -34,15 +34,15 @@ public extension RenderDraft {
         // `idStartStep`'s own -- the source well and the extend well are two
         // independent controls, and a value going stale between them must
         // never reach the wire alongside the extend that outranks it.
-        request.sourceImage = extendVideo == nil ? sourceImage : nil
-        request.sourceImageName = extendVideo == nil ? sourceImageName : nil
-        request.editImages = editImages.isEmpty ? nil : editImages
-        request.referenceWeight = editImages.isEmpty ? nil : referenceWeight
+        request.sourceImage = media.extendVideo == nil ? media.sourceImage : nil
+        request.sourceImageName = media.extendVideo == nil ? media.sourceImageName : nil
+        request.editImages = media.editImages.isEmpty ? nil : media.editImages
+        request.referenceWeight = media.editImages.isEmpty ? nil : media.referenceWeight
         // Strength only means something with something to apply it to.
-        request.strength = sourceImage == nil ? nil : strength
+        request.strength = media.sourceImage == nil ? nil : strength
         // A mask with no source is refused outright (`validation.rs:3101-3107`).
-        request.maskImage = sourceImage == nil ? nil : maskImage
-        request.loras = loras.isEmpty ? nil : loras
+        request.maskImage = media.sourceImage == nil ? nil : media.maskImage
+        request.loras = media.loras.isEmpty ? nil : media.loras
         applyIdentity(to: &request, maxPhotos: maxIdentityPhotos)
         applyControl(to: &request)
         applyClip(to: &request)
@@ -120,7 +120,7 @@ public extension RenderDraft {
     /// down after Start step was set must not silently arm a 422
     /// (`identity.rs:560-566`).
     private func applyIdentity(to request: inout GenerateRequest, maxPhotos: Int) {
-        guard let identity, let wire = identity.wire(maxPhotos: maxPhotos) else { return }
+        guard let identity = media.identity, let wire = identity.wire(maxPhotos: maxPhotos) else { return }
         switch wire {
         case let .single(photo):
             request.idImage = photo.encoded
@@ -139,9 +139,9 @@ public extension RenderDraft {
     /// other, so a draft with only one half sends NEITHER rather than a
     /// request the server would 422.
     private func applyControl(to request: inout GenerateRequest) {
-        guard let image = control?.image, let model = control?.model else { return }
+        guard let image = media.control?.image, let model = media.control?.model else { return }
         request.controlImage = image
         request.controlModel = model
-        request.controlScale = Swift.max(control?.scale ?? Control.defaultScale, 0)
+        request.controlScale = Swift.max(media.control?.scale ?? Control.defaultScale, 0)
     }
 }

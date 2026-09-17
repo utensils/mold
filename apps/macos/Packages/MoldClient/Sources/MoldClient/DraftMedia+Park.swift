@@ -1,9 +1,8 @@
 import Foundation
 
 // Parking and restoring conditioning a recipe cannot currently take. Split
-// from `RenderDraft+Recipe.swift` (which calls into this from `adopting`)
-// purely for size.
-public extension RenderDraft {
+// from `DraftMedia`'s own shape purely for size.
+public extension DraftMedia {
     /// Moves a value out of the way when the recipe cannot read it, and
     /// brings it back when one that can returns.
     ///
@@ -60,9 +59,9 @@ public extension RenderDraft {
     }
 
     /// The mask. Its `supported` already folds in both `acceptsMask` and
-    /// "the source image survived" at the call site
-    /// (`RenderDraft+Recipe.swift`) -- an orphaned mask over no source is
-    /// meaningless (`validation.rs:3101-3107`).
+    /// "the source image survived" at the call site (`reconcile(for:)`) --
+    /// an orphaned mask over no source is meaningless
+    /// (`validation.rs:3101-3107`).
     mutating func reconcileMask(supported: Bool) {
         Self.reconcile(&maskImage, &parked.maskImage, supported: supported)
     }

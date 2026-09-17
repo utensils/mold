@@ -50,70 +50,8 @@ public extension RenderDraft {
 
         // Conditioning the recipe cannot currently take is PARKED rather than
         // dropped, so it comes back if the next model can read it again
-        // (`RenderDraft+Park.swift`; decision 4 in the M4 design). Edit
-        // images are reconciled first so the exclusive/replaces check below
-        // reads the post-truncation list, matching the order this logic ran
-        // in before parking existed.
-        // Keyframes and an extend continuation reconcile FIRST: both can park
-        // or restore the source image below, and an extend also pins the
-        // request's video-only reading (`RenderDraft+Audio.swift`).
-        draft.reconcileKeyframes(supported: recipe.capabilities.acceptsKeyframes)
-        draft.reconcileExtend(supported: recipe.capabilities.supportsExtend == true)
-        draft.reconcileAudioFile(supported: recipe.capabilities.acceptsSourceAudio)
-        draft.reconcileSourceVideo(supported: recipe.capabilities.acceptsSourceVideo)
-        // Keyframes and an extend are mutually exclusive on ONE request
-        // (`validation.rs:1851-1853`); `addingKeyframe`/`settingExtend` keep
-        // that true while a person edits, but the two live in SEPARATE parks
-        // and a recipe switch can restore both at once. Extend wins -- it
-        // already parks the source image below, the stronger claim.
-        if draft.extendVideo != nil, !draft.keyframes.isEmpty {
-            draft.parked.keyframes = draft.keyframes
-            draft.keyframes = []
-        }
-
-        let references = recipe.capabilities.referenceImages
-        let referencesVisible = references?.mode.isVisible == true
-        draft.reconcileEditImages(supported: referencesVisible, maxCount: references?.maxCount)
-        if !referencesVisible { draft.referenceWeight = nil }
-
-        // `exclusive`/`replaces` mean ONE render carries a source image OR
-        // references, never both. Keeping whichever was added last would be
-        // guessing, so references win -- they are the more specific
-        // instruction. `readsSourceImage` is the CORRECTED reading of an
-        // absent `sourceImage` block: absence means the recipe reads one
-        // (fact 1 in the M4 design, `manifest.rs:265-270`), not that there is
-        // no source path -- the raw `sourceImage?.isSupported` this block
-        // used to read got that backwards for every still model in the fleet.
-        // An extend is a third claimant, and the strongest one -- it pins the
-        // continuation's first frames from the source clip's own tail
-        // (`validation.rs:1845-1849`).
-        let takenByReferences = !draft.editImages.isEmpty
-            && (references?.sourceRelation == .exclusive || references?.sourceRelation == .replaces)
-        draft.reconcileSourceImage(
-            supported: recipe.capabilities.readsSourceImage && !takenByReferences && draft.extendVideo == nil
-        )
-
-        // The mask needs BOTH the recipe's own permission and a surviving
-        // source image -- an orphaned mask over no source is meaningless
-        // (`validation.rs:3101-3107`).
-        draft.reconcileMask(supported: recipe.capabilities.acceptsMask && draft.sourceImage != nil)
-
-        // Identity is positive-only: `supportsIdentity != true` means the
-        // well is not drawn and the staged photo is held, because sending it
-        // to an unqualified checkpoint is a refusal, not a silent ignore
-        // (`identity.rs:1011-1013`).
-        draft.reconcileIdentity(supported: recipe.capabilities.supportsIdentity == true)
-
-        // ControlNet: `controlNet` is nil for a `hidden` block and for no
-        // block at all (fact 3 in the M4 design) -- there is a real recipe
-        // gate, so this never asks whether an adapter happens to be
-        // installed, only whether THIS recipe would read one.
-        draft.reconcileControl(supported: recipe.capabilities.controlNet != nil)
-
-        draft.reconcileLoras(
-            supported: recipe.capabilities.loraStack != nil,
-            maxCount: recipe.capabilities.loraStack?.maxCount
-        )
+        // (`DraftMedia+Reconcile.swift`; decision 4 in the M4 design).
+        draft.media.reconcile(for: recipe.capabilities)
 
         if recipe.capabilities.negativePrompt?.isAvailable != true {
             draft.negativePrompt = ""

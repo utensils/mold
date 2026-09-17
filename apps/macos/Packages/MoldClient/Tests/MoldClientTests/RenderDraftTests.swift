@@ -135,16 +135,16 @@ private func clipRecipe(source: SourceImageCapability? = nil,
 
 @Test func aSourceImageIsDroppedWhenTheRecipeCannotReadOne() {
     var draft = RenderDraft()
-    draft.sourceImage = "AAAA"
-    draft.sourceImageName = "a.png"
+    draft.media.sourceImage = "AAAA"
+    draft.media.sourceImageName = "a.png"
 
     let keeps = draft.adopting(clipRecipe(source: .optional), isNewModel: false)
-    #expect(keeps.sourceImage == "AAAA")
+    #expect(keeps.media.sourceImage == "AAAA")
 
     // Sending bytes to a recipe with no source path is a refusal, not a render.
     let drops = draft.adopting(clipRecipe(source: .unsupported), isNewModel: false)
-    #expect(drops.sourceImage == nil)
-    #expect(drops.sourceImageName == nil)
+    #expect(drops.media.sourceImage == nil)
+    #expect(drops.media.sourceImageName == nil)
 }
 
 @Test func strengthRidesOnlyWithSomethingToApplyItTo() {
@@ -152,7 +152,7 @@ private func clipRecipe(source: SourceImageCapability? = nil,
     draft.strength = 0.4
     #expect(draft.request(model: "m").strength == nil)
 
-    draft.sourceImage = "AAAA"
+    draft.media.sourceImage = "AAAA"
     #expect(draft.request(model: "m").strength == 0.4)
 }
 
@@ -237,40 +237,40 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
 
 @Test func referencesAreDroppedWhereTheRecipeHidesThem() {
     var draft = RenderDraft()
-    draft.editImages = ["A", "B"]
+    draft.media.editImages = ["A", "B"]
     let adopted = draft.adopting(referenceRecipe(.hidden, relation: .replaces),
                                  isNewModel: false)
-    #expect(adopted.editImages.isEmpty)
+    #expect(adopted.media.editImages.isEmpty)
     #expect(adopted.request(model: "m").editImages == nil)
 }
 
 @Test func referencesAreTrimmedToWhatTheRecipeAccepts() {
     var draft = RenderDraft()
-    draft.editImages = ["A", "B", "C", "D"]
+    draft.media.editImages = ["A", "B", "C", "D"]
     let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .replaces, maxCount: 2),
                                  isNewModel: false)
-    #expect(adopted.editImages == ["A", "B"])
+    #expect(adopted.media.editImages == ["A", "B"])
 }
 
 @Test func anExclusiveRecipeCarriesReferencesOrASourceButNotBoth() {
     var draft = RenderDraft()
-    draft.sourceImage = "SRC"
-    draft.sourceImageName = "s.png"
-    draft.editImages = ["A"]
+    draft.media.sourceImage = "SRC"
+    draft.media.sourceImageName = "s.png"
+    draft.media.editImages = ["A"]
     let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .exclusive),
                                  isNewModel: false)
     // One render carries one or the other; sending both is a refusal.
-    #expect(adopted.editImages == ["A"])
-    #expect(adopted.sourceImage == nil)
+    #expect(adopted.media.editImages == ["A"])
+    #expect(adopted.media.sourceImage == nil)
 }
 
 @Test func aReplacesRecipeDropsTheSourceEntirely() {
     var draft = RenderDraft()
-    draft.sourceImage = "SRC"
-    draft.editImages = ["A"]
+    draft.media.sourceImage = "SRC"
+    draft.media.editImages = ["A"]
     let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .replaces),
                                  isNewModel: false)
-    #expect(adopted.sourceImage == nil)
+    #expect(adopted.media.sourceImage == nil)
 }
 
 @Test func anEmptyReferenceListIsOmittedRatherThanSentEmpty() {
@@ -404,4 +404,27 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     draft.collectionName = "Smurf Village"
     #expect(draft.request(model: "m").collection == .named("Smurf Village"))
     #expect(RenderDraft().request(model: "m").collection == nil)
+}
+
+// MARK: - S6c: the draft's media inputs are one value
+
+/// A fresh draft starts with an EMPTY `DraftMedia`, and assigning one
+/// wholesale round-trips -- the seam `RenderDraft.media` exists to be a
+/// single value, not a bag of independently-defaulted fields.
+@Test func theDraftsMediaIsOneValue() {
+    #expect(RenderDraft().media == DraftMedia())
+
+    var media = DraftMedia()
+    media.sourceImage = "AAAA"
+    media.sourceImageName = "a.png"
+    media.editImages = ["A", "B"]
+    media.identity = IdentityConditioning(photos: [IdentityPhoto(encoded: "x", name: "a")])
+    media.loras = [LoraChoice(path: "/x.safetensors", name: "X")]
+    media.parked.maskImage = "MASK"
+
+    var draft = RenderDraft()
+    draft.media = media
+    #expect(draft.media == media)
+    #expect(draft.media.sourceImage == "AAAA")
+    #expect(draft.media.parked.maskImage == "MASK")
 }
