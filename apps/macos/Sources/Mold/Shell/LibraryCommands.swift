@@ -36,9 +36,15 @@ struct LibraryCommands: Commands {
     }
 
     @ViewBuilder private var prints: some View {
+        // A bare space as a key equivalent is offered to the main menu BEFORE
+        // the field editor sees it, so an enabled item here takes the space
+        // bar out of the search field, the inspector's Title and "Add a tag"
+        // -- all three of which are only reachable with a selection, which is
+        // exactly when this item is not disabled. It stands down while text is
+        // being edited, the way the viewer's own key equivalents already do.
         Button("Quick Look") { library?.quickLook() }
             .keyboardShortcut(.space, modifiers: [])
-            .disabled(library?.isEmpty ?? true)
+            .disabled(!(library?.canQuickLook ?? false))
         // Share moved to File ▸ Share, off the same `librarySelection.share`
         // (design decision 24, `MoldCommands.swift`) -- a Mac's Share belongs
         // in File, not in a feature menu.
@@ -94,6 +100,10 @@ struct LibrarySelection: Equatable {
     /// The shelf being looked at, when the scope is one. "Remove from…" is
     /// only ever honest about the shelf you are standing in.
     let enclosingShelf: CollectionShelf?
+    /// Whether something in the window has a caret in it. A menu item with a
+    /// bare key equivalent is offered the key first, so anything the Library
+    /// binds unmodified has to yield to a field being typed into.
+    let isEditingText: Bool
 
     /// Not compared: a `DraggablePrint` is a closure in a trench coat, and the
     /// count above already changes whenever this list does.
@@ -110,10 +120,15 @@ struct LibrarySelection: Equatable {
 
     var isEmpty: Bool { count == 0 }
 
+    /// Quick Look's item, which owns the bare space bar, is offered only when
+    /// there is something to preview AND nothing is being typed into.
+    var canQuickLook: Bool { !isEmpty && !isEditingText }
+
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf
+            && lhs.isEditingText == rhs.isEditingText
     }
 }
 

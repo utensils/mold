@@ -17,6 +17,7 @@ extension LibraryPane {
             scope: navigation.scope,
             shelves: library.shelves,
             enclosingShelf: enclosingShelf,
+            isEditingText: isEditingText,
             share: navigation.scope.isTrash ? [] : entries.map(actions.draggable),
             quickLook: { actions.quickLook(entries) },
             favorite: { _ in actions.toggleFavorite(entries) },
@@ -53,6 +54,11 @@ extension LibraryPane {
             }
         )
     }
+
+    /// Whether a caret in this window has the better claim on a bare key.
+    /// The Library menu's Quick Look item binds an unmodified space, which
+    /// AppKit offers to the menu before the field editor ever sees it.
+    var isEditingText: Bool { isSearchFocused || editingText == true }
 
     /// The shelf the grid is currently showing, if it is showing one.
     private var enclosingShelf: CollectionShelf? {

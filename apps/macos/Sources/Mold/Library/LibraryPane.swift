@@ -23,7 +23,12 @@ struct LibraryPane: View {
     @State var viewing: PrintID?
     /// Backs Edit ▸ Find (design S6): `.searchFocused($isSearchFocused)`
     /// below, set from `body`'s own `findAction` focused value.
-    @FocusState private var isSearchFocused: Bool
+    /// Deliberately not `private`: what the menu is offered is assembled in an
+    /// extension in another file, and `private` does not cross that boundary.
+    @FocusState var isSearchFocused: Bool
+    /// Published by the inspector's Title field and "Add a tag". The search
+    /// field says so through `isSearchFocused` above, which this pane owns.
+    @FocusedValue(\.editingText) var editingText: Bool?
     /// Persisted, and deliberately not `private`: the toolbar button that
     /// flips it lives in an extension in another file.
     @AppStorage("libraryShowsInspector", store: AppStorageSuite.defaults)
