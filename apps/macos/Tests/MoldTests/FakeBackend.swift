@@ -51,6 +51,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var resourceStreamContinuation: AsyncThrowingStream<ResourceSnapshot, Error>.Continuation?
     /// What `setDevice` was asked, in call order.
     nonisolated(unsafe) var patchedDevices: [(String, Bool)] = []
+    /// Overrides the default enabled/disabled mutation, for a test that needs
+    /// to see what a draining or starting answer looks like -- a real machine
+    /// answers `setDevice` with its actual admin state, not the boolean it was
+    /// asked for.
+    nonisolated(unsafe) var setDeviceAnswer: DeviceInfo?
+    /// Set when the resource stream's consumer went away, same reason as
+    /// `downloadStreamEnded` below.
+    nonisolated(unsafe) var resourceStreamEnded = false
     /// The live `/api/events` stream, so a test can hand the store a frame
     /// and watch what it does with it. Held open: a stream that finishes
     /// sends the watcher round its reconnect loop, which is a second
@@ -151,6 +159,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func setDevice(_ id: String, enabled: Bool) async throws -> DeviceInfo {
         try record("setDevice")
         patchedDevices.append((id, enabled))
+        if let setDeviceAnswer { return setDeviceAnswer }
         guard let row = deviceState?.devices.first(where: { $0.id == id }) else { throw notPlanted() }
         return try Self.mutated(row, enabled: enabled)
     }
@@ -161,7 +170,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func resourceStream() -> AsyncThrowingStream<ResourceSnapshot, Error> {
         calls.append("resourceStream")
-        return AsyncThrowingStream { self.resourceStreamContinuation = $0 }
+        return AsyncThrowingStream { continuation in
+            self.resourceStreamContinuation = continuation
+            continuation.onTermination = { _ in self.resourceStreamEnded = true }
+        }
     }
     func peers() async throws -> [DiscoveryPeer] { try record("peers"); return peerRows }
 

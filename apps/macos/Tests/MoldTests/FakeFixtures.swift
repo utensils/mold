@@ -59,4 +59,37 @@ extension FakeFixtures {
     static func downloadTicket(_ id: String) -> DownloadTicket {
         try! MoldJSON.decoder.decode(DownloadTicket.self, from: Data(#"{"id": "\#(id)"}"#.utf8))
     }
+
+    /// One GPU, as `MachineStore` sees it. `DeviceInfo` has no public
+    /// memberwise init either.
+    static func deviceInfo(_ id: String, ordinal: Int, adminState: String = "enabled",
+                           desiredEnabled: Bool = true) -> DeviceInfo {
+        let json = """
+        {"id": "\(id)", "name": "GPU \(ordinal)", "ordinal": \(ordinal), "device_kind": "full_gpu",
+         "memory": {}, "telemetry": {}, "desired_enabled": \(desiredEnabled),
+         "admin_state": "\(adminState)", "health": "healthy", "activity": "idle",
+         "schedulable": true, "loaded_models": []}
+        """
+        return try! MoldJSON.decoder.decode(DeviceInfo.self, from: Data(json.utf8))
+    }
+
+    /// `GET /api/devices`'s envelope, wrapping already-built rows -- re-encoded
+    /// through `MoldJSON.encoder` rather than typed out twice.
+    static func deviceState(_ rows: [DeviceInfo] = [FakeFixtures.deviceInfo("cuda:0", ordinal: 0)]) -> DeviceState {
+        let encoded = rows.map { String(data: try! MoldJSON.encoder.encode($0), encoding: .utf8)! }
+            .joined(separator: ",")
+        let json = #"{"plan_version": 1, "devices": [\#(encoded)]}"#
+        return try! MoldJSON.decoder.decode(DeviceState.self, from: Data(json.utf8))
+    }
+
+    /// One 1 Hz sample, with only the GPUs a test needs to plant.
+    static func resourceSnapshot(_ gpus: [(ordinal: Int, vramUsed: UInt64)]) -> ResourceSnapshot {
+        let rows = gpus.map {
+            #"{"ordinal": \#($0.ordinal), "vram_total": 1000, "vram_used": \#($0.vramUsed)}"#
+        }.joined(separator: ",")
+        let json = #"""
+        {"hostname": "fake", "gpus": [\#(rows)], "system_ram": {"total": 1, "used": 1, "used_by_mold": 0}}
+        """#
+        return try! MoldJSON.decoder.decode(ResourceSnapshot.self, from: Data(json.utf8))
+    }
 }

@@ -19,6 +19,7 @@ struct MoldApp: App {
     @State private var generate: GenerateController
     @State private var queue: QueueStore
     @State private var downloads: DownloadStore
+    @State private var machines: MachineStore
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -34,6 +35,7 @@ struct MoldApp: App {
         _queue = State(initialValue: QueueStore(hosts: hosts))
         _downloads = State(initialValue: DownloadStore(hosts: hosts))
         _generate = State(initialValue: GenerateController(hosts: hosts))
+        _machines = State(initialValue: MachineStore(hosts: hosts))
     }
 
     var body: some Scene {
@@ -56,6 +58,7 @@ struct MoldApp: App {
                 .environment(generate)
                 .environment(queue)
                 .environment(downloads)
+                .environment(machines)
                 .environment(engine)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.
