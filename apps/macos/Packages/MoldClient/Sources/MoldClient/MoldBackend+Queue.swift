@@ -22,4 +22,16 @@ public protocol MoldQueueBackend: Sendable {
     /// Authoritative state for many batches in one call -- a READ despite the
     /// verb (`routes.rs:3383-3418`).
     func batchStatuses(batchIds: [String]) async throws -> BatchStatusListing
+
+    /// Exports a HELD row as a portable request with its media inlined. The
+    /// bytes are opaque and must never be decoded (`queue_transfer.rs:34-97`).
+    func exportHeldJob(_ authority: QueueAuthority) async throws -> Data
+    /// Admits one exported request HERE, fenced on this machine's identity
+    /// via `x-mold-destination-instance` (`routes.rs:2973-2994`).
+    func admitTransfer(
+        clientBatchId: String, portable: Data, destinationInstance: String
+    ) async throws -> BatchStatus
+    /// Cancels the held source row, and ONLY after the destination accepted
+    /// (`routes.rs:7584-7599`).
+    func completeTransfer(_ authority: QueueAuthority) async throws
 }

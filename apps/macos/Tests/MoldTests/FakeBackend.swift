@@ -296,6 +296,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var retriedAuthorities: [QueueAuthority] = []
     /// Every ids array `batchStatuses` was asked for, in call order.
     nonisolated(unsafe) var batchStatusQueries: [[String]] = []
+    /// Answered per JOB ID, same "absent is unplanted" rule as `queueJobDetails`.
+    nonisolated(unsafe) var exportBodies: [String: Data] = [:]
+    /// Every admission `admitTransfer` was asked for, in call order -- what a
+    /// transfer's assembled body actually carried.
+    nonisolated(unsafe) var transferAdmissions:
+        [(clientBatchId: String, body: Data, destination: String)] = []
+    nonisolated(unsafe) var admitAnswer: BatchStatus?
+    /// Every authority `completeTransfer` was asked to cancel, in call order.
+    nonisolated(unsafe) var completedTransfers: [QueueAuthority] = []
 
     func queue() async throws -> QueueListing {
         try record("queue")
@@ -330,6 +339,24 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         batchStatusQueries.append(batchIds)
         guard !batchListings.isEmpty else { throw notPlanted() }
         return batchListings.removeFirst()
+    }
+    func exportHeldJob(_ authority: QueueAuthority) async throws -> Data {
+        try record("exportHeldJob")
+        guard let body = exportBodies[authority.jobId] else { throw notPlanted() }
+        return body
+    }
+    func admitTransfer(
+        clientBatchId: String, portable: Data, destinationInstance: String
+    ) async throws -> BatchStatus {
+        try record("admitTransfer")
+        transferAdmissions.append(
+            (clientBatchId: clientBatchId, body: portable, destination: destinationInstance))
+        guard let admitAnswer else { throw notPlanted() }
+        return admitAnswer
+    }
+    func completeTransfer(_ authority: QueueAuthority) async throws {
+        try record("completeTransfer")
+        completedTransfers.append(authority)
     }
 
     // MARK: - Downloads

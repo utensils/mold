@@ -187,3 +187,61 @@ private let backend = HTTPBackend(
     let query = CatalogQuery(text: "dreamshaper", pageSize: 3)
     #expect(query.queryString == "q=dreamshaper&page_size=3")
 }
+
+/// M6 S1b: the three transfer routes (design fact 4 --
+/// `routes.rs:7548-7599`, `:2973-2994`).
+@Test func theTransferRoutesAddressTheRightPaths() {
+    #expect(backend.transferExportPath("job 1") == "/api/queue/job%201/transfer")
+    #expect(backend.transferCompletePath("job 1") == "/api/queue/job%201/transfer/complete")
+    #expect(HTTPBackend.transferAdmitPath == "/api/generation-batches/transfer")
+
+    let exportURL = backend.request(backend.transferExportPath("j")).url
+    #expect(exportURL?.path() == "/api/queue/j/transfer")
+    let completeURL = backend.request(backend.transferCompletePath("j")).url
+    #expect(completeURL?.path() == "/api/queue/j/transfer/complete")
+}
+
+/// **Fails today**: there is no splice, and encoding a portable body through
+/// `BatchAdmission` would drop any key this build's `GenerateRequest` does
+/// not model -- because its hand-written `encode(to:)` enumerates a fixed
+/// field list. `admissionBody` must never parse `portable`; a key it does
+/// not understand has to survive byte for byte (design fact 14).
+@Test func anAdmissionBodyCarriesTheExportVerbatim() throws {
+    let portable = Data(
+        #"{"prompt":"a cat","a_field_this_build_does_not_model":{"nested":[1,2,3]}}"#.utf8)
+    let body = try HTTPBackend.transferAdmissionBody(clientBatchId: "abc-123", portable: portable)
+    let text = try #require(String(data: body, encoding: .utf8))
+    #expect(text == #"{"client_batch_id":"abc-123","requests":[{"prompt":"a cat","a_field_this_build_does_not_model":{"nested":[1,2,3]}}]}"#)
+
+    // And it still parses as one JSON object with `requests` holding the
+    // portable bytes UNCHANGED, including the unknown key.
+    let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(object["client_batch_id"] as? String == "abc-123")
+    let requests = try #require(object["requests"] as? [[String: Any]])
+    #expect(requests.count == 1)
+    #expect(requests[0]["prompt"] as? String == "a cat")
+    #expect(requests[0]["a_field_this_build_does_not_model"] != nil)
+}
+
+/// A client batch id can itself hold characters JSON has to escape -- this
+/// pins that it goes through `MoldJSON.encoder`'s escaping rather than being
+/// interpolated raw, which would produce broken JSON or, worse, a body an
+/// attacker-controlled id could inject fields into.
+@Test func anAdmissionBodyEscapesTheClientBatchId() throws {
+    let body = try HTTPBackend.transferAdmissionBody(
+        clientBatchId: "a\"b\\c", portable: Data("{}".utf8))
+    let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(object["client_batch_id"] as? String == "a\"b\\c")
+}
+
+/// `x-mold-destination-instance` is the fence against a destination that
+/// restarted between the picker and the click; the destination admits only
+/// when it still recognises itself (`routes.rs:2973-2994`).
+@Test func theDestinationHeaderRidesTheAdmission() throws {
+    let request = try backend.transferAdmissionRequest(
+        clientBatchId: "abc", portable: Data("{}".utf8), destinationInstance: "inst-42")
+    #expect(request.value(forHTTPHeaderField: "x-mold-destination-instance") == "inst-42")
+    #expect(request.httpMethod == "POST")
+    #expect(request.url?.path() == "/api/generation-batches/transfer")
+    #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+}
