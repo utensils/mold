@@ -128,6 +128,54 @@ struct PrintMaterializerTests {
         #expect(!FileManager.default.fileExists(atPath: old.path))
     }
 
+    /// **Fails today**: a spared entry is simply skipped, and nothing else is
+    /// evicted to make up for it -- so once anything is held the cache sits
+    /// over its cap as a stable state rather than a transient one.
+    @Test func whatIsSparedComesOffTheBudgetRatherThanOutOfTheReckoning() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let held = Held()
+        let materializer = PrintMaterializer(root: root, inUse: { held.urls })
+        // Two of these do not fit in one megabyte; one does.
+        let open = try #require(await materializer.url(for: entry("open.png")) {
+            Data(repeating: 1, count: 700_000)
+        })
+        let other = try #require(await materializer.url(for: entry("other.png")) {
+            Data(repeating: 1, count: 700_000)
+        })
+        held.urls = [open]
+
+        // Room for one of the two. The held one is unavoidable, so the cap
+        // that is left over is nothing -- and the other has to go.
+        AppStorageSuite.defaults.set(1, forKey: PrintMaterializer.capKey)
+        defer { AppStorageSuite.defaults.removeObject(forKey: PrintMaterializer.capKey) }
+        materializer.enforceBudget()
+
+        #expect(FileManager.default.fileExists(atPath: open.path))
+        #expect(!FileManager.default.fileExists(atPath: other.path))
+    }
+
+    /// **Fails today**: `QuickLook.items` is only ever replaced, so every
+    /// folder of the last preview stays pinned against eviction for the rest
+    /// of the process -- panel shut or not.
+    @Test func quickLookLettingGoUnpinsWhatItWasShowing() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = PrintMaterializer(root: root,
+                                             inUse: { QuickLook.shared.heldURLs })
+        let file = try #require(await materializer.url(for: entry("open.png")) {
+            Data(repeating: 1, count: 2_048)
+        })
+        QuickLook.shared.release()
+
+        AppStorageSuite.defaults.set(0, forKey: PrintMaterializer.capKey)
+        defer { AppStorageSuite.defaults.removeObject(forKey: PrintMaterializer.capKey) }
+        materializer.enforceBudget()
+
+        #expect(QuickLook.shared.heldURLs.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+    }
+
     /// **Fails today**: `contents` takes `files.first` and reports THAT file's
     /// size as the whole folder's (`PrintMaterializer+Budget.swift:24`). The
     /// folder key excludes the filename -- it is the host and the folded

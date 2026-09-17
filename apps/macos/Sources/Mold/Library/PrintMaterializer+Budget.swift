@@ -50,17 +50,20 @@ extension PrintMaterializer {
 
     /// Evicts down to the cap, sparing what is in use.
     ///
-    /// `keeping` is the print just written: this runs between the write and
+    /// `keeping` is the print just written. This runs between the write and
     /// the return, so a clip bigger than the whole cap used to be downloaded,
     /// written, deleted, and its URL handed back -- after which Quick Look
     /// showed an empty panel, a save wrote nothing through its `try?`, and the
-    /// drag reported a generic failure. Nothing was told. A file too big to
-    /// keep still goes, but AFTER the thing that asked for it has had it, and
-    /// the person is told why it will not be there next time.
+    /// drag reported a generic failure. Nothing said why. It now survives this
+    /// pass, so the thing that asked for it gets it, and goes on a later one
+    /// when nothing is holding it -- with `note` saying it will not be kept.
     ///
     /// Whatever `inUse` names is spared for the same reason: Quick Look reads
     /// its item's URL lazily. A drag promise needs no entry there -- the
     /// Finder holds an open descriptor, which an unlink does not invalidate.
+    /// Spared bytes come OFF the budget rather than out of the reckoning, so
+    /// the rest of the cache is still trimmed to what is left of the cap
+    /// instead of the whole thing sitting over it.
     func enforceBudget(keeping key: String? = nil) {
         var spared = Set(inUse().map {
             $0.deletingLastPathComponent().lastPathComponent
@@ -70,12 +73,16 @@ extension PrintMaterializer {
         // to land.
         spared.formUnion(inFlightKeys)
         if let key { spared.insert(key) }
+
         let holdings = contents
-        var doomed = Set(CacheBudget.evictions(from: holdings, cap: capBytes))
+        let held = holdings.filter { spared.contains($0.name) }.reduce(0) { $0 + $1.bytes }
+        let evictable = holdings.filter { !spared.contains($0.name) }
+        var doomed = Set(CacheBudget.evictions(from: evictable,
+                                               cap: Swift.max(capBytes - held, 0)))
         // Nothing measurable in it is not a budget question: it is rubbish,
         // and it was invisible to both halves of this function before.
-        doomed.formUnion(holdings.filter { $0.bytes == 0 }.map(\.name))
-        for name in doomed.subtracting(spared) {
+        doomed.formUnion(evictable.filter { $0.bytes == 0 }.map(\.name))
+        for name in doomed {
             try? FileManager.default.removeItem(at: cacheRoot.appending(path: name))
         }
     }

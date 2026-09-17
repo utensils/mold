@@ -19,6 +19,9 @@ final class QuickLook: NSObject, @unchecked Sendable {
     static let shared = QuickLook()
 
     private let items = OSAllocatedUnfairLock<[QuickLookItem]>(initialState: [])
+    /// Registered once, the first time the panel is shown: the panel is a
+    /// shared singleton and outlives any one preview.
+    @MainActor private var closeObserver: (any NSObjectProtocol)?
 
     /// Shows the panel over the given files, titled by print.
     @MainActor
@@ -28,7 +31,33 @@ final class QuickLook: NSObject, @unchecked Sendable {
         panel.dataSource = self
         panel.reloadData()
         // Space toggles, the way it does in the Finder.
-        if panel.isVisible { panel.orderOut(nil) } else { panel.makeKeyAndOrderFront(nil) }
+        if panel.isVisible {
+            panel.orderOut(nil)
+            release()
+        } else {
+            watchForClose(panel)
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Forgets what was being shown.
+    ///
+    /// `items` was only ever REPLACED, so the media cache -- which asks this
+    /// what it must not evict -- kept every folder of the last preview pinned
+    /// for the rest of the process, panel shut or not. Preview two hundred
+    /// clips once and the cap could no longer be enforced at all.
+    func release() {
+        items.withLock { $0 = [] }
+    }
+
+    @MainActor
+    private func watchForClose(_ panel: QLPreviewPanel) {
+        guard closeObserver == nil else { return }
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            self?.release()
+        }
     }
 
     /// The files the panel is holding.
