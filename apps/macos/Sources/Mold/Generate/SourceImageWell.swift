@@ -12,6 +12,11 @@ import SwiftUI
 /// `PictureDrop`/`PictureSource` the reference strip also uses.
 struct SourceImageWell: View {
     @Binding var draft: RenderDraft
+    /// Whether this recipe has a mask path at all -- `RefineGroup.maskCapable`'s
+    /// answer, passed in rather than re-derived.
+    var canEditMask: Bool = false
+    /// Opens the mask editor. `nil` where there is none to open.
+    var openMaskEditor: (() -> Void)?
 
     @Environment(HostStore.self) var hosts
     @Environment(LibraryStore.self) var library
@@ -21,6 +26,9 @@ struct SourceImageWell: View {
     /// What a file the engine cannot read said, beside the control that
     /// collected it rather than in a 422 after the upload (finding 02#7).
     @State var importFailure: String?
+    /// The one import in flight, cancelled by the next pick so an older,
+    /// slower file can never overwrite a newer one (review 06, medium).
+    @State var importTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -43,6 +51,7 @@ struct SourceImageWell: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        .contextMenu { menuItems }
         .dropDestination(for: PictureDrop.self) { drops, _ in
             guard let drop = drops.first else { return false }
             handle(drop)
@@ -64,13 +73,20 @@ struct SourceImageWell: View {
         }
     }
 
-    @ViewBuilder private var menuItems: some View {
-        let items = SourceImageWell.menuItems(hasPicture: draft.media.sourceImage != nil)
-        Button(items[0], action: chooseFile)
-        Button(items[1]) { showsLibrary = true }
-        if items.count > 2 {
+    /// The click menu and the contextual menu are the SAME list
+    /// (`GenerateMenus.sourceWell`) -- one declaration, two surfaces.
+    @ViewBuilder var menuItems: some View {
+        let items = GenerateMenus.sourceWell(
+            hasPicture: draft.media.sourceImage != nil,
+            canEditMask: canEditMask, canPaste: PicturePaste.hasPicture)
+        ForEach(items.ordinary, id: \.self) { action in
+            Button(action.title) { perform(action) }
+        }
+        if !items.destructive.isEmpty {
             Divider()
-            Button(items[2], role: .destructive, action: clear)
+            ForEach(items.destructive, id: \.self) { action in
+                Button(action.title, role: .destructive) { perform(action) }
+            }
         }
     }
 
@@ -113,9 +129,14 @@ struct SourceImageWell: View {
 }
 
 extension SourceImageWell {
-    /// What the menu offers -- pure, so the row itself is tested with no
-    /// view needed.
-    static func menuItems(hasPicture: Bool) -> [String] {
-        hasPicture ? ["Choose File…", "From Library…", "Remove"] : ["Choose File…", "From Library…"]
+    func perform(_ action: GenerateAction) {
+        switch action {
+        case .chooseFile: chooseFile()
+        case .chooseFromLibrary: showsLibrary = true
+        case .paste: pasteFromPasteboard()
+        case .editMask: openMaskEditor?()
+        case .removeSource: clear()
+        default: break
+        }
     }
 }

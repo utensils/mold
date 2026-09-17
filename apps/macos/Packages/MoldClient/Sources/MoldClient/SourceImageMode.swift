@@ -98,4 +98,14 @@ public extension ReferenceImagesCapability {
     /// FLUX.2 Dev's reference ceiling before the profile advertised one;
     /// mirrors `mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES`.
     static let legacyFlux2MaxReferenceImages = 4
+
+    /// Whether another picture fits. ABSENT `max_count` is UNBOUNDED, which
+    /// is what studio reads it as (`sourceMediaPlan.ts:104`,
+    /// `max: references?.max ?? null`) -- treating it as ONE left Qwen's strip
+    /// holding the Target and no references at all on a host that predates the
+    /// block, which is exactly the path 01#4's legacy rule routes into.
+    func hasRoom(for count: Int) -> Bool {
+        guard let maxCount else { return true }
+        return count < maxCount
+    }
 }
