@@ -20,7 +20,7 @@ struct ExpansionTests {
     ) -> GenerateController {
         let hosts = HostStore(hosts: [host]) { _ in backend }
         hosts.capabilities[host.id] = capabilities
-        let controller = GenerateController(hosts: hosts, defaults: ModelDefaultsStore(hosts: hosts))
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
         controller.modelName = "flux-dev:q4"
         controller.modelFamily = "flux"
         controller.hostID = host.id

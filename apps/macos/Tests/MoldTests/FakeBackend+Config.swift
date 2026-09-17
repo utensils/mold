@@ -18,14 +18,34 @@ extension FakeBackend {
     func setConfig(_ key: String, to value: ConfigScalar) async throws -> ConfigEntry {
         try record("setConfig")
         configWrites.append((key, value))
-        return ConfigEntry(key: key, value: value, source: "db")
+        let entry = ConfigEntry(key: key, value: value, source: "db")
+        applyToPlantedListing(entry)
+        return entry
     }
 
     @discardableResult
     func resetConfig(_ key: String) async throws -> ConfigEntry {
         try record("resetConfig")
         configResets.append(key)
-        return ConfigEntry(key: key, value: .null, source: "default")
+        let entry = ConfigEntry(key: key, value: .null, source: "default")
+        applyToPlantedListing(entry)
+        return entry
+    }
+
+    /// Mutates the planted `configListing` in place, the way a live
+    /// server's next `GET /api/config` would reflect a write it just
+    /// accepted -- so `ConfigStore`'s re-read after every `set`/`reset`
+    /// (`config_sync.rs:674-688`) has something real to see rather than the
+    /// same stale rows it started with.
+    private func applyToPlantedListing(_ entry: ConfigEntry) {
+        guard let listing = configListing else { return }
+        var entries = listing.entries
+        if let index = entries.firstIndex(where: { $0.key == entry.key }) {
+            entries[index] = entry
+        } else {
+            entries.append(entry)
+        }
+        configListing = ConfigListing(profile: listing.profile, entries: entries)
     }
 
     func configProfiles() async throws -> ConfigProfiles {

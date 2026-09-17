@@ -79,8 +79,9 @@ struct CreateStoresTests {
 
     // MARK: - Adoption
 
-    /// **Fails today**, before `ModelDefaultsStore` and `RenderDraft.applying`
-    /// exist: with `config-plato.json` planted -- every `models.flux-dev:q8.*`
+    /// **Fails today**, before `ModelDefaultsStore` (now `ConfigStore`) and
+    /// `RenderDraft.applying` exist: with `config-plato.json` planted -- every
+    /// `models.flux-dev:q8.*`
     /// row present and `null` -- adopting `flux-dev:q8` must leave the
     /// recipe's own numbers standing, not something read out of an all-null
     /// listing.
@@ -89,7 +90,7 @@ struct CreateStoresTests {
         let backend = FakeBackend(host: plato)
         backend.configListing = FakeFixtures.configListing()
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
         await defaultsStore.refresh(on: plato.id)
 
         let recipe = FakeFixtures.recipe()
@@ -107,7 +108,7 @@ struct CreateStoresTests {
             ConfigEntry(key: "models.flux-dev:q8.default_steps", value: .number(12), source: "db"),
         ])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
         await defaultsStore.refresh(on: plato.id)
 
         let recipe = FakeFixtures.recipe()
@@ -124,7 +125,7 @@ struct CreateStoresTests {
             ConfigEntry(key: "models.flux-dev:q8.default_steps", value: .number(200), source: "db"),
         ])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
         await defaultsStore.refresh(on: plato.id)
 
         let recipe = FakeFixtures.recipe(stepsMax: 8)
@@ -141,7 +142,7 @@ struct CreateStoresTests {
             ConfigEntry(key: "models.flux-dev:q8.default_steps", value: .number(12), source: "db"),
         ])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
         await defaultsStore.refresh(on: plato.id)
 
         let recipe = FakeFixtures.recipe()
@@ -160,7 +161,7 @@ struct CreateStoresTests {
         let backend = FakeBackend(host: plato)
         backend.configListing = ConfigListing(entries: [])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
         var draft = RenderDraft()
         draft.steps = 30
         draft.guidance = 4.5
@@ -181,7 +182,7 @@ struct CreateStoresTests {
         let backend = FakeBackend(host: plato)
         backend.configListing = ConfigListing(entries: [])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
 
         await defaultsStore.refresh(on: plato.id)
         await defaultsStore.save(RenderDraft(), for: "flux-dev:q8", on: plato.id)
@@ -194,7 +195,7 @@ struct CreateStoresTests {
         let backend = FakeBackend(host: plato)
         backend.configListing = ConfigListing(entries: [])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let defaultsStore = ModelDefaultsStore(hosts: hosts)
+        let defaultsStore = ConfigStore(hosts: hosts)
 
         await defaultsStore.clear(for: "flux-dev:q8", on: plato.id)
 

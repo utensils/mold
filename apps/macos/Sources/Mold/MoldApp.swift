@@ -25,7 +25,7 @@ struct MoldApp: App {
     @State private var catalog: CatalogStore
     @State private var machines: MachineStore
     @State private var promptHistory: PromptHistoryStore
-    @State private var modelDefaults: ModelDefaultsStore
+    @State private var modelDefaults: ConfigStore
     @State private var adapters: LoraStore
     @State private var landedPrints: LandedPrints
     @State private var notifications: MoldNotifications
@@ -49,7 +49,7 @@ struct MoldApp: App {
         _licenses = State(initialValue: licenses)
         _downloads = State(initialValue: DownloadStore(hosts: hosts, licenses: licenses))
         _catalog = State(initialValue: CatalogStore(hosts: hosts))
-        let modelDefaults = ModelDefaultsStore(hosts: hosts)
+        let modelDefaults = ConfigStore(hosts: hosts)
         _modelDefaults = State(initialValue: modelDefaults)
         _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
         _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))

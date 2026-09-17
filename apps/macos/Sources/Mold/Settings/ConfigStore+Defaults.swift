@@ -1,46 +1,11 @@
 import Foundation
 import MoldClient
 
-/// What each machine has been told a model's controls should start at.
-///
-/// One `GET /api/config` per machine answers for EVERY model, which is why
-/// this holds a listing rather than asking per key: a per-key GET 404s for a
-/// model nobody has configured yet (`config_keys.rs:586-593`), and turning
-/// "never set" into an error report is how a feature ends up shouting on a
-/// fresh machine.
-@MainActor
-@Observable
-final class ModelDefaultsStore {
-    private let hosts: HostStore
-    private(set) var byHost: [MoldHost.ID: ConfigListing] = [:]
-    /// The machines that answered 503 because their metadata DB is off --
-    /// same reason `PromptHistoryStore` keeps one.
-    private(set) var unavailable: Set<MoldHost.ID> = []
-
-    init(hosts: HostStore) {
-        self.hosts = hosts
-    }
-
-    func refresh(on host: MoldHost.ID) async {
-        guard let client = hosts.backend(for: host) else { return }
-        do {
-            byHost[host] = try await client.config()
-            unavailable.remove(host)
-            hosts.succeeded(on: host, doing: "read its configured defaults")
-        } catch let MoldClientError.http(status, code, _) where status == 503 && code == "CONFIG_UNAVAILABLE" {
-            unavailable.insert(host)
-        } catch {
-            hosts.report(error, on: host, doing: "read its configured defaults")
-        }
-    }
-
-    /// Whether this host has ever answered -- with a listing, or with "this
-    /// machine can't". `nil` in `byHost` and absence from `unavailable`
-    /// together mean "not yet asked".
-    func hasLoaded(on host: MoldHost.ID) -> Bool {
-        byHost[host] != nil || unavailable.contains(host)
-    }
-
+// M3's per-model defaults API, unchanged by the M7 S2 rename -- `defaults`,
+// `save` and `clear` keep their exact signatures, so `GenerateController` and
+// the inspector's "Use as default for this model" compile and behave exactly
+// as they did against `ModelDefaultsStore`.
+extension ConfigStore {
     /// A model nobody has ever configured on this host, or whose listing
     /// hasn't been read yet, has no defaults -- `ModelDefaults()` is empty,
     /// so adopting it changes nothing and the recipe's own numbers stand.

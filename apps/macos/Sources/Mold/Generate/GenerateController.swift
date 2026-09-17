@@ -12,7 +12,7 @@ final class GenerateController {
     /// What a machine has been told a model's controls should start at --
     /// read on adoption, after the recipe's own numbers, and never on a KEPT
     /// draft. See `applyStoredDefaults`.
-    let defaults: ModelDefaultsStore
+    let defaults: ConfigStore
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
@@ -52,7 +52,7 @@ final class GenerateController {
     var runTask: Task<Void, Never>?
     var activeBatch: (id: String, clientBatchId: String, host: MoldHost.ID)?
 
-    init(hosts: HostStore, defaults: ModelDefaultsStore) {
+    init(hosts: HostStore, defaults: ConfigStore) {
         self.hosts = hosts
         self.defaults = defaults
     }
