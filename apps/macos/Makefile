@@ -91,8 +91,12 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	@# their machine list, their models or their prints. `make run` is the
 	@# opposite by design: it uses the real settings and the real home.
 	@defaults delete io.utensils.mold.native.fresh 2>/dev/null || true
+	@# The throwaway SECRETS too -- `SecretStore.applicationSupport` swaps to
+	@# the `.fresh` directory under MOLD_NATIVE_FRESH, and a UAT that inherits
+	@# the previous run's engine key is not a first launch (Lane E's note).
+	@rm -rf "$$HOME/Library/Application Support/io.utensils.mold.native.fresh"
 	@rm -rf "$(UAT_HOME)" && mkdir -p "$(UAT_HOME)"
-	@echo "  prefs: io.utensils.mold.native.fresh (emptied)"
+	@echo "  prefs: io.utensils.mold.native.fresh (emptied, including its secrets)"
 	@echo "  home:  $(UAT_HOME) (emptied -- the engine starts here with no models)"
 	@MOLD_NATIVE_FRESH=1 MOLD_HOME="$(UAT_HOME)" \
 	  ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold

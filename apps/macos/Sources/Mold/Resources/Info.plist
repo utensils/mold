@@ -27,7 +27,25 @@
 	<!-- mold servers speak plain HTTP. They live on a LAN, on Tailscale, or on
 	     loopback when the engine is embedded, and none of those have a
 	     certificate a device would trust. ATS would refuse every one of them,
-	     so the exception is the feature working rather than a shortcut. -->
+	     so the exception is the feature working rather than a shortcut.
+
+	     This IS as narrow as ATS goes for this app, and the narrower form is a
+	     trap rather than an improvement (review 05-M15, 04-L3). Apple's own
+	     rule: on macOS 10.12+ `NSAllowsArbitraryLoads` is IGNORED whenever
+	     `NSAllowsLocalNetworking` is present -- the pair exists so an old OS
+	     gets the blanket and a new one gets local networking only. On macOS 26
+	     adding it would therefore switch cleartext back ON for `.local` and
+	     loopback and OFF for everything else, and a mold on Tailscale is
+	     `100.64/10`, which is not "local" by any of ATS's definitions. The
+	     same applies to `NSExceptionDomains`: under a blanket they are inert,
+	     and without one they cannot enumerate an address someone types.
+
+	     Two consequences worth knowing rather than hiding. An operator key
+	     sent to an `http://` host travels in cleartext, on whatever network
+	     that host is on. And a blanket relaxes CLEARTEXT, never certificate
+	     validation, so an `https://` mold with a self-signed or private-CA
+	     certificate is still unreachable and there is no `URLSessionDelegate`
+	     to opt into one. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

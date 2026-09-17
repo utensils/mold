@@ -1886,8 +1886,12 @@
                   cd apps/macos
                   make build
                   # Two copies would argue over one preferences domain, so the
-                  # previous run is reaped rather than stacked.
-                  pkill -x Mold 2>/dev/null || true
+                  # previous run is reaped rather than stacked. By BUNDLE PATH,
+                  # never `pkill -x Mold`: Tauri's productName is also "Mold"
+                  # (desktop/src-tauri/tauri.conf.json), so the plain form
+                  # SIGTERMed Mold Desktop -- and with it an embedded engine
+                  # that might have been mid-render (review 05-M10).
+                  pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
                   # Exec'd rather than `open`ed: LaunchServices starts an app
                   # with a fresh environment, which would drop MOLD_NATIVE_HOSTS
                   # and send stdout somewhere you cannot watch.
@@ -1901,7 +1905,8 @@
                 command = ''
                   set -euo pipefail
                   cd apps/macos
-                  pkill -x Mold 2>/dev/null || true
+                  # By bundle path, so Mold Desktop is left alone (05-M10).
+                  pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
                   exec make uat
                 '';
               }
