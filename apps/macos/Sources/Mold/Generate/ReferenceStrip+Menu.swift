@@ -9,34 +9,15 @@ extension ReferenceStrip {
     /// One reference's own menu. ORDER matters: on a `primaryIsTarget` recipe
     /// index 0 is the picture being edited, so Move Left / Move Right are real
     /// instructions (`GenerateMenus.referenceItem`).
-    @ViewBuilder func itemMenu(_ index: Int) -> some View {
-        let items = GenerateMenus.referenceItem(
-            index: index, count: draft.media.editImages.count)
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { perform(action, at: index) }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { action in
-                Button(action.title, role: .destructive) { perform(action, at: index) }
-            }
-        }
+    func itemMenu(_ index: Int) -> [GenerateMenus.Row] {
+        GenerateMenus.referenceItem(index: index, count: draft.media.editImages.count)
     }
 
-    @ViewBuilder var stripMenu: some View {
-        let items = GenerateMenus.referenceStrip(
+    var stripMenu: [GenerateMenus.Row] {
+        GenerateMenus.referenceStrip(
             count: draft.media.editImages.count,
             hasRoom: capability.hasRoom(for: draft.media.editImages.count),
             canPaste: PicturePaste.hasPicture)
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { perform(action, at: nil) }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { action in
-                Button(action.title, role: .destructive) { perform(action, at: nil) }
-            }
-        }
     }
 
     func perform(_ action: GenerateAction, at index: Int?) {

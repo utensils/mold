@@ -8,19 +8,15 @@ extension RecentGroup {
     /// One recent prompt's menu. There is no per-entry delete verb on the
     /// wire -- the history route offers `clear` alone -- so "Remove from
     /// History" is absent rather than shown and broken.
-    @ViewBuilder func rowMenu(_ entry: HistoryEntry) -> some View {
-        ForEach(GenerateMenus.recentPrompt().all, id: \.self) { action in
-            Button(action.title) {
-                switch action {
-                case .usePrompt:
-                    Self.pick(entry, into: &draft)
-                case .copyPrompt:
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(entry.prompt, forType: .string)
-                default:
-                    break
-                }
-            }
+    func perform(_ action: GenerateAction, on entry: HistoryEntry) {
+        switch action {
+        case .usePrompt:
+            Self.pick(entry, into: &draft)
+        case .copyPrompt:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.prompt, forType: .string)
+        default:
+            break
         }
     }
 
@@ -36,6 +32,6 @@ extension RecentGroup {
         }
         .buttonStyle(.plain)
         .help("Puts this prompt back. The model and the controls stay as they are.")
-        .contextMenu { rowMenu(entry) }
+        .rowActionMenu(GenerateMenus.recentPrompt()) { perform($0, on: entry) }
     }
 }

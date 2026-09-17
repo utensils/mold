@@ -5,19 +5,28 @@ import SwiftUI
 // so it and the inline controls beside it cannot drift. Split from the
 // group's own shape purely for size.
 extension AdaptersGroup {
-    /// The adapter row's shared list. Reset Strength is only offered where
-    /// there is something to reset (`GenerateMenus.adapterRow`).
-    @ViewBuilder func adapterMenu(_ choice: LoraChoice) -> some View {
-        let items = GenerateMenus.adapterRow(
-            isAtDefaultStrength: choice.scale == Lora.defaultScale)
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { perform(action, on: choice) }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { action in
-                Button(action.title, role: .destructive) { perform(action, on: choice) }
-            }
+    /// An adapter row's menu holds one thing no other Generate row does: the
+    /// adapter's own trained words, which are its VOCABULARY rather than
+    /// actions on it -- so the row's kind is either of the two.
+    enum Item: Hashable {
+        case insert(String)
+        case act(GenerateAction)
+    }
+
+    /// The row's own words first, then the shared list
+    /// (`GenerateMenus.adapterRow`), whose Reset Strength is offered only
+    /// where there is something to reset. Grouped explicitly, because a list
+    /// that declares one separator declares them all.
+    func adapterMenu(_ choice: LoraChoice, words: [String]) -> [RowAction<Item>] {
+        let vocabulary = words.map { RowAction(kind: Item.insert($0), title: "Insert \"\($0)\"") }
+        let actions = GenerateMenus.adapterRow(isAtDefaultStrength: choice.scale == Lora.defaultScale)
+        return vocabulary + [.separator] + RowAction.grouped(actions.map { $0.mapKind(Item.act) })
+    }
+
+    func perform(_ item: Item, on choice: LoraChoice) {
+        switch item {
+        case let .insert(word): insert(word)
+        case let .act(action): perform(action, on: choice)
         }
     }
 

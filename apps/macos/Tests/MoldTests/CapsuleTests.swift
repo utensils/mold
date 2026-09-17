@@ -41,12 +41,12 @@ struct CapsuleTests {
     @Test func emptyWellOffersNoRemove() {
         let items = GenerateMenus.sourceWell(
             hasPicture: false, canEditMask: true, canPaste: false)
-        #expect(items.all.map(\.title) == ["Choose File…", "Choose from Library…"])
+        #expect(items.map(\.title) == ["Choose File…", "Choose from Library…"])
     }
 
     @Test func filledWellAddsRemove() {
         let items = GenerateMenus.sourceWell(
             hasPicture: true, canEditMask: false, canPaste: false)
-        #expect(items.all.map(\.title) == ["Choose File…", "Choose from Library…", "Remove"])
+        #expect(items.map(\.title) == ["Choose File…", "Choose from Library…", "Remove"])
     }
 }

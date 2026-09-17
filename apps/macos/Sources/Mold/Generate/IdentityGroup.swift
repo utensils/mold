@@ -32,7 +32,7 @@ struct IdentityGroup: View {
             WrappingHStack(horizontalSpacing: 6, verticalSpacing: 6) {
                 ForEach(photos) { photo in
                     IdentityPhotoWell(photo: photo) { remove(photo) }
-                        .contextMenu { photoMenu(photo) }
+                        .rowActionMenu(photoMenu) { perform($0, on: photo) }
                 }
                 if photos.count < maxPhotos { addWell }
             }

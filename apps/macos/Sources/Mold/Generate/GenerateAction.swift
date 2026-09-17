@@ -1,4 +1,4 @@
-import Foundation
+import MoldClient
 
 /// One thing a Generate surface can do, declared ONCE so the inline control,
 /// the contextual menu and (where one exists) the menu-bar item all render the
@@ -70,7 +70,7 @@ enum GenerateAction: Hashable, CaseIterable {
     }
 
     /// Destructive items are shown last, after a divider, with the system's
-    /// destructive role -- the house rule everywhere in this app.
+    /// destructive role -- `RowAction.rendered`'s rule, which is every menu's.
     var isDestructive: Bool {
         switch self {
         case .removeSource, .removeReference, .removePhoto, .removeAdapter,
@@ -80,22 +80,11 @@ enum GenerateAction: Hashable, CaseIterable {
             false
         }
     }
-}
 
-/// A rendered menu: the ordinary items, then the destructive ones behind a
-/// divider. EMPTY means no menu at all -- a row with nothing applicable must
-/// not sprout an empty contextual menu.
-struct GenerateMenuItems: Equatable {
-    let ordinary: [GenerateAction]
-    let destructive: [GenerateAction]
-
-    var isEmpty: Bool { ordinary.isEmpty && destructive.isEmpty }
-    /// Flat, in render order -- what a test asserts against.
-    var all: [GenerateAction] { ordinary + destructive }
-
-    /// The one place the ordering rule lives.
-    init(_ actions: [GenerateAction]) {
-        ordinary = actions.filter { !$0.isDestructive }
-        destructive = actions.filter(\.isDestructive)
+    /// This action as a menu row. Generate declares its lists as cases and
+    /// turns them into rows HERE, so a pane's contextual menu and the click
+    /// menu beside it are one list drawn by the app's one renderer.
+    var row: RowAction<GenerateAction> {
+        RowAction(kind: self, title: title, isDestructive: isDestructive)
     }
 }

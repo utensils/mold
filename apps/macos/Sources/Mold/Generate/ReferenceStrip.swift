@@ -42,7 +42,7 @@ struct ReferenceStrip: View {
                     .frame(maxWidth: 160, alignment: .leading)
             }
         }
-        .contextMenu { stripMenu }
+        .rowActionMenu(stripMenu) { perform($0, at: nil) }
     }
 
     private func well(index: Int, encoded: String) -> some View {
@@ -50,7 +50,7 @@ struct ReferenceStrip: View {
             .overlay(alignment: .topLeading) { badge(index) }
             .overlay(alignment: .topTrailing) { remove(index) }
             .help(label(index))
-            .contextMenu { itemMenu(index) }
+            .rowActionMenu(itemMenu(index)) { perform($0, at: index) }
     }
 
     /// The same "Choose File…" / "From Library…" menu the source well

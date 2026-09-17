@@ -35,18 +35,7 @@ extension IdentityGroup {
 
     /// One photograph's menu. Replace is Choose File… aimed at this slot;
     /// Remove is the well's own ✕ (`GenerateMenus.identityPhoto`).
-    @ViewBuilder func photoMenu(_ photo: IdentityPhoto) -> some View {
-        let items = GenerateMenus.identityPhoto()
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { perform(action, on: photo) }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { action in
-                Button(action.title, role: .destructive) { perform(action, on: photo) }
-            }
-        }
-    }
+    var photoMenu: [GenerateMenus.Row] { GenerateMenus.identityPhoto() }
 
     func perform(_ action: GenerateAction, on photo: IdentityPhoto) {
         switch action {

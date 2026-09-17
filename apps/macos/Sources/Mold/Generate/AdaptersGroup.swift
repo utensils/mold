@@ -49,14 +49,8 @@ struct AdaptersGroup: View {
             }
         }
         .help(helpText(for: choice, info: info))
-        .contextMenu {
-            // The row's own vocabulary first -- it is not an action ON the
-            // row -- then the shared list (`GenerateMenus.adapterRow`).
-            ForEach(info?.trainedWords ?? [], id: \.self) { word in
-                Button("Insert \"\(word)\"") { insert(word) }
-            }
-            if !(info?.trainedWords ?? []).isEmpty { Divider() }
-            adapterMenu(choice)
+        .rowActionMenu(adapterMenu(choice, words: info?.trainedWords ?? [])) {
+            perform($0, on: choice)
         }
     }
 
@@ -87,7 +81,10 @@ struct AdaptersGroup: View {
         draft.media.loras.append(LoraChoice(path: info.path, name: info.name))
     }
 
-    private func insert(_ word: String) {
+    /// Not `private`: `AdaptersGroup+Menu`, an extension in another file,
+    /// dispatches the row's trained words -- and `private` does not cross a
+    /// file boundary even within one type.
+    func insert(_ word: String) {
         draft.prompt += (draft.prompt.isEmpty ? "" : " ") + word
     }
 

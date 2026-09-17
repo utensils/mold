@@ -17,7 +17,7 @@ struct ResultActions {
     /// `nil` where the recipe takes no references, or the strip is full.
     let addAsReference: ((BatchResult) -> Void)?
 
-    var menu: GenerateMenuItems {
+    var menu: [GenerateMenus.Row] {
         GenerateMenus.result(canUseAsSource: useAsSource != nil,
                              canAddReference: addAsReference != nil)
     }
@@ -53,21 +53,6 @@ extension View {
     /// The result menu, rendered from the ONE list so the canvas's big
     /// picture and every strip tile offer the same things in the same order.
     func resultContextMenu(_ result: BatchResult, actions: ResultActions) -> some View {
-        let items = actions.menu
-        return contextMenu {
-            if !items.isEmpty {
-                ForEach(items.ordinary, id: \.self) { action in
-                    Button(action.title) { actions.perform(action, on: result) }
-                }
-                if !items.destructive.isEmpty {
-                    Divider()
-                    ForEach(items.destructive, id: \.self) { action in
-                        Button(action.title, role: .destructive) {
-                            actions.perform(action, on: result)
-                        }
-                    }
-                }
-            }
-        }
+        rowActionMenu(actions.menu) { actions.perform($0, on: result) }
     }
 }

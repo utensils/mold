@@ -51,7 +51,7 @@ struct SourceImageWell: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .contextMenu { menuItems }
+        .rowActionMenu(items, perform: perform)
         .dropDestination(for: PictureDrop.self) { drops, _ in
             guard let drop = drops.first else { return false }
             handle(drop)
@@ -75,19 +75,14 @@ struct SourceImageWell: View {
 
     /// The click menu and the contextual menu are the SAME list
     /// (`GenerateMenus.sourceWell`) -- one declaration, two surfaces.
-    @ViewBuilder var menuItems: some View {
-        let items = GenerateMenus.sourceWell(
+    var items: [GenerateMenus.Row] {
+        GenerateMenus.sourceWell(
             hasPicture: draft.media.sourceImage != nil,
             canEditMask: canEditMask, canPaste: PicturePaste.hasPicture)
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { perform(action) }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { action in
-                Button(action.title, role: .destructive) { perform(action) }
-            }
-        }
+    }
+
+    @ViewBuilder var menuItems: some View {
+        RowActionMenu(actions: items, perform: perform)
     }
 
     private var well: some View {

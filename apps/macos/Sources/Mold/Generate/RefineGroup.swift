@@ -64,26 +64,21 @@ struct RefineGroup: View {
                         .help("Remove this mask")
                     }
                 }
-                .contextMenu { maskMenu }
+                .rowActionMenu(
+                    GenerateMenus.maskRow(hasMask: draft.media.maskImage != nil),
+                    perform: performMask)
             }
         }
     }
 
-    /// The mask row's menu, from the one list. An UNPAINTED row's inline
-    /// button already IS "Edit mask…", so `GenerateMenus.maskRow` answers
-    /// empty there and no menu is drawn at all.
-    @ViewBuilder private var maskMenu: some View {
-        let items = GenerateMenus.maskRow(hasMask: draft.media.maskImage != nil)
-        ForEach(items.ordinary, id: \.self) { action in
-            Button(action.title) { controller.showsMaskEditor = true }
-        }
-        if !items.destructive.isEmpty {
-            Divider()
-            ForEach(items.destructive, id: \.self) { _ in
-                Button(GenerateAction.clearMask.title, role: .destructive) {
-                    draft.media.maskImage = nil
-                }
-            }
+    /// The mask row's two verbs. An UNPAINTED row's inline button already IS
+    /// "Edit mask…", so `GenerateMenus.maskRow` answers empty there and no
+    /// menu is attached at all.
+    private func performMask(_ action: GenerateAction) {
+        switch action {
+        case .editMask: controller.showsMaskEditor = true
+        case .clearMask: draft.media.maskImage = nil
+        default: break
         }
     }
 

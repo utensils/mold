@@ -13,11 +13,15 @@ struct GenerateMenusTests {
 
     @Test func destructiveItemsAlwaysComeLastBehindADivider() {
         let items = GenerateMenus.sourceWell(hasPicture: true, canEditMask: true, canPaste: true)
-        #expect(items.ordinary.allSatisfy { !$0.isDestructive })
-        #expect(items.destructive == [.removeSource])
-        #expect(items.all.last == .removeSource)
-        // `GenerateMenuItems` is the ONE place the split happens.
-        #expect(GenerateMenuItems([.removeSource, .chooseFile]).all == [.chooseFile, .removeSource])
+        #expect(items.dropLast().allSatisfy { !$0.isDestructive })
+        #expect(items.filter(\.isDestructive).map(\.kind) == [.removeSource])
+        #expect(items.last?.kind == .removeSource)
+        // `RowAction.rendered` is the ONE place the split -- and the divider
+        // in front of it -- happens, for every menu in the app.
+        let drawn = RowAction.rendered([GenerateAction.removeSource.row,
+                                        GenerateAction.chooseFile.row])
+        #expect(drawn.map(\.kind) == [.chooseFile, nil, .removeSource])
+        #expect(drawn.dropLast().last?.isSeparator == true)
     }
 
     @Test func aRowWithNothingApplicableHasNoMenuAtAll() {
@@ -31,14 +35,14 @@ struct GenerateMenusTests {
 
     @Test func aResultOffersReuseOnlyWhereTheWellExists() {
         let bare = GenerateMenus.result(canUseAsSource: false, canAddReference: false)
-        #expect(bare.all == [.saveACopy, .copyResult, .showInLibrary])
+        #expect(bare.map(\.kind) == [.saveACopy, .copyResult, .showInLibrary])
 
         let both = GenerateMenus.result(canUseAsSource: true, canAddReference: true)
-        #expect(both.all == [.saveACopy, .copyResult, .showInLibrary,
+        #expect(both.map(\.kind) == [.saveACopy, .copyResult, .showInLibrary,
                              .useAsSourceImage, .addAsReference])
 
         let sourceOnly = GenerateMenus.result(canUseAsSource: true, canAddReference: false)
-        #expect(!sourceOnly.all.contains(.addAsReference))
+        #expect(!sourceOnly.map(\.kind).contains(.addAsReference))
     }
 
     // MARK: - The source well
@@ -46,14 +50,14 @@ struct GenerateMenusTests {
     @Test func theSourceWellOffersRemoveAndTheMaskOnlyWhenTheyApply() {
         let empty = GenerateMenus.sourceWell(
             hasPicture: false, canEditMask: true, canPaste: false)
-        #expect(empty.all == [.chooseFile, .chooseFromLibrary])
+        #expect(empty.map(\.kind) == [.chooseFile, .chooseFromLibrary])
 
         let held = GenerateMenus.sourceWell(hasPicture: true, canEditMask: false, canPaste: true)
-        #expect(held.all == [.chooseFile, .chooseFromLibrary, .paste, .removeSource])
+        #expect(held.map(\.kind) == [.chooseFile, .chooseFromLibrary, .paste, .removeSource])
 
         let maskable = GenerateMenus.sourceWell(
             hasPicture: true, canEditMask: true, canPaste: false)
-        #expect(maskable.all == [.chooseFile, .chooseFromLibrary, .editMask, .removeSource])
+        #expect(maskable.map(\.kind) == [.chooseFile, .chooseFromLibrary, .editMask, .removeSource])
     }
 
     // MARK: - The reference strip
@@ -61,23 +65,23 @@ struct GenerateMenusTests {
     /// Index 0 is Qwen's edit TARGET, so moving one is a real instruction --
     /// and the ends carry no move.
     @Test func aReferenceOffersOnlyTheMovesThatExist() {
-        #expect(GenerateMenus.referenceItem(index: 0, count: 3).all
+        #expect(GenerateMenus.referenceItem(index: 0, count: 3).map(\.kind)
             == [.moveRight, .replacePicture, .removeReference])
-        #expect(GenerateMenus.referenceItem(index: 1, count: 3).all
+        #expect(GenerateMenus.referenceItem(index: 1, count: 3).map(\.kind)
             == [.moveLeft, .moveRight, .replacePicture, .removeReference])
-        #expect(GenerateMenus.referenceItem(index: 2, count: 3).all
+        #expect(GenerateMenus.referenceItem(index: 2, count: 3).map(\.kind)
             == [.moveLeft, .replacePicture, .removeReference])
-        #expect(GenerateMenus.referenceItem(index: 0, count: 1).all
+        #expect(GenerateMenus.referenceItem(index: 0, count: 1).map(\.kind)
             == [.replacePicture, .removeReference])
     }
 
     @Test func theStripBackgroundFollowsItsRoomAndItsContents() {
-        #expect(GenerateMenus.referenceStrip(count: 0, hasRoom: true, canPaste: false).all
+        #expect(GenerateMenus.referenceStrip(count: 0, hasRoom: true, canPaste: false).map(\.kind)
             == [.addReference])
-        #expect(GenerateMenus.referenceStrip(count: 2, hasRoom: true, canPaste: true).all
+        #expect(GenerateMenus.referenceStrip(count: 2, hasRoom: true, canPaste: true).map(\.kind)
             == [.addReference, .paste, .removeAllReferences])
         // Full: nothing to add or paste, but there is something to clear.
-        #expect(GenerateMenus.referenceStrip(count: 4, hasRoom: false, canPaste: true).all
+        #expect(GenerateMenus.referenceStrip(count: 4, hasRoom: false, canPaste: true).map(\.kind)
             == [.removeAllReferences])
     }
 
@@ -100,13 +104,13 @@ struct GenerateMenusTests {
     // MARK: - The rest
 
     @Test func theRemainingRowsOfferWhatTheyCan() {
-        #expect(GenerateMenus.identityPhoto().all == [.replacePhoto, .removePhoto])
-        #expect(GenerateMenus.maskRow(hasMask: true).all == [.editMask, .clearMask])
-        #expect(GenerateMenus.adapterRow(isAtDefaultStrength: true).all == [.removeAdapter])
-        #expect(GenerateMenus.adapterRow(isAtDefaultStrength: false).all
+        #expect(GenerateMenus.identityPhoto().map(\.kind) == [.replacePhoto, .removePhoto])
+        #expect(GenerateMenus.maskRow(hasMask: true).map(\.kind) == [.editMask, .clearMask])
+        #expect(GenerateMenus.adapterRow(isAtDefaultStrength: true).map(\.kind) == [.removeAdapter])
+        #expect(GenerateMenus.adapterRow(isAtDefaultStrength: false).map(\.kind)
             == [.resetStrength, .removeAdapter])
         // No per-entry delete verb exists on the wire, so none is offered.
-        #expect(GenerateMenus.recentPrompt().all == [.usePrompt, .copyPrompt])
+        #expect(GenerateMenus.recentPrompt().map(\.kind) == [.usePrompt, .copyPrompt])
     }
 
     @Test func everyActionHasATitleAndNoTwoDestructivesHide() {
