@@ -38,6 +38,12 @@ public struct ServerStatus: Hashable, Codable, Sendable {
     /// never aimed at a host that has restarted since.
     public let instanceId: String?
     public let uptimeSecs: UInt64
+    /// The MACHINE's own figure for what its models occupy, never a sum of
+    /// installed rows' `diskUsageBytes` -- a shared VAE or encoder is counted
+    /// once per model that references it, so the column never adds up to
+    /// this (`routes.rs:5931-5948`, design fact 3, M5). `nil` on a host that
+    /// predates the field, which is a real absence, not a zero.
+    public let modelsDisk: ModelsDisk?
 
     public struct GPU: Hashable, Codable, Sendable {
         public let ordinal: Int
@@ -46,6 +52,11 @@ public struct ServerStatus: Hashable, Codable, Sendable {
         public let vramUsedBytes: UInt64?
         public let state: String?
 
+    }
+
+    public struct ModelsDisk: Hashable, Codable, Sendable {
+        public let totalBytes: UInt64
+        public let freeBytes: UInt64
     }
 
 }

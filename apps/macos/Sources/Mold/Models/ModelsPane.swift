@@ -1,55 +1,42 @@
 import MoldClient
 import SwiftUI
 
-/// What each machine can render with, written so a person can tell what a
-/// model is FOR.
-///
-/// mold's manifest already describes every model as "Title — plain-English
-/// trade-off". This groups by model and lets each variant row carry that
-/// sentence, instead of listing 170 rows of quantization tags and leaving the
-/// reader to work out the difference between q4 and bf16.
+/// What a machine has installed, as a table someone managing eighty models
+/// can sort and scan -- rather than a flat list they have to read end to end
+/// to find the one row that needs attention.
 struct ModelsPane: View {
-    // Not `private`: `ModelsPane+Grouping` reads all of these, and `private`
-    // does not cross a file boundary even within one type.
+    // Not `private`: `ModelsPane+Grouping` and `ModelsPane+Table` read all of
+    // these, and `private` does not cross a file boundary even within one
+    // type.
     @Environment(HostStore.self) var hosts
     @Environment(ModelStore.self) var models
-    @Environment(DownloadStore.self) private var downloads
+    @Environment(DownloadStore.self) var downloads
 
     /// The same key the sidebar and `MachinesPane` declare, over the same
-    /// suite. "Models here -- Show ›" then lands on the right machine with
-    /// zero plumbing, and the app has one notion of "the machine you are
-    /// working on" instead of two -- picking a machine here is the same act
-    /// as picking it in the sidebar, and it persists across launches.
+    /// suite -- one notion of "the machine you are working on" rather than
+    /// two, and it persists across launches.
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) var selectedMachine = ""
+    @AppStorage("modelsSortColumn", store: AppStorageSuite.defaults) var sortColumnRaw =
+        ModelSort.Column.model.rawValue
+    @AppStorage("modelsSortAscending", store: AppStorageSuite.defaults) var sortAscending = true
     @State var query = ""
-    @State var installedOnly = true
+    @State var selection: Model.ID?
+
+    /// `ModelSort` itself is not `@AppStorage`-able -- it is not a primitive
+    /// and not `RawRepresentable` -- so this reads and writes the two scalar
+    /// keys that back it, the same shape `selectedHostID` already uses for
+    /// `selectedMachine`.
+    var sort: Binding<ModelSort> {
+        Binding(
+            get: { ModelSort(column: ModelSort.Column(rawValue: sortColumnRaw) ?? .model, ascending: sortAscending) },
+            set: { sortColumnRaw = $0.column.rawValue; sortAscending = $0.ascending }
+        )
+    }
 
     var body: some View {
-        Group {
-            if groups.isEmpty {
-                empty
-            } else {
-                List {
-                    ForEach(groups, id: \.title) { group in
-                        if group.isSolo {
-                            ModelSoloRow(model: group.variants[0], title: group.title,
-                                         install: install,
-                                         progress: progress(group.variants[0]))
-                        } else {
-                            Section {
-                                ForEach(group.variants) { variant in
-                                    ModelVariantRow(model: variant, groupTitle: group.title,
-                                                    install: install,
-                                                    progress: progress(variant))
-                                }
-                            } header: {
-                                ModelGroupHeader(title: group.title, repo: group.repo)
-                            }
-                        }
-                    }
-                }
-                .listStyle(.inset)
-            }
+        VStack(spacing: 0) {
+            content
+            ModelsFooter(count: candidates.count, host: host, status: status)
         }
         .failureBanner(hosts)
         .navigationTitle("Models")
@@ -60,10 +47,17 @@ struct ModelsPane: View {
         .onChange(of: hosts.reachability) { _, _ in adoptPreferredHost() }
     }
 
+    @ViewBuilder private var content: some View {
+        if sections.isEmpty {
+            empty
+        } else {
+            table
+        }
+    }
+
     private var subtitle: String {
         guard let host else { return "No machine" }
-        let count = candidates.count
-        return "\(count) \(installedOnly ? "installed" : "available") on \(host.name)"
+        return "\(candidates.count) installed on \(host.name)"
     }
 
     @ViewBuilder private var empty: some View {
@@ -83,24 +77,30 @@ struct ModelsPane: View {
                 }
             }
         }
-        ToolbarItem {
-            Toggle(isOn: $installedOnly) {
-                Label("Installed only", systemImage: "internaldrive")
-            }
-            .help(installedOnly ? "Showing installed models" : "Showing everything on offer")
-        }
+        // The Discover scope lands in S6 alongside the catalog browser it
+        // has something to show; a one-segment picker in the meantime would
+        // be a control with nothing to switch.
     }
 
-    private func progress(_ model: Model) -> DownloadStore.Progress? {
+    func progress(_ model: Model) -> DownloadStore.Progress? {
         guard let host else { return nil }
         return downloads.progress(for: model.name, on: host.id)
     }
 
-    private func install(_ model: Model) {
+    func install(_ model: Model) {
         guard let host else { return }
-        Task {
-            await downloads.install(model.name, on: host)
-        }
+        Task { await downloads.install(model.name, on: host) }
+    }
+
+    /// The Cancel action for a row mid-download, or `nil` off it. The job id
+    /// comes straight from `DownloadStore.active`'s own keys -- `progress`
+    /// alone does not carry it, and this is the one place both the id and
+    /// its progress are read from the same dictionary together.
+    func cancel(_ model: Model) -> (() -> Void)? {
+        guard let host,
+              let job = downloads.active[host.id]?.first(where: { $0.value.model == model.name })
+        else { return nil }
+        return { Task { await downloads.cancel(jobID: job.key, on: host) } }
     }
 
     private func load() async {

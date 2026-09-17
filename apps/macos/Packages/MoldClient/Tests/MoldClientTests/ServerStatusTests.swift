@@ -51,3 +51,21 @@ private let statusWithNoHostname = """
     let host = MoldHost(name: "hal9000", baseURL: URL(string: "http://100.123.198.98:7680")!)
     #expect(host.apiKey == nil)
 }
+
+// Captured verbatim from plato (`GET /api/status`, mold 0.29.0). `models_disk`
+// is the machine's own figure -- the footer reads THIS, never a sum of
+// installed rows' `disk_usage_bytes` (design fact 3, M5).
+@Test func decodesTheMachinesOwnModelsDiskFigure() throws {
+    let status = try MoldJSON.decoder.decode(
+        ServerStatus.self, from: RepoFixtures.fixture("status-plato.json"))
+
+    #expect(status.modelsDisk?.totalBytes == 2_495_367_610_368)
+    #expect(status.modelsDisk?.freeBytes == 787_001_376_768)
+}
+
+/// `hal9000Status` above predates the field entirely -- absence is a real
+/// "older host", never a zero.
+@Test func aHostThatPredatesModelsDiskHasNoFigureAtAll() throws {
+    let status = try MoldJSON.decoder.decode(ServerStatus.self, from: hal9000Status)
+    #expect(status.modelsDisk == nil)
+}

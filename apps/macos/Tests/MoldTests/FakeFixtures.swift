@@ -31,10 +31,16 @@ enum FakeFixtures {
 // `/api/status`, what it says it can do, and the ticket a download starts
 // with. Same reason as above -- none of these has a public memberwise init.
 extension FakeFixtures {
-    static func serverStatus(instanceId: String? = nil) -> ServerStatus {
+    static func serverStatus(
+        instanceId: String? = nil, modelsDiskTotal: UInt64? = nil, modelsDiskFree: UInt64? = nil
+    ) -> ServerStatus {
+        let disk = modelsDiskTotal.map { total in
+            #"{"total_bytes": \#(total), "free_bytes": \#(modelsDiskFree ?? 0)}"#
+        }
         let json = """
         {"version": "0.29.0", "hostname": "fake", "busy": false, "uptime_secs": 0,
-         "instance_id": \(instanceId.map { "\"\($0)\"" } ?? "null")}
+         "instance_id": \(instanceId.map { "\"\($0)\"" } ?? "null"),
+         "models_disk": \(disk ?? "null")}
         """
         return try! MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
     }
@@ -134,14 +140,16 @@ extension FakeFixtures {
 
     static func model(
         _ name: String, family: String = "flux", sizeGb: Double? = nil, downloaded: Bool? = nil,
-        remainingDownloadBytes: Int? = nil, isLoaded: Bool? = nil
+        remainingDownloadBytes: Int? = nil, isLoaded: Bool? = nil, diskUsageBytes: Int? = nil,
+        description: String? = nil
     ) -> Model {
         let json = #"""
-        {"name": "\#(name)", "family": "\#(family)", "description": "\#(name) — fake",
+        {"name": "\#(name)", "family": "\#(family)", "description": "\#(description ?? "\(name) — fake")",
          "size_gb": \#(sizeGb.map { "\($0)" } ?? "null"),
          "downloaded": \#(downloaded.map { "\($0)" } ?? "null"),
          "remaining_download_bytes": \#(remainingDownloadBytes.map { "\($0)" } ?? "null"),
-         "is_loaded": \#(isLoaded.map { "\($0)" } ?? "null")}
+         "is_loaded": \#(isLoaded.map { "\($0)" } ?? "null"),
+         "disk_usage_bytes": \#(diskUsageBytes.map { "\($0)" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(Model.self, from: Data(json.utf8))
     }
