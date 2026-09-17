@@ -5,11 +5,7 @@ import Foundation
 extension HTTPBackend {
     func get<T: Decodable>(_ path: String) async throws -> T {
         let data = try await bytes(for: request(path))
-        do {
-            return try MoldJSON.decoder.decode(T.self, from: data)
-        } catch {
-            throw MoldClientError.malformedResponse
-        }
+        return try decoded(T.self, from: data, route: path)
     }
 
     /// `timeout` is the ordinary 10 s unless a route says otherwise -- a
@@ -24,11 +20,7 @@ extension HTTPBackend {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try MoldJSON.encoder.encode(body)
         let data = try await bytes(for: request)
-        do {
-            return try MoldJSON.decoder.decode(T.self, from: data)
-        } catch {
-            throw MoldClientError.malformedResponse
-        }
+        return try decoded(T.self, from: data, route: path)
     }
 
     /// A request for a path, which may carry a query string.
@@ -64,7 +56,12 @@ extension HTTPBackend {
 
     func bytes(for request: URLRequest) async throws -> Data {
         let (data, http) = try await send(request)
-        try check(http, data)
+        do {
+            try check(http, data)
+        } catch {
+            note(error, for: request)
+            throw error
+        }
         return data
     }
 

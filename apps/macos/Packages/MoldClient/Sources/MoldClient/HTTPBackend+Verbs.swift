@@ -21,11 +21,7 @@ extension HTTPBackend {
         _ path: String, method: String, body: Body
     ) async throws -> T {
         let data = try await bytes(for: self.body(path, method: method, body))
-        do {
-            return try MoldJSON.decoder.decode(T.self, from: data)
-        } catch {
-            throw MoldClientError.malformedResponse
-        }
+        return try decoded(T.self, from: data, route: path)
     }
 
     /// A request with a body whose answer does not.
