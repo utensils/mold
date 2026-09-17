@@ -14,14 +14,20 @@ generation and the library. No 3-D studio.
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Name a print, tag it, file it, and rename or delete a tag across every machine at once. Favourite, tag, filing and renaming are all **undoable** from the Edit menu. Space is Quick Look, and every print can be shared, saved or dragged out. File ▸ Import to adds a picture, clip or mesh from this Mac to a machine. Refreshes by ETag, and follows each machine's live event stream — a print favourited, tagged or trashed somewhere else appears here without a refresh. |
 | **Queue** | Every machine's work, live from its event stream: a batch as one row with its children beneath, drag or Move Up/Down to reorder where the machine will actually put the job, Empty Queue for what is waiting (anything rendering keeps going), and a held row that asks in words -- Pull the missing model then Retry, or the machine's own sentence and Try Again where it says trying again would help. Move to… sends a held job to another machine in the three calls the web app makes, idempotently. The Dock icon counts prints that landed while Mold was in the background, and a finished render or a failed job can notify you. |
 | **Models** | Installed is a table grouped by family -- model, variant, the manifest's plain-English trade-off, size, state -- listing every installed model on the machine, with the machine's own disk figure underneath. Discover searches the catalog through the machine: family and sort come from what it advertises, a row installs, reads Installed, or offers its page when the machine cannot take it. Install, repair, cancel, load, unload, components and delete from the row, the Model menu or the keyboard; downloads in a toolbar popover; a gated model's licence rendered from the machine's own payload and accepted in place. Settings ▸ Accounts holds each machine's catalog tokens. |
-| **Machines** | Every machine's page: its GPUs with what each is holding and how much memory is gone, a switch per card where the machine's scheduler will honour one, live memory and CPU, what is queued and installed there, and its address. Machines on the local network that this one can see are offered to add. The machine picked here is the one the Models pane shows. |
-| **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. Storage sets how much disk the media cache may use. |
+| **Machines** | Every machine's page: its GPUs with what each is holding and how much memory is gone, a switch per card where the machine's scheduler will honour one, live memory and CPU, what is queued and installed there, and its address. Machines on the local network that this one can see are offered to add. The machine picked here is the one the Models pane shows. On a keyed machine this app already holds an operator key for, its page also lists **paired phones** -- name, when paired, when last used, Revoke -- and Pair a Phone… opens a sheet with a QR code and a `mold://pair` link that expires in under two minutes. The section is absent, not disabled, on a keyless machine, because there is nothing there to pair or revoke. |
+| **Settings** | Nine tabs. **General** is this Mac's own preferences -- Dock badge and notifications while Mold is in the background, the media cache and Empty Now (absorbed from the old Storage tab), Reset These Preferences. **Generation** and **Expansion** are the render defaults and the eight `expand.*` keys, each pinned to the engine's own `config_keys.rs` registry by a test that parses the Rust, so a bound that moves there is caught here. **Library** and **Performance** hold the trash/authority-log/held-retention and scheduler/port keys. **Accounts** and **Machines** are unchanged from M5 and M2 -- catalog tokens, and add/edit/remove. **This Mac** is unchanged, plus one sentence on why its engine can never be paired. **Advanced** is the escape hatch: every row `GET /api/config` returns for the picked machine, edited from its own value's JSON type (the wire declares no schema at all), a source badge telling env from db from file, a search field, and Reset wherever the source is `db`. Advanced is also the *only* way to reach `logging.*`, `runpod.*`, `lambda.*`, `models_dir`, `output_dir`, and the sixteen per-model `models.<name>.<field>` rows -- nothing curated repeats them. Adding a machine still normalizes its address the way the other apps do, checks it live while you type, refuses an address another machine already answers at, and puts its key in the Keychain, never a plist. |
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘5 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
 Settings, ⌥⌘I for the inspector (on Generate and on Library, each remembering its own), ⌥-click the wand to remix, ⌘[ and ⌘] for the brush and ⌘Z inside the mask editor, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
 favourite, ⌘⌫ to trash, ⌘Z to undo, Space for Quick Look, Escape to leave the
-viewer.
+viewer. ⇧⌘R checks a selected machine right now, ⇧⌘E and ⇧⌘S export or save a
+copy of the Library selection, ⌘F finds in the Library, and ⌘+ / ⌘− make the
+grid's thumbnails larger or smaller. ⌘A is the grid's own, not a menu
+command -- Edit ▸ Select All is the system's stock item, and this SDK never
+routes it to a custom grid, so the grid answers ⌘A itself while Select All
+stays present and disabled, the way Refresh does when there is nothing to
+refresh.
 Every shortcut is declared once in `MoldCommands` or `LibraryCommands` and only
 *printed* elsewhere — binding one twice queues the work twice.
 
@@ -64,16 +70,25 @@ entitlements allow JIT because candle compiles its Metal shaders at runtime.
 ## Not built yet
 
 Chain jobs (scripted sequences are CLI and API only by design), the 3-D
-studio, pairing-based onboarding for keyed hosts, and large reference uploads -- mold's upload-session protocol is for MiniMax H3 and 3-D
-meshes, neither of which this app makes, so reference pictures always travel
-inline.
+studio, and large reference uploads -- mold's upload-session protocol is for
+MiniMax H3 and 3-D meshes, neither of which this app makes, so reference
+pictures always travel inline.
 
-## Seven things about the wire that the docs do not say
+The app is never a *claimant*. It can issue a pairing for a keyed machine it
+already holds an operator key for (Machines ▸ that machine ▸ Pair a Phone…),
+but nothing here scans a code or asks to be paired itself. **This Mac's own
+engine cannot be paired at all**: it binds `127.0.0.1` with no API key
+(`rust/mold-macos-ffi`'s FFI carries a models directory, not a credential),
+so there is no key to hand a phone, and a phone could not reach loopback on
+this Mac regardless.
+
+## Eight things about the wire that the docs do not say
 
 The first two were found by reading frames off a live host, and both fail
 silently; the third is a rule with two halves; the fourth is a refusal; the
 fifth is an absence that means yes; the sixth is three small traps in one; the
-seventh is about the queue.
+seventh is about the queue; the eighth is that nothing on the wire says what
+a setting is.
 
 `GET /api/events` opens with `event: authority` and then sends **everything
 else** as the literal `event: event`, with the real tag in the payload's
@@ -130,6 +145,24 @@ is ever typed. A transfer is three calls this app makes -- export from the
 source, admit on the destination, complete on the source -- with the export
 kept as opaque bytes, because re-encoding it through this build's request type
 would drop the media it carries.
+
+**Nothing on the wire says what a setting is.** `GET /api/config` answers
+`{key, value, source, env_var?, restart_required}` and the value is the only
+type there is -- string, number, bool or null. There is no schema route, no
+description, no bounds; the engine's own registry has a type it never ships
+and bounds that are literal arguments at each setter. So the curated panes
+carry their own knowledge and a test reads `config_keys.rs` to keep them
+true, and Advanced renders whatever it is handed from the value's JSON type --
+which is what makes a key newer than this build still appear and still work.
+Two more traps in the same room: `runpod.api_key` and `lambda.api_key` read
+back as the literal string `"<set>"`, so a field that writes back what it read
+sets the key to `<set>`; and `restart_required` is true for exactly the three
+`scheduler.*` keys, computed by string prefix, which means a key that DOES
+need a restart (every `logging.*` one) reports false and the app does not
+invent a second opinion. And a `DELETE /api/config/:key` answers
+`source: "default"`, but the listing reports a key's storage SURFACE, so a
+re-read after a reset says `db` again -- a listing cannot tell a stored value
+from a default (`routes_config.rs:48-53`).
 
 ## Running it
 
@@ -198,6 +231,16 @@ machine-keyed JSON fixture and refuses every mutation, and
 photographed without a generation. The sheet ones exist so a UAT run can photograph it without
 a script driving the mouse across the desktop.
 
+`MOLD_NATIVE_SETTINGS_TAB=<general|generation|expansion|library|performance|accounts|machines|thisMac|advanced>`
+opens the Settings window straight to that tab; an unknown or absent id opens
+the first one rather than a blank window.
+`MOLD_NATIVE_PAIRING_FIXTURE=<path>` seeds the Machines pane's Pairing
+section from a JSON file keyed by machine NAME --
+`{"hosts": {"<name>": <PairedClients> | {"clients": …, "session"?: …, "operator_required"?: true}}}`,
+the bare shape or the keyed one that also seeds an in-flight session and the
+403 state -- and refuses every mutation, the same class of hook as
+`MOLD_NATIVE_QUEUE_FIXTURE`.
+
 ## Layout
 
 | Path                  | What                                                              |
@@ -224,8 +267,12 @@ a script driving the mouse across the desktop.
 - A **type's** size is flagged too: `lint-type-size` sums `Type.swift` and every
   `Type+Concern.swift` beside it and prints anything over 600, because slicing
   a type into files that each pass the rule above does not make it smaller.
-  Today it prints exactly one line, `LibraryStore`, and that line is the
-  honest remaining debt rather than a threshold to raise.
+  Today it prints two lines, `HTTPBackend` (1,130) and `LibraryStore` (834),
+  and both are the honest remaining debt rather than a threshold to raise.
+  `HTTPBackend`'s stands on purpose: Swift has no conformance delegation, so
+  composing it out of sub-types would cost roughly 190 forwarder lines that
+  this same rule sums straight back onto the total (M1.5 S8's rule, held
+  again at M7).
 - No `bytes.lines` in `MoldClient`. URLSession's splitter drops empty lines,
   and an empty line is what ends an SSE frame -- the download stream was
   silent for months because of it. `moldLines()` keeps them.
