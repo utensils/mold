@@ -28,8 +28,12 @@ public extension RenderDraft {
 
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         request.title = trimmedTitle.isEmpty ? nil : trimmedTitle
-        // S4: ClientTags.compose folds the auto-tag-from-title rule in here.
-        request.tags = tags.isEmpty ? nil : tags
+        // Folds the title into the tag list when the switch asks for it --
+        // see `ClientTags.compose`.
+        let composedTags = ClientTags.compose(
+            explicit: tags, title: request.title, autoTagTitle: autoTagTitle
+        ).tags
+        request.tags = composedTags.isEmpty ? nil : composedTags
         request.collection = collectionName.map(CollectionRef.named)
         request.outputFormat = outputFormat
         request.upscaleModel = upscaleModel

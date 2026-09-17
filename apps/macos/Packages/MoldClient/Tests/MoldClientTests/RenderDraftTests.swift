@@ -337,7 +337,9 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     #expect(requests.allSatisfy { $0.batchSize == 1 })
     #expect(requests.allSatisfy { $0.prompt == "a tin robot" })
     #expect(requests.allSatisfy { $0.title == "Robots" })
-    #expect(requests.allSatisfy { $0.tags == ["metal"] })
+    // "Robots" auto-tags as "robots" -- `autoTagTitle` defaults to on, and
+    // `ClientTags.compose` is what turns the title into that extra tag.
+    #expect(requests.allSatisfy { $0.tags == ["metal", "robots"] })
     #expect(requests.allSatisfy { $0.collection == .named("Robots") })
 
     let batchId = try #require(requests[0].batchId)

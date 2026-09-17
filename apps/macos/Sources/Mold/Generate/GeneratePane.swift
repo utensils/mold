@@ -9,8 +9,17 @@ import SwiftUI
 struct GeneratePane: View {
     @Binding var destination: Destination
     @Environment(HostStore.self) private var hosts
-    @Environment(ModelStore.self) private var models
-    @Environment(GenerateController.self) private var controller
+    /// Not `private`: the toolbar's model picker, in an extension in another
+    /// file, reads it too.
+    @Environment(ModelStore.self) var models
+    /// Not `private`, same reason.
+    @Environment(GenerateController.self) var controller
+    /// Persisted, and deliberately not `private`: the toolbar button that
+    /// flips it lives in an extension in another file. Its own key beside
+    /// `libraryShowsInspector` -- ⌥⌘I is one shortcut whose STATE is per
+    /// destination.
+    @AppStorage("generateShowsInspector", store: AppStorageSuite.defaults)
+    var showsInspector = true
 
     var body: some View {
         @Bindable var controller = controller
@@ -24,6 +33,10 @@ struct GeneratePane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .trailingColumn(isShowing: showsInspector) {
+            GenerateInspector(recipe: recipe, model: selectedModel, host: host,
+                              draft: $controller.draft)
+        }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
@@ -33,6 +46,9 @@ struct GeneratePane: View {
         .onExitCommand { controller.promptTucked = false }
         .focusedSceneValue(\.promptTuck, PromptTuckAction(isTucked: controller.promptTucked) {
             controller.promptTucked.toggle()
+        })
+        .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
+            showsInspector.toggle()
         })
         .task { await loadModels() }
         .task { await controller.recoverPending() }
@@ -61,11 +77,13 @@ struct GeneratePane: View {
 
     // MARK: - Selection
 
-    private var host: MoldHost? {
+    /// Not `private`: the toolbar's model picker needs it too.
+    var host: MoldHost? {
         hosts.hosts.first { $0.id == controller.hostID } ?? hosts.preferredHost
     }
 
-    private var selectedModel: Model? {
+    /// Not `private`, same reason.
+    var selectedModel: Model? {
         guard let host, let name = controller.modelName else { return nil }
         return models.model(named: name, on: host.id)
     }
@@ -82,20 +100,6 @@ struct GeneratePane: View {
         guard let host else { return "No machine" }
         guard let model = selectedModel else { return host.name }
         return "\(model.headline) · \(host.name)"
-    }
-
-    // MARK: - Toolbar
-
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem {
-            ModelPicker(
-                host: host,
-                families: host.map { models.families(on: $0.id) } ?? [],
-                selected: selectedModel
-            ) { model in
-                if let host { controller.select(model: model, on: host.id) }
-            }
-        }
     }
 
     private func loadModels() async {

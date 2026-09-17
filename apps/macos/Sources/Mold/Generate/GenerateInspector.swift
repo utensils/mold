@@ -1,0 +1,69 @@
+import MoldClient
+import MoldStyle
+import SwiftUI
+
+/// Everything the capsule is too small for.
+///
+/// Every group EXISTS only when the recipe advertises it, and none of them is
+/// ever a disabled control: a model that cannot do a thing has nothing to say
+/// about it, and a greyed row invites a click that will never work. The
+/// ordering is how often a thing is touched, the same rule `LibraryInspector`
+/// follows.
+struct GenerateInspector: View {
+    let recipe: GenerationRecipe?
+    let model: Model?
+    let host: MoldHost?
+    @Binding var draft: RenderDraft
+
+    @Environment(HostStore.self) private var hosts
+    @Environment(ModelStore.self) private var models
+    @Environment(LibraryStore.self) private var library
+
+    @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
+    private var showsOutput = true
+    @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
+    private var showsFileUnder = false
+    // M4 appends a Recent group here, behind this same key.
+    @AppStorage("createShowsRecent", store: AppStorageSuite.defaults)
+    private var showsRecent = false
+
+    var body: some View {
+        Group {
+            if model == nil {
+                ContentUnavailableView("Nothing to set", systemImage: "slider.horizontal.3")
+            } else {
+                ScrollView { content.padding(16) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private var content: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            DisclosureGroup("Output", isExpanded: $showsOutput) {
+                OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
+                    .padding(.top, 6)
+            }
+            .font(.callout)
+            if FileUnderGroup.isShown(capabilities: capabilities) {
+                DisclosureGroup("File under", isExpanded: $showsFileUnder) {
+                    FileUnderGroup(shelves: library.shelves, draft: $draft)
+                        .padding(.top, 6)
+                }
+                .font(.callout)
+            }
+        }
+    }
+
+    private var capabilities: Capabilities? {
+        host.flatMap { hosts.capabilities(of: $0) }
+    }
+
+    /// Every model this host has, upscalers included -- `ModelStore.ready`
+    /// filters those out, so `OutputGroup` reads the raw list and does its
+    /// own `isUpscaler && isReady` filtering (`UpscaleRow.resolve`).
+    private var hostModels: [Model] {
+        guard let host else { return [] }
+        return models.byHost[host.id] ?? []
+    }
+}

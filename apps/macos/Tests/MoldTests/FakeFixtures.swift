@@ -46,6 +46,14 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
+    /// `gallery.organize` is what `canOrganize` reads -- absence (an older
+    /// host) is a separate case from an explicit `false`, but both mean no
+    /// File-under group.
+    static func capabilities(organize: Bool) -> Capabilities {
+        let json = #"{"gallery": {"organize": \#(organize)}}"#
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
+    }
+
     /// A host that HAS said something about prompt expansion. Omitting the
     /// whole `expand` key (rather than calling this) is how a test plants the
     /// "hasn't said" host `mayExpandPrompts` treats as unknown-not-no.
@@ -89,10 +97,13 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(ExportOptions.self, from: Data(#"{"formats": [\#(list)]}"#.utf8))
     }
 
-    static func model(_ name: String, family: String = "flux", sizeGb: Double? = nil) -> Model {
+    static func model(
+        _ name: String, family: String = "flux", sizeGb: Double? = nil, downloaded: Bool? = nil
+    ) -> Model {
         let json = #"""
         {"name": "\#(name)", "family": "\#(family)", "description": "\#(name) — fake",
-         "size_gb": \#(sizeGb.map { "\($0)" } ?? "null")}
+         "size_gb": \#(sizeGb.map { "\($0)" } ?? "null"),
+         "downloaded": \#(downloaded.map { "\($0)" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(Model.self, from: Data(json.utf8))
     }
