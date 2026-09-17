@@ -63,16 +63,17 @@ extension FakeFixtures {
     }
 
     /// One recipe, decoded rather than built -- `GenerationRecipe` has no
-    /// public memberwise init either. Only `prompt` varies across the tests
-    /// that need one at all.
-    static func recipe(prompt: PromptRequirement = .required) -> GenerationRecipe {
+    /// public memberwise init either. `prompt` and `stepsMax` are the only
+    /// things that vary across the tests that need one at all -- the latter
+    /// for a test pinning a stored default gets CLAMPED, not just applied.
+    static func recipe(prompt: PromptRequirement = .required, stepsMax: Int = 100) -> GenerationRecipe {
         let json = #"""
         {"id": "r", "label": "R",
          "defaults": {"width": 1024, "height": 1024, "steps": 20, "guidance": 3.5,
                       "frames": null, "fps": null, "negative_prompt": null},
          "resolution": {"domain": "dynamic", "alignment": 16, "min_width": 256, "min_height": 256,
                         "max_pixels": null, "max_axis_pixels": null, "off_bucket": null, "aspect_groups": null},
-         "steps": {"default": 20, "min": 1, "max": 100, "step": 1, "recommended": null, "mode": "adjustable", "note": null},
+         "steps": {"default": 20, "min": 1, "max": \#(stepsMax), "step": 1, "recommended": null, "mode": "adjustable", "note": null},
          "guidance": {"default": 3.5, "min": 0, "max": 10, "step": 0.1, "mode": "adjustable", "note": null},
          "temporal": null,
          "capabilities": {"prompt": {"mode": "\#(prompt.rawValue)", "reason": null}, "negative_prompt": null,
@@ -178,5 +179,22 @@ extension FakeFixtures {
         }.joined(separator: ",")
         let json = #"{"id": "\#(id)", "client_batch_id": "\#(clientBatchId)", "children": [\#(rows)]}"#
         return try! MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
+    }
+
+    /// A real `GET /api/config` from plato: 63 entries, 16 `models.*` rows
+    /// for two configured models (`flux-dev:q8`, `flux2-klein:q8`), every
+    /// value `null`, `source:"db"` -- what "configured but nothing set"
+    /// looks like on a real host. Loaded by a path relative to THIS file
+    /// rather than `MoldClientTests`' own `RepoFixtures`: this app test
+    /// bundle is a separate target and cannot see that package's fixtures
+    /// or its resource bundle.
+    static func configListing(fixture name: String = "config-plato.json") -> ConfigListing {
+        let fixtures = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests/MoldTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // apps/macos
+            .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
+        let data = try! Data(contentsOf: fixtures.appending(path: name))
+        return try! MoldJSON.decoder.decode(ConfigListing.self, from: data)
     }
 }

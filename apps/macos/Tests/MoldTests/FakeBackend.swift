@@ -29,6 +29,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// planted -- a REFUSAL, not an unreachable machine, so a store test can
     /// still pin the verb its report was keyed on.
     nonisolated(unsafe) var refuses: Set<String> = []
+    /// Route names that throw a SPECIFIC error instead of what they would
+    /// otherwise answer -- `refuses`' fixed 409 can't simulate a `503
+    /// HISTORY_UNAVAILABLE` or `503 CONFIG_UNAVAILABLE`, which a store must
+    /// tell apart from an ordinary refusal by CODE, not by status alone.
+    nonisolated(unsafe) var plantedErrors: [String: Error] = [:]
     nonisolated(unsafe) var prints: [GalleryPrint] = []
     nonisolated(unsafe) var trashedRows: [GalleryPrint] = []
     nonisolated(unsafe) var tagRows: [TagCount] = []
@@ -90,6 +95,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     private func record(_ route: String) throws {
         calls.append(route)
+        if let planted = plantedErrors[route] { throw planted }
         if refuses.contains(route) {
             throw MoldClientError.http(status: 409, code: nil, message: "Refused by the fake.")
         }

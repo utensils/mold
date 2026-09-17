@@ -20,6 +20,8 @@ struct MoldApp: App {
     @State private var queue: QueueStore
     @State private var downloads: DownloadStore
     @State private var machines: MachineStore
+    @State private var promptHistory: PromptHistoryStore
+    @State private var modelDefaults: ModelDefaultsStore
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -34,7 +36,10 @@ struct MoldApp: App {
         _models = State(initialValue: ModelStore(hosts: hosts))
         _queue = State(initialValue: QueueStore(hosts: hosts))
         _downloads = State(initialValue: DownloadStore(hosts: hosts))
-        _generate = State(initialValue: GenerateController(hosts: hosts))
+        let modelDefaults = ModelDefaultsStore(hosts: hosts)
+        _modelDefaults = State(initialValue: modelDefaults)
+        _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
+        _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))
         _machines = State(initialValue: MachineStore(hosts: hosts))
     }
 
@@ -59,6 +64,8 @@ struct MoldApp: App {
                 .environment(queue)
                 .environment(downloads)
                 .environment(machines)
+                .environment(promptHistory)
+                .environment(modelDefaults)
                 .environment(engine)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.

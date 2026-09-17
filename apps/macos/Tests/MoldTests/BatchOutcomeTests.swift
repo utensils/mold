@@ -17,7 +17,7 @@ struct BatchOutcomeTests {
 
     private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
         let hosts = HostStore(hosts: [host]) { _ in backend }
-        let controller = GenerateController(hosts: hosts)
+        let controller = GenerateController(hosts: hosts, defaults: ModelDefaultsStore(hosts: hosts))
         controller.modelName = "flux-dev:q4"
         controller.hostID = host.id
         controller.draft.prompt = "a cat"

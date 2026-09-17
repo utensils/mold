@@ -9,6 +9,10 @@ final class GenerateController {
     /// Not `private`: `GenerateController+Run` reports a machine's cancel
     /// failure through it.
     let hosts: HostStore
+    /// What a machine has been told a model's controls should start at --
+    /// read on adoption, after the recipe's own numbers, and never on a KEPT
+    /// draft. See `applyStoredDefaults`.
+    let defaults: ModelDefaultsStore
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
@@ -39,8 +43,9 @@ final class GenerateController {
     var runTask: Task<Void, Never>?
     var activeBatch: (id: String, clientBatchId: String, host: MoldHost.ID)?
 
-    init(hosts: HostStore) {
+    init(hosts: HostStore, defaults: ModelDefaultsStore) {
         self.hosts = hosts
+        self.defaults = defaults
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.
@@ -52,9 +57,10 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         hostID = host
-        if let recipe = model.defaultRecipe {
-            draft = draft.adopting(recipe, isNewModel: !keepingDraft)
-        }
+        guard let recipe = model.defaultRecipe else { return }
+        let isNewModel = !keepingDraft
+        draft = draft.adopting(recipe, isNewModel: isNewModel)
+        applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
 
     /// Adopts a model, reconciling the draft against its recipe.
@@ -63,9 +69,35 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         hostID = host
-        if let recipe = model.defaultRecipe {
-            draft = draft.adopting(recipe, isNewModel: isNewModel)
+        guard let recipe = model.defaultRecipe else { return }
+        draft = draft.adopting(recipe, isNewModel: isNewModel)
+        applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
+    }
+
+    /// Puts a machine's stored per-model defaults on top of the recipe's own
+    /// numbers -- but only on a NEW model; `applying` is already a no-op on a
+    /// kept draft, and this skips the store read entirely in that case.
+    ///
+    /// If this host's listing has never been read, nothing is applied yet;
+    /// a refresh is kicked off and, once it lands, applied retroactively --
+    /// but only if this is STILL the selected model and host by then. A
+    /// second model choice made while that refresh was in flight makes its
+    /// answer moot, and re-applying it over whatever is now on screen would
+    /// silently overwrite a choice made in between.
+    private func applyStoredDefaults(
+        for model: Model, on host: MoldHost.ID, recipe: GenerationRecipe, isNewModel: Bool
+    ) {
+        guard isNewModel else { return }
+        guard defaults.hasLoaded(on: host) else {
+            Task { [weak self] in
+                await self?.defaults.refresh(on: host)
+                guard let self, self.modelName == model.name, self.hostID == host else { return }
+                self.draft = self.draft.applying(
+                    self.defaults.defaults(for: model.name, on: host), recipe: recipe, isNewModel: true)
+            }
+            return
         }
+        draft = draft.applying(defaults.defaults(for: model.name, on: host), recipe: recipe, isNewModel: true)
     }
 
     /// Asks the host where this would run and roughly how long it would take.
