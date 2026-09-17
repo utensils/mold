@@ -121,7 +121,9 @@ extension MachinesPane {
     /// (`PairingSection.swift`) rather than a function here, since it needs
     /// its own `@State` for the sheet and the pending revoke.
     @ViewBuilder func pairing(_ host: MoldHost) -> some View {
-        PairingSection(host: host)
+        // ABSENT for this Mac's engine, never disabled -- `MoldEngine.isPairable`
+        // carries the reason and the test (review F4).
+        if MoldEngine.isPairable(host) { PairingSection(host: host) }
     }
 
     // MARK: - The figures
