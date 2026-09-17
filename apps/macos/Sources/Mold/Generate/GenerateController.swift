@@ -91,7 +91,13 @@ final class GenerateController {
         hostID = host
         recipeID = nil
         machineChoice = host
-        guard let recipe = model.defaultRecipe else { return }
+        guard let recipe = model.defaultRecipe else {
+            // No recipe to reconcile against, but the draft must not keep
+            // describing the PREVIOUS model's layout -- the request builder
+            // routes the wire off `sourceMode` (finding 08, low).
+            draft.media.sourceMode = .single
+            return
+        }
         let isNewModel = !keepingDraft
         draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
@@ -104,7 +110,10 @@ final class GenerateController {
         modelFamily = model.family
         hostID = host
         if isNewModel { recipeID = nil }
-        guard let recipe = model.defaultRecipe else { return }
+        guard let recipe = model.defaultRecipe else {
+            draft.media.sourceMode = .single
+            return
+        }
         draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
