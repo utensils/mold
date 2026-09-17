@@ -30,19 +30,21 @@ struct MachineRow: View {
             }
         }
         .help(HostAddress.displayString(for: host.baseURL))
-        // The Machine menu's own two items first, in its order and its words
-        // (`MachineCommands.swift:21-25`) -- both calling the same
-        // `HostStore` methods it does, so a right click and ⇧⌘R can never
-        // mean different things. Show in Library is the Library's, not the
-        // Machine menu's, so it sits behind a divider.
-        .contextMenu {
-            Button("Check Now") { Task { await hosts.refresh(host) } }
-            Button("Set as Default") { hosts.setDefault(host) }
-            Divider()
-            Button("Show in Library") {
-                navigation.query.tokens = [.machine(id: host.id, name: host.name)]
-                destination = .library
-            }
+        // Declared once in `SidebarMachineActions`, which is also where the
+        // Machine menu's two items get their words -- so a right click and
+        // ⇧⌘R can never mean different things.
+        .rowActionMenu(SidebarMachineActions.offered(), perform: perform)
+    }
+
+    private func perform(_ kind: SidebarMachineActions.Kind) {
+        switch kind {
+        case .checkNow:
+            Task { await hosts.refresh(host) }
+        case .setDefault:
+            hosts.setDefault(host)
+        case .showInLibrary:
+            navigation.query.tokens = [.machine(id: host.id, name: host.name)]
+            destination = .library
         }
     }
 }

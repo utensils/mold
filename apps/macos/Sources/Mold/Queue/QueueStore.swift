@@ -38,11 +38,10 @@ final class QueueStore {
     /// .hydrate(on:)`. Not `private` for the same cross-file reason.
     var hydrations: [MoldHost.ID: Task<Void, Never>] = [:]
 
-    /// The newest refresh for each machine, and whether one is already
-    /// PROMISED behind the one in flight. Together they are the throttle
-    /// `refresh(on:)` documents: one read at a time, at most one queued.
-    var refreshes: [MoldHost.ID: Task<Void, Never>] = [:]
-    var queuedRefreshes: [MoldHost.ID: Task<Void, Never>] = [:]
+    /// The throttle on `refresh(on:)` -- one read at a time per machine, at
+    /// most one queued behind it. Its own type, because `QueueStore` is at
+    /// the type-size budget and this is a rule, not more state.
+    let reads = SingleFlight()
 
     /// How long a burst of job frames waits before the one re-read it earns
     /// -- a stored value, not a fixed constant, so a test can shrink it

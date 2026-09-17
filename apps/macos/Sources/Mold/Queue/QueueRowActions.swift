@@ -66,18 +66,43 @@ struct QueueRowActions: Equatable {
         }
     }
 
-    /// The contextual menu's titles, in order, so a test pins exactly what a
-    /// right-click offers without rendering a menu -- `QueueHoldRow
-    /// .menuTitles`'s shape, and deliberately the same words and the same
-    /// order as the Queue menu itself (`QueueSelection.offeredTitles`).
-    func menuTitles(canMoveUp: Bool = false, canMoveDown: Bool = false) -> [String] {
-        var titles: [String] = []
-        if pause { titles.append("Pause Job") }
-        if resume { titles.append("Resume Job") }
-        if retry { titles.append("Try Again") }
-        if canMoveUp { titles.append("Move Up") }
-        if canMoveDown { titles.append("Move Down") }
-        if cancel { titles.append("Cancel Job") }
-        return titles
+    /// Everything a row's menu can offer. Moving is here too, because a menu
+    /// is the only way to reach a move from the keyboard.
+    enum Kind: Hashable {
+        case pause, resume, retry, moveUp, moveDown, cancel
+    }
+
+    /// THE list the contextual menu draws -- rendered by `.rowActionMenu`,
+    /// not mirrored by it. It used to be a `menuTitles` beside a hand-written
+    /// `@ViewBuilder`, which is two lists: reordering the view broke nothing,
+    /// and "destructive last, behind a divider" was pinned nowhere at all.
+    ///
+    /// Deliberately the same words and the same order as the Queue menu
+    /// itself (`QueueSelection.offeredTitles`), which a test asserts rather
+    /// than a comment claiming it.
+    func offered(canMoveUp: Bool = false, canMoveDown: Bool = false) -> [RowAction<Kind>] {
+        var items: [RowAction<Kind>] = []
+        if pause { items.append(RowAction(kind: .pause, title: "Pause Job")) }
+        if resume { items.append(RowAction(kind: .resume, title: "Resume Job")) }
+        if retry { items.append(RowAction(kind: .retry, title: "Try Again")) }
+        if canMoveUp { items.append(RowAction(kind: .moveUp, title: "Move Up")) }
+        if canMoveDown { items.append(RowAction(kind: .moveDown, title: "Move Down")) }
+        if cancel { items.append(RowAction(kind: .cancel, title: "Cancel Job", isDestructive: true)) }
+        return RowAction.ordered(items)
+    }
+
+    /// A whole batch's menu. The same gates and the same order; the words say
+    /// what each item REACHES, which is what distinguishes a group item from
+    /// a child row's own.
+    func groupOffered(canMoveUp: Bool = false, canMoveDown: Bool = false) -> [RowAction<Kind>] {
+        var items: [RowAction<Kind>] = []
+        if pause { items.append(RowAction(kind: .pause, title: "Pause Every Job")) }
+        if resume { items.append(RowAction(kind: .resume, title: "Resume Every Job")) }
+        if canMoveUp { items.append(RowAction(kind: .moveUp, title: "Move Up")) }
+        if canMoveDown { items.append(RowAction(kind: .moveDown, title: "Move Down")) }
+        if cancel {
+            items.append(RowAction(kind: .cancel, title: "Cancel Every Job", isDestructive: true))
+        }
+        return RowAction.ordered(items)
     }
 }

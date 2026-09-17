@@ -110,6 +110,25 @@ struct DeviceControlTests {
             == DeviceControl.MenuItem(title: "Enable at next restart", enable: true))
     }
 
+    /// **Fails today**: `MachineRow` hardcodes "Check Now" and "Set as
+    /// Default" and `MachineCommands` hardcodes the same two words ten files
+    /// away, with nothing shared and nothing tested. Renaming one leaves the
+    /// other saying the old thing.
+    @Test func aMachineRowOffersTheMachineMenusOwnItemsFirst() {
+        let offered = SidebarMachineActions.offered()
+
+        #expect(offered.map(\.kind) == [.checkNow, .setDefault, .showInLibrary])
+        // The Machine menu's own two, in its order, from the one declaration
+        // `MachineCommands` reads too.
+        #expect(offered.prefix(2).map(\.title)
+            == [SidebarMachineActions.checkNow, SidebarMachineActions.setAsDefault])
+        #expect(offered.map(\.title) == ["Check Now", "Set as Default", "Show in Library"])
+        // Nothing here removes anything, so nothing is destructive and there
+        // is always a menu to open.
+        #expect(offered.allSatisfy { !$0.isDestructive && !$0.isDisabled })
+        #expect(RowAction.offersMenu(offered))
+    }
+
     @Test func aDeviceWithNoReportedTotalHasNoBar() {
         #expect(MemoryReading(used: 12, total: nil) == nil)
         #expect(MemoryReading(used: 12, total: 0) == nil)

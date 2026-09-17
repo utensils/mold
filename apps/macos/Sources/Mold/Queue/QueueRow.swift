@@ -49,8 +49,27 @@ struct QueueRow: View {
             buttons
         }
         .padding(.vertical, 3)
-        .contextMenu { menu }
+        // THE list its buttons are built from, rendered rather than mirrored
+        // -- and no menu at all on a settled row, which used to open an empty
+        // one. Destructive last behind a divider is `RowActionMenu`'s rule,
+        // not a `@ViewBuilder` this file could reorder by accident.
+        .rowActionMenu(
+            actions.offered(
+                canMoveUp: isReorderable && canMoveUp,
+                canMoveDown: isReorderable && canMoveDown),
+            perform: perform)
         .help(entry.id)
+    }
+
+    private func perform(_ kind: QueueRowActions.Kind) {
+        switch kind {
+        case .pause: act(.pause)
+        case .resume: act(.resume)
+        case .retry: act(.retry)
+        case .moveUp: moveUp()
+        case .moveDown: moveDown()
+        case .cancel: act(.cancel)
+        }
     }
 
     @ViewBuilder private var buttons: some View {
@@ -74,26 +93,6 @@ struct QueueRow: View {
         }
         .buttonStyle(.borderless)
         .labelStyle(.iconOnly)
-    }
-
-    /// The same four actions, the same gates, in the Queue menu's own words
-    /// and its own order -- and nothing here is ever disabled, the
-    /// "absent, not disabled" rule this whole pane follows. Destructive last,
-    /// behind a divider, exactly as `QueueHoldRow`'s menu already does.
-    @ViewBuilder private var menu: some View {
-        if actions.pause { Button("Pause Job") { act(.pause) } }
-        if actions.resume { Button("Resume Job") { act(.resume) } }
-        if actions.retry { Button("Try Again") { act(.retry) } }
-        // Drag alone is unreachable from the keyboard and invisible to
-        // Help ▸ Search -- these are the same move, offered a second way.
-        if isReorderable {
-            if canMoveUp { Button("Move Up", action: moveUp) }
-            if canMoveDown { Button("Move Down", action: moveDown) }
-        }
-        if actions.cancel {
-            Divider()
-            Button("Cancel Job", role: .destructive) { act(.cancel) }
-        }
     }
 
     private var symbol: String {

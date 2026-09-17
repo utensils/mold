@@ -115,34 +115,72 @@ struct QueueRowActionsTests {
 
     // MARK: - The contextual menu
 
-    /// The right-click menu carries the same actions, under the same gates,
-    /// in the Queue menu's own words and order -- with the destructive item
-    /// last (`QueueCommands.swift:17-36`).
-    @Test func theContextualMenuMatchesTheQueueMenusWordsAndOrder() {
+    /// **Fails today**: `menuTitles` is a HAND-MAINTAINED COPY of the row's
+    /// `@ViewBuilder`. Reorder or rename an item in the view and this still
+    /// passes, and neither list carries a divider, so "destructive last,
+    /// behind a divider" -- the rule this whole pass is about -- is pinned
+    /// nowhere at all.
+    ///
+    /// `offered(...)` is now THE list `.rowActionMenu` renders, so asserting
+    /// on it asserts on the menu: its order, its gating, its wording, and
+    /// which item is destructive.
+    @Test func theContextualMenuIsTheListTheViewDraws() {
         let waiting = QueueRowActions.resolve(entry("queued"), on: modern)
-        #expect(waiting.menuTitles(canMoveUp: true, canMoveDown: true)
-            == ["Pause Job", "Move Up", "Move Down", "Cancel Job"])
+            .offered(canMoveUp: true, canMoveDown: true)
+        #expect(waiting.map(\.title) == ["Pause Job", "Move Up", "Move Down", "Cancel Job"])
+        // Destructive LAST -- which is where `RowActionMenu` draws the
+        // divider -- and it is the only one.
+        #expect(waiting.map(\.isDestructive) == [false, false, false, true])
+        #expect(waiting.map(\.kind) == [.pause, .moveUp, .moveDown, .cancel])
 
-        let held = QueueRowActions.resolve(entry("held"), on: modern)
-        #expect(held.menuTitles() == ["Try Again", "Cancel Job"])
+        let held = QueueRowActions.resolve(entry("held"), on: modern).offered()
+        #expect(held.map(\.title) == ["Try Again", "Cancel Job"])
 
-        let paused = QueueRowActions.resolve(entry("paused"), on: modern)
-        #expect(paused.menuTitles() == ["Resume Job", "Cancel Job"])
+        let paused = QueueRowActions.resolve(entry("paused"), on: modern).offered()
+        #expect(paused.map(\.title) == ["Resume Job", "Cancel Job"])
 
-        // Nothing offered means nothing drawn -- not an empty menu of
-        // disabled items.
-        #expect(QueueRowActions.resolve(entry("complete"), on: modern).menuTitles().isEmpty)
+        // Nothing offered means NO MENU -- `.rowActionMenu` attaches none, so
+        // a right-click on a settled row does not open an empty one.
+        let settled = QueueRowActions.resolve(entry("complete"), on: modern).offered()
+        #expect(settled.isEmpty)
+        #expect(!RowAction.offersMenu(settled))
+    }
+
+    /// And it says the same things the Queue menu says, in the same order --
+    /// asserted against that menu's own list rather than against a comment
+    /// claiming they agree.
+    @Test func theRowsMenuAndTheQueueMenuOfferTheSameWords() {
+        for state in ["queued", "running", "paused", "held", "complete"] {
+            let row = QueueRowActions.resolve(entry(state), on: modern)
+            let selection = QueueSelection(
+                job: QueueSelection.Job(
+                    canPause: row.pause, canResume: row.resume, canRetry: row.retry,
+                    canMoveUp: true, canMoveDown: true, canCancel: row.cancel,
+                    moveToDestinations: [], pause: {}, resume: {}, retry: {},
+                    moveUp: {}, moveDown: {}, cancel: {}, moveTo: { _ in }),
+                emptyQueue: nil)
+            #expect(selection.offeredTitles
+                == row.offered(canMoveUp: true, canMoveDown: true).map(\.title),
+                "\(state)")
+        }
     }
 
     /// A batch's own menu names the reach of each item, and is likewise
-    /// destructive-last.
+    /// destructive-last. Retry is never a group action -- it needs a
+    /// `QueueAuthority` per row.
     @Test func aBatchsContextualMenuNamesEveryJobItReaches() {
         let rows = [
             FakeFixtures.queueEntry("a", state: "queued"),
             FakeFixtures.queueEntry("b", state: "paused"),
         ]
-        let actions = QueueRowActions.group(rows, on: modern)
-        #expect(QueueBatchRow.menuTitles(actions, canMoveUp: false, canMoveDown: true)
+        let offered = QueueRowActions.group(rows, on: modern)
+            .groupOffered(canMoveUp: false, canMoveDown: true)
+        #expect(offered.map(\.title)
             == ["Pause Every Job", "Resume Every Job", "Move Down", "Cancel Every Job"])
+        #expect(offered.last?.isDestructive == true)
+
+        let held = [FakeFixtures.queueEntry("a", state: "held")]
+        #expect(!QueueRowActions.group(held, on: modern).groupOffered()
+            .contains { $0.kind == .retry })
     }
 }

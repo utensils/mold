@@ -49,35 +49,23 @@ struct QueueBatchRow: View {
             }
         }
         .padding(.vertical, 3)
-        .contextMenu { menu }
+        // THE list its buttons are built from -- see `QueueRow`'s own note.
+        .rowActionMenu(
+            actions.groupOffered(canMoveUp: canMoveUp, canMoveDown: canMoveDown),
+            perform: perform)
     }
 
-    /// The batch's own buttons a second way, in the Queue menu's words and
-    /// order -- "every" because a group item reaches every child it applies
-    /// to, which is what distinguishes it from a child row's own item.
-    @ViewBuilder private var menu: some View {
-        if actions.pause { Button("Pause Every Job") { groupAct(.pause) } }
-        if actions.resume { Button("Resume Every Job") { groupAct(.resume) } }
-        if canMoveUp { Button("Move Up", action: moveUp) }
-        if canMoveDown { Button("Move Down", action: moveDown) }
-        if actions.cancel {
-            Divider()
-            Button("Cancel Every Job", role: .destructive) { groupAct(.cancel) }
+    private func perform(_ kind: QueueRowActions.Kind) {
+        switch kind {
+        case .pause: groupAct(.pause)
+        case .resume: groupAct(.resume)
+        case .moveUp: moveUp()
+        case .moveDown: moveDown()
+        case .cancel: groupAct(.cancel)
+        // A group has no Try Again: retry needs a `QueueAuthority` per row,
+        // which is `QueueHoldRow`'s, so `groupOffered` never offers it.
+        case .retry: return
         }
-    }
-
-    /// The titles `menu` draws, in order, so a test pins them without
-    /// rendering a menu -- `QueueHoldRow.menuTitles`'s shape.
-    static func menuTitles(
-        _ actions: QueueRowActions, canMoveUp: Bool, canMoveDown: Bool
-    ) -> [String] {
-        var titles: [String] = []
-        if actions.pause { titles.append("Pause Every Job") }
-        if actions.resume { titles.append("Resume Every Job") }
-        if canMoveUp { titles.append("Move Up") }
-        if canMoveDown { titles.append("Move Down") }
-        if actions.cancel { titles.append("Cancel Every Job") }
-        return titles
     }
 
     @ViewBuilder private var buttons: some View {

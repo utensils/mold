@@ -18,10 +18,14 @@ struct MachineCommands: Commands {
         CommandMenu("Machine") {
             // Present and disabled off no machine, the rule `Refresh` set:
             // Help ▸ Search finds "Set as Default" from every pane.
-            Button("Check Now") { selection?.check() }
+            // The words come from `SidebarMachineActions`, which is also what
+            // a machine row's right-click menu draws -- one spelling, two
+            // surfaces. The shortcut and the disabled-off-nothing rule stay
+            // here, because a `RowAction` carries neither.
+            Button(SidebarMachineActions.checkNow) { selection?.check() }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(selection == nil)
-            Button("Set as Default") { selection?.setDefault() }
+            Button(SidebarMachineActions.setAsDefault) { selection?.setDefault() }
                 .disabled(selection == nil)
             if let selection, !selection.machines.isEmpty {
                 Divider()
