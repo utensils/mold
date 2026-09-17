@@ -26,18 +26,31 @@ extension LibraryActions {
         }
     }
 
-    private func send(_ urls: [URL], to host: MoldHost) async {
+    /// Not `private`: `LibraryImportTests` sends a batch without an open
+    /// panel, which is the only way to pin what a batch does with one bad
+    /// file in the middle of it.
+    func send(_ urls: [URL], to host: MoldHost) async {
         guard let client = hosts.backend(for: host.id) else { return }
+        /// The files this Mac could not read, reported ONCE when the batch is
+        /// done. Not per file: every successful import calls
+        /// `hosts.succeeded(on:)`, which clears that machine's failures, so a
+        /// report made mid-loop is wiped by the next file that works -- ten
+        /// chosen, one unreadable, nothing said.
+        var unreadable: [(name: String, error: Error)] = []
         for url in urls {
             let data: Data
             do {
-                data = try Data(contentsOf: url)
+                // Off the main actor, like every other file this app reads:
+                // an import is routinely a 60 MB PNG or a clip, and this
+                // method is MainActor-isolated by default.
+                data = try await MediaImport.bytes(of: url)
             } catch {
-                // Ten files chosen, nine imported, no message -- the same
-                // silence `saveAll` was rewritten to stop. The upload failure
-                // below already reports; the READ did not.
-                hosts.report(error, on: host.id, doing: "import “\(url.lastPathComponent)”")
-                return
+                // CONTINUE, not return: a file this Mac cannot read is about
+                // THAT FILE, and abandoning the other nine is worse than the
+                // silence it replaced. A refused upload below is about the
+                // MACHINE, which is why that one stops.
+                unreadable.append((url.lastPathComponent, error))
+                continue
             }
             // The file's own date, so an old picture lands where it belongs in
             // a day-sectioned timeline instead of at the top of today.
@@ -55,6 +68,16 @@ extension LibraryActions {
                 return
             }
         }
+        report(unreadable, to: host)
+    }
+
+    /// One line for the whole batch, once every import that could happen has.
+    private func report(_ unreadable: [(name: String, error: Error)], to host: MoldHost) {
+        guard let first = unreadable.first else { return }
+        let verb = unreadable.count == 1
+            ? "import “\(first.name)”"
+            : "import \(unreadable.count) of those files"
+        hosts.report(first.error, on: host.id, doing: verb)
     }
 
     /// The picture's real shape, read from the file's own header rather than

@@ -20,9 +20,17 @@ nonisolated enum MediaImport {
     }
 
     static func load(_ url: URL) async throws -> File {
+        let data = try await bytes(of: url)
+        return await Task.detached(priority: .userInitiated) {
+            File(base64: data.base64EncodedString(), name: url.lastPathComponent)
+        }.value
+    }
+
+    /// The bytes alone, for a caller that sends them as bytes -- a Library
+    /// import, which hands a whole file to `GalleryImport`.
+    static func bytes(of url: URL) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            let data = try Data(contentsOf: url)
-            return File(base64: data.base64EncodedString(), name: url.lastPathComponent)
+            try Data(contentsOf: url)
         }.value
     }
 }

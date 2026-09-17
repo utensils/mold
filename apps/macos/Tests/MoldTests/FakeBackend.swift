@@ -223,7 +223,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Holds `status()` open until `releaseStatus()`, the way a machine that
     /// is off holds a connection until it times out. A test uses it to prove
     /// that asking one machine does not stop the others being asked.
-    nonisolated(unsafe) var statusHeldOpen = false
+    nonisolated(unsafe) var statusHeldOpen = false {
+        // Setting the hold ARMS it: hold → release → hold again is a test
+        // this seam should answer, and a latch that is never cleared would
+        // silently not hold the second time.
+        didSet { if statusHeldOpen { statusReleased = false } }
+    }
     nonisolated(unsafe) private var statusWaiters: [CheckedContinuation<Void, Never>] = []
     /// The release is a LATCH, not a broadcast. `releaseStatus()` used to
     /// resume whoever happened to be waiting at that instant, so a `status()`
@@ -634,9 +639,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func trash(_ filenames: [String]) async throws { try record("trash") }
     func restoreFromTrash(_ filenames: [String]) async throws { try record("restoreFromTrash") }
     func deleteForever(_ filenames: [String]) async throws { try record("deleteForever") }
+    /// Every import's filename, in order -- what a BATCH actually sent, which
+    /// a call count cannot say.
+    nonisolated(unsafe) var importedNames: [String] = []
+
     @discardableResult
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String {
         try record("importPrint")
+        importedNames.append(filename)
         return filename
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {
