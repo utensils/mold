@@ -19,13 +19,16 @@ enum FakeFixtures {
     /// silently exercising `.unknown`, not a live row.
     static func queueEntry(
         _ id: String, state: String = "queued", batchId: String? = nil,
-        clientBatchId: String? = nil, batchIndex: Int? = nil, model: String? = nil
+        clientBatchId: String? = nil, batchIndex: Int? = nil, model: String? = nil,
+        heldReason: String? = nil, retryable: Bool? = nil
     ) -> QueueEntry {
         let json = #"""
         {"id": "\#(id)", "state": "\#(state)", "model": \#(model.map { "\"\($0)\"" } ?? "null"),
          "batch_id": \#(batchId.map { "\"\($0)\"" } ?? "null"),
          "client_batch_id": \#(clientBatchId.map { "\"\($0)\"" } ?? "null"),
-         "batch_index": \#(batchIndex.map { "\($0)" } ?? "null")}
+         "batch_index": \#(batchIndex.map { "\($0)" } ?? "null"),
+         "held_reason": \#(heldReason.map { "\"\($0)\"" } ?? "null"),
+         "retryable": \#(retryable.map { "\($0)" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(QueueEntry.self, from: Data(json.utf8))
     }
@@ -51,12 +54,15 @@ enum FakeFixtures {
     /// One child of a batch, decoded the way `/api/generation-batches/status`
     /// produces one -- `BatchChild` has no public memberwise init either.
     static func batchChild(
-        _ jobId: String, state: String = "held", errorCode: String? = nil, revision: UInt64? = nil
+        _ jobId: String, state: String = "held", errorCode: String? = nil, revision: UInt64? = nil,
+        retryable: Bool? = nil, error: String? = nil
     ) -> BatchChild {
         let json = #"""
         {"index": 0, "job_id": "\#(jobId)", "state": "\#(state)",
          "error_code": \#(errorCode.map { "\"\($0)\"" } ?? "null"),
-         "revision": \#(revision.map { "\($0)" } ?? "null")}
+         "revision": \#(revision.map { "\($0)" } ?? "null"),
+         "retryable": \#(retryable.map { "\($0)" } ?? "null"),
+         "error": \#(error.map { "\"\($0)\"" } ?? "null")}
         """#
         return try! MoldJSON.decoder.decode(BatchChild.self, from: Data(json.utf8))
     }

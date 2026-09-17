@@ -28,6 +28,7 @@ struct MoldApp: App {
     @State private var modelDefaults: ModelDefaultsStore
     @State private var adapters: LoraStore
     @State private var landedPrints: LandedPrints
+    @State private var notifications: MoldNotifications
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -38,7 +39,8 @@ struct MoldApp: App {
     init() {
         let hosts = HostStore(hosts: HostStore.seededHosts())
         _hosts = State(initialValue: hosts)
-        _library = State(initialValue: LibraryStore(hosts: hosts))
+        let library = LibraryStore(hosts: hosts)
+        _library = State(initialValue: library)
         _models = State(initialValue: ModelStore(hosts: hosts))
         let queue = QueueStore(hosts: hosts)
         _queue = State(initialValue: queue)
@@ -53,7 +55,10 @@ struct MoldApp: App {
         _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))
         _machines = State(initialValue: MachineStore(hosts: hosts))
         _adapters = State(initialValue: LoraStore(hosts: hosts))
-        _landedPrints = State(initialValue: LandedPrints(hosts: hosts))
+        let landedPrints = LandedPrints(hosts: hosts)
+        _landedPrints = State(initialValue: landedPrints)
+        _notifications = State(initialValue: MoldNotifications(
+            landedPrints: landedPrints, queue: queue, hosts: hosts, library: library))
     }
 
     var body: some Scene {
@@ -67,6 +72,12 @@ struct MoldApp: App {
                     delegate.engine = engine
                     delegate.materializer = materializer
                     delegate.landedPrints = landedPrints
+                    // A notification click reaches the delegate, not a view
+                    // -- this is where it meets the destination binding and
+                    // the Library's own navigation.
+                    delegate.onNotificationRoute = { route in
+                        applyNotificationRoute(route, destination: $destination, navigation: libraryNavigation)
+                    }
                 }
                 // The Dock badge itself: `NSApp.dockTile` is the one AppKit
                 // call in this file that isn't a backend, and `LandedPrints`

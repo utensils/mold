@@ -31,7 +31,10 @@ extension QueueStore {
             do {
                 let listing = try await client.batchStatuses(batchIds: chunk)
                 for status in listing.batches {
-                    merged[status.id] = merge(status.children, into: merged[status.id])
+                    let before = merged[status.id] ?? []
+                    let after = merge(status.children, into: merged[status.id])
+                    merged[status.id] = after
+                    reportOutcomes(before: before, after: after, on: host)
                 }
                 for goneId in listing.missing.batchIds { merged.removeValue(forKey: goneId) }
                 hosts.succeeded(on: host, doing: "list its batches")
@@ -40,6 +43,25 @@ extension QueueStore {
             }
         }
         children[host] = merged
+    }
+
+    /// `onOutcome`'s only caller. A child not seen before is not a
+    /// TRANSITION this app watched happen, so it stays quiet -- only a state
+    /// this store already recorded, now different, fires. A resolvable hold
+    /// (missing model, or `retryable: true`) is not an outcome: it still
+    /// offers a button.
+    private func reportOutcomes(before: [BatchChild], after: [BatchChild], on host: MoldHost.ID) {
+        guard let onOutcome else { return }
+        let previously = Dictionary(uniqueKeysWithValues: before.map { ($0.jobId, $0) })
+        for child in after {
+            guard let was = previously[child.jobId], was.state != child.state else { continue }
+            guard let entry = entries(on: host).first(where: { $0.id == child.jobId }) else { continue }
+            if child.state == .failed {
+                onOutcome(host, entry, child.error ?? entry.error ?? "The job failed.")
+            } else if case let .prose(sentence, retryable: false)? = QueueHold.resolve(entry: entry, child: child) {
+                onOutcome(host, entry, sentence)
+            }
+        }
     }
 
     /// The newer view of each child, by `supersedes(_:)` -- never the newest

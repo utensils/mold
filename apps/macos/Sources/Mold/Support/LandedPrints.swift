@@ -24,6 +24,10 @@ final class LandedPrints {
     private let defaults: UserDefaults
     private(set) var recent: [Landing] = []
 
+    /// Fired for each new arrival, after it is appended -- `MoldNotifications`
+    /// coalesces from this rather than polling `recent` itself.
+    var onLanding: ((Landing) -> Void)?
+
     /// Distinct filenames across every machine -- decision 21: the SAME print
     /// echoed by two machines (a remote render auto-saved here too) is one
     /// arrival, not two.
@@ -54,13 +58,30 @@ final class LandedPrints {
         // For the life of the app -- `LibraryStore.swift`'s shape. See
         // `HostStore+Events`.
         hosts.onEvent { [weak self] host, event in self?.apply(event, from: host) }
+        // Turning the preference off must not merely stop counting -- a stale
+        // number nobody can clear is the exact failure the desktop wrote down.
+        // KVO rather than `GeneralSettings`' own `onChange`: this is a plain
+        // object, and the toggle can flip while no Settings window is even
+        // open.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reconcileEnabled() }
+        }
+    }
+
+    private func reconcileEnabled() {
+        guard !enabled, !recent.isEmpty else { return }
+        clear()
     }
 
     private func apply(_ event: MoldEvent, from host: MoldHost.ID) {
         guard case let .gallery(.added(filename, _)) = event else { return }
         guard !isActive, enabled else { return }
         guard !recent.contains(where: { $0.host == host && $0.filename == filename }) else { return }
-        recent.append(Landing(host: host, filename: filename, at: Date()))
+        let landing = Landing(host: host, filename: filename, at: Date())
+        recent.append(landing)
+        onLanding?(landing)
     }
 
     /// Coming back to the app, or turning the preference off -- either way

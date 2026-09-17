@@ -22,6 +22,16 @@ extension LibraryPane {
         visible.first { $0.id == id }
     }
 
+    /// `navigation.reveal`'s one consumer: opens the named print and clears
+    /// the channel right back, so a later visit to the pane does not reopen
+    /// it (design M6 S5).
+    func revealIfNeeded() {
+        guard let reveal = navigation.reveal else { return }
+        selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
+        viewing = reveal
+        navigation.reveal = nil
+    }
+
     func host(of entry: LibraryEntry) -> MoldHost? {
         hosts.host(entry.hostID)
     }

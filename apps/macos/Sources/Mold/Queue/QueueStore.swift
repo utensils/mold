@@ -36,6 +36,12 @@ final class QueueStore {
     /// instead of sleeping 250 ms per case.
     let coalesceDelay: Duration
 
+    /// A child this store already knew settling badly -- `.failed`, or a
+    /// hold the host says trying again would not help. Fired from
+    /// `QueueStore+Batches`'s `hydrate`, the only thing that compares a
+    /// child's state against what this store held before (decision 24).
+    var onOutcome: ((MoldHost.ID, QueueEntry, String) -> Void)?
+
     init(hosts: HostStore, coalesceDelay: Duration = .milliseconds(250)) {
         self.hosts = hosts
         self.coalesceDelay = coalesceDelay
@@ -106,11 +112,8 @@ final class QueueStore {
 
     /// Only meaningful for a held job that is a durable batch child, and only
     /// with the host's instance id -- retrying against a host that has
-    /// restarted would aim at nothing.
-    ///
-    /// The identity comes from `HostStore`, which already holds it twice over:
-    /// this store used to keep a third copy and buy it with a second
-    /// `/api/status` call per machine per refresh.
+    /// restarted would aim at nothing. The identity comes from `HostStore`,
+    /// which already holds it, so this store need not keep a second copy.
     func retry(_ entry: QueueEntry, on host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: "retry that job") else { return }
         guard let instance = hosts.instanceID(of: host) else {
@@ -143,7 +146,5 @@ final class QueueStore {
 }
 
 // `NoInstanceKnown`, `NotADurableBatchChild` and the fixture's own
-// `FixtureRefusal` -- every reason a mutation reports instead of reaching a
-// backend -- live in `QueueStore+Fixture.swift`, not `private` here (`private`
-// does not cross a file boundary), to keep this file under the file-size
-// rule.
+// `FixtureRefusal` live in `QueueStore+Fixture.swift`, not `private` here --
+// `private` does not cross a file boundary.

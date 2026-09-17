@@ -59,9 +59,13 @@ struct LibraryPane: View {
             // nothing to apply them to.
             .task { await actions.reload() }
             .onAppear { library.undo.manager = undoManager }
+            .onAppear { revealIfNeeded() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
+            // A click on an already-open Library: `.onAppear` above only
+            // fires when the pane is freshly mounted.
+            .onChange(of: navigation.reveal) { _, _ in revealIfNeeded() }
     }
 
     /// A new shelf is a new list, and a selection made in the old one names

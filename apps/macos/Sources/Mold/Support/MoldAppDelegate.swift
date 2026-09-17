@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 /// What has to happen before Mold goes away.
 ///
@@ -12,6 +13,18 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     var engine: MoldEngine?
     var materializer: PrintMaterializer?
     var landedPrints: LandedPrints?
+    /// What a notification click should do, applied by the composition root
+    /// -- this delegate only decodes the payload (`MoldNotifications.swift`).
+    var onNotificationRoute: ((NotificationRoute) -> Void)?
+
+    /// Sets the notification-centre delegate, behind the same bundle guard
+    /// `MoldNotifications` posts behind -- installing a delegate touches
+    /// `UNUserNotificationCenter` too, and outside a real `.app` that aborts
+    /// the process just as posting would.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard MoldNotifications.isInsideBundle() else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
 
     /// Mirrors `NSApp.isActive` onto `LandedPrints`, which is what decides
     /// whether a `gallery_added` frame counts and clears the badge on the
@@ -38,5 +51,25 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+}
+
+extension MoldAppDelegate: UNUserNotificationCenterDelegate {
+    /// A click on a delivered notification. Decoding the payload is the only
+    /// AppKit/`UserNotifications`-touching half of routing -- the decision
+    /// itself is `NotificationRoute.route(userInfo:)`, pure and tested apart
+    /// from this.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        // AppKit does not promise the main thread here, so the hop is
+        // explicit rather than `MainActor.assumeIsolated`, which would trap
+        // if that promise is ever broken.
+        guard let userInfo = response.notification.request.content.userInfo as? [String: String],
+              let route = NotificationRoute.route(userInfo: userInfo)
+        else { return }
+        Task { @MainActor [weak self] in self?.onNotificationRoute?(route) }
     }
 }

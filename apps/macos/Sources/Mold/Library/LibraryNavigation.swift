@@ -16,6 +16,11 @@ final class LibraryNavigation {
     var query = LibraryQuery()
     /// Thumbnail edge. A view setting, but one people expect to persist.
     var edge: CGFloat
+    /// A print a notification click named -- `LibraryPane` opens it once on
+    /// appearance (or on this changing under an already-open pane) and clears
+    /// it right back. Transient on purpose: nothing about a click survives a
+    /// relaunch the way `scope` and `edge` do.
+    var reveal: PrintID?
 
     private static let scopeKey = "libraryScope"
     private static let edgeKey = "libraryEdge"
