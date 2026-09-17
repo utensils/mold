@@ -46,6 +46,18 @@ private func made(_ format: String?, frames: Int? = nil) -> GalleryPrint {
     }
 }
 
+/// The known limit, written down rather than left to be rediscovered: an
+/// animated WebP imported through `GalleryImport` carries no `frames` and no
+/// other signal exists for it on the wire, so it reads as a still. A GIF or
+/// an MP4 imported the same way is right, because there the container IS the
+/// answer. `GalleryPrint.isVideo`'s doc comment says what closing it takes.
+@Test func anImportedAnimatedWebpIsAKnownMisclassification() {
+    let imported = PrintFixtures.print("clip.webp", format: "webp", prompt: "Imported — clip.webp")
+    #expect(!imported.isVideo)
+    #expect(PrintFixtures.print("clip.gif", format: "gif").isVideo)
+    #expect(PrintFixtures.print("clip.mp4", format: "mp4").isVideo)
+}
+
 /// And a mesh is neither. `glb` is the only stored 3-D form.
 @Test func aMeshIsNeither() {
     #expect(made("glb").kind == .mesh)

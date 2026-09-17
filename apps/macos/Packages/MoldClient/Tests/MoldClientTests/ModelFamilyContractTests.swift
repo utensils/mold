@@ -5,10 +5,12 @@ import Testing
 
 /// Pins the Swift family lists against the Rust that owns them.
 ///
-/// `Model.isGenerator` decides what a person sees in a model picker. If mold
-/// adds an auxiliary family and this app doesn't know, a ControlNet quietly
-/// shows up as something you could render with. Reading the Rust is cheaper
-/// than remembering to update two lists.
+/// `Model.isPictureMaker` decides what a person sees in a model picker, and
+/// it is built from these sets. If mold adds an auxiliary family and this app
+/// doesn't know, a ControlNet quietly shows up as something you could render
+/// with. Reading the Rust is cheaper than remembering to update two lists.
+/// `Model.meshFamilies` is the one set with no Rust counterpart to pin --
+/// `ModelMeshFamilyTests` says why, and checks it stays out of these.
 private func rustFamilies(_ constant: String) throws -> Set<String> {
     let root = try #require(RepoFixtures.repoRoot, "mold checkout not found above the tests")
     let source = try String(contentsOf: root.appending(path: "crates/mold-core/src/manifest.rs"),

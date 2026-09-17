@@ -60,24 +60,6 @@ private final class CountingBytes: AsyncSequence, @unchecked Sendable {
     #expect(source.pulled == 21, "through the blank line that ended the frame, and no further")
 }
 
-/// Every guarantee `LineAccumulator` exists for still holds when the bytes
-/// arrive in whatever chunks the network felt like -- including a multi-byte
-/// character split across two reads, and the empty line that ends a frame.
-@Test func chunkedReadsKeepEveryLineGuarantee() {
-    let wire = Array("data: caf\u{00E9}\r\n\r\ndata: x\n\n".utf8)
-    for size in [1, 2, 3, 5, 7, 64] {
-        var accumulator = LineAccumulator()
-        var lines: [String] = []
-        var index = 0
-        while index < wire.count {
-            let end = min(index + size, wire.count)
-            accumulator.consume(contentsOf: wire[index..<end], into: &lines)
-            index = end
-        }
-        #expect(lines == ["data: caf\u{00E9}", "", "data: x", ""], "chunks of \(size)")
-    }
-}
-
 /// **Fails today**: all four `AsyncThrowingStream`s in the package default to
 /// `.unbounded`. A ceiling is the only lever `AsyncStream` offers -- there is
 /// no `yield` that blocks -- so each one has to state its own, and a new

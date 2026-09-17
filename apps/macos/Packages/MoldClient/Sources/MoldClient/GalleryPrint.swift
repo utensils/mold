@@ -68,6 +68,17 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     /// Picking GIF or WebP for an LTX-2 or Wan render is a one-click choice
     /// the inspector offers from `capabilities.output.formats`, so this is an
     /// ordinary print, not a corner case.
+    ///
+    /// **Known limit: an animated WebP brought in through `GalleryImport`
+    /// reads as a still.** There is no honest signal for it anywhere on the
+    /// wire: the import descriptor carries no `frames` (nothing on this Mac
+    /// counts them, and inventing a number would be worse than reading none),
+    /// and the host's own `format_from_path` (`metadata_io.rs:36-56`) maps the
+    /// extension to `Webp` without opening the file. A GIF or an MP4 imported
+    /// the same way is classified correctly, because for those the container
+    /// IS the answer. Closing this needs a frame count at the import call
+    /// site, which is a change to what `GalleryImport` sends, not to this
+    /// rule.
     public var isVideo: Bool {
         guard let format else { return false }
         if Self.animatedFormats.contains(format) { return true }

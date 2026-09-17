@@ -14,7 +14,7 @@ import Testing
     private func lines(_ text: String) -> [String] {
         var accumulator = LineAccumulator()
         var out: [String] = []
-        for byte in Array(text.utf8) { out += accumulator.consume(byte) }
+        for byte in Array(text.utf8) { accumulator.consume(byte, into: &out) }
         return out
     }
 
@@ -35,8 +35,11 @@ import Testing
     /// finished when its newline arrives.
     @Test func aLineWithNoNewlineYetIsNotALine() {
         var accumulator = LineAccumulator()
-        #expect(Array("par".utf8).flatMap { accumulator.consume($0) }.isEmpty)
-        #expect(Array("tial\n".utf8).flatMap { accumulator.consume($0) } == ["partial"])
+        var out: [String] = []
+        for byte in Array("par".utf8) { accumulator.consume(byte, into: &out) }
+        #expect(out.isEmpty)
+        for byte in Array("tial\n".utf8) { accumulator.consume(byte, into: &out) }
+        #expect(out == ["partial"])
     }
 
     @Test func multiByteCharactersSurviveBeingSplitAcrossReads() {
@@ -59,12 +62,12 @@ import Testing
         var accumulator = LineAccumulator()
         var parser = SSEParser()
         var events: [MoldEvent] = []
-        for byte in Array(wire.utf8) {
-            for line in accumulator.consume(byte) {
-                guard let frame = parser.consume(line: line) else { continue }
-                if let event = MoldEvent(name: frame.name, data: frame.data) {
-                    events.append(event)
-                }
+        var lines: [String] = []
+        for byte in Array(wire.utf8) { accumulator.consume(byte, into: &lines) }
+        for line in lines {
+            guard let frame = parser.consume(line: line) else { continue }
+            if let event = MoldEvent(name: frame.name, data: frame.data) {
+                events.append(event)
             }
         }
         #expect(events == [.authority(instanceID: "ff00bea2"),
