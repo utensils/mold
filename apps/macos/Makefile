@@ -104,10 +104,13 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	  "$(BUILD)/$(CONFIG)/Mold.app/Contents/MacOS/Mold"
 
 test: gen ## Run every test bundle: the package, then the app's own store tests
-	@# The release path's one testable script. It synthesises the /nix/store
-	@# load commands a remote-only build cannot produce, so the fixup and its
-	@# fail-closed arm are exercised without a 40-minute engine build.
+	@# The release path's testable scripts. They synthesise what a remote-only
+	@# build cannot produce -- /nix/store load commands, a Sparkle framework,
+	@# a placeholder update key -- so every fail-closed arm is exercised
+	@# without a 40-minute engine build or a signing identity.
 	@scripts/tests/linkage-fixup.sh
+	@scripts/tests/sparkle-key-gate.sh
+	@scripts/tests/sparkle-signing-order.sh
 	@cd Packages/MoldClient && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
@@ -198,6 +201,9 @@ signed: $(ENGINE_PREREQ) ## Release build, signed for distribution (needs MOLD_S
 ifneq ($(ALLOW_REMOTE_ONLY),1)
 	@scripts/assert-embedded-engine.sh "$(RELEASE_APP)"
 endif
+	@# A Release that cannot verify an update must not ship. Debug never runs
+	@# this and has no updater at all.
+	@scripts/assert-sparkle-key.sh "$(RELEASE_APP)"
 	@# BEFORE signing: `install_name_tool` invalidates a signature, so the
 	@# order is not a preference. Fails closed on a surviving /nix/store ref.
 	@scripts/fix-macos-native-linkage.sh "$(RELEASE_APP)"

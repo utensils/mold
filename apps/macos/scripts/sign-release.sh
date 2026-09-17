@@ -32,17 +32,66 @@ sign_app() {
     --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$1"
 }
 
+# Sparkle's Downloader XPC service carries its OWN sandbox entitlements and is
+# the one piece of nested code that must keep them. Sparkle's signing
+# instructions say so explicitly -- `codesign … --preserve-metadata=entitlements
+# Sparkle.framework/Versions/B/XPCServices/Downloader.xpc`
+# (https://sparkle-project.org/documentation/sandboxing, "Manually Re-sign
+# Sparkle XPC Services"). Every other nested item there, Installer.xpc and
+# Updater.app and Autoupdate included, is signed with NO entitlements, which is
+# what this script already does. Mold is NOT sandboxed
+# (`ENABLE_APP_SANDBOX: "NO"`), so none of that page's other requirements apply
+# to us: no `SUEnableInstallerLauncherService`, and no
+# `com.apple.security.temporary-exception.mach-lookup.global-name` pair -- those
+# exist so a SANDBOXED app can reach its own installer, and adding them here
+# would be granting an exception for a sandbox we do not have.
+sign_preserving_entitlements() {
+  codesign --force --timestamp --options runtime --generate-entitlement-der \
+    --preserve-metadata=entitlements --sign "$IDENTITY" "$1"
+}
+
 # Innermost first. `find -depth` gives exactly that order. `.bundle`, `.xpc`
 # and `.appex` are here because a bundle is not only frameworks and dylibs;
-# today SwiftPM links its dependencies statically and this loop is usually
-# empty, which is not a reason to be wrong when it stops being.
+# SwiftPM links most dependencies statically, but Sparkle is a real framework
+# with an `Updater.app`, two XPC services and an `Autoupdate` tool inside it,
+# and every one of them is code that Gatekeeper will assess.
+#
+# `Autoupdate` is a bare Mach-O executable, so no name pattern finds it: it is
+# named here, by the path Sparkle's own instructions use.
+sparkle_code() {
+  local framework="$APP/Contents/Frameworks/Sparkle.framework" versions helper
+  [ -d "$framework" ] || return 0
+  # Its helpers first, in the order Sparkle's own instructions sign them, then
+  # the framework that wraps them. Version `B` is Sparkle 2's; the glob keeps
+  # this working if that ever changes.
+  for versions in "$framework"/Versions/*/; do
+    # `Versions/Current` is a symlink to `Versions/B`, and it matches this
+    # glob. Following it signs every helper a second time under a second path.
+    [ -d "$versions" ] && [ ! -L "${versions%/}" ] || continue
+    for helper in XPCServices/Installer.xpc XPCServices/Downloader.xpc Autoupdate Updater.app; do
+      if [ -e "$versions$helper" ]; then printf '%s\n' "$versions$helper"; fi
+    done
+  done
+  printf '%s\n' "$framework"
+}
+
 while IFS= read -r nested; do
   [ "$nested" = "$APP" ] && continue
   echo "  signing $(basename "$nested")"
-  sign_nested "$nested"
-done < <(find "$APP" -depth \
-  \( -name '*.framework' -o -name '*.dylib' -o -name '*.app' \
-     -o -name '*.bundle' -o -name '*.xpc' -o -name '*.appex' \))
+  case "$nested" in
+    */XPCServices/Downloader.xpc) sign_preserving_entitlements "$nested" ;;
+    *) sign_nested "$nested" ;;
+  esac
+done < <({
+  # Everything else. Sparkle is cut out of this sweep entirely -- the framework
+  # AND its contents -- because `find -depth` would otherwise sign the wrapper
+  # before the helpers inside it, which invalidates them.
+  find "$APP" -depth \
+    \( -name '*.framework' -o -name '*.dylib' -o -name '*.app' \
+       -o -name '*.bundle' -o -name '*.xpc' -o -name '*.appex' \) \
+    ! -path '*/Sparkle.framework' ! -path '*/Sparkle.framework/*'
+  sparkle_code
+})
 
 echo "  signing $(basename "$APP")"
 sign_app "$APP"
