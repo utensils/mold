@@ -259,9 +259,12 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
     draft.media.editImages = ["A"]
     let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .exclusive),
                                  isNewModel: false)
-    // One render carries one or the other; sending both is a refusal.
+    // Both wells keep their media; ONE render carries one or the other, and
+    // the REQUEST is where that is decided (finding 02#1).
     #expect(adopted.media.editImages == ["A"])
-    #expect(adopted.media.sourceImage == nil)
+    #expect(adopted.media.sourceImage == "SRC")
+    let request = adopted.request(model: "m")
+    #expect(!(request.sourceImage != nil && request.editImages != nil))
 }
 
 @Test func aReplacesRecipeDropsTheSourceEntirely() {

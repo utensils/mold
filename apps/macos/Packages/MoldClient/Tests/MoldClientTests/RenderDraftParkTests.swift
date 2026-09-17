@@ -146,7 +146,12 @@ private func recipe(_ capabilities: RecipeCapabilities) -> GenerationRecipe {
     #expect(restored.media.parked.control == nil)
 }
 
-@Test func exclusiveReferencesParkTheSourceRatherThanDeletingIt() {
+/// The EXCLUSIVE relation keeps both wells and parks only for the length of
+/// one request (finding 02#1): the recipe still has a source path, so hard
+/// parking it here emptied a well the pane draws. `replaces` -- where the
+/// references ARE the conditioning -- is the one that still parks outright,
+/// and `aReplacesRecipeParksTheSourceOutright` covers it.
+@Test func exclusiveReferencesKeepTheSourceAndShipOnlyTheActiveWell() {
     var draft = RenderDraft()
     draft.media.sourceImage = "SRC"
     draft.media.sourceImageName = "s.png"
@@ -160,11 +165,28 @@ private func recipe(_ capabilities: RecipeCapabilities) -> GenerationRecipe {
         recipe(capabilities(sourceImage: .optional, referenceImages: exclusive)), isNewModel: false
     )
     #expect(adopted.media.editImages == ["A"])
-    #expect(adopted.media.sourceImage == nil)
-    #expect(adopted.media.parked.sourceImage == "SRC")
+    // Kept, not parked -- both wells draw, and an unmarked restore that holds
+    // both reads as the source well (`ExclusiveWells.resolve`).
+    #expect(adopted.media.sourceImage == "SRC")
+    #expect(adopted.media.parked.sourceImage == nil)
+    #expect(adopted.media.exclusiveWells?.active == .source)
+    #expect(adopted.media.exclusiveWells?.parked == .references)
+    // One render still carries one or the other; sending both is a refusal.
+    #expect(adopted.request(model: "m").sourceImage == "SRC")
+    #expect(adopted.request(model: "m").editImages == nil)
 
-    // Back on a plain img2img recipe (no references block), the source
-    // comes back rather than staying lost.
+    // Writing the strip parks the source for as long as it holds media, and
+    // the picture is still there when it is emptied again.
+    var rewritten = adopted
+    rewritten.media.lastExclusiveWrite = .references
+    #expect(rewritten.request(model: "m").editImages == ["A"])
+    #expect(rewritten.request(model: "m").sourceImage == nil)
+    rewritten.media.editImages = []
+    #expect(rewritten.request(model: "m").sourceImage == "SRC")
+
+    // Back on a plain img2img recipe (no references block), the source is
+    // what it always was.
     let restored = adopted.adopting(recipe(capabilities(sourceImage: .optional)), isNewModel: false)
     #expect(restored.media.sourceImage == "SRC")
+    #expect(restored.request(model: "m").sourceImage == "SRC")
 }

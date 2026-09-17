@@ -10,7 +10,15 @@ public extension DraftMedia {
     /// pass -- conditioning the recipe cannot currently take is PARKED
     /// rather than dropped, so it comes back if the next recipe can read it
     /// again (decision 4 in the M4 design).
-    mutating func reconcile(for capabilities: RecipeCapabilities) {
+    /// `family` and `model` are only ever read by the LEGACY reference rule,
+    /// for a host that advertises no `reference_images` block at all
+    /// (`RecipeCapabilities.referenceImages(family:model:)`). Both default to
+    /// nil so a caller with no model in hand -- a test, or a recipe switch
+    /// where the advertised block is present anyway -- reads exactly the
+    /// advertised contract.
+    mutating func reconcile(
+        for capabilities: RecipeCapabilities, family: String? = nil, model: String? = nil
+    ) {
         // Keyframes and an extend continuation reconcile FIRST: both can
         // park or restore the source image below, and an extend also pins
         // the request's video-only reading (`RenderDraft+Audio.swift`).
@@ -31,22 +39,27 @@ public extension DraftMedia {
         // Edit images are reconciled next so the exclusive/replaces check
         // below reads the post-truncation list, matching the order this
         // logic ran in before parking existed.
-        let references = capabilities.referenceImages
-        let referencesVisible = references?.mode.isVisible == true
+        let references = capabilities.referenceImages(family: family, model: model)
+        sourceMode = SourceImageMode(references: references)
+        let referencesVisible = references != nil
         reconcileEditImages(supported: referencesVisible, maxCount: references?.maxCount)
-        if !referencesVisible { referenceWeight = nil }
+        if !referencesVisible {
+            referenceWeight = nil
+            lastExclusiveWrite = nil
+        }
 
-        // `exclusive`/`replaces` mean ONE render carries a source image OR
-        // references, never both. Keeping whichever was added last would be
-        // guessing, so references win -- they are the more specific
-        // instruction. `readsSourceImage` is the CORRECTED reading of an
+        // `replaces` means the references ARE the conditioning: no strength,
+        // no mask, no source path at all, so a staged source image is PARKED.
+        // `exclusive` is deliberately NOT parked here -- it keeps both wells,
+        // and `requestConditioning` decides which one ships (finding 02#1).
+        // Parking it would empty a well the layout draws. `readsSourceImage`
+        // is the CORRECTED reading of an
         // absent `sourceImage` block: absence means the recipe reads one
         // (fact 1 in the M4 design, `manifest.rs:265-270`), not that there is
         // no source path. An extend is a third claimant, and the strongest
         // one -- it pins the continuation's first frames from the source
         // clip's own tail (`validation.rs:1845-1849`).
-        let takenByReferences = !editImages.isEmpty
-            && (references?.sourceRelation == .exclusive || references?.sourceRelation == .replaces)
+        let takenByReferences = !editImages.isEmpty && sourceMode.replacesSourceImage
         reconcileSourceImage(
             supported: capabilities.readsSourceImage && !takenByReferences && extendVideo == nil
         )

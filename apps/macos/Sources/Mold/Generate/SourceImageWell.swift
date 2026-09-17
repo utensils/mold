@@ -118,6 +118,9 @@ struct SourceImageWell: View {
         // what will be sent.
         draft.media.sourceImage = picked.data.base64EncodedString()
         draft.media.sourceImageName = picked.name
+        // Last write wins on an EXCLUSIVE recipe: attaching here parks the
+        // reference strip rather than refusing the drop (`ExclusiveWells`).
+        draft.media.lastExclusiveWrite = .source
         preview = NSImage(data: picked.data)
     }
 

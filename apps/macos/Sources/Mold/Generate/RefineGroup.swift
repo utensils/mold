@@ -31,7 +31,10 @@ struct RefineGroup: View {
     }
 
     @ViewBuilder private var maskSection: some View {
-        switch Self.maskRow(capabilities: recipe?.capabilities, hasSource: draft.media.sourceImage != nil) {
+        // `carriesSource`, not `sourceImage != nil`: a parked source on an
+        // exclusive recipe ships nothing, so a mask over it would be orphaned.
+        switch Self.maskRow(capabilities: recipe?.capabilities,
+                            hasSource: draft.media.requestConditioning.carriesSource) {
         case .hidden:
             EmptyView()
         case .needsSource:

@@ -14,7 +14,14 @@ public extension RenderDraft {
     /// `true` (a fresh model) or `false` (a recipe switch on the SAME model,
     /// e.g. one LTX-2 pipeline to another) -- either way the question is the
     /// same one: can the recipe about to run read what the draft is holding.
-    public func adopting(_ recipe: GenerationRecipe, isNewModel: Bool) -> RenderDraft {
+    ///
+    /// `family` and `model` are read ONLY by the legacy reference rule, for a
+    /// host that advertises no `reference_images` block at all
+    /// (`DraftMedia.reconcile(for:family:model:)`).
+    public func adopting(
+        _ recipe: GenerationRecipe, isNewModel: Bool,
+        family: String? = nil, model: String? = nil
+    ) -> RenderDraft {
         var draft = self
         if isNewModel {
             draft.width = recipe.defaults.width
@@ -51,7 +58,7 @@ public extension RenderDraft {
         // Conditioning the recipe cannot currently take is PARKED rather than
         // dropped, so it comes back if the next model can read it again
         // (`DraftMedia+Reconcile.swift`; decision 4 in the M4 design).
-        draft.media.reconcile(for: recipe.capabilities)
+        draft.media.reconcile(for: recipe.capabilities, family: family, model: model)
 
         if recipe.capabilities.negativePrompt?.isAvailable != true {
             draft.negativePrompt = ""

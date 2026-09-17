@@ -117,6 +117,8 @@ struct ReferenceStrip: View {
     private func append(_ picked: (data: Data, name: String)) {
         guard draft.media.editImages.count < (capability.maxCount ?? 1) else { return }
         draft.media.editImages.append(picked.data.base64EncodedString())
+        // Last write wins on an EXCLUSIVE recipe (`ExclusiveWells`).
+        draft.media.lastExclusiveWrite = .references
     }
 }
 

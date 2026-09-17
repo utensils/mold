@@ -59,9 +59,40 @@ public struct DraftMedia: Hashable, Sendable {
     public var sourceVideo: String?
     public var sourceVideoName: String?
 
+    /// The image-conditioning layout the ADOPTED recipe projects, written by
+    /// `reconcile(for:family:model:)` and read by the request builder and by
+    /// every well. Kept on the draft rather than re-derived at each call site
+    /// so the request that ships and the wells on screen can never disagree
+    /// about which relation is in force.
+    public var sourceMode: SourceImageMode = .single
+    /// Which of the two EXCLUSIVE wells was written most recently. Only
+    /// `sourceMode == .singleOrReferences` reads it; `nil` reads as the
+    /// source well, which is what a restored print with both carries
+    /// (`ExclusiveWells.resolve`).
+    public var lastExclusiveWrite: ExclusiveWell?
+
     /// What the CURRENT recipe cannot take, held so it comes back
     /// (`DraftMedia+Park.swift`).
     public var parked = ParkedConditioning()
 
     public init() {}
+
+    /// Which conditioning a request built from this media carries. The one
+    /// question the request builder, the Strength control and the Mask row
+    /// all ask -- never `sourceImage != nil`, which on an exclusive recipe
+    /// answers for a well that is parked.
+    public var requestConditioning: RequestConditioning {
+        RequestConditioning.resolve(
+            mode: sourceMode, hasSource: sourceImage != nil,
+            referenceCount: editImages.count, lastWrite: lastExclusiveWrite)
+    }
+
+    /// Which exclusive well is parked right now, and the sentence it renders.
+    /// `nil` on every other relation -- nothing parks there.
+    public var exclusiveWells: ExclusiveWells? {
+        guard sourceMode == .singleOrReferences else { return nil }
+        return ExclusiveWells.resolve(
+            hasSource: sourceImage != nil, referenceCount: editImages.count,
+            lastWrite: lastExclusiveWrite)
+    }
 }

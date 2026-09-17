@@ -14,9 +14,7 @@ public extension RenderDraft {
     /// `maxIdentityPhotos` is `Capabilities.maxIdentityPhotos` for the host
     /// this request is going to -- it decides `id_image` vs `id_images`
     /// (`IdentityConditioning.wire(maxPhotos:)`) and has no honest default,
-    /// so it defaults to 0 (no identity block understood) rather than
-    /// guessing a host's capability. Nothing in `Sources/Mold` passes the
-    /// real value yet -- see the S2 report for the callers S3+ must update.
+    /// so it defaults to 0 rather than guessing a host's capability.
     func request(model: String, maxIdentityPhotos: Int = 0) -> GenerateRequest {
         var request = GenerateRequest(
             prompt: prompt, model: model, width: width, height: height,
@@ -29,19 +27,23 @@ public extension RenderDraft {
         request.pipeline = pipeline
         request.enableAudio = enableAudio ? true : nil
         request.videoOnly = VideoOnlyPolicy.requestValue(enabled: videoOnly, videoOnlyInputs)
-        // An extend is the strongest claimant on the request's first frames
-        // (`RenderDraft+Recipe.swift`'s `adopting`); this belt matches
-        // `idStartStep`'s own -- the source well and the extend well are two
-        // independent controls, and a value going stale between them must
-        // never reach the wire alongside the extend that outranks it.
-        request.sourceImage = media.extendVideo == nil ? media.sourceImage : nil
-        request.sourceImageName = media.extendVideo == nil ? media.sourceImageName : nil
-        request.editImages = media.editImages.isEmpty ? nil : media.editImages
-        request.referenceWeight = media.editImages.isEmpty ? nil : media.referenceWeight
-        // Strength only means something with something to apply it to.
-        request.strength = media.sourceImage == nil ? nil : strength
-        // A mask with no source is refused outright (`validation.rs:3101-3107`).
-        request.maskImage = media.sourceImage == nil ? nil : media.maskImage
+        // WHICH well ships is `requestConditioning`'s decision, never
+        // "references if there are any": an EXCLUSIVE recipe keeps both wells
+        // and one render carries a source image OR references, so a builder
+        // that emitted both is refused (`sourceMediaPlan.ts:217-241`). An
+        // extend outranks both -- it pins the first frames from the source
+        // clip's own tail, and a source going stale between two independent
+        // controls must never ride out beside it.
+        let carries = media.requestConditioning
+        let carriesSource = carries.carriesSource && media.extendVideo == nil
+        request.sourceImage = carriesSource ? media.sourceImage : nil
+        request.sourceImageName = carriesSource ? media.sourceImageName : nil
+        request.editImages = carries.carriesReferences ? media.editImages : nil
+        request.referenceWeight = carries.carriesReferences ? media.referenceWeight : nil
+        // Strength means nothing with nothing to apply it to, and a mask with
+        // no source is refused outright (`validation.rs:3101-3107`).
+        request.strength = carriesSource ? strength : nil
+        request.maskImage = carriesSource ? media.maskImage : nil
         request.loras = media.loras.isEmpty ? nil : media.loras
         applyIdentity(to: &request, maxPhotos: maxIdentityPhotos)
         applyControl(to: &request)

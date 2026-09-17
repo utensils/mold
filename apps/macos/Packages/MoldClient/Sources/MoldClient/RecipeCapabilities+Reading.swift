@@ -53,4 +53,25 @@ public extension RecipeCapabilities {
 
     /// What a blocked control SAYS. The server's own sentence, verbatim.
     var controlNetReason: String? { controlnet?.reason }
+
+    /// The reference contract this recipe really offers.
+    ///
+    /// Three different answers, and the difference matters: an ADVERTISED
+    /// visible block is the authority; an advertised `hidden` block is the
+    /// server SAYING NO and answers nil; an ABSENT block is an OLDER SERVER
+    /// (`generation_profile.rs:583` makes the field `Option` precisely so
+    /// absence is never a refusal), and only then does the legacy family rule
+    /// stand in. Reading a nil block as `hidden` is finding 01#4: it parked
+    /// every reference on a host that predates the field, so the one model
+    /// whose recipe REQUIRES a reference could never be submitted while the
+    /// browser on the same host worked.
+    func referenceImages(family: String?, model: String?) -> ReferenceImagesCapability? {
+        if let referenceImages { return referenceImages.mode.isVisible ? referenceImages : nil }
+        return ReferenceImagesCapability.legacy(family: family, model: model)
+    }
+
+    /// The image-conditioning layout this recipe projects onto.
+    func sourceImageMode(family: String?, model: String?) -> SourceImageMode {
+        SourceImageMode(references: referenceImages(family: family, model: model))
+    }
 }

@@ -80,7 +80,7 @@ final class GenerateController {
         machineChoice = host
         guard let recipe = model.defaultRecipe else { return }
         let isNewModel = !keepingDraft
-        draft = draft.adopting(recipe, isNewModel: isNewModel)
+        draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
 
@@ -92,7 +92,7 @@ final class GenerateController {
         hostID = host
         if isNewModel { recipeID = nil }
         guard let recipe = model.defaultRecipe else { return }
-        draft = draft.adopting(recipe, isNewModel: isNewModel)
+        draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
 
@@ -101,7 +101,7 @@ final class GenerateController {
     /// does: steps, guidance, size, format and every group re-read.
     func selectRecipe(_ recipe: GenerationRecipe) {
         recipeID = recipe.id
-        draft = draft.adopting(recipe, isNewModel: false)
+        draft = draft.adopting(recipe, isNewModel: false, family: modelFamily, model: modelName)
     }
 
     /// Asks the host where this would run and roughly how long it would take.

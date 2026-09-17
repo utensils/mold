@@ -81,12 +81,7 @@ struct PromptPanel: View {
                             .focused($promptFocused)
                     }
                 }
-                if let references = recipe.capabilities.referenceImages,
-                   references.mode.isVisible {
-                    ReferenceStrip(capability: references, draft: $draft)
-                } else if Self.showsSourceWell(for: recipe) {
-                    SourceImageWell(draft: $draft)
-                }
+                ImageConditioningWells(recipe: recipe, model: model, draft: $draft)
             }
         }
     }
@@ -116,6 +111,10 @@ struct PromptPanel: View {
     }
 
     /// Absence of `sourceImage` means YES -- raw `sourceImage?.isSupported` had it backwards.
+    ///
+    /// The recipe's own permission only; whether the well is DRAWN is
+    /// `ImageConditioningWells.layout`'s decision, which folds this together
+    /// with the reference relation.
     static func showsSourceWell(for recipe: GenerationRecipe) -> Bool { recipe.capabilities.readsSourceImage }
 
     /// What `canRevertExpansion`'s affordance says was just done to the

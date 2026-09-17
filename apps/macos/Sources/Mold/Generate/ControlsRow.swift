@@ -28,7 +28,11 @@ struct ControlsRow: View {
             if recipe.guidance.hasSomethingToShow {
                 ControlLabel("Guidance") { guidance }
             }
-            if draft.media.sourceImage != nil, recipe.capabilities.supportsStrength == true {
+            // The conditioning the REQUEST will carry, not whatever the well
+            // is holding: an exclusive recipe parks one of the two, and
+            // strength applies only to a source image that actually ships.
+            if draft.media.requestConditioning.carriesSource,
+               recipe.capabilities.supportsStrength == true {
                 ControlLabel("Strength") {
                     SliderControl(value: $draft.strength, range: 0...1, step: 0.05) {
                         Text(draft.strength, format: .number.precision(.fractionLength(2)))
