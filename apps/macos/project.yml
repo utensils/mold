@@ -33,6 +33,14 @@ settings:
   configs:
     Release:
       SWIFT_COMPILATION_MODE: wholemodule
+    Debug:
+      # Stated, not left to xcodegen's Debug preset: the preset is dropped for
+      # any key the config file defines, and `make engine` writes this key into
+      # Engine.xcconfig -- so on a Mac with the engine linked a Debug build lost
+      # DEBUG entirely, every `#if DEBUG` UAT hook compiled out, and their
+      # tests passed by running nothing. `$(inherited)` keeps the xcconfig's
+      # MOLD_EMBEDDED_ENGINE beside it.
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEBUG"
 
 packages:
   MoldClient:

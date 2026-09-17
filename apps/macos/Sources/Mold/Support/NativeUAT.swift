@@ -35,6 +35,7 @@ enum NativeUAT: String, CaseIterable {
     /// Canned fixtures for two panes (`QueuePane+UAT`, `PairingSection+UAT`).
     case queueFixture = "MOLD_NATIVE_QUEUE_FIXTURE"
     case pairingFixture = "MOLD_NATIVE_PAIRING_FIXTURE"
+    case script = "MOLD_NATIVE_UAT_SCRIPT"
 
     /// This hook's value, or `nil`.
     ///

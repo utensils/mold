@@ -18,12 +18,10 @@ import AppKit
 ///     quit
 @MainActor
 enum UATScript {
-    static let envVar = "MOLD_NATIVE_UAT_SCRIPT"
-
     static func runIfRequested(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        guard let path = environment[envVar],
+        guard let path = NativeUAT.script.value(in: environment),
               let script = try? String(contentsOfFile: path, encoding: .utf8)
         else { return }
         Task { await run(steps(in: script), log: URL(fileURLWithPath: path + ".log")) }
