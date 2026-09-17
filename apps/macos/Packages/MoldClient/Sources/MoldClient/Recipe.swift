@@ -26,6 +26,13 @@ public struct OutputCapabilities: Codable, Hashable, Sendable {
     public let defaultFormat: String
     public let formats: [String]
     public let audioRequiresMp4: Bool?
+    /// Real, and the only thing that explains a one-entry `formats` list: a
+    /// mesh recipe delivers only GLB, an audio-only recipe only WAV.
+    /// `generation_profile.rs:495-502`.
+    public let deliveryReason: String?
+
+    /// A recipe with one deliverable container has nothing to pick between.
+    public var isFixed: Bool { formats.count <= 1 }
 }
 
 /// How reference images relate to a source image on this recipe.

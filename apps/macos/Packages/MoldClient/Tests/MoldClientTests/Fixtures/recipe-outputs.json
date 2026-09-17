@@ -1,0 +1,20 @@
+{
+  "image": {"formats": ["png", "jpeg", "webp"], "default_format": "png", "audio_requires_mp4": false},
+  "video": {"formats": ["mp4", "gif", "apng", "webp"], "default_format": "mp4", "audio_requires_mp4": false},
+  "ltx2": {
+    "formats": ["mp4", "gif", "apng", "webp"],
+    "default_format": "mp4",
+    "audio_requires_mp4": true,
+    "delivery_reason": "Audio-enabled video delivery requires MP4."
+  },
+  "audio": {
+    "formats": ["wav"],
+    "default_format": "wav",
+    "delivery_reason": "Audio-only delivery uses WAV."
+  },
+  "mesh": {
+    "formats": ["glb"],
+    "default_format": "glb",
+    "delivery_reason": "3-D delivery uses binary glTF; OBJ, OBJ+PBR ZIP, STL and PLY are available as gallery exports."
+  }
+}

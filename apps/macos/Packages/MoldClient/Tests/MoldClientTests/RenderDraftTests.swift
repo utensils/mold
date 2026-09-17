@@ -318,3 +318,77 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     #expect(adopted.width == 768)
     #expect(adopted.height == 768)
 }
+
+// MARK: - Fan-out
+
+/// `/api/generation-batches` refuses any child whose `batch_size` is not 1
+/// (`queue_media_admission.rs:380-386`), so a batch of N is N independent
+/// one-output requests sharing a prompt, a title, tags, a collection and one
+/// logical `batchId` -- differing only by seed.
+@Test func aBatchOfFourIsFourSingleOutputRequests() throws {
+    var draft = RenderDraft()
+    draft.prompt = "a tin robot"
+    draft.title = "Robots"
+    draft.tags = ["metal"]
+    draft.collectionName = "Robots"
+    let requests = draft.requests(model: "m", copies: 4, randomBase: 100)
+
+    #expect(requests.count == 4)
+    #expect(requests.allSatisfy { $0.batchSize == 1 })
+    #expect(requests.allSatisfy { $0.prompt == "a tin robot" })
+    #expect(requests.allSatisfy { $0.title == "Robots" })
+    #expect(requests.allSatisfy { $0.tags == ["metal"] })
+    #expect(requests.allSatisfy { $0.collection == .named("Robots") })
+
+    let batchId = try #require(requests[0].batchId)
+    #expect(requests.allSatisfy { $0.batchId == batchId })
+    #expect(requests.map(\.batchIndex) == [1, 2, 3, 4])
+    #expect(requests.allSatisfy { $0.batchCount == 4 })
+    #expect(requests.map(\.seed) == [100, 101, 102, 103])
+}
+
+/// A one-off is not a prepared set: no batch provenance, and with the seed
+/// unlocked, no seed either -- the host picks.
+@Test func aSingleRenderCarriesNoBatchProvenance() {
+    let draft = RenderDraft()
+    let requests = draft.requests(model: "m", copies: 1, randomBase: 100)
+    #expect(requests.count == 1)
+    #expect(requests[0].batchSize == 1)
+    #expect(requests[0].batchId == nil)
+    #expect(requests[0].batchIndex == nil)
+    #expect(requests[0].batchCount == nil)
+    #expect(requests[0].seed == nil)
+}
+
+/// A seed near the ceiling is legal; a trap is not an answer.
+@Test func aLockedSeedAtTheCeilingWrapsRatherThanTrapping() {
+    var draft = RenderDraft()
+    draft.seed = .max
+    draft.locksSeed = true
+    let requests = draft.requests(model: "m", copies: 2, randomBase: 999)
+    #expect(requests.map(\.seed) == [UInt64.max, 0])
+}
+
+/// The count goes in `PlacementRequest.copies`; the request itself always
+/// previews one output, however large the draft's own batch is.
+@Test func aPlacementRequestIsAlwaysOneOutput() {
+    var draft = RenderDraft()
+    draft.batchSize = 4
+    #expect(draft.placementRequest(model: "m").batchSize == 1)
+}
+
+/// Whitespace is not a title.
+@Test func aTitleOfOnlyWhitespaceIsNoTitle() {
+    var draft = RenderDraft()
+    draft.title = "   "
+    #expect(draft.request(model: "m").title == nil)
+}
+
+/// A filed request names its collection by NAME, never by id -- an id is
+/// only ever right on one machine.
+@Test func aFiledRequestNamesItsCollectionNeverAnId() {
+    var draft = RenderDraft()
+    draft.collectionName = "Smurf Village"
+    #expect(draft.request(model: "m").collection == .named("Smurf Village"))
+    #expect(RenderDraft().request(model: "m").collection == nil)
+}

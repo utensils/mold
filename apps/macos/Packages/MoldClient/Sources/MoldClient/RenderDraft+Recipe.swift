@@ -83,22 +83,4 @@ public extension RenderDraft {
         }
         return nil
     }
-
-    public func request(model: String) -> GenerateRequest {
-        var request = GenerateRequest(
-            prompt: prompt, model: model, width: width, height: height,
-            steps: steps, guidance: guidance, batchSize: batchSize,
-            negativePrompt: negativePrompt.isEmpty ? nil : negativePrompt,
-            seed: locksSeed ? seed : nil
-        )
-        request.frames = frames
-        request.fps = fps
-        request.sourceImage = sourceImage
-        request.sourceImageName = sourceImageName
-        request.editImages = editImages.isEmpty ? nil : editImages
-        request.referenceWeight = editImages.isEmpty ? nil : referenceWeight
-        // Strength only means something with something to apply it to.
-        request.strength = sourceImage == nil ? nil : strength
-        return request
-    }
 }

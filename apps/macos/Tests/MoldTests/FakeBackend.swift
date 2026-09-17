@@ -142,6 +142,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// What `clearHistory` was asked, in call order -- `nil` is "clear
     /// everything", a number is the `keep` it trimmed to.
     nonisolated(unsafe) var historyCleared: [Int?] = []
+    nonisolated(unsafe) var configListing: ConfigListing?
+    /// What `setConfig` was asked, in call order.
+    nonisolated(unsafe) var configWrites: [(String, ConfigScalar)] = []
+    /// What `resetConfig` was asked, in call order.
+    nonisolated(unsafe) var configResets: [String] = []
 
     func expand(_ request: ExpandRequest) async throws -> ExpandResponse {
         try record("expand")
@@ -161,6 +166,23 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func clearHistory(keeping keep: Int?) async throws {
         try record("clearHistory")
         historyCleared.append(keep)
+    }
+    func config() async throws -> ConfigListing {
+        try record("config")
+        guard let configListing else { throw notPlanted() }
+        return configListing
+    }
+    @discardableResult
+    func setConfig(_ key: String, to value: ConfigScalar) async throws -> ConfigEntry {
+        try record("setConfig")
+        configWrites.append((key, value))
+        return ConfigEntry(key: key, value: value, source: "db")
+    }
+    @discardableResult
+    func resetConfig(_ key: String) async throws -> ConfigEntry {
+        try record("resetConfig")
+        configResets.append(key)
+        return ConfigEntry(key: key, value: .null, source: "default")
     }
 
     // MARK: - Queue

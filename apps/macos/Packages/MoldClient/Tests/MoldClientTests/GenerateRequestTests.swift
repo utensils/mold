@@ -46,3 +46,41 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
     #expect(!admission.clientBatchId.isEmpty)
     #expect(UUID(uuidString: admission.clientBatchId) != nil)
 }
+
+@Test func filingAndBatchFieldsEncodeInSnakeCaseWhenSet() throws {
+    var request = GenerateRequest(
+        prompt: "p", model: "m", width: 512, height: 512, steps: 4, guidance: 0
+    )
+    request.outputFormat = "webp"
+    request.upscaleModel = "real-esrgan-x4plus:fp16"
+    request.title = "Smurf village at dusk"
+    request.tags = ["blue", "village"]
+    request.collection = .named("Smurf Village")
+    request.originalPrompt = "a village"
+    request.batchId = "b1"
+    request.batchIndex = 1
+    request.batchCount = 4
+
+    let json = try encoded(request)
+    #expect(json["output_format"] as? String == "webp")
+    #expect(json["upscale_model"] as? String == "real-esrgan-x4plus:fp16")
+    #expect(json["title"] as? String == "Smurf village at dusk")
+    #expect(json["tags"] as? [String] == ["blue", "village"])
+    #expect((json["collection"] as? [String: Any])?["name"] as? String == "Smurf Village")
+    #expect(json["original_prompt"] as? String == "a village")
+    #expect(json["batch_id"] as? String == "b1")
+    #expect(json["batch_index"] as? Int == 1)
+    #expect(json["batch_count"] as? Int == 4)
+}
+
+@Test func filingAndBatchFieldsAreOmittedWhenUnset() throws {
+    let json = try encoded(GenerateRequest(
+        prompt: "p", model: "m", width: 512, height: 512, steps: 4, guidance: 0
+    ))
+    for key in [
+        "output_format", "upscale_model", "title", "tags", "collection",
+        "original_prompt", "prompt_transform", "batch_id", "batch_index", "batch_count",
+    ] {
+        #expect(json[key] == nil)
+    }
+}

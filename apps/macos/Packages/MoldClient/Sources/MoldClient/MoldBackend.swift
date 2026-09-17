@@ -50,6 +50,16 @@ public protocol MoldBackend: Sendable {
     /// `nil` clears everything; otherwise trims to the most recent N. There
     /// is no per-row delete -- a `HistoryEntry` carries no id to name one.
     func clearHistory(keeping keep: Int?) async throws
+    /// Every model's config surface, as `/api/config` reports it. An absent
+    /// per-model key means "never configured"; a present key with a null
+    /// value means the same thing.
+    func config() async throws -> ConfigListing
+    /// Sets one key. `models.<name>.<field>` CREATES the model's row.
+    @discardableResult
+    func setConfig(_ key: String, to value: ConfigScalar) async throws -> ConfigEntry
+    /// Drops the DB row so the key falls back to file/env/default.
+    @discardableResult
+    func resetConfig(_ key: String) async throws -> ConfigEntry
 
     // MARK: - Queue
 

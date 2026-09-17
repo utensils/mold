@@ -85,6 +85,9 @@ private let backend = HTTPBackend(
         _ = try await backend.history(limit: 10)
         try await backend.clearHistory(keeping: 5)
         try await backend.clearHistory()
+        _ = try await backend.config()
+        _ = try await backend.setConfig("models.m.default_steps", to: .number(20))
+        _ = try await backend.resetConfig("models.m.default_steps")
     }
     #expect(backend.host.name == "plato")
 }
@@ -104,6 +107,16 @@ private let backend = HTTPBackend(
     #expect(backend.historyPath(limit: 50) == "/api/history?limit=50")
     #expect(backend.clearHistoryPath(keeping: 5) == "/api/history?keep=5")
     #expect(backend.clearHistoryPath(keeping: nil) == "/api/history")
+}
+
+/// `.` and `:` are both in `.urlPathAllowed`, so `escaped(_:)` leaves them
+/// alone -- `models.flux-dev:q8.default_steps` must address ONE path
+/// component, which is what axum's `Path<String>` reads back.
+@Test func aConfigKeyWithADotAndAColonIsOnePathComponent() {
+    let key = "models.flux-dev:q8.default_steps"
+    #expect(backend.escaped(key) == key)
+    let url = backend.request("/api/config/\(backend.escaped(key))", method: "PUT").url
+    #expect(url?.path() == "/api/config/models.flux-dev:q8.default_steps")
 }
 
 /// A print in the trash lives behind `?view=trash`, exactly as the listing

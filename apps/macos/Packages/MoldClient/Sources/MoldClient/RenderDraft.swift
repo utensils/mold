@@ -30,6 +30,24 @@ public struct RenderDraft: Hashable, Sendable {
     public var editImages: [String] = []
     public var referenceWeight: Double?
 
+    /// Filing: title, tags and a collection to file the finished print
+    /// under, gated on `canOrganize` at the call site.
+    public var title: String = ""
+    public var tags: [String] = []
+    public var collectionName: String?
+    /// Whether the title's own words are folded into tags too. Mirrors
+    /// `mold_core::organization::compose_client_tags`; the rule itself is
+    /// applied at request time, not here (`ClientTags`, M3 S4).
+    public var autoTagTitle: Bool = true
+    public var outputFormat: String?
+    public var upscaleModel: String?
+    /// `false` publishes the print and moves it straight to the trash. `true`
+    /// is the server's own default, so a request never has to say so.
+    public var savesToGallery: Bool = true
+    /// Provenance for a prompt an expand/remix wand produced.
+    public var originalPrompt: String?
+    public var promptTransform: PromptTransformProvenance?
+
     public init() {}
 }
 

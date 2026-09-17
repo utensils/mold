@@ -28,6 +28,29 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// field mean different things to the host.
     public var editImages: [String]?
     public var referenceWeight: Double?
+    /// Echoed back from the recipe's own advertised `formats` -- a `String`
+    /// rather than a Swift enum, so the app's whole job is to echo one back
+    /// without inventing a spelling that could drift from the recipe's.
+    public var outputFormat: String?
+    public var upscaleModel: String?
+    /// User-authored print title. Validated at admission; absent means
+    /// untitled.
+    public var title: String?
+    /// Additive; absent means "file under nothing".
+    public var tags: [String]?
+    /// Resolved by name -- an id is only ever right on one host.
+    public var collection: CollectionRef?
+    /// Set by the client when a prompt was expanded or remixed locally, so an
+    /// older host retains the root/source prompt even without the
+    /// structured form below.
+    public var originalPrompt: String?
+    public var promptTransform: PromptTransformProvenance?
+    /// Durable client-generated identifier shared by prepared batch siblings.
+    /// The three `batch*` fields ride together or not at all
+    /// (`queue_media_admission.rs:937-947`).
+    public var batchId: String?
+    public var batchIndex: Int?
+    public var batchCount: Int?
 
     public init(
         prompt: String, model: String, width: Int, height: Int, steps: Int,
@@ -65,6 +88,16 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         try container.encodeIfPresent(strength, forKey: .strength)
         try container.encodeIfPresent(editImages, forKey: .editImages)
         try container.encodeIfPresent(referenceWeight, forKey: .referenceWeight)
+        try container.encodeIfPresent(outputFormat, forKey: .outputFormat)
+        try container.encodeIfPresent(upscaleModel, forKey: .upscaleModel)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(tags, forKey: .tags)
+        try container.encodeIfPresent(collection, forKey: .collection)
+        try container.encodeIfPresent(originalPrompt, forKey: .originalPrompt)
+        try container.encodeIfPresent(promptTransform, forKey: .promptTransform)
+        try container.encodeIfPresent(batchId, forKey: .batchId)
+        try container.encodeIfPresent(batchIndex, forKey: .batchIndex)
+        try container.encodeIfPresent(batchCount, forKey: .batchCount)
     }
 }
 
