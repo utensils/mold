@@ -168,3 +168,22 @@ a script driving the mouse across the desktop.
   materials, and the user's own accent. There is no palette to maintain.
 - Files over 150 lines are flagged. The Tauri app's `GenerateView.vue` reached
   4,885; this is the guardrail against that.
+- A **type's** size is flagged too: `lint-type-size` sums `Type.swift` and every
+  `Type+Concern.swift` beside it and prints anything over 600, because slicing
+  a type into files that each pass the rule above does not make it smaller.
+  Today it prints exactly one line, `LibraryStore`, and that line is the
+  honest remaining debt rather than a threshold to raise.
+- No `bytes.lines` in `MoldClient`. URLSession's splitter drops empty lines,
+  and an empty line is what ends an SSE frame -- the download stream was
+  silent for months because of it. `moldLines()` keeps them.
+
+`make test` runs two bundles: the `MoldClient` package (wire types, parsers,
+the outbox policy, a stub `URLProtocol` for the transport) and the app's own
+`MoldTests`, which launches the app against the same throwaway home `make
+uat` uses and drives the stores with a `FakeBackend` that throws on any route
+a test did not plant. Every store takes `HostStore` at init, so a test hands
+it a fake and nothing else changes.
+
+Every failure a machine reports goes through one funnel, `HostStore.report`,
+and shows in one place -- a dismissable line above the pane, never a modal --
+so one machine failing says nothing about the machines that worked.
