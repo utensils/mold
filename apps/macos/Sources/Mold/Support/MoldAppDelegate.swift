@@ -9,10 +9,14 @@ import UserNotifications
 /// app used the wait for nothing.
 @MainActor
 final class MoldAppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by the composition root, which owns all three.
+    /// Set by the composition root, which owns all four.
     var engine: MoldEngine?
     var materializer: PrintMaterializer?
     var landedPrints: LandedPrints?
+    /// The fleet's own 10 s tick. It lives here rather than on a view because
+    /// the app being active is an APPLICATION fact, and a window closing must
+    /// not take the fleet's only unprompted reconciliation with it.
+    var heartbeat: HostHeartbeat?
     /// What a notification click should do, applied by the composition root
     /// -- this delegate only decodes the payload (`MoldNotifications.swift`).
     var onNotificationRoute: ((NotificationRoute) -> Void)?
@@ -37,10 +41,14 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// transition back to `true` (decision 21).
     func applicationDidBecomeActive(_ notification: Notification) {
         landedPrints?.isActive = true
+        // The same signal, one meaning: while Mold is frontmost its panes are
+        // being read, so the machines that cannot stream are asked on a tick.
+        heartbeat?.start()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
         landedPrints?.isActive = false
+        heartbeat?.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

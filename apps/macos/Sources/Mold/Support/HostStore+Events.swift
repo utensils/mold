@@ -29,6 +29,20 @@ extension HostStore {
         }
     }
 
+    /// Drops every live stream and opens it again.
+    ///
+    /// For the one case reconciling cannot fix: a stream that is dead but
+    /// whose watcher does not know it yet. After a sleep the socket is gone
+    /// and the watcher is either blocked reading it or waiting out a backoff
+    /// of up to 32 s, so `reconcileEventStreams` sees a watcher and leaves it
+    /// alone. Cancelling first is what makes the machine answer NOW -- and
+    /// the reconnect's own opening `authority` frame is what tells every
+    /// listener to start again (`deliver`).
+    func reconnectEventStreams() {
+        for id in watchers.keys { watchers.removeValue(forKey: id)?.cancel() }
+        reconcileEventStreams()
+    }
+
     /// Whether this machine should be watched right now.
     ///
     /// `events.available` absent means an older server that has no such route;
@@ -88,13 +102,28 @@ extension HostStore {
     }
 
     private func deliver(_ event: MoldEvent, from host: MoldHost.ID) {
-        // The opening frame is the machine's identity, not news. A DIFFERENT
-        // identity at the same address is a different library, though, so
-        // whoever is caching per-host state is told to start again.
+        // The opening frame is the machine's identity, and `/api/events`
+        // sends exactly one per connection (`routes.rs:11777`). So a SECOND
+        // one from the same machine is not news about the machine -- it is
+        // proof that this app was disconnected, and everything cached about
+        // that machine is as old as the gap.
+        //
+        // A CHANGED identity is not the test. `instance_id` is persisted per
+        // data-dir-and-port (`instance.rs:20-28`) and survives a restart, so
+        // the two cases this most needs to catch -- the Mac slept while three
+        // jobs finished, and `mold serve` restarted and parked every row as
+        // paused -- both come back with the identity they left with. Asking
+        // only about a change left the Queue pane drawing rows that no longer
+        // existed until somebody pressed ⌘R.
+        //
+        // Repairing from `GET /api/queue`, `GET /api/devices` and
+        // `GET /api/gallery` is what the server itself prescribes for a gap
+        // (`routes.rs:11751-11755`), and that is exactly what a listener does
+        // with `.resyncRequired`.
         if case let .authority(instanceID) = event {
-            let known = instanceIDs[host]
+            let reconnected = instanceIDs[host] != nil
             instanceIDs[host] = instanceID
-            guard let known, known != instanceID else { return }
+            guard reconnected else { return }
             listeners.forEach { $0(host, .resyncRequired) }
             return
         }

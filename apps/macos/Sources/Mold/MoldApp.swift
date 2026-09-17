@@ -30,6 +30,7 @@ struct MoldApp: App {
     @State private var adapters: LoraStore
     @State private var landedPrints: LandedPrints
     @State private var notifications: MoldNotifications
+    @State private var heartbeat: HostHeartbeat
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -61,6 +62,7 @@ struct MoldApp: App {
         _landedPrints = State(initialValue: landedPrints)
         _notifications = State(initialValue: MoldNotifications(
             landedPrints: landedPrints, queue: queue, hosts: hosts, library: library))
+        _heartbeat = State(initialValue: HostHeartbeat(hosts: hosts, queue: queue))
     }
 
     var body: some Scene {
@@ -74,6 +76,12 @@ struct MoldApp: App {
                     delegate.engine = engine
                     delegate.materializer = materializer
                     delegate.landedPrints = landedPrints
+                    // `applicationDidBecomeActive` has already fired by the
+                    // time this scene's task runs, so the launch start is
+                    // here rather than there; `start()` is idempotent, so the
+                    // next activation costs nothing.
+                    delegate.heartbeat = heartbeat
+                    if NSApp.isActive { heartbeat.start() }
                     // A notification click reaches the delegate, not a view
                     // -- this is where it meets the destination binding and
                     // the Library's own navigation.
