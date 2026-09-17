@@ -80,6 +80,34 @@ extension SecretStore {
         }
     }
 
+    /// One read-modify-write, serialised against every OTHER PROCESS sharing
+    /// this home.
+    ///
+    /// The `Mutex` only ever serialised writers inside one process, and the
+    /// document is read once and then held -- so a dev build beside an
+    /// installed one, or two launches racing, each wrote its own stale copy
+    /// over the other's. An advisory `flock(2)` on `secrets.json.lock` plus a
+    /// re-read INSIDE it is the whole fix: a write costs one extra read, and
+    /// writes are rare.
+    ///
+    /// Advisory, so it binds only holders that take it -- which, on this home,
+    /// is every build that has this file.
+    func locked<T>(_ body: () throws -> T) throws -> T {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = url.appendingPathExtension("lock").path(percentEncoded: false)
+        let descriptor = open(path, O_RDWR | O_CREAT, 0o600)
+        guard descriptor >= 0 else {
+            throw SecretStoreError.couldNotReplace(path: path, code: errno)
+        }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            throw SecretStoreError.couldNotReplace(path: path, code: errno)
+        }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
+    }
+
     /// One file, created with mode `0600` and flushed to the platter.
     ///
     /// NOT `Data.write(to:)` plus a chmod: that creates at the process umask,

@@ -163,6 +163,26 @@ struct SecretStoreTests {
         #expect(mode & 0o777 == 0o600)
     }
 
+    /// **Fails today**: the document is read once per process and then held,
+    /// and a write persists the whole cached map. Two live writers on one home
+    /// -- a dev build beside an installed one, two launches racing -- each
+    /// wrote their own stale copy over the other's. The `Mutex` only ever
+    /// serialised writers INSIDE one process.
+    @Test func aSecondWriterDoesNotClobberTheFirst() throws {
+        let (first, dir) = try scratch()
+        let second = SecretStore(directory: dir)
+        let a = hostName(), b = hostName(), c = hostName()
+
+        try first.set("k-a", for: a)   // `first` now holds a warm cache
+        try second.set("k-b", for: b)  // written behind its back
+        try first.set("k-c", for: c)   // must not lose k-b
+
+        let cold = SecretStore(directory: dir)
+        #expect(try cold.value(for: a) == "k-a")
+        #expect(try cold.value(for: b) == "k-b")
+        #expect(try cold.value(for: c) == "k-c")
+    }
+
     @Test func concurrentWritersDoNotLoseUpdates() async throws {
         let (store, _) = try scratch()
         let names = (0..<8).map { _ in hostName() }

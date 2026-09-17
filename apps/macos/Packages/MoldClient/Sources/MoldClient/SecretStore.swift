@@ -86,21 +86,39 @@ public final class SecretStore: Sendable {
 
     public func set(_ value: String, for name: String) throws {
         try Self.check(name)
-        try state.withLock { slot in
-            var current = try loaded(&slot)
-            current.map[name] = value
-            try save(&current)
-            slot = current
-        }
+        try write(name) { $0[name] = value }
     }
 
     public func clear(_ name: String) throws {
         try Self.check(name)
+        try write(name) { $0.removeValue(forKey: name) }
+    }
+
+    /// The value on DISK, whatever this process has cached.
+    ///
+    /// `LegacyKeychain` deletes an item only once this says the file holds the
+    /// key: the Keychain was the only other copy, and the in-process cache
+    /// would answer with what we MEANT to write (review E1).
+    public func persistedValue(for name: String) throws -> String? {
+        try Self.check(name)
+        return try state.withLock { _ in
+            var cold: Loaded?
+            return try loaded(&cold).map[name]
+        }
+    }
+
+    /// One read-modify-write, under the process mutex AND the cross-process
+    /// lock, re-reading the document inside both -- so a second live writer's
+    /// key is never lost to this one's cache.
+    private func write(_ name: String, _ change: (inout [String: String]) -> Void) throws {
         try state.withLock { slot in
-            var current = try loaded(&slot)
-            current.map.removeValue(forKey: name)
-            try save(&current)
-            slot = current
+            try locked {
+                slot = nil
+                var current = try loaded(&slot)
+                change(&current.map)
+                try save(&current)
+                slot = current
+            }
         }
     }
 
