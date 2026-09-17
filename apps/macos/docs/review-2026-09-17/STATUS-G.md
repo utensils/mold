@@ -126,10 +126,13 @@ failure said beside the control. Failing test first:
 `PictureImportTests.noWellReadsAFileItself`.
 
 **#9 changes one number.** The tile badge and VoiceOver counted elapsed
-86,400-second chunks while the sentence under Recently Deleted counted
-calendar days. All three now count calendar days — the sentence's answer, and
-the one that is a promise about a date. The badge's tooltip also stops saying
-"Purged in 0 days" under a badge reading "today".
+86,400-second chunks while the sentence under Recently Deleted asked
+`dateComponents` between two instants — which is the same elapsed count with
+daylight saving folded in, NOT calendar days, as the second review round
+caught. `TrashCountdown` now counts midnights in the viewer's own calendar, so
+a purge at 01:00 tomorrow read at 23:00 tonight is 1 day on all three surfaces
+instead of "today" on all three. The badge's tooltip also stops saying "Purged
+in 0 days" under a badge reading "today".
 
 **#11**: `QueueRowActions.Kind.title` is the one spelling of all six words, and
 `QueueSelection.offered` is the one list the Queue menu draws and
@@ -156,11 +159,59 @@ Run LAST, on the settled tree, after every helper had finished:
 - app bundle `xcodebuild … test` under the shared lock — 539 tests, 80
   suites, green.
 
+## Adversarial review, second round
+
+| # | finding | status | commit | test |
+| --- | --- | --- | --- | --- |
+| 1 | a multi-file import ABANDONED the batch on the first unreadable file | fixed — `continue`, reported once after the batch, and the read moved off-main | `dc0bee5` | `LibraryImportTests` (3) |
+| 2 | every separator shared one `ForEach` identity | fixed — a drawn row is keyed by POSITION; `RowAction` is no longer `Identifiable` | `c832c96` | `RowActionSuite.aDrawnMenuRepeatsItselfAndIsKeyedByPosition` |
+| 3 | the Installed-models menu lost its `host` gate | **not a bug** — the gate is in `ModelsPane.menuItems(for:)` (`+Actions.swift:37`), which is `guard let host else { return [] }`; the review compared against the VIEW's copy of the same gate. It cannot be unit-tested without a view hierarchy (`@Environment` stores), so it is stated here rather than pinned | — | — |
+| 4 | `KeyframeTable` still swallowed its import failure | fixed — the same caption its two siblings draw | `2afc861` | — (a `@State` caption) |
+| 5 | both source scans could pass vacuously | fixed — a `count >` floor on each, the menu scan widened to `Packages/*/Sources`, the well scan from `Generate/` to all of `Sources/Mold` | `38e8805` | the scans themselves |
+| 6 | `TrashCountdown` did not count calendar days | fixed — it counts MIDNIGHTS now, in the viewer's calendar, which is what every claim said | `f345e23` | `TrashCountdownSuite` (5) |
+| 7 | the ledger said "cross-lane edits: none" | corrected below | this file | — |
+| 8 | Discover's Open Page lost the `.link` trait | LEFT — see below | — | — |
+| 9 | an orphaned doc comment | fixed | `1562c65` | — |
+| 10 | the fake's latch was sticky | fixed — arming the hold clears it | `1562c65` | — |
+| 11 | two `rendered` edge cases | the policy asymmetry is now stated in the doc; the submenu-of-submenus case has no surface and is left | `1562c65` | — |
+
+**#1 is the one that mattered.** The sweep's fix reported the failure and then
+`return`ed from inside the loop, so ten files with a bad one second in imported
+ONE and never attempted eight. A read failure is about THAT FILE and now
+`continue`s; a refused UPLOAD is about the MACHINE and still stops. Both are
+pinned. The test then found a second half nobody had looked for: every
+successful import calls `hosts.succeeded(on:)`, which clears that machine's
+failures, so a report made mid-loop is wiped by the next file that works. The
+batch reports ONCE when it is done, naming the file or saying how many.
+
+**#2**: `RowAction.id` was `kind ?? title` and every separator is
+`RowAction(title: "")`, so the Queue menu (up to four dividers) and the adapter
+row (two) handed SwiftUI the same identity repeatedly. The conformance is gone
+rather than patched, because nothing in the VALUE can tell two dividers apart;
+`RowActionMenu` keys its `ForEach` on the offset. The test that should have
+caught it was written over a list rendering zero separators.
+
+**#8, left**: `Link` → `Button` loses the `.link` accessibility trait and the
+`\.openURL` environment. Restoring it would put the one control the shared
+renderer cannot draw back inside a menu, which is the thing this lane removed.
+Worth a follow-up that models a link IN the shared type (a `RowAction` whose
+kind is a URL the renderer draws as a `Link`) rather than an exception here.
+The review's related note — neither spelling validates the scheme, so a
+server-supplied `file://` would launch — is real and is NOT a regression of
+this lane; it wants its own commit.
+
 ## Cross-lane edits
 
-None. Nothing outside this lane's owned paths was touched — no
-`Engine/**`, `rust/**`, `Makefile`, `project.yml`, `scripts/**`, `Info.plist`,
-`flake.nix`, `.github/**`, `MoldApp.swift` or `MoldAppDelegate.swift`.
+One, and it is not in the brief's list: `Sources/Mold/Machines/PairingSection.swift`
+(the paired-client row's `.contextMenu { Button("Revoke…") }` became
+`.rowActionMenu`). The engine lane has since landed `MoldEngine.isPairable` in
+that neighbourhood — if its guard is in the client row this is a textual
+conflict on adjacent lines; if it is in the pairing-code section it merges. The
+integrator resolves it; this lane did not rebase.
+
+Nothing else outside this lane's owned paths was touched — no `Engine/**`,
+`rust/**`, `Makefile`, `project.yml`, `scripts/**`, `Info.plist`, `flake.nix`,
+`.github/**`, `MoldApp.swift` or `MoldAppDelegate.swift`.
 
 ## For the integrator
 
