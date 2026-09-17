@@ -26,6 +26,9 @@ extension HostStore {
                 group.addTask { await self.refresh(host) }
             }
         }
+        // Once every answer is in, rather than once per machine: a fleet-wide
+        // check reconciles as one decision.
+        reconcileEventStreams()
     }
 
     func refresh(_ host: MoldHost) async {
@@ -33,7 +36,9 @@ extension HostStore {
         let state = await check(host)
         reachability[host.id] = state
         // Capabilities change only when the host is rebuilt, so one fetch per
-        // reachability check is plenty.
+        // reachability check is plenty. Reconciling comes AFTER them, because
+        // whether a machine wants watching is something its capabilities say.
+        defer { reconcileEventStreams() }
         guard case .up = state, capabilities[host.id] == nil else { return }
         let client = backend(for: host)
         capabilities[host.id] = try? await client.capabilities()

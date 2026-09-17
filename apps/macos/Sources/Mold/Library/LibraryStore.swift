@@ -41,12 +41,17 @@ final class LibraryStore {
     /// The machines whose chain a task is already walking.
     var draining: Set<MoldHost.ID> = []
 
-    /// The registration with `HostStore`'s event fan-out. See
-    /// `LibraryStore+Live`.
-    var listening: UUID?
-
     init(hosts: HostStore) {
         self.hosts = hosts
+        // Listening starts with the store, not with a pane. The Library used
+        // to register on appearing, so a print made while Generate was showing
+        // reached nobody and the timeline only caught up on the next ⌘R.
+        // What still waits for a pane is the first LISTING -- these are
+        // deltas, and a client that has read nothing has nothing to apply
+        // them to. See `LibraryStore+Live`.
+        hosts.onEvent { [weak self] host, event in
+            self?.apply(event, from: host)
+        }
     }
 
     /// Prints from every host, newest first.

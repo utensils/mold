@@ -60,23 +60,16 @@ struct LibraryPane: View {
     /// when the machines or the shelves change under it.
     private var watched: some View {
         chrome
-            .task { await start() }
+            // Its own data, and nothing else: `HostStore` reconciles its own
+            // event streams, and the library listens from the moment it is
+            // built. What still belongs here is the first LISTING, because
+            // the events are deltas and a client that has read nothing has
+            // nothing to apply them to.
+            .task { await actions.reload() }
             .onAppear { library.undo.manager = undoManager }
-            .onChange(of: hosts.hosts) { _, _ in hosts.reconcileEventStreams() }
-            .onChange(of: hosts.reachability) { _, _ in hosts.reconcileEventStreams() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
-    }
-
-    /// First list, then listen.
-    ///
-    /// In that order because the events are DELTAS: a client that has never
-    /// read the listings has nothing to apply them to.
-    private func start() async {
-        await actions.reload()
-        library.listen()
-        hosts.reconcileEventStreams()
     }
 
     /// A new shelf is a new list, and a selection made in the old one names

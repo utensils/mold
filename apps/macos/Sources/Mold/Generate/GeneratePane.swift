@@ -35,6 +35,7 @@ struct GeneratePane: View {
             controller.promptTucked.toggle()
         })
         .task { await loadModels() }
+        .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
         .onChange(of: controller.draft) { _, _ in refreshPlacement() }
         .onChange(of: controller.modelName) { _, _ in refreshPlacement() }
     }
@@ -97,15 +98,20 @@ struct GeneratePane: View {
     }
 
     private func loadModels() async {
-        // Reachability decides which machine we land on, so make sure it is
-        // known before choosing one.
-        await hosts.refreshAll()
         await models.refresh()
-        // Nothing chosen yet: start on something the machine can actually run.
-        if controller.modelName == nil, let host,
-           let first = models.ready(on: host.id).first {
-            controller.select(model: first, on: host.id)
-        }
+        adoptFirstReadyModel()
+    }
+
+    /// Nothing chosen yet: start on something the machine can actually run.
+    ///
+    /// Also on reachability, because which machine `host` resolves to is an
+    /// answer this pane no longer probes for itself -- the root does the one
+    /// automatic check, and this adopts when it lands.
+    private func adoptFirstReadyModel() {
+        guard controller.modelName == nil, let host,
+              let first = models.ready(on: host.id).first
+        else { return }
+        controller.select(model: first, on: host.id)
     }
 
     private func startRun() {

@@ -17,7 +17,7 @@ final class DownloadStore {
     private let hosts: HostStore
     /// Keyed by host then by the host's job id.
     private(set) var active: [MoldHost.ID: [String: Progress]] = [:]
-    private var streams: [MoldHost.ID: Task<Void, Never>] = [:]
+    private(set) var streams: [MoldHost.ID: Task<Void, Never>] = [:]
 
     init(hosts: HostStore) {
         self.hosts = hosts
@@ -43,7 +43,7 @@ final class DownloadStore {
             forHost[ticket.id] = Progress(model: model.name)
             active[host.id] = forHost
             hosts.succeeded(on: host.id)
-            watch(host: host)
+            reconcile()
         } catch {
             hosts.report(error, on: host.id, doing: "start that download")
         }
@@ -57,13 +57,35 @@ final class DownloadStore {
             hosts.report(error, on: host.id, doing: "cancel that download")
         }
         active[host.id]?.removeValue(forKey: jobID)
+        reconcile()
     }
 
-    /// One stream per machine, however many models are being fetched on it.
-    private func watch(host: MoldHost) {
-        guard streams[host.id] == nil else { return }
-        streams[host.id] = Task { [weak self] in
-            defer { self?.streams[host.id] = nil }
+    /// One stream per machine with something in flight, and none for a
+    /// machine that is gone. The same rule `HostStore` reconciles its event
+    /// watchers by, rather than a second mechanism -- and the reason nothing
+    /// has to remember to STOP a stream: the method that did had no callers,
+    /// so a removed machine kept a live connection for the rest of the launch.
+    ///
+    /// Called after every change to `active`, and by the root when the machine
+    /// list changes.
+    func reconcile() {
+        let wanted = Set(active.keys).intersection(hosts.hosts.map(\.id))
+        for id in streams.keys where !wanted.contains(id) {
+            streams.removeValue(forKey: id)?.cancel()
+        }
+        for id in wanted where streams[id] == nil {
+            guard let host = hosts.host(id) else { continue }
+            streams[id] = watch(host: host)
+        }
+    }
+
+    private func watch(host: MoldHost) -> Task<Void, Never> {
+        Task { [weak self] in
+            // A cancelled task was already taken out of `streams` by
+            // `reconcile`, which may have replaced it -- clearing the entry
+            // here would take the successor's. Any other exit is a dropped
+            // connection nobody knows about yet, so it says so.
+            defer { if !Task.isCancelled { self?.streams[host.id] = nil } }
             // A dropped stream just stops the live figures; the download
             // itself belongs to the host and carries on.
             guard let backend = self?.hosts.backend(for: host) else { return }
@@ -93,12 +115,7 @@ final class DownloadStore {
             forHost[id] = progress
         }
         active[host] = forHost.isEmpty ? nil : forHost
+        reconcile()
     }
 
-    /// Stops every stream. Called when the pane goes away so a background
-    /// connection per machine does not outlive the screen that wanted it.
-    func stopWatching() {
-        streams.values.forEach { $0.cancel() }
-        streams.removeAll()
-    }
 }

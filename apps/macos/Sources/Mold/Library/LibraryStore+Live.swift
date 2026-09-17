@@ -5,19 +5,10 @@ import MoldClient
 @MainActor
 extension LibraryStore {
 
-    /// Starts applying live gallery events.
-    ///
-    /// The app still lists on launch and on ⌘R: these are DELTAS, and a client
-    /// that has never read the listings has nothing to apply them to. What
-    /// they replace is the polling in between.
-    func listen() {
-        guard listening == nil else { return }
-        listening = hosts.onEvent { [weak self] host, event in
-            self?.apply(event, from: host)
-        }
-    }
-
-    private func apply(_ event: MoldEvent, from host: MoldHost.ID) {
+    /// One machine's frame. Registered from `init`, so it is `internal`
+    /// rather than `private`: `private` does not cross a file boundary, even
+    /// within one type.
+    func apply(_ event: MoldEvent, from host: MoldHost.ID) {
         switch event {
         case .authority:
             break
@@ -94,9 +85,21 @@ extension LibraryStore {
     func relist(_ id: MoldHost.ID) async {
         guard let machine = hosts.host(id), let client = hosts.backend(for: id) else { return }
         etags[id] = nil
-        guard case let .fresh(prints, etag) = try? await client.gallery(etag: nil) else { return }
+        let fetched: Fetched<[GalleryPrint]>
+        do {
+            fetched = try await client.gallery(etag: nil)
+        } catch {
+            // The repair itself failing is the one thing the person has to be
+            // told about: this machine's rows are known-stale and nothing
+            // else is going to correct them. Swallowing it was how a resync
+            // that never resynced looked exactly like one that worked.
+            hosts.report(error, on: id, doing: "list its prints")
+            return
+        }
+        guard case let .fresh(prints, etag) = fetched else { return }
         if let etag { etags[id] = etag }
         perHost[id] = prints.map { LibraryEntry(host: machine, print: $0) }
+        hosts.succeeded(on: id, doing: "list its prints")
         replayPending(on: id)
         rebuild()
     }

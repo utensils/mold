@@ -65,7 +65,6 @@ struct QueuePane: View {
     }
 
     private func load() async {
-        await hosts.refreshAll()
         await queue.refresh()
     }
 }

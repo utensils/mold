@@ -34,10 +34,12 @@ extension HostStore {
         updated.name = resolvedName(host.name, for: updated.baseURL)
         hosts[index] = updated
         persist()
-        // The key or address may have changed, so what we knew is stale.
+        // The key or address may have changed, so EVERYTHING we knew is stale
+        // -- the fleet identity included: a machine whose address changed that
+        // kept the old box's identity would match the new box's authority
+        // frame, and the "this is a different library" repair would never fire.
+        forget(updated.id)
         reachability[updated.id] = .unknown
-        capabilities[updated.id] = nil
-        exportOptions[updated.id] = nil
         Task { await refresh(updated) }
     }
 
@@ -58,10 +60,25 @@ extension HostStore {
         return suggested.isEmpty ? HostAddress.displayString(for: url) : suggested
     }
 
+    /// Everything this app held about one machine, in one place -- because
+    /// three callers each clearing the subset they remembered is how a
+    /// watcher, an export list and a failure banner outlived the machine that
+    /// produced them.
+    ///
+    /// `listeners` is not pruned: it is keyed by registration, not by machine.
+    func forget(_ id: MoldHost.ID) {
+        reachability[id] = nil
+        capabilities[id] = nil
+        exportOptions[id] = nil
+        instanceIDs[id] = nil
+        watchers.removeValue(forKey: id)?.cancel()
+        failures.removeAll { $0.host == id }
+    }
+
     func remove(_ host: MoldHost) {
         hosts.removeAll { $0.id == host.id }
-        reachability[host.id] = nil
-        capabilities[host.id] = nil
+        forget(host.id)
+        reconcileEventStreams()
         HostPersistence.forget(host)
         persist()
     }
@@ -76,15 +93,15 @@ extension HostStore {
         } else {
             hosts.insert(host, at: 0)
         }
+        forget(host.id)
         reachability[host.id] = .unknown
-        capabilities[host.id] = nil
         Task { await refresh(host) }
     }
 
     func dropLocalEngine() {
         hosts.removeAll { $0.id == MoldEngine.localHostID }
-        reachability[MoldEngine.localHostID] = nil
-        capabilities[MoldEngine.localHostID] = nil
+        forget(MoldEngine.localHostID)
+        reconcileEventStreams()
     }
 
     private func persist() {

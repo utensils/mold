@@ -23,7 +23,9 @@ final class HostStore {
 
     /// One live `/api/events` connection per machine. See `HostStore+Events`.
     var watchers: [MoldHost.ID: Task<Void, Never>] = [:]
-    var listeners: [UUID: (MoldHost.ID, MoldEvent) -> Void] = [:]
+    /// Registered once each by the composition root's stores, and never
+    /// removed -- see `HostStore+Events`.
+    var listeners: [(MoldHost.ID, MoldEvent) -> Void] = []
     /// The fleet identity each machine last announced. The same address
     /// answering with a different one is a different library, not a
     /// reconnection.

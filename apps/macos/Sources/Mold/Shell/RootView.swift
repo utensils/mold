@@ -7,6 +7,7 @@ import SwiftUI
 /// second copy of it arguing with the first.
 struct RootView: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(DownloadStore.self) private var downloads
     @Environment(\.openSettings) private var openSettings
     /// Reopening where you left off is what every Mac app does. The env
     /// override exists so a UAT run can land on a named destination without
@@ -25,6 +26,11 @@ struct RootView: View {
         .navigationTitle("Mold")
         .task { await hosts.refreshAll() }
         .task { openSettingsIfRequested() }
+        // `HostStore` cannot reach `DownloadStore` -- it is the root every
+        // store is built from, not a peer. So the machine list is watched
+        // HERE rather than in the Models pane: a stream for a machine that is
+        // gone must stop when it goes, not when somebody next opens Models.
+        .onChange(of: hosts.hosts) { _, _ in downloads.reconcile() }
         .onChange(of: destination) { _, new in stored = new.rawValue }
     }
 }

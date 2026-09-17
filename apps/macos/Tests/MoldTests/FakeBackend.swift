@@ -11,6 +11,17 @@ import MoldClient
 /// `nonisolated(unsafe)` state: the three stream requirements answer
 /// synchronously, which a `@MainActor` witness cannot satisfy, and this is
 /// only ever touched from the main actor by a `@MainActor` test.
+/// Lets a store's own tasks run. A watcher is an unstructured `Task`, so
+/// nothing about it has happened yet when the call that started it returns --
+/// a test asserts on what it DID, not on the instant it was made.
+@MainActor
+func settle(until condition: () -> Bool) async {
+    for step in 0 ..< 200 {
+        if condition() { return }
+        if step < 100 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+}
+
 final class FakeBackend: MoldBackend, @unchecked Sendable {
     let host: MoldHost
     nonisolated(unsafe) private(set) var calls: [String] = []
@@ -23,6 +34,23 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// `nil` means nothing was planted, so `queue()` behaves like every other
     /// unplanted route and throws rather than answering with an empty list.
     nonisolated(unsafe) var queueListing: QueueListing?
+    nonisolated(unsafe) var serverStatus: ServerStatus?
+    nonisolated(unsafe) var capabilityBlock: Capabilities?
+    nonisolated(unsafe) var exportBlock: ExportOptions?
+    nonisolated(unsafe) var downloadTicket: DownloadTicket?
+    /// The live `/api/events` stream, so a test can hand the store a frame
+    /// and watch what it does with it. Held open: a stream that finishes
+    /// sends the watcher round its reconnect loop, which is a second
+    /// `events` call and a wait a test would have to sleep through.
+    nonisolated(unsafe) var eventStream: AsyncThrowingStream<MoldEvent, Error>.Continuation?
+    nonisolated(unsafe) var downloadStream: AsyncThrowingStream<DownloadEvent, Error>.Continuation?
+    /// Set when the download stream's consumer went away.
+    nonisolated(unsafe) var downloadStreamEnded = false
+
+    /// Hands the open event stream one frame.
+    func emit(_ event: MoldEvent) { eventStream?.yield(event) }
+
+    func callCount(_ route: String) -> Int { calls.filter { $0 == route }.count }
 
     init(host: MoldHost) { self.host = host }
 
@@ -35,8 +63,16 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Status
 
-    func status() async throws -> ServerStatus { try record("status"); throw notPlanted() }
-    func capabilities() async throws -> Capabilities { try record("capabilities"); throw notPlanted() }
+    func status() async throws -> ServerStatus {
+        try record("status")
+        guard let serverStatus else { throw notPlanted() }
+        return serverStatus
+    }
+    func capabilities() async throws -> Capabilities {
+        try record("capabilities")
+        guard let capabilityBlock else { throw notPlanted() }
+        return capabilityBlock
+    }
     func models() async throws -> [Model] { try record("models"); return [] }
 
     // MARK: - Generation
@@ -71,7 +107,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     // MARK: - Downloads
 
     func startDownload(_ request: DownloadRequest) async throws -> DownloadTicket {
-        try record("startDownload"); throw notPlanted()
+        try record("startDownload")
+        guard let downloadTicket else { throw notPlanted() }
+        return downloadTicket
     }
     func cancelDownload(id: String) async throws { try record("cancelDownload") }
 
@@ -98,7 +136,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func media(_ filename: String, trashed: Bool) async throws -> Data {
         try record("media"); throw notPlanted()
     }
-    func exportOptions() async throws -> ExportOptions { try record("exportOptions"); throw notPlanted() }
+    func exportOptions() async throws -> ExportOptions {
+        try record("exportOptions")
+        guard let exportBlock else { throw notPlanted() }
+        return exportBlock
+    }
     func export(_ filename: String, format: String) async throws -> Data {
         try record("export"); throw notPlanted()
     }
@@ -132,7 +174,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func events() -> AsyncThrowingStream<MoldEvent, Error> {
         calls.append("events")
-        return AsyncThrowingStream { $0.finish() }
+        return AsyncThrowingStream { self.eventStream = $0 }
     }
     func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error> {
         calls.append("batchEvents")
@@ -140,6 +182,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func downloadEvents() -> AsyncThrowingStream<DownloadEvent, Error> {
         calls.append("downloadEvents")
-        return AsyncThrowingStream { $0.finish() }
+        return AsyncThrowingStream {
+            $0.onTermination = { _ in self.downloadStreamEnded = true }
+            self.downloadStream = $0
+        }
     }
 }

@@ -9,13 +9,15 @@ import SwiftUI
 /// sentence, instead of listing 170 rows of quantization tags and leaving the
 /// reader to work out the difference between q4 and bf16.
 struct ModelsPane: View {
-    @Environment(HostStore.self) private var hosts
-    @Environment(ModelStore.self) private var models
+    // Not `private`: `ModelsPane+Grouping` reads all of these, and `private`
+    // does not cross a file boundary even within one type.
+    @Environment(HostStore.self) var hosts
+    @Environment(ModelStore.self) var models
     @Environment(DownloadStore.self) private var downloads
 
-    @State private var hostID: MoldHost.ID?
-    @State private var query = ""
-    @State private var installedOnly = true
+    @State var hostID: MoldHost.ID?
+    @State var query = ""
+    @State var installedOnly = true
 
     var body: some View {
         Group {
@@ -50,48 +52,7 @@ struct ModelsPane: View {
         .searchable(text: $query, prompt: "Search models")
         .toolbar { toolbar }
         .task { await load() }
-    }
-
-    // MARK: - Grouping
-
-    /// Deliberately not named `Group`: that shadows SwiftUI's own view inside
-    /// `body`, and the resulting errors point everywhere but here.
-    private struct VariantGroup {
-        let title: String
-        let repo: String?
-        let variants: [Model]
-
-        /// A model with one untagged variant is not a group of anything.
-        /// Giving it a heading plus a row leaves the row with nothing to say,
-        /// which reads as a rendering bug rather than as a simple model.
-        var isSolo: Bool { variants.count == 1 && variants[0].tag == nil }
-    }
-
-    private var host: MoldHost? {
-        hosts.hosts.first { $0.id == hostID } ?? hosts.preferredHost
-    }
-
-    private var candidates: [Model] {
-        guard let host else { return [] }
-        let all = installedOnly ? models.ready(on: host.id) : models.generators(on: host.id)
-        guard !query.isEmpty else { return all }
-        let needle = query.lowercased()
-        return all.filter {
-            $0.description.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
-        }
-    }
-
-    private var groups: [VariantGroup] {
-        Dictionary(grouping: candidates, by: \.baseName)
-            .map { _, variants in
-                let sorted = variants.sorted { ($0.sizeGb ?? 0) < ($1.sizeGb ?? 0) }
-                let lead = sorted[0]
-                // The trade-off sentence describes the VARIANT, so it stays
-                // on the row. Repeating it in the heading said the same thing
-                // twice for every single-variant model.
-                return VariantGroup(title: lead.baseTitle, repo: lead.hfRepo, variants: sorted)
-            }
-            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        .onChange(of: hosts.reachability) { _, _ in adoptPreferredHost() }
     }
 
     private var subtitle: String {
@@ -138,8 +99,19 @@ struct ModelsPane: View {
     }
 
     private func load() async {
-        await hosts.refreshAll()
         await models.refresh()
-        if hostID == nil { hostID = hosts.preferredHost?.id }
+        adoptPreferredHost()
+    }
+
+    /// Land on a machine once one has answered.
+    ///
+    /// `preferredHost` falls back to the first row configured, which before
+    /// any answer is in may well be a machine that is off -- so this waits for
+    /// an `up`. Until then `host` falls back the same way for display, so the
+    /// pane still shows something; what it does not do is PIN the picker to a
+    /// machine nobody chose.
+    private func adoptPreferredHost() {
+        guard hostID == nil, hosts.hosts.contains(where: hosts.isUp) else { return }
+        hostID = hosts.preferredHost?.id
     }
 }

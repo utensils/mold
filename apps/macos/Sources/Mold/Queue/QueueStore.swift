@@ -7,7 +7,6 @@ import MoldClient
 final class QueueStore {
     private let hosts: HostStore
     private(set) var byHost: [MoldHost.ID: [QueueEntry]] = [:]
-    private(set) var instanceIDs: [MoldHost.ID: String] = [:]
     private(set) var isLoading = false
 
     init(hosts: HostStore) {
@@ -17,19 +16,15 @@ final class QueueStore {
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
-        await withTaskGroup(of: (MoldHost.ID, Result<QueueListing, Error>, String?).self) { group in
+        await withTaskGroup(of: (MoldHost.ID, Result<QueueListing, Error>).self) { group in
             for host in hosts.hosts {
                 let client = hosts.backend(for: host)
                 group.addTask {
-                    async let listing: Result<QueueListing, Error> = {
-                        do { return .success(try await client.queue()) }
-                        catch { return .failure(error) }
-                    }()
-                    async let status = try? await client.status()
-                    return (host.id, await listing, (await status)?.instanceId)
+                    do { return (host.id, .success(try await client.queue())) }
+                    catch { return (host.id, .failure(error)) }
                 }
             }
-            for await (id, result, instance) in group {
+            for await (id, result) in group {
                 switch result {
                 case let .success(listing):
                     byHost[id] = listing.merged
@@ -40,7 +35,6 @@ final class QueueStore {
                     // jobs, when what happened is a bad connection.
                     hosts.report(error, on: id, doing: "list its queue")
                 }
-                if let instance { instanceIDs[id] = instance }
             }
         }
     }
@@ -65,8 +59,12 @@ final class QueueStore {
 
     /// Only meaningful for a held job, and only with the host's instance id --
     /// retrying against a host that has restarted would aim at nothing.
+    ///
+    /// The identity comes from `HostStore`, which already holds it twice over:
+    /// this store used to keep a third copy and buy it with a second
+    /// `/api/status` call per machine per refresh.
     func retry(_ entry: QueueEntry, on host: MoldHost.ID) async {
-        guard let instance = instanceIDs[host] else {
+        guard let instance = hosts.instanceID(of: host) else {
             hosts.report(NoInstanceKnown(), on: host, doing: "retry that job")
             return
         }

@@ -24,14 +24,14 @@ struct LibraryStoreHostsTests {
         let hosts = HostStore(hosts: [empty, other]) { host in
             fakes[host.id] ?? { let f = FakeBackend(host: host); fakes[host.id] = f; return f }()
         }
+        // Listening from `init`, so there is nothing to start.
         let library = LibraryStore(hosts: hosts)
-        library.listen()
 
         // `empty` has never reported a print -- `perHost[empty.id]` is absent,
         // not merely empty.
         #expect(library.perHost[empty.id] == nil)
 
-        hosts.listeners.values.forEach {
+        hosts.listeners.forEach {
             $0(empty.id, .gallery(.added(filename: "new.png", row: FakeFixtures.print("new.png"))))
         }
 
@@ -67,13 +67,13 @@ struct LibraryStoreHostsTests {
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("a.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }
+        // Listening from `init`, so there is nothing to start.
         let library = LibraryStore(hosts: hosts)
-        library.listen()
 
         // Still on its way to the machine when the resync arrives.
         library.outbox.enqueue(PrintEdit(change: .favorite(true), targets: [machine.id: ["a.png"]]))
 
-        hosts.listeners.values.forEach { $0(machine.id, .resyncRequired) }
+        hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
         try await waitUntil {
             library.perHost[machine.id]?.first(where: { $0.print.filename == "a.png" }) != nil
         }

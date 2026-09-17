@@ -26,7 +26,6 @@ struct MachinesSettings: View {
                 hosts.update(MoldHost(id: host.id, name: name, baseURL: url, apiKey: key))
             }
         }
-        .task { await hosts.refreshAll() }
         .task { openEditorIfRequested() }
     }
 
