@@ -18,10 +18,13 @@ public extension PrintKind {
     /// all. Where `frames` IS available the caller should prefer it -- this
     /// table is the fallback, and the one place the extensions live.
     init(playbackOf filename: String) {
-        switch (filename as NSString).pathExtension.lowercased() {
-        case "mp4", "webm", "mov", "m4v": self = .clip
-        case "glb": self = .mesh
-        default: self = .picture
+        let ext = (filename as NSString).pathExtension.lowercased()
+        if Self.playableClipExtensions.contains(ext) {
+            self = .clip
+        } else if ext == "glb" {
+            self = .mesh
+        } else {
+            self = .picture
         }
     }
 

@@ -90,6 +90,9 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
 
     /// What a person would call this.
     public var kind: PrintKind {
+        // No `format` (an older host's listing): the name is all there is,
+        // and the one extension table answers for it.
+        if format == nil { return PrintKind(playbackOf: filename) }
         if isVideo { return .clip }
         if isMesh { return .mesh }
         return .picture

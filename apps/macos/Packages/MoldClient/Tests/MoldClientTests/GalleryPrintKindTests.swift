@@ -72,3 +72,13 @@ private func made(_ format: String?, frames: Int? = nil) -> GalleryPrint {
     #expect(!made(nil).isMesh)
     #expect(made(nil).kind == .picture)
 }
+
+/// **Fails today**: with no `format` every print reads as a picture. An older
+/// host's listing omits it, and then the filename is all there is -- the same
+/// thing a finished batch child has, so both ask the ONE extension table
+/// (`PrintKind(playbackOf:)`) rather than keeping two that can disagree.
+@Test func aPrintWithNoFormatIsClassifiedByItsName() {
+    #expect(PrintFixtures.print("clip.mp4", format: nil).kind == .clip)
+    #expect(PrintFixtures.print("shape.glb", format: nil).kind == .mesh)
+    #expect(PrintFixtures.print("still.png", format: nil).kind == .picture)
+}
