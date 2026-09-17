@@ -92,19 +92,25 @@ struct PictureImportTests {
     ///
     /// A source scan, because the defect is the ABSENCE of a call: a unit
     /// test can only pin what a well does once it goes through the one door,
-    /// and nothing stops the next well from opening its own.
+    /// and nothing stops the next well from opening its own. Over the WHOLE
+    /// app, not just `Generate/`: the Library's import read a whole file on
+    /// the main actor too, in a different folder.
     @Test func noWellReadsAFileItself() throws {
-        let generate = URL(fileURLWithPath: #filePath)
+        let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appending(path: "Sources/Mold/Generate")
-        let files = FileManager.default.enumerator(at: generate, includingPropertiesForKeys: nil)
+            .appending(path: "Sources/Mold")
+        let enumerated = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil)
+        let files = (enumerated?.allObjects as? [URL] ?? []).filter { $0.pathExtension == "swift" }
+        // A scan that finds no files passes for the wrong reason.
+        #expect(files.count > 100, "the app's source directory was not found")
         var offences: [String] = []
-        for case let file as URL in files?.allObjects ?? [] where file.pathExtension == "swift" {
-            // The two readers themselves, and the UAT seed, which reads a
+        for file in files {
+            // The two readers themselves, and the UAT seeds, which read a
             // path from the environment rather than a person's pick.
-            guard !["PictureImport.swift", "MediaImport.swift", "GeneratePane+UAT.swift"]
-                .contains(file.lastPathComponent)
+            guard !["PictureImport.swift", "MediaImport.swift"]
+                .contains(file.lastPathComponent),
+                !file.lastPathComponent.hasSuffix("+UAT.swift")
             else { continue }
             let text = try String(contentsOf: file, encoding: .utf8)
             for (number, line) in text.components(separatedBy: "\n").enumerated() {

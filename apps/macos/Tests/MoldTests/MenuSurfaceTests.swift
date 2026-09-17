@@ -24,7 +24,12 @@ struct MenuSurfaceTests {
     /// `.contextMenu` gets none of them and nobody notices.
     @Test func everyMenuIsAttachedThroughTheOneModifier() throws {
         var offences: [String] = []
-        for file in try sources() {
+        let files = try sources()
+        // A scan that finds no files passes for the wrong reason -- a wrong
+        // walk-up, a renamed directory, a sandboxed runner
+        // (`RouteEscapingContractTests`' own guard).
+        #expect(files.count > 100, "the app's source directory was not found")
+        for file in files {
             // `RowActionMenu.swift` IS the door: its two overloads are the
             // only `.contextMenu` in the app.
             guard file.lastPathComponent != "RowActionMenu.swift" else { continue }
@@ -52,13 +57,18 @@ struct MenuSurfaceTests {
             .map(\.title) == ["Details…"])
     }
 
+    /// The app AND the design system: `MoldStyle` imports SwiftUI too, so a
+    /// `.contextMenu` helper there would be just as invisible.
     private func sources() throws -> [URL] {
         let macos = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
-        let files = FileManager.default.enumerator(at: macos.appending(path: "Sources/Mold"),
-                                                   includingPropertiesForKeys: nil)
-        return (files?.allObjects as? [URL] ?? []).filter { $0.pathExtension == "swift" }
+        return ["Sources/Mold", "Packages/MoldStyle/Sources", "Packages/MoldClient/Sources"]
+            .flatMap { path -> [URL] in
+                let files = FileManager.default.enumerator(at: macos.appending(path: path),
+                                                           includingPropertiesForKeys: nil)
+                return (files?.allObjects as? [URL] ?? []).filter { $0.pathExtension == "swift" }
+            }
     }
 }
