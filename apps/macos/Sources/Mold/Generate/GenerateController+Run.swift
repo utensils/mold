@@ -55,7 +55,7 @@ extension GenerateController {
                 let active = ActiveBatch(
                     id: accepted.id, clientBatchId: admission.clientBatchId,
                     host: host.id, admitted: accepted)
-                guard followingNow else { self.queued.append(active); return }
+                guard followingNow else { self.queued.append(.batch(active)); return }
                 // Stop, or a second press, may have happened while this was in
                 // the air. Only now is there an id the host would recognise.
                 switch self.submissions.land(admission.clientBatchId) {
@@ -66,7 +66,7 @@ extension GenerateController {
                     // render must not displace the one that replaced it.
                     if !self.run.isBusy { self.followNext() }
                 case .queue:
-                    self.queued.append(active)
+                    self.queued.append(.batch(active))
                 case .follow:
                     self.activeBatch = active
                     await self.follow(accepted, backend: backend, host: host.id)

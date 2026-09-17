@@ -69,7 +69,7 @@ final class GenerateController {
     /// `internal(set)`, not `private(set)`: mutated from
     /// `GenerateController+Run` and `GenerateController+Queue`, different
     /// files -- the same reason `HostStore.failures` is `internal(set)`.
-    internal(set) var queued: [ActiveBatch] = []
+    internal(set) var queued: [QueuedRun] = []
 
     init(hosts: HostStore, defaults: ConfigStore,
          handoff: ResultHandoff = ResultHandoff(), probe: PlacementProbe = PlacementProbe()) {

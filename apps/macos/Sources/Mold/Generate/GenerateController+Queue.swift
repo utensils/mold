@@ -2,9 +2,9 @@ import Foundation
 import MoldClient
 
 /// M8 decision 8: Generate never turns into Stop. The host's queue is
-/// durable and one Generate press is one batch, so a press while another is
-/// on screen ADMITS a second batch (`submit(on:backend:)`) instead of being
-/// refused, and this is where it waits and advances.
+/// durable, so a press while another run is on screen ADMITS the work
+/// (`submit(on:backend:routing:)`) instead of being refused, and this is where
+/// it waits and advances. A chain waits in the SAME line (`QueuedRun`).
 @MainActor
 extension GenerateController {
     /// What the capsule's caption names -- "2 more queued".
@@ -51,12 +51,21 @@ extension GenerateController {
         while !queued.isEmpty {
             let next = queued.removeFirst()
             guard let backend = hosts.backend(for: next.host) else {
-                PendingBatch.forget(next.clientBatchId)
+                RunQueueing.forget(next)
                 continue
             }
-            activeBatch = next
-            runTask = Task { [weak self] in
-                await self?.follow(next.admitted, backend: backend, host: next.host)
+            switch next {
+            case let .batch(batch):
+                activeBatch = batch
+                runTask = Task { [weak self] in
+                    await self?.follow(batch.admitted, backend: backend, host: batch.host)
+                }
+            case let .chain(admitted):
+                // A chain job the host already holds: re-attaching to it IS
+                // following it, exactly as it is after a relaunch.
+                chain.reattach(jobId: admitted.jobId, stageCount: admitted.stageCount,
+                               on: admitted.host, backend: backend,
+                               report: ChainSubmission.reporter(for: self))
             }
             return
         }
@@ -101,10 +110,7 @@ extension GenerateController {
     /// Stops everything this pane admitted: every batch still waiting in
     /// `queued`, then the one on screen.
     func stopAll() {
-        for batch in queued {
-            PendingBatch.forget(batch.clientBatchId)
-            cancelOnItsMachine(batch)
-        }
+        for waiting in queued { RunQueueing.withdraw(waiting, on: self) }
         queued.removeAll()
         stop()
     }
