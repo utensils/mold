@@ -18,6 +18,9 @@ struct TitleField: View {
             .textFieldStyle(.roundedBorder)
             .font(.headline)
             .focused($editing)
+            // The viewer's Escape and arrows are key equivalents, which beat
+            // a caret. This is how they know to leave it alone.
+            .focusedValue(\.editingText, editing ? true : nil)
             .onSubmit(commit)
             .onChange(of: editing) { wasEditing, _ in if wasEditing { commit() } }
             // A different print selected is a different field, not a rename of

@@ -13,11 +13,18 @@ struct RootView: View {
     /// override exists so a UAT run can land on a named destination without
     /// driving the mouse.
     @AppStorage("destination", store: AppStorageSuite.defaults) private var stored = Destination.generate.rawValue
+    /// So does a collapsed sidebar. `@State` initializers cannot read another
+    /// property wrapper, so the seed comes straight from the suite -- the same
+    /// way `Destination.launch` reads where you were last.
+    @AppStorage("sidebarVisibility", store: AppStorageSuite.defaults)
+    private var storedVisibility = NavigationSplitViewVisibility.all.stored
+    @State private var columnVisibility = NavigationSplitViewVisibility(
+        stored: AppStorageSuite.defaults.string(forKey: "sidebarVisibility"))
     /// Owned by the scene so a menu command can change it.
     @Binding var destination: Destination
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             Sidebar(destination: $destination)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
@@ -32,6 +39,7 @@ struct RootView: View {
         // gone must stop when it goes, not when somebody next opens Models.
         .onChange(of: hosts.hosts) { _, _ in downloads.reconcile() }
         .onChange(of: destination) { _, new in stored = new.rawValue }
+        .onChange(of: columnVisibility) { _, new in storedVisibility = new.stored }
     }
 }
 
@@ -48,6 +56,15 @@ extension RootView {
         guard requested == "settings" || sheets.contains(requested ?? "") else { return }
         openSettings()
     }
+}
+
+/// `NavigationSplitViewVisibility` is not `RawRepresentable`, so the two
+/// states a person can actually leave the window in are mapped by hand.
+/// `.automatic` is the system choosing; remembering it would remember nothing.
+extension NavigationSplitViewVisibility {
+    init(stored: String?) { self = stored == "detailOnly" ? .detailOnly : .all }
+
+    var stored: String { self == .detailOnly ? "detailOnly" : "all" }
 }
 
 enum Destination: String, Hashable, CaseIterable, Identifiable {

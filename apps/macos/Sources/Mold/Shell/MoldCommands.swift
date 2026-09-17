@@ -75,6 +75,17 @@ struct InspectorToggleKey: FocusedValueKey {
     typealias Value = InspectorToggle
 }
 
+/// Whether a text field somewhere is being typed into.
+///
+/// A key equivalent is checked BEFORE the focused field sees the key, so an
+/// unmodified Escape or arrow bound to a control will take the key off a
+/// caret. Fields that can be focused while such a control exists publish this
+/// so the control can stand down; ABSENT means nothing is being typed, which
+/// is why it is published as nil rather than as `false`.
+struct EditingTextKey: FocusedValueKey {
+    typealias Value = Bool
+}
+
 extension FocusedValues {
     var refreshAction: RefreshActionKey.Value? {
         get { self[RefreshActionKey.self] }
@@ -89,5 +100,10 @@ extension FocusedValues {
     var inspectorToggle: InspectorToggle? {
         get { self[InspectorToggleKey.self] }
         set { self[InspectorToggleKey.self] = newValue }
+    }
+
+    var editingText: Bool? {
+        get { self[EditingTextKey.self] }
+        set { self[EditingTextKey.self] = newValue }
     }
 }

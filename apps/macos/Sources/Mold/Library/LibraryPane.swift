@@ -21,7 +21,10 @@ struct LibraryPane: View {
 
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
-    @State var showsInspector = true
+    /// Persisted, and deliberately not `private`: the toolbar button that
+    /// flips it lives in an extension in another file.
+    @AppStorage("libraryShowsInspector", store: AppStorageSuite.defaults)
+    var showsInspector = true
     @State private var pendingDestruction: LibraryActions.Destruction?
 
     var actions: LibraryActions {
@@ -74,6 +77,12 @@ struct LibraryPane: View {
 
         return content(showing)
             .failureBanner(hosts)
+            .trailingColumn(isShowing: showsInspector) {
+                LibraryInspector(entries: showing.selected,
+                                 host: showing.selected.first.flatMap(host(of:)),
+                                 scope: navigation.scope, actions: actions,
+                                 filterByTag: { navigation.query.tokens.append(.tag($0)) })
+            }
             .navigationTitle(navigation.scope.title(in: library.shelves))
             .navigationSubtitle(fullSubtitle(showing))
             .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,
@@ -82,19 +91,13 @@ struct LibraryPane: View {
                 Label(token.label, systemImage: token.symbol)
             }
             .toolbar { toolbar }
-            .inspector(isPresented: $showsInspector) {
-                LibraryInspector(entries: showing.selected, host: showing.selected.first.flatMap(host(of:)),
-                                 scope: navigation.scope, actions: actions,
-                                 filterByTag: { navigation.query.tokens.append(.tag($0)) })
-                    .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
-            }
     }
 
     /// What is actually on screen: a print, the grid, or an explanation.
     @ViewBuilder private func content(_ showing: LibraryShowing) -> some View {
         if let viewing, let entry = entry(viewing, in: showing.visible) {
             LibraryViewer(entry: entry, host: host(of: entry), actions: actions,
-                          onClose: { self.viewing = nil },
+                          onClose: { close(viewing) },
                           onStep: { step($0, in: showing.visible) })
         } else if showing.visible.isEmpty {
             empty(showing)
@@ -106,6 +109,13 @@ struct LibraryPane: View {
                 selection: $selection, onOpen: { viewing = $0 }
             )
         }
+    }
+
+    /// Leaving the viewer puts the cursor back on the print you were looking
+    /// at, so the arrow keys carry on from there rather than from nothing.
+    private func close(_ viewed: PrintID) {
+        selection = LibraryCursor.Selection(items: [viewed], anchor: viewed, lead: viewed)
+        viewing = nil
     }
 
     /// Seeds the Generate pane from a finished print and goes there.

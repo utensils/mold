@@ -64,6 +64,9 @@ struct MoldApp: App {
         .defaultSize(width: 1_280, height: 860)
         .windowToolbarStyle(.unified)
         .commands {
+            // SwiftUI's own View ▸ Hide/Show Sidebar (⌃⌘S). Nothing bespoke:
+            // the shortcut every Mac app uses belongs to the framework.
+            SidebarCommands()
             MoldCommands(destination: $destination)
             LibraryCommands()
         }

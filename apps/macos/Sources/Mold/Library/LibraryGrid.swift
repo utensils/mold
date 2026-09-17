@@ -15,6 +15,9 @@ struct LibraryGrid: View {
     let onOpen: (PrintID) -> Void
 
     @State private var columns = 1
+    /// The grid must HOLD key focus, or its arrows, Return and Space never
+    /// reach it -- including when the viewer closes and hands the cursor back.
+    @FocusState private var focused: Bool
 
     var body: some View {
         ScrollViewReader { scroller in
@@ -42,6 +45,10 @@ struct LibraryGrid: View {
         }
         .focusable()
         .focusEffectDisabled()
+        .focused($focused)
+        // Claimed after a yield rather than in `onAppear`: a `@FocusState`
+        // written in the pass that inserts the view is dropped.
+        .task { await Task.yield(); focused = true }
         .onKeyPress(.leftArrow) { move(.left) }
         .onKeyPress(.rightArrow) { move(.right) }
         .onKeyPress(.upArrow) { move(.up) }

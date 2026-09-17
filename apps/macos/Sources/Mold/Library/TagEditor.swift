@@ -40,6 +40,7 @@ struct TagEditor: View {
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
                 .focused($typing)
+                .focusedValue(\.editingText, typing ? true : nil)
                 .onSubmit {
                     actions.setTag(adding, adding: true, on: entries)
                     adding = ""

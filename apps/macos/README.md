@@ -18,8 +18,9 @@ generation and the library. No 3-D studio.
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
-Settings, ⌥⌘I for the inspector, ⌥⌘F to favourite, ⌘⌫ to trash, ⌘Z to undo,
-Space for Quick Look.
+Settings, ⌥⌘I for the inspector, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
+favourite, ⌘⌫ to trash, ⌘Z to undo, Space for Quick Look, Escape to leave the
+viewer.
 Every shortcut is declared once in `MoldCommands` or `LibraryCommands` and only
 *printed* elsewhere — binding one twice queues the work twice.
 

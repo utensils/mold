@@ -19,9 +19,13 @@ struct LibraryViewer: View {
     @State private var full: NSImage?
     @State private var placeholder: NSImage?
     @State private var player: AVPlayer?
-    /// The viewer must actually HOLD focus, or its escape and arrow keys never
-    /// fire -- `.focusable()` alone only makes it focus-ABLE.
-    @FocusState private var focused: Bool
+    /// Anything being typed into keeps the keyboard for its caret. A key
+    /// equivalent is checked BEFORE the focused field sees the key, so every
+    /// shortcut this viewer binds stands down while text is being edited --
+    /// the search field says so through the environment, the inspector's
+    /// fields through `editingText`.
+    @Environment(\.isSearching) private var isSearching
+    @FocusedValue(\.editingText) private var editingText: Bool?
 
     var body: some View {
         ZStack {
@@ -44,13 +48,6 @@ struct LibraryViewer: View {
         .background(.background)
         .overlay(alignment: .top) { bar }
         .task(id: entry.id) { await load() }
-        .onKeyPress(.escape) { onClose(); return .handled }
-        .onKeyPress(.leftArrow) { onStep(-1); return .handled }
-        .onKeyPress(.rightArrow) { onStep(1); return .handled }
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        .onAppear { focused = true }
     }
 
     /// Video plays in place rather than as a poster you have to export to see.
@@ -69,8 +66,24 @@ struct LibraryViewer: View {
 
     private var bar: some View {
         HStack(spacing: 12) {
-            Button { onClose() } label: { Label("Back", systemImage: "chevron.left") }
+            // A grid, not a third chevron: the icon says WHERE back goes, and
+            // the bar no longer reads as three arrows in a row.
+            Button { onClose() } label: { Label("Library", systemImage: "square.grid.2x2") }
+                // Every key this viewer answers is bound to the control that
+                // performs it, never to a focus the viewer holds: SwiftUI
+                // hands the grid's focus to the search field the moment the
+                // viewer replaces it, so `.onKeyPress` here reached nothing.
+                // A key equivalent is window-scoped and needs no focus, and
+                // these controls exist only while a print is showing.
+                .keyboardShortcut(isEditing ? nil : KeyboardShortcut.cancelAction)
                 .help("Back to the library (esc)")
+            Divider().frame(height: 14)
+            Button { onStep(-1) } label: { Label("Previous", systemImage: "chevron.left") }
+                .keyboardShortcut(stepping(.leftArrow))
+                .help("Previous print (←)")
+            Button { onStep(1) } label: { Label("Next", systemImage: "chevron.right") }
+                .keyboardShortcut(stepping(.rightArrow))
+                .help("Next print (→)")
             Spacer()
             Text(entry.print.metadata.prompt ?? entry.print.filename)
                 .lineLimit(1)
@@ -90,6 +103,18 @@ struct LibraryViewer: View {
         .labelStyle(.iconOnly)
         .padding(10)
         .background(.bar)
+    }
+
+    /// Written once, because Escape and the two arrows all answer to it: a
+    /// caret has the better claim on an unmodified key, so every shortcut here
+    /// stands down and the field answers instead. How long that lasts is the
+    /// FIELD's to decide -- the search field releases focus on its own Escape,
+    /// so the next one leaves the viewer; a title field reverts and keeps
+    /// typing, so you leave it before Escape means "back" again.
+    private var isEditing: Bool { isSearching || editingText == true }
+
+    private func stepping(_ key: KeyEquivalent) -> KeyboardShortcut? {
+        isEditing ? nil : KeyboardShortcut(key, modifiers: [])
     }
 
     private func load() async {
