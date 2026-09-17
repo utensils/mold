@@ -9,32 +9,33 @@ extension HTTPBackend {
     /// there is nothing an app can do about a field this build cannot read,
     /// and retrying will not help. But collapsing to it threw away the only
     /// fact that makes such a bug findable: which key, at which path, on
-    /// which route. That answer now goes to the log; the BODY never does,
-    /// because it carries prompts and filenames (`MoldLog`).
+    /// which route. That answer goes to the log; the BODY never does, and
+    /// neither does the concrete route, whose components ARE filenames and
+    /// ids (`RouteTemplate`).
     func decoded<T: Decodable>(_ type: T.Type, from data: Data, route: String) throws -> T {
         do {
             return try MoldJSON.decoder.decode(type, from: data)
         } catch let error as DecodingError {
-            MoldLog.decoding.error(
-                """
-                \(route, privacy: .public) as \(String(describing: type), privacy: .public): \
-                \(DecodingFailure.summary(error), privacy: .public)
-                """)
+            log(route, type, DecodingFailure.summary(error))
             throw MoldClientError.malformedResponse
         } catch {
-            MoldLog.decoding.error(
-                """
-                \(route, privacy: .public) as \(String(describing: type), privacy: .public): \
-                unreadable
-                """)
+            log(route, type, "unreadable")
             throw MoldClientError.malformedResponse
         }
+    }
+
+    private func log(_ route: String, _ type: Any.Type, _ failure: String) {
+        MoldLog.decoding.error(
+            """
+            \(RouteTemplate.redacted(route), privacy: .public) as \
+            \(String(describing: type), privacy: .public): \(failure, privacy: .public)
+            """)
     }
 
     /// A refusal, as a route and a status. Never the server's sentence, which
     /// names filenames and models, and never a header.
     func note(_ error: Error, for request: URLRequest) {
-        let route = request.url?.path(percentEncoded: true) ?? "?"
+        let route = RouteTemplate.redacted(request.url?.path(percentEncoded: true) ?? "")
         let method = request.httpMethod ?? "GET"
         switch error {
         case let MoldClientError.http(status, code, _):

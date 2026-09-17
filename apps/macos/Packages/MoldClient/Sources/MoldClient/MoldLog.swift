@@ -17,8 +17,9 @@ import os
 public enum MoldLog {
     public static let subsystem = "io.utensils.mold.native"
 
-    /// Requests and their refusals: route, method, status, mold's error code.
-    /// Never a body and never a header.
+    /// Requests and their refusals: the route FAMILY (`RouteTemplate`, never
+    /// the concrete path, whose components are filenames and ids), method,
+    /// status, mold's error code. Never a body and never a header.
     static let transport = Logger(subsystem: subsystem, category: "transport")
 
     /// Event-stream lifecycle: opened, refused, ended.
