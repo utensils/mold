@@ -45,6 +45,13 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     public var idImageNames: [String]?
     public var idWeight: Double?
     public var idStartStep: Int?
+    /// ControlNet. Sent both or neither -- `RenderDraft+Request.swift`'s
+    /// `applyControl` is the only place either gets set
+    /// (`validation.rs:3079-3090`, a symmetric pair). There is no
+    /// `control_image_name` field on the wire.
+    public var controlImage: String?
+    public var controlModel: String?
+    public var controlScale: Double?
     /// Echoed back from the recipe's own advertised `formats` -- a `String`
     /// rather than a Swift enum, so the app's whole job is to echo one back
     /// without inventing a spelling that could drift from the recipe's.
@@ -98,8 +105,9 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
              saveToGallery, frames, fps, sourceImage, sourceImageName, strength, editImages,
              referenceWeight, maskImage, loras, idImage, idImageName, idImages, idImageNames,
-             idWeight, idStartStep, outputFormat, upscaleModel, title, tags, collection,
-             originalPrompt, promptTransform, batchId, batchIndex, batchCount
+             idWeight, idStartStep, controlImage, controlModel, controlScale, outputFormat,
+             upscaleModel, title, tags, collection, originalPrompt, promptTransform, batchId,
+             batchIndex, batchCount
     }
 }
 

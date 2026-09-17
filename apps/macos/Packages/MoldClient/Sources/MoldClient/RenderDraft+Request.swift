@@ -36,6 +36,7 @@ public extension RenderDraft {
         request.maskImage = sourceImage == nil ? nil : maskImage
         request.loras = loras.isEmpty ? nil : loras
         applyIdentity(to: &request, maxPhotos: maxIdentityPhotos)
+        applyControl(to: &request)
 
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         request.title = trimmedTitle.isEmpty ? nil : trimmedTitle
@@ -121,5 +122,17 @@ public extension RenderDraft {
         }
         request.idWeight = identity.weight
         request.idStartStep = Swift.min(identity.startStep, Swift.max(steps - 1, 0))
+    }
+
+    /// `control_image` and `control_model` are a symmetric pair
+    /// (`validation.rs:3079-3090`): either alone is refused. The Refine
+    /// group's picker and picture well can each be filled in before the
+    /// other, so a draft with only one half sends NEITHER rather than a
+    /// request the server would 422.
+    private func applyControl(to request: inout GenerateRequest) {
+        guard let image = control?.image, let model = control?.model else { return }
+        request.controlImage = image
+        request.controlModel = model
+        request.controlScale = Swift.max(control?.scale ?? Control.defaultScale, 0)
     }
 }

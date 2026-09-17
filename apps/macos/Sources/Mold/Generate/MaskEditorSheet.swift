@@ -5,8 +5,8 @@ import SwiftUI
 
 /// A sheet over Generate: paint a repaint mask against the source image.
 ///
-/// S5 moves the entry point into the Refine group; for now `GeneratePane`
-/// opens this directly from a temporary binding. The picture is drawn
+/// Opened from the Refine group's Mask row (`RefineGroup.swift`) through
+/// `GenerateController.showsMaskEditor`. The picture is drawn
 /// underneath at reduced opacity so what is painted reads against what it
 /// covers, and every committed stroke is stored in the SOURCE image's own
 /// pixel space (`MaskStroke`) -- the canvas here is just a scaled window onto

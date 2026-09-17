@@ -1,0 +1,62 @@
+[
+  {
+    "name": "flux-dev:q4",
+    "family": "flux",
+    "description": "FLUX.1 Dev Q4 \u2014 smaller/faster, good quality",
+    "size_gb": 7.01361,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "city96/FLUX.1-dev-gguf",
+    "remaining_download_bytes": 0
+  },
+  {
+    "name": "sd15:fp16",
+    "family": "sd15",
+    "description": "Stable Diffusion 1.5 \u2014 canonical base model, huge LoRA ecosystem",
+    "size_gb": 3.202043,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+    "remaining_download_bytes": 0
+  },
+  {
+    "name": "controlnet-canny-sd15:fp16",
+    "family": "controlnet",
+    "description": "ControlNet Canny edge detection for SD1.5",
+    "size_gb": 0.67297244,
+    "is_loaded": false,
+    "downloaded": false,
+    "hf_repo": "lllyasviel/control_v11p_sd15_canny",
+    "remaining_download_bytes": 722598642
+  },
+  {
+    "name": "controlnet-depth-sd15:fp16",
+    "family": "controlnet",
+    "description": "ControlNet depth estimation for SD1.5",
+    "size_gb": 0.67297244,
+    "is_loaded": false,
+    "downloaded": false,
+    "hf_repo": "lllyasviel/control_v11f1p_sd15_depth",
+    "remaining_download_bytes": 722598642
+  },
+  {
+    "name": "controlnet-openpose-sd15:fp16",
+    "family": "controlnet",
+    "description": "ControlNet OpenPose body detection for SD1.5",
+    "size_gb": 0.67297244,
+    "is_loaded": false,
+    "downloaded": false,
+    "hf_repo": "lllyasviel/control_v11p_sd15_openpose",
+    "remaining_download_bytes": 722598642
+  },
+  {
+    "name": "real-esrgan-x4plus:fp16",
+    "family": "upscaler",
+    "description": "Real-ESRGAN x4+ FP16 \u2014 high quality 4x upscaler (32MB)",
+    "size_gb": 0.031163601,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "",
+    "remaining_download_bytes": 0
+  }
+]

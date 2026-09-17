@@ -71,6 +71,13 @@ public extension RenderDraft {
         Self.reconcile(&identity, &parked.identity, supported: supported)
     }
 
+    /// ControlNet. One value, like identity -- `ControlConditioning` already
+    /// bundles the picture, the chosen adapter and the scale, so parking it
+    /// is a single swap rather than a pair of fields kept in lockstep.
+    mutating func reconcileControl(supported: Bool) {
+        Self.reconcile(&control, &parked.control, supported: supported)
+    }
+
     /// Parks/restores the adapter stack, truncating to `maxCount` and
     /// parking the tail rather than dropping it -- same shape as
     /// `reconcileEditImages`.

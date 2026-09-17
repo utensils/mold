@@ -16,6 +16,7 @@ public struct ParkedConditioning: Hashable, Sendable {
     public var editImages: [String] = []
     public var maskImage: String?
     public var identity: IdentityConditioning?
+    public var control: ControlConditioning?
     public var loras: [LoraChoice] = []
 
     public init() {}

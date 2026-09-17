@@ -39,9 +39,15 @@ public extension Model {
         "pulid", "ip-adapter", "hunyuan3d-paint",
     ]
 
+    /// `"controlnet"` is already inside `auxiliaryFamilies`, mirrored from
+    /// `manifest.rs`'s `AUXILIARY_FAMILIES` -- this names the SUBSET of it the
+    /// Refine group's adapter picker may offer, not a second capability rule.
+    static let controlNetFamilies: Set<String> = ["controlnet"]
+
     var isUtility: Bool { Self.utilityFamilies.contains(family) }
     var isUpscaler: Bool { Self.upscalerFamilies.contains(family) }
     var isAuxiliary: Bool { Self.auxiliaryFamilies.contains(family) }
+    var isControlNet: Bool { Self.controlNetFamilies.contains(family) }
 
     /// True when a person picking "what should make this picture" should see it.
     var isGenerator: Bool { !isUtility && !isUpscaler && !isAuxiliary }

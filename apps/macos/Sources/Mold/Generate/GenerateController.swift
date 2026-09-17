@@ -39,9 +39,9 @@ final class GenerateController {
     /// the run changes with it.
     var promptTucked = false
 
-    /// Whether the mask editor sheet is up. Temporary entry point -- S5
-    /// moves the button that flips this into the Refine group; for now
-    /// `GeneratePane` drives it directly from the inspector's Output group.
+    /// Whether the mask editor sheet is up. Flipped by the Refine group's
+    /// Mask row (`RefineGroup.swift`); `GeneratePane` owns the `.sheet` this
+    /// drives.
     var showsMaskEditor = false
 
     var run: RunState = .idle

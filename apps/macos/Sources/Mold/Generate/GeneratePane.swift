@@ -36,7 +36,7 @@ struct GeneratePane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .trailingColumn(isShowing: showsInspector) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
-                              draft: $controller.draft)
+                              draft: $controller.draft, destination: $destination)
         }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
@@ -56,6 +56,7 @@ struct GeneratePane: View {
         }
         .task { await loadModels() }
         .task { await controller.recoverPending() }
+        .task { seedSourceImageIfRequested() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
         .onChange(of: controller.draft) { _, _ in refreshPlacement() }
         .onChange(of: controller.modelName) { _, _ in refreshPlacement() }

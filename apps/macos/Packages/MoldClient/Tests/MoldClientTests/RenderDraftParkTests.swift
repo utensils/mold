@@ -20,13 +20,14 @@ private func capabilities(
     supportsIdentity: Bool? = nil,
     lora: AdapterControl? = nil,
     mask: FeatureControl? = nil,
-    referenceImages: ReferenceImagesCapability? = nil
+    referenceImages: ReferenceImagesCapability? = nil,
+    controlnet: AdapterControl? = nil
 ) -> RecipeCapabilities {
     RecipeCapabilities(
         prompt: nil, negativePrompt: nil, output: nil, referenceImages: referenceImages,
         supportsStrength: nil, supportsLora: nil, supportsControlnet: nil,
         supportsIdentity: supportsIdentity, supportsSequence: nil, supportsExtend: nil,
-        supportsAudio: nil, sourceImage: sourceImage, lora: lora, controlnet: nil,
+        supportsAudio: nil, sourceImage: sourceImage, lora: lora, controlnet: controlnet,
         mask: mask, keyframes: nil, audio: nil, sourceVideo: nil, schedulers: nil,
         wanRecipe: nil
     )
@@ -122,6 +123,27 @@ private func recipe(_ capabilities: RecipeCapabilities) -> GenerationRecipe {
     // own `mask` block would otherwise allow one.
     #expect(adopted.maskImage == nil)
     #expect(adopted.parked.maskImage == "MASK")
+}
+
+@Test func a_recipe_without_controlnet_parks_the_control_and_hands_it_back() {
+    var draft = RenderDraft()
+    draft.control = ControlConditioning(image: "CTRL", name: "c.png", model: "controlnet-canny-sd15:fp16")
+
+    // SD1.5's own `controlnet` block goes away on a recipe that doesn't
+    // advertise one -- `RecipeCapabilities.controlNet` answers nil the same
+    // way for a `hidden` block and no block at all (`RecipeCapabilities+Reading.swift`).
+    let parked = draft.adopting(recipe(capabilities(controlnet: nil)), isNewModel: false)
+    #expect(parked.control == nil)
+    #expect(parked.parked.control?.model == "controlnet-canny-sd15:fp16")
+    #expect(parked.parked.control?.image == "CTRL")
+
+    // Back on SD1.5, or any recipe that advertises the block again, the
+    // control conditioning comes back whole rather than staying lost.
+    let adjustable = AdapterControl(mode: .adjustable, maxCount: 1, reason: nil)
+    let restored = parked.adopting(recipe(capabilities(controlnet: adjustable)), isNewModel: false)
+    #expect(restored.control?.model == "controlnet-canny-sd15:fp16")
+    #expect(restored.control?.image == "CTRL")
+    #expect(restored.parked.control == nil)
 }
 
 @Test func exclusiveReferencesParkTheSourceRatherThanDeletingIt() {

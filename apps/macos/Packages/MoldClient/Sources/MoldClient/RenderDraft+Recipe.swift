@@ -82,6 +82,12 @@ public extension RenderDraft {
         // (`identity.rs:1011-1013`).
         draft.reconcileIdentity(supported: recipe.capabilities.supportsIdentity == true)
 
+        // ControlNet: `controlNet` is nil for a `hidden` block and for no
+        // block at all (fact 3 in the M4 design) -- there is a real recipe
+        // gate, so this never asks whether an adapter happens to be
+        // installed, only whether THIS recipe would read one.
+        draft.reconcileControl(supported: recipe.capabilities.controlNet != nil)
+
         draft.reconcileLoras(
             supported: recipe.capabilities.loraStack != nil,
             maxCount: recipe.capabilities.loraStack?.maxCount

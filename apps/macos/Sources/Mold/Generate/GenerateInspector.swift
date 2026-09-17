@@ -14,6 +14,7 @@ struct GenerateInspector: View {
     let model: Model?
     let host: MoldHost?
     @Binding var draft: RenderDraft
+    @Binding var destination: Destination
 
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
@@ -24,6 +25,8 @@ struct GenerateInspector: View {
     private var showsAdapters = true
     @AppStorage("createShowsIdentity", store: AppStorageSuite.defaults)
     private var showsIdentity = true
+    @AppStorage("createShowsRefine", store: AppStorageSuite.defaults)
+    private var showsRefine = true
     @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
     private var showsOutput = true
     @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
@@ -58,16 +61,16 @@ struct GenerateInspector: View {
                 }
                 .font(.callout)
             }
-            DisclosureGroup("Output", isExpanded: $showsOutput) {
-                VStack(alignment: .leading, spacing: 10) {
-                    OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
-                    // Temporary entry point -- S5 moves this into the Refine
-                    // group once it draws one.
-                    if showsMaskEditorButton {
-                        Button("Edit mask…") { controller.showsMaskEditor = true }
-                    }
+            if RefineGroup.isShown(recipe: recipe, models: hostModels) {
+                DisclosureGroup("Refine", isExpanded: $showsRefine) {
+                    RefineGroup(recipe: recipe, models: hostModels, draft: $draft, destination: $destination)
+                        .padding(.top, 6)
                 }
-                .padding(.top, 6)
+                .font(.callout)
+            }
+            DisclosureGroup("Output", isExpanded: $showsOutput) {
+                OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
+                    .padding(.top, 6)
             }
             .font(.callout)
             if FileUnderGroup.isShown(capabilities: capabilities) {
@@ -83,12 +86,6 @@ struct GenerateInspector: View {
 
     private var capabilities: Capabilities? {
         host.flatMap { hosts.capabilities(of: $0) }
-    }
-
-    /// A mask is meaningless without a source picture, and refused outright
-    /// by a recipe that says so (`RecipeCapabilities.acceptsMask`).
-    private var showsMaskEditorButton: Bool {
-        draft.sourceImage != nil && (recipe?.capabilities.acceptsMask ?? false)
     }
 
     /// Every model this host has, upscalers included -- `ModelStore.ready`

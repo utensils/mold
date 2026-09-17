@@ -46,3 +46,13 @@ private func rustFamilies(_ constant: String) throws -> Set<String> {
     // than a literal -- the parser above resolves it.
     #expect(try rustFamilies("AUXILIARY_FAMILIES") == Model.auxiliaryFamilies)
 }
+
+/// `Model.controlNetFamilies` names which installed models the Refine
+/// group's adapter picker may offer -- there is no separate Rust
+/// `CONTROLNET_FAMILIES` constant to pin against byte for byte, so the honest
+/// check is that it never drifts outside the auxiliary set the test above
+/// already pins. `"controlnet"` is a literal inside `AUXILIARY_FAMILIES`
+/// (`manifest.rs`), not a second capability rule.
+@Test func controlNetFamiliesStayInsideTheRustAuxiliarySet() throws {
+    #expect(Model.controlNetFamilies.isSubset(of: try rustFamilies("AUXILIARY_FAMILIES")))
+}

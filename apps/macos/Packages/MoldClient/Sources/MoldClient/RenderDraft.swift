@@ -53,6 +53,11 @@ public struct RenderDraft: Hashable, Sendable {
     /// the host's `multi_photo`, so `id_image` and `id_images` can never
     /// both be set (`IdentityConditioning.wire(maxPhotos:)`).
     public var identity: IdentityConditioning?
+    /// ControlNet conditioning. Parked/restored the same way as every other
+    /// conditioning input (`RenderDraft+Park.swift`) -- see
+    /// `ControlConditioning`'s own doc comment for why both its halves are
+    /// optional.
+    public var control: ControlConditioning?
     /// The adapter stack, in the order it was added. Never written into the
     /// legacy singular `lora` field (`types.rs:3419-3444`) -- there is no
     /// Swift equivalent of it and there never will be.
