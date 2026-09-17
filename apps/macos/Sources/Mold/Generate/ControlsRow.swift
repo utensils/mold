@@ -12,15 +12,38 @@ import SwiftUI
 /// model added to mold tomorrow gets correct controls with no change here.
 struct ControlsRow: View {
     let recipe: GenerationRecipe
+    /// Only the clip-length ceiling reads it: a wan tier's single-clip size is
+    /// a question about the CHECKPOINT, not about the recipe (`ClipLengthBounds`).
+    let model: Model?
     let maxBatch: Int
     @Binding var draft: RenderDraft
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            controls
+            if let note = lengthBounds?.note {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Resolved once per pass: the slider's range and the sentence under it
+    /// are the same answer.
+    private var lengthBounds: ClipLengthBounds? {
+        recipe.temporal.map {
+            $0.lengthBounds(fps: draft.fps ?? $0.fps.value, family: model?.family,
+                            model: model?.name, sourceImage: recipe.capabilities.sourceImage)
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
         WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
-            if let temporal = recipe.temporal {
-                ControlLabel("Length") { LengthControl(temporal: temporal, draft: $draft) }
+            if let temporal = recipe.temporal, let bounds = lengthBounds {
+                ControlLabel("Length") {
+                    LengthControl(temporal: temporal, bounds: bounds, draft: $draft)
+                }
             }
             if recipe.steps.hasSomethingToShow {
                 ControlLabel("Steps") { steps }

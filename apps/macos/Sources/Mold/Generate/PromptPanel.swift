@@ -35,7 +35,7 @@ struct PromptPanel: View {
                 prompt(recipe)
                 promptTools(recipe)
                 Divider()
-                ControlsRow(recipe: recipe, maxBatch: maxBatch, draft: $draft)
+                ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch, draft: $draft)
                 actions(recipe)
             } else {
                 Text("Pick a model to see its controls.")

@@ -47,9 +47,16 @@ public extension RenderDraft {
         // A still model has no clip length; a clip model's length must sit on
         // the grid its family accepts.
         if let temporal = recipe.temporal {
-            draft.frames = temporal.snap(draft.frames ?? temporal.frames.default)
+            // The RATE first: the requestable ceiling moves with it
+            // (`TemporalProfile.lengthBounds`), so a length settled before it
+            // could be one admission narrows away.
             if !temporal.fps.isAdjustable { draft.fps = temporal.fps.value }
             if draft.fps == nil { draft.fps = temporal.fps.value }
+            let bounds = temporal.lengthBounds(
+                fps: draft.fps ?? temporal.fps.value, family: family, model: model,
+                sourceImage: recipe.capabilities.sourceImage)
+            let snapped = temporal.snap(draft.frames ?? temporal.frames.default)
+            draft.frames = Swift.min(Swift.max(snapped, bounds.min), bounds.max)
         } else {
             draft.frames = nil
             draft.fps = nil

@@ -53,19 +53,26 @@ struct GuidanceControl: View {
 /// accepts, but the readout is the duration that means something to a person.
 struct LengthControl: View {
     let temporal: TemporalProfile
+    /// What admission will really accept at this rate, and the tier's own
+    /// single-clip ceiling -- NOT the advertised `frames.max`, which for
+    /// LTX-2 is the figure at 120 fps and for wan is a resource guard
+    /// (`ClipLengthBounds`, findings 01#3 and 02#3).
+    let bounds: ClipLengthBounds
     @Binding var draft: RenderDraft
 
     var body: some View {
         SliderControl(
             value: Binding(
                 get: { Double(draft.frames ?? temporal.frames.default) },
-                set: { draft.frames = temporal.snap(Int($0.rounded())) }
+                set: { draft.frames = min(temporal.snap(Int($0.rounded())), bounds.max) }
             ),
-            range: Double(temporal.frames.min)...Double(temporal.frames.max),
+            range: Double(bounds.min)...Double(max(bounds.max, bounds.min + 1)),
             step: Double(max(temporal.frames.step, 1))
         ) {
             Text(seconds)
         }
+        .accessibilityLabel("Length")
+        .accessibilityValue(seconds)
         .help("\(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) fps")
     }
 
