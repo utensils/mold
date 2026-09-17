@@ -16,12 +16,46 @@ final class MoldEngine {
         case stopped
         case starting
         case running(port: UInt16)
-        case failed(String)
+        /// Draining. The app has asked the engine to stop and is waiting out
+        /// the server's own budget.
+        case stopping
+        case failed(Failure)
+    }
+
+    /// A refusal, and whether pressing Start again could possibly help.
+    struct Failure: Equatable, Sendable {
+        let reason: String
+        /// The engine bootstraps ONCE per process — the models-dir override
+        /// is a `OnceLock`, tracing installs a global subscriber, and
+        /// `mold_engine_start` keeps a finished thread's handle in its slot —
+        /// so once it has run, nothing short of a relaunch starts another.
+        /// Start used to be offered for every failure and was simply inert
+        /// (review 05-M2); now it is offered only where it can work, and a
+        /// relaunch is offered by name where it cannot.
+        let relaunchNeeded: Bool
     }
 
     private(set) var state: State = MoldEngine.isLinked ? .stopped : .unavailable(
         "This build has no local engine. Run `make engine` and rebuild."
     )
+
+    /// The ONE writer, so a view can never move the engine and a `grep` for
+    /// `transition(to:)` finds every place it does move. `MoldEngine+Lifecycle`
+    /// is the only caller.
+    func transition(to next: State) { state = next }
+
+    /// What this launch resolved, kept because the API key the engine was
+    /// STARTED with is the one "This Mac" has to present back to it.
+    private(set) var launch: EngineLaunch?
+
+    /// Polls the engine's liveness while it is running, so a panic or a
+    /// `run_server` that returned `Err` becomes `.failed` rather than a
+    /// machine list entry pointing at a closed port (review 05-M1).
+    var watchdog: Task<Void, Never>?
+
+    /// Called when a running engine stops or dies, so the machine list can
+    /// drop "This Mac". Set by the composition root, which owns both.
+    var onEngineGone: (() -> Void)?
 
     /// True when the staticlib was linked in.
     static var isLinked: Bool {
@@ -31,10 +65,6 @@ final class MoldEngine {
         false
         #endif
     }
-
-    /// What this launch resolved, kept because the API key the engine was
-    /// STARTED with is the one "This Mac" has to present back to it.
-    private(set) var launch: EngineLaunch?
 
     var host: MoldHost? {
         guard case let .running(port) = state, let launch else { return nil }
@@ -55,81 +85,59 @@ final class MoldEngine {
     /// its prints stay attributable to this Mac in the merged library.
     static let localHostID = UUID(uuidString: "00000000-0000-4000-A000-000000000001")!
 
-    func start() {
-        #if MOLD_EMBEDDED_ENGINE
-        guard case .stopped = state else { return }
-        state = .starting
+    /// Prepares this process for an engine, as early in the launch as the app
+    /// has a main actor.
+    ///
+    /// `mold_engine_bootstrap` writes `MOLD_HOME`, `MOLD_API_KEY` and
+    /// `MOLD_CORS_ORIGIN` with `setenv`, which reallocates `environ` and is
+    /// not safe beside a concurrent `getenv` — CFNetwork reads proxy
+    /// variables, among others. It used to run from a detached `Task` in a
+    /// fully launched app, with URLSession's threads and `HostStore` already
+    /// polling (review 05-M4). `@main`'s `init`, before a single store is
+    /// built, is the earliest point this app owns. Honestly: AppKit and the
+    /// Swift runtime have started threads of their own before `init` runs, so
+    /// this NARROWS the window rather than closing it. Closing it means
+    /// `run_server` taking the home and the key as parameters instead of
+    /// through the environment — a change to the engine, not to the embedder.
+    func bootstrapAtLaunch() { _ = prepared() }
 
-        // Resolved the way every other mold on this Mac resolves it. An app
-        // launched from Finder is handed no environment at all, so reading
-        // MOLD_HOME alone meant the engine ran against `~/.mold` while the CLI
-        // and the Tauri app used the home someone had actually chosen.
-        let launch: EngineLaunch
+    /// Resolves the launch and runs the one-shot preamble, at most once.
+    /// `nil` means the refusal is already on `state`.
+    @discardableResult
+    func prepared() -> EngineLaunch? {
+        #if MOLD_EMBEDDED_ENGINE
+        if let launch { return launch }
+        let resolved: EngineLaunch
         do {
-            launch = try EngineLaunchPlan.resolve(
-                home: MoldHome.resolve(),
-                secrets: .shared,
-                logDirectory: MoldEngine.logDirectory
-            )
+            resolved = try EngineLaunchPlan.resolve(
+                home: MoldHome.resolve(), secrets: .shared, logDirectory: Self.logDirectory)
         } catch {
-            state = .failed((error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.")
-            return
+            // Nothing one-shot has been consumed, so Start can be pressed
+            // again once the drive is back or the store is writable.
+            state = .failed(Failure(
+                reason: (error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.",
+                relaunchNeeded: false))
+            return nil
         }
-        self.launch = launch
-        let home = launch.home
-        let key = launch.apiKey
-        let logs = launch.logDirectory
-        Task.detached(priority: .userInitiated) {
-            // The engine starts at most ONCE per process: the models-dir
-            // override is a process-lifetime OnceLock and tracing installs a
-            // global subscriber, so changing either means relaunching.
-            let bootstrapped = home.withCString { homePtr in
-                key.withCString { keyPtr in
-                    logs.withCString { logPtr in
-                        mold_engine_bootstrap(homePtr, keyPtr, logPtr)
-                    }
+        let code = resolved.home.withCString { home in
+            resolved.apiKey.withCString { key in
+                resolved.logDirectory.withCString { logs in
+                    mold_engine_bootstrap(home, key, logs)
                 }
             }
-            guard bootstrapped == 0 else {
-                await MainActor.run { self.state = .failed("The engine couldn't start.") }
-                return
-            }
-            let port = mold_engine_alloc_port()
-            guard port != 0 else {
-                await MainActor.run { self.state = .failed("No free port on this Mac.") }
-                return
-            }
-            let started = "127.0.0.1".withCString { bind in
-                mold_engine_start(bind, port, nil)
-            }
-            await MainActor.run {
-                self.state = started == 0
-                    ? .running(port: port)
-                    : .failed("The engine couldn't start.")
-            }
         }
-        #endif
-    }
-
-    /// Stops the engine by asking it to, which is the only way an embedder can:
-    /// `run_server`'s shutdown trigger is reachable through `POST
-    /// /api/shutdown` and nothing else.
-    func stop() async {
-        #if MOLD_EMBEDDED_ENGINE
-        guard case let .running(port) = state else { return }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/shutdown")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        _ = try? await URLSession.shared.data(for: request)
-        // Off the main thread: this blocks for up to 8s, and the shutdown
-        // request above already yielded, so nothing here needs to run on
-        // the actor.
-        _ = await Task.detached { mold_engine_join(8_000) }.value
-        // The engine bootstraps at most once per process (`OnceLock`, a
-        // global tracing subscriber) -- `.stopped` is what `start()` accepts,
-        // and accepting it again here would be a second bootstrap this
-        // process can't actually do.
-        state = .unavailable("The engine starts once per launch. Relaunch Mold to start it again.")
+        guard code == 0 else {
+            state = .failed(Failure(
+                reason: "The engine couldn't prepare itself. Relaunch Mold to try again — "
+                    + "Mold's log in ~/Library/Logs/Mold has the detail.",
+                relaunchNeeded: true))
+            return nil
+        }
+        launch = resolved
+        if case .failed = state { state = .stopped }
+        return resolved
+        #else
+        return nil
         #endif
     }
 

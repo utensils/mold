@@ -31,7 +31,7 @@ struct MoldApp: App {
     @State private var landedPrints: LandedPrints
     @State private var notifications: MoldNotifications
     @State private var heartbeat: HostHeartbeat
-    @State private var engine = MoldEngine()
+    @State private var engine: MoldEngine
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
 
@@ -39,7 +39,12 @@ struct MoldApp: App {
     /// happens explicitly here: `HostStore` first, since every other store
     /// is built by asking it which machines exist.
     init() {
+        // FIRST, before a single store exists and so before URLSession or
+        // `HostStore`'s polling has a thread of its own (review 05-M4).
+        let engine = MoldEngine.bootstrapped()
+        _engine = State(initialValue: engine)
         let hosts = HostStore(hosts: HostStore.seededHosts())
+        engine.dropsItsMachine(from: hosts)
         _hosts = State(initialValue: hosts)
         let library = LibraryStore(hosts: hosts)
         _library = State(initialValue: library)

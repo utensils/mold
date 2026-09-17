@@ -84,21 +84,33 @@ struct LocalEngineSettings: View {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Starting…") }
         case .running:
             Label("Running", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case let .failed(message):
-            Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        case .stopping:
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Finishing…") }
+        case let .failed(failure):
+            Label(failure.reason, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
         }
     }
 
+    /// Start is offered only where it can work. It used to be offered for
+    /// every failure while `start()` refused anything but `.stopped`, so the
+    /// button was enabled and inert -- and the engine bootstraps once per
+    /// process, so for half those failures the honest answer is a relaunch
+    /// (review 05-M2).
     @ViewBuilder private var controls: some View {
         switch engine.state {
-        case .stopped, .failed:
-            Button("Start Engine") { start() }
         case .running:
             Button("Stop Engine") { Task { await stop() } }
-        case .starting:
+        case .starting, .stopping:
             Button("Start Engine") { }.disabled(true)
         case .unavailable:
             EmptyView()
+        default:
+            if engine.canStart {
+                Button("Start Engine") { start() }
+            } else {
+                Button("Relaunch Mold…") { EngineRelaunch.now() }
+            }
         }
     }
 
@@ -113,14 +125,18 @@ struct LocalEngineSettings: View {
 
     private func start() {
         engine.start()
-        // Poll briefly: `start` returns as soon as the thread is spawned, and
-        // the host only exists once a port is bound.
+        // The host exists once the engine has ANSWERED, which on a cold home
+        // with a large gallery is well past the old ten-second window: the
+        // engine's own probe waits for `/api/status`, so this waits for it.
         Task {
-            for _ in 0..<40 {
-                try? await Task.sleep(for: .milliseconds(250))
+            while true {
                 if let host = engine.host {
                     hosts.adoptLocalEngine(host)
                     return
+                }
+                switch engine.state {
+                case .starting: try? await Task.sleep(for: .milliseconds(250))
+                default: return
                 }
             }
         }
