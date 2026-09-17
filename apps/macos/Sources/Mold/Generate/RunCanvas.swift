@@ -16,7 +16,7 @@ struct RunCanvas: View {
     /// type.
     @Environment(HostStore.self) var hosts
     @State private var preview: NSImage?
-    @State var result: NSImage?
+    @State var result: RunResultMedia = .loading
     @State var selected = 0
 
     var body: some View {
