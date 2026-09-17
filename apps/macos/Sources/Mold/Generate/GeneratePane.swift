@@ -51,6 +51,9 @@ struct GeneratePane: View {
         .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
             showsInspector.toggle()
         })
+        .sheet(isPresented: $controller.showsMaskEditor) {
+            MaskEditorSheet(draft: $controller.draft)
+        }
         .task { await loadModels() }
         .task { await controller.recoverPending() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }

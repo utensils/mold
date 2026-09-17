@@ -39,6 +39,11 @@ final class GenerateController {
     /// the run changes with it.
     var promptTucked = false
 
+    /// Whether the mask editor sheet is up. Temporary entry point -- S5
+    /// moves the button that flips this into the Refine group; for now
+    /// `GeneratePane` drives it directly from the inspector's Output group.
+    var showsMaskEditor = false
+
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: (id: String, clientBatchId: String, host: MoldHost.ID)?
