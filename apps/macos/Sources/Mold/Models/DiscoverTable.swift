@@ -57,7 +57,9 @@ struct DiscoverTable: View {
             TableColumn("Downloads") { entry in Text(Self.downloadsText(entry)).foregroundStyle(.secondary) }
             TableColumn("State") { entry in stateCell(entry) }
         } rows: {
-            ForEach(Self.rows(for: entries)) { entry in TableRow(entry) }
+            ForEach(Self.rows(for: entries)) { entry in
+                TableRow(entry).contextMenu { menu(for: entry) }
+            }
         }
         .alternatingRowBackgrounds(.disabled)
     }
@@ -84,6 +86,23 @@ struct DiscoverTable: View {
         .padding(.vertical, 6)
     }
 
+    /// The row's own controls a second way -- nothing here is ever disabled,
+    /// the same "absent, not disabled" rule the State column follows, and
+    /// nothing destructive happens to a catalog row so there is no divider
+    /// to draw.
+    @ViewBuilder private func menu(for entry: CatalogEntry) -> some View {
+        ForEach(DiscoverRow.menuItems(for: entry)) { item in
+            switch item {
+            case .details:
+                Button(item.title) { detailEntry = entry }
+            case .install:
+                Button(item.title) { Task { await downloads.install(entry.id, on: host) } }
+            case let .openPage(url):
+                Link(item.title, destination: url)
+            }
+        }
+    }
+
     private func nameCell(_ entry: CatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
@@ -97,7 +116,13 @@ struct DiscoverTable: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { detailEntry = entry }
+        // `.onTapGesture(count: 2)` eats the single click the `Table`'s own
+        // `selection:` needs, so double-clicking a row opened its details
+        // while never selecting it -- and the Details… item below reads the
+        // entry it was built for, not the selection, precisely because of
+        // that. `.simultaneousGesture` leaves the single click alone (M8's
+        // own `List`-row finding).
+        .simultaneousGesture(TapGesture(count: 2).onEnded { detailEntry = entry })
     }
 
     @ViewBuilder private func stateCell(_ entry: CatalogEntry) -> some View {

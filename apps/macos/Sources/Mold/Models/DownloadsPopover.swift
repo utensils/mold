@@ -76,6 +76,21 @@ struct DownloadsPopover: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .contextMenu { menu(for: row) }
+    }
+
+    /// The row's own ✕ a second way, in the Model menu's words
+    /// ("Cancel Download", `ModelActions+Menu.swift`) rather than a third
+    /// spelling. A finished row has nothing to act on -- Clear is about the
+    /// whole list, not this row -- so it gets no menu at all rather than one
+    /// holding a disabled item.
+    @ViewBuilder private func menu(for row: Rows.Row) -> some View {
+        if row.isActive {
+            Button("Cancel Download", role: .destructive) {
+                Task { await downloads.cancel(jobID: row.id, on: host) }
+            }
+        }
     }
 }
 

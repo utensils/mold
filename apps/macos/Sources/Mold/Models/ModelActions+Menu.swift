@@ -19,6 +19,11 @@ extension ModelActions {
 
         var id: Kind { kind }
         var role: ButtonRole? { kind == .delete ? .destructive : nil }
+        /// Whether a separator belongs ABOVE this item. The destructive one
+        /// is last and behind a divider wherever it is drawn, so a right
+        /// click cannot land Delete under the cursor by accident -- the same
+        /// shape `QueueHoldRow`'s and `QueueRow`'s menus take.
+        var startsGroup: Bool { kind == .delete }
     }
 
     /// The exact items that apply to one model right now -- pure, so the

@@ -116,6 +116,33 @@ struct DiscoverTests {
         #expect(DiscoverRow.resolve(entry) == .install)
     }
 
+    // MARK: - The contextual menu
+
+    /// **Fails today**: a Discover row has no contextual menu at all, and its
+    /// details open on a double-click and nothing else -- unreachable from a
+    /// right click or the keyboard. The menu carries exactly what the row's
+    /// own cells offer, in the row's own reading order.
+    @Test func aDiscoverRowsMenuCarriesTheSameActionsItsCellsDo() throws {
+        let installable = FakeFixtures.catalogEntry(id: "cv:1", supported: true, installed: false)
+        #expect(DiscoverRow.menuItems(for: installable).map(\.title) == ["Details…", "Install"])
+
+        let unsupported = FakeFixtures.catalogEntry(
+            id: "hf:x", supported: false, pageUrl: "https://example.com/x")
+        #expect(DiscoverRow.menuItems(for: unsupported).map(\.title) == ["Details…", "Open Page"])
+        let url = try #require(URL(string: "https://example.com/x"))
+        #expect(DiscoverRow.menuItems(for: unsupported).last == .openPage(url))
+
+        // No page to open is no item, not an item that goes nowhere.
+        let nowhere = FakeFixtures.catalogEntry(id: "hf:y", supported: false)
+        #expect(DiscoverRow.menuItems(for: nowhere).map(\.title) == ["Details…"])
+
+        // An installed row is managed from the Installed table, which has the
+        // whole install/load/delete menu -- the State column offers nothing
+        // here either.
+        let installed = FakeFixtures.catalogEntry(id: "cv:2", installed: true)
+        #expect(DiscoverRow.menuItems(for: installed).map(\.title) == ["Details…"])
+    }
+
     // MARK: - Licence metadata
 
     /// All-null is the ORDINARY case (measured on plato) and means no

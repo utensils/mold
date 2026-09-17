@@ -15,6 +15,7 @@ struct ModelCommands: Commands {
     var body: some Commands {
         CommandMenu("Model") {
             ForEach(selection?.items ?? []) { item in
+                if item.startsGroup { Divider() }
                 Button(item.title, role: item.role) { selection?.perform(item.kind) }
             }
         }

@@ -47,6 +47,7 @@ extension ModelsPane {
     @ViewBuilder private func contextMenu(for model: Model) -> some View {
         if let host {
             ForEach(menuItems(for: model)) { item in
+                if item.startsGroup { Divider() }
                 Button(item.title, role: item.role) { actions.perform(item.kind, on: model, host: host) }
             }
         }

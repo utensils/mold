@@ -36,6 +36,27 @@ struct ModelActionsTests {
         #expect(!kinds(.loaded).contains(.load))
     }
 
+    /// **Fails today**: `Item` has no `startsGroup`, so both menus draw
+    /// Delete… straight under Show Licence… with nothing between them -- a
+    /// right click can land the destructive item under the cursor. Every
+    /// other menu in this app (`QueueRow`, `QueueBatchRow`, `QueueHoldRow`)
+    /// puts its destructive item last and behind a divider.
+    @Test func deleteIsLastAndBehindADividerWhereverItIsDrawn() {
+        let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
+        for state in [ModelInstallState.installed, .loaded, .needsRepair(10)] {
+            let items = ModelActions.menu(
+                for: model, installState: state, isBusy: false, isDownloading: false, licensed: true)
+            #expect(items.last?.kind == .delete)
+            #expect(items.filter(\.startsGroup).map(\.kind) == [.delete])
+            #expect(items.last?.role == .destructive)
+        }
+        // A row with nothing installed has nothing to delete, so there is no
+        // divider either.
+        let available = ModelActions.menu(
+            for: model, installState: .available(nil), isBusy: false, isDownloading: false, licensed: false)
+        #expect(!available.contains { $0.startsGroup })
+    }
+
     @Test func showLicenceAppearsOnlyForAGatedModel() {
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
         let gated = ModelActions.menu(for: model, installState: .installed, isBusy: false,
