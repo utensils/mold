@@ -348,6 +348,80 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         submitLock.withLock { cancelledBatchIds.append(id) }
     }
 
+    // MARK: - Chain jobs (lane F4)
+
+    /// What `createChainJob` answers with. `nil` is unplanted, which throws
+    /// exactly as every other route does.
+    nonisolated(unsafe) var chainJobAnswer: CreateChainJobResponse?
+    /// Every body created, in call order -- WHAT an auto-chain submitted.
+    nonisolated(unsafe) var chainJobRequests: [AutoChainRequest] = []
+    /// Every `x-mold-operation-id` sent, so a test can pin the fence.
+    nonisolated(unsafe) var chainOperationIds: [String] = []
+    nonisolated(unsafe) var cancelledChainJobIds: [String] = []
+    nonisolated(unsafe) var chainJobDetails: [String: ChainJobDetail] = [:]
+    /// Ids whose event stream is held OPEN, pushed with `emitChainEvent`.
+    nonisolated(unsafe) var chainEventsHeldOpen: Set<String> = []
+    nonisolated(unsafe) var chainEventContinuations:
+        [String: AsyncThrowingStream<ChainJobEvent, Error>.Continuation] = [:]
+
+    /// Set before a submit to hold `createChainJob` in the air until
+    /// `releaseSubmit()` -- the window where Stop has no job id to cancel yet.
+    nonisolated(unsafe) var holdsChainCreate = false
+
+    func createChainJob(
+        _ request: AutoChainRequest, operationId: String
+    ) async throws -> CreateChainJobResponse {
+        try record("createChainJob")
+        let holding = submitLock.withLock { () -> Bool in
+            chainJobRequests.append(request)
+            chainOperationIds.append(operationId)
+            let held = holdsChainCreate
+            holdsChainCreate = false
+            return held
+        }
+        if holding {
+            await withCheckedContinuation { continuation in
+                submitLock.lock()
+                if submitReleased {
+                    submitReleased = false
+                    submitLock.unlock()
+                    continuation.resume()
+                } else {
+                    submitGate = { continuation.resume() }
+                    submitLock.unlock()
+                }
+            }
+        }
+        guard let chainJobAnswer else { throw notPlanted() }
+        return chainJobAnswer
+    }
+
+    func chainJob(id: String) async throws -> ChainJobDetail {
+        try record("chainJob")
+        guard let detail = chainJobDetails[id] else { throw notPlanted() }
+        return detail
+    }
+
+    func cancelChainJob(id: String) async throws {
+        try record("cancelChainJob")
+        submitLock.withLock { cancelledChainJobIds.append(id) }
+    }
+
+    func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error> {
+        callsLock.withLock { recorded.append("chainJobEvents") }
+        guard chainEventsHeldOpen.contains(id) else {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        return AsyncThrowingStream { continuation in
+            self.chainEventContinuations[id] = continuation
+        }
+    }
+
+    /// Pushes one frame into an id's held-open chain stream.
+    func emitChainEvent(_ event: ChainJobEvent, for id: String) {
+        chainEventContinuations[id]?.yield(event)
+    }
+
     // MARK: - Create
 
     nonisolated(unsafe) var expandAnswer: ExpandResponse?

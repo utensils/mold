@@ -12,6 +12,16 @@ struct BatchOutcome: Equatable {
     /// One sentence per child that made nothing.
     let failures: [String]
 
+    /// A chain settles into ONE result and there is no `BatchStatus` to read
+    /// it off -- `POST /api/chain-jobs` mints a different kind of id and its
+    /// stream a different kind of frame. So a stitched long video builds its
+    /// outcome directly, which is also the only way this type is ever
+    /// constructed with no batch behind it.
+    init(chainResults: [BatchResult], failures: [String]) {
+        results = chainResults
+        self.failures = failures
+    }
+
     /// The one answer for a status that has come to rest, or nil while
     /// anything can still move on its own. A HELD child counts as at rest
     /// (`BatchStatus.isAtRest`): the machine has parked it until someone

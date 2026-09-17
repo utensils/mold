@@ -18,6 +18,15 @@ public struct ClipLengthBounds: Hashable, Sendable {
     /// Why the ceiling is lower than the recipe's own maximum, when it is.
     /// `nil` where the advertised maximum stands.
     public let note: String?
+
+    /// Spelled out so the app can widen a ceiling the router would chain
+    /// past: `lengthBounds` answers for ONE denoise, and a chainable model's
+    /// slider may reach further (`ClipRouting`).
+    public init(min: Int, max: Int, note: String?) {
+        self.min = min
+        self.max = max
+        self.note = note
+    }
 }
 
 public extension TemporalProfile {

@@ -21,28 +21,25 @@ struct ControlsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             controls
-            if let note = lengthBounds?.note {
+            if let note = routing?.note {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 
-    /// Resolved once per pass: the slider's range and the sentence under it
-    /// are the same answer.
-    private var lengthBounds: ClipLengthBounds? {
-        recipe.temporal.map {
-            $0.lengthBounds(fps: draft.fps ?? $0.fps.value, family: model?.family,
-                            model: model?.name, sourceImage: recipe.capabilities.sourceImage)
-        }
+    /// Resolved once per pass: the slider's range, the sentence under it and
+    /// where a render of that length GOES are one answer (`ClipRouting`).
+    private var routing: ClipRouting? {
+        ClipRouting.resolve(recipe: recipe, model: model, draft: draft)
     }
 
     @ViewBuilder private var controls: some View {
         WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
-            if let temporal = recipe.temporal, let bounds = lengthBounds {
+            if let temporal = recipe.temporal, let routing {
                 ControlLabel("Length") {
-                    LengthControl(temporal: temporal, bounds: bounds, draft: $draft)
+                    LengthControl(temporal: temporal, bounds: routing.bounds, draft: $draft)
                 }
             }
             if recipe.steps.hasSomethingToShow {

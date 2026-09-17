@@ -91,6 +91,18 @@ public struct BatchResult: Codable, Hashable, Sendable {
     public let seed: UInt64?
     public let generationTimeMs: Int?
     public let gpu: Int?
+
+    /// Spelled out so a result with no batch behind it can be built -- an
+    /// automatically chained clip settles into one of these from its own
+    /// job's stream. The seed and the timing belong to a chain's STAGES, not
+    /// to the print, so they are absent there rather than invented.
+    public init(filename: String?, seed: UInt64? = nil,
+                generationTimeMs: Int? = nil, gpu: Int? = nil) {
+        self.filename = filename
+        self.seed = seed
+        self.generationTimeMs = generationTimeMs
+        self.gpu = gpu
+    }
 }
 
 /// A running job's live progress, polled from `GET /api/queue/{id}/preview`.

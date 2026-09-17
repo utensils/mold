@@ -57,8 +57,9 @@ final class GenerateController {
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: ActiveBatch?
-    /// Stop, and a second press, while an admission is still unanswered.
+    /// Stop, and a second press, while an admission is unanswered.
     let submissions = SubmissionFence()
+    let chain = ChainRun()  // the ephemeral chain a too-long clip becomes
     /// The beat between a batch settling and the next one taking the canvas.
     let handoff: ResultHandoff
     /// Batches this pane admitted while another was still on screen, in

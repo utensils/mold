@@ -14,8 +14,14 @@ extension GenerateController {
     /// The client batch id is minted and PERSISTED BEFORE the request goes
     /// out either way. If the response is lost, the work is recovered by
     /// asking the host about that id -- submitting again would render twice.
-    func submit(on host: MoldHost, backend: any MoldBackend) {
+    ///
+    /// `routing` is the PANE's answer -- it needs the recipe. A render past
+    /// the clip size is not a batch at all (`ChainSubmission`).
+    func submit(on host: MoldHost, backend: any MoldBackend,
+                routing: ChainRouting.Decision = .single()) {
         guard let modelName else { return }
+        if ChainSubmission.take(routing, request: draft.request(model: modelName),
+                                on: host, backend: backend, controller: self) { return }
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)

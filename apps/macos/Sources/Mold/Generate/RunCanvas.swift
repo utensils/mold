@@ -29,7 +29,7 @@ struct RunCanvas: View {
             switch state {
             case .idle, .submitting:
                 idle
-            case .running:
+            case .running, .runningChain:
                 running
             case let .finished(outcome, _):
                 // The queue is released by the MEDIA arm reaching a drawn

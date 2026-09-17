@@ -94,13 +94,17 @@ private final class CountingBytes: AsyncSequence, @unchecked Sendable {
 
     // **Fails today**: `stream(_:timeout:)` builds one too, STACKED under
     // each of these -- so `events()`'s declared 512 was 512 on top of another
-    // independent 512, and "one buffer in the pipeline" was not true. The
-    // four routes are the only places a buffer belongs, because they are the
-    // only places that know what losing a frame COSTS.
+    // independent 512, and "one buffer in the pipeline" was not true. These
+    // routes are the only places a buffer belongs, because they are the only
+    // places that know what losing a frame COSTS.
     #expect(Set(buffers) == [
         "HTTPBackend+Events.swift",     // MoldEvent
         "HTTPBackend+Work.swift",       // DownloadEvent
         "HTTPBackend+Generation.swift", // BatchStatus
         "HTTPBackend+Machines.swift",   // ResourceSnapshot
+        // ChainJobEvent, and the one stream here that is NOT `latestOnly`:
+        // a chain's frames are DELTAS, so an older one dropped loses a stage
+        // boundary the newer one does not repeat.
+        "HTTPBackend+Chain.swift",
     ])
 }

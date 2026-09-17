@@ -7,16 +7,6 @@ import MoldClient
 /// refused, and this is where it waits and advances.
 @MainActor
 extension GenerateController {
-    /// One admitted batch: what `submit(on:backend:)` got back, kept so
-    /// `followNext` can start following it without a second read.
-    struct ActiveBatch: Equatable {
-        let id: String
-        let clientBatchId: String
-        let host: MoldHost.ID
-        /// The 202 answer `submit(on:backend:)` got back for this batch.
-        let admitted: BatchStatus
-    }
-
     /// What the capsule's caption names -- "2 more queued".
     var queuedCount: Int { queued.count }
 
@@ -72,10 +62,13 @@ extension GenerateController {
         }
     }
 
-    /// Stops the batch on screen -- exactly what `cancel(backend:)` used to
-    /// do -- then moves on to whatever is next in `queued`.
+    /// Stops what is on screen, then moves on to whatever is next in `queued`.
     func stop() {
         handoff.cancel()
+        // A chain is cancelled through its OWN route, never the queue.
+        if chain.stop(backend: { [hosts] in hosts.backend(for: $0) }) {
+            run = .idle; followNext(); return
+        }
         // Stop pressed while an admission is still in the air. `runTask` is
         // deliberately NOT cancelled: the POST has very likely already reached
         // the host, and killing the task here would leave that batch rendering

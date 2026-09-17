@@ -122,9 +122,15 @@ struct GeneratePane: View {
         return "\(model.headline) · \(host.name)"
     }
 
+    /// A clip longer than the checkpoint renders in one pass goes out as an
+    /// EPHEMERAL chain job instead of a batch. The routing is resolved here
+    /// because it needs the recipe, which the controller does not hold.
     private func startRun() {
         guard let host else { return }
-        controller.submit(on: host, backend: hosts.backend(for: host))
+        let routing = recipe.flatMap {
+            ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft)
+        }?.decision ?? .single()
+        controller.submit(on: host, backend: hosts.backend(for: host), routing: routing)
     }
 
     private func cancelRun() { controller.stop() }
