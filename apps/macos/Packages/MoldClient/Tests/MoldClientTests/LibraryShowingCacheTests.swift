@@ -45,6 +45,25 @@ struct LibraryShowingCacheTests {
         #expect(cache.derivations == 2)
     }
 
+    /// **Fails today**: the calendar is not in the key, so an app left open
+    /// across midnight keeps yesterday's cut -- and the headings, which ARE
+    /// recomputed every pass, then read "Today" over yesterday's prints.
+    @Test func aNewDayReDerivesTheCut() {
+        let cache = LibraryShowingCache()
+        let rows = pool(3)
+        let today = Date(timeIntervalSince1970: 1_789_560_000)
+
+        _ = cache.showing(pool: rows, revision: 1, query: LibraryQuery(), selection: [],
+                          now: today)
+        _ = cache.showing(pool: rows, revision: 1, query: LibraryQuery(), selection: [],
+                          now: today.addingTimeInterval(60))
+        #expect(cache.derivations == 1)
+
+        _ = cache.showing(pool: rows, revision: 1, query: LibraryQuery(), selection: [],
+                          now: today.addingTimeInterval(86_400))
+        #expect(cache.derivations == 2)
+    }
+
     @Test func aChangeToTheQueryReDerives() {
         let cache = LibraryShowingCache()
         let rows = pool(3)

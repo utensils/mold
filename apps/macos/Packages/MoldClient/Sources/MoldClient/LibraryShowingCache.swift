@@ -30,6 +30,11 @@ public final class LibraryShowingCache {
         let first: PrintID?
         let last: PrintID?
         let query: LibraryQuery
+        /// The cut is made in the viewer's calendar, so an app left open
+        /// across midnight was still showing yesterday's sections -- with
+        /// yesterday's prints under a heading that now reads "Today", because
+        /// the HEADING is recomputed every pass and the cut was not.
+        let today: Date
     }
 
     private var key: Key?
@@ -48,9 +53,11 @@ public final class LibraryShowingCache {
     public private(set) var derivations = 0
 
     public func showing(pool: [LibraryEntry], revision: Int, query: LibraryQuery,
-                        selection: Set<PrintID>) -> LibraryShowing {
+                        selection: Set<PrintID>, now: Date = .now,
+                        calendar: Calendar = .current) -> LibraryShowing {
         let key = Key(revision: revision, count: pool.count, first: pool.first?.id,
-                      last: pool.last?.id, query: query)
+                      last: pool.last?.id, query: query,
+                      today: calendar.startOfDay(for: now))
         if key != self.key {
             self.key = key
             derived = LibraryShowing(pool: pool, query: query, selection: [])

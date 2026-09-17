@@ -9,7 +9,7 @@ import UserNotifications
 /// app used the wait for nothing.
 @MainActor
 final class MoldAppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by the composition root, which owns all four.
+    /// Set by the composition root, which owns all of them.
     var engine: MoldEngine?
     var materializer: PrintMaterializer?
     var thumbnails: ThumbnailCache?
