@@ -55,7 +55,10 @@ public extension GenerateRequest {
         try container.encodeIfPresent(tags, forKey: .tags)
         try container.encodeIfPresent(collection, forKey: .collection)
         try container.encodeIfPresent(originalPrompt, forKey: .originalPrompt)
-        try container.encodeIfPresent(promptTransform, forKey: .promptTransform)
+        // `wireSafe`, never the block itself: a strict Rust enum has no
+        // `unknown` variant, and one re-encoded `"unknown"` refuses the whole
+        // body (`PromptTransform+Wire.swift`).
+        try container.encodeIfPresent(promptTransform?.wireSafe, forKey: .promptTransform)
         try container.encodeIfPresent(batchId, forKey: .batchId)
         try container.encodeIfPresent(batchIndex, forKey: .batchIndex)
         try container.encodeIfPresent(batchCount, forKey: .batchCount)
