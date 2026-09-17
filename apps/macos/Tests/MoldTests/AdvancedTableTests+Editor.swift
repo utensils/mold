@@ -74,6 +74,22 @@ struct AdvancedTableEditorTests {
         #expect(ConfigValueField.commitScalar(text: "", entry: text, onBlur: false) == .null)
     }
 
+    /// **Fails today**: `nan` and `inf` both parse as `Double`, the encoder
+    /// throws on them rather than refusing, and `ConfigStore.set`'s `default:`
+    /// arm raises a machine-level failure -- so a typo in one row reported the
+    /// whole machine as broken (review 05-L6). It reverts like any other text
+    /// this editor cannot parse.
+    @Test func aNonFiniteNumberRevertsRatherThanFailingTheMachine() {
+        let entry = FakeFixtures.configEntry("expand.max_tokens", value: .number(256), source: "db")
+
+        for text in ["nan", "inf", "-inf", "NaN", "Infinity"] {
+            #expect(ConfigValueField.commitScalar(text: text, entry: entry, onBlur: false) == nil,
+                    "\(text) must not reach the wire")
+        }
+        #expect(ConfigValueField.commitScalar(text: "-1", entry: entry, onBlur: false) == .number(-1),
+                "a finite number the machine will refuse is still the machine's call")
+    }
+
     @Test func aBlurWithNoChangeSendsNoWrite() {
         let entry = FakeFixtures.configEntry("expand.max_tokens", value: .number(256), source: "db")
 

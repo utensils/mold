@@ -118,7 +118,16 @@ struct ConfigValueField: View {
     static func commitScalar(text: String, entry: ConfigEntry, onBlur: Bool) -> ConfigScalar? {
         if onBlur, text == entry.editableText { return nil }
         if entry.editor == .secret, text.isEmpty { return nil }
-        return ConfigEntry.scalar(from: text, editor: entry.editor)
+        let scalar = ConfigEntry.scalar(from: text, editor: entry.editor)
+        // `Double("nan")` and `Double("inf")` both parse, and `JSONEncoder`
+        // THROWS on a non-finite number rather than refusing it -- which
+        // `ConfigStore.set`'s `default:` arm reports as a fleet-wide "that
+        // machine couldn't …" banner for a typo in one row (review 05-L6).
+        // There is deliberately no client-side BOUND here, but a value no
+        // request can even carry is not a bound; it reverts like any other
+        // text this editor cannot parse.
+        if case let .number(number) = scalar, !number.isFinite { return nil }
+        return scalar
     }
 
     private func commit(onBlur: Bool) {
