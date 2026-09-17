@@ -44,7 +44,7 @@ extension QueueStore {
     }
 
     private func hydrateNow(on host: MoldHost.ID) async {
-        guard !isSeeded, let client = hosts.backend(for: host) else { return }
+        guard !isSeeded, !Task.isCancelled, let client = hosts.backend(for: host) else { return }
         let ids = Array(Set(entries(on: host).compactMap(\.batchId)))
         guard !ids.isEmpty else {
             children[host] = [:]

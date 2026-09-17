@@ -39,7 +39,13 @@ struct QueueStoreLiveTests {
         let backend = fake(for: plato)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
         let hosts = HostStore(hosts: [plato]) { _ in backend }
-        let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(5))
+        // Long enough to outlast the burst. At 5 ms the window could elapse
+        // while frames were still arriving, so `markDirty` started a SECOND
+        // coalescer and a second read genuinely happened -- and nothing
+        // bounded that at two. Widening the assertion to absorb it was the
+        // wrong repair: the contract is one read, so the delay has to be one
+        // that actually covers the burst.
+        let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(500))
         await connect(plato, hosts: hosts, backend: backend)
 
         for i in 0 ..< 64 { backend.emit(.job(.queued(id: "job-\(i)", model: "flux-dev"))) }
@@ -49,11 +55,7 @@ struct QueueStoreLiveTests {
         // satisfied by a read whose result is not in `byHost` yet.
         await settle { !queue.entries(on: plato.id).isEmpty }
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
-        // One read for the whole burst -- the coalescer's entire point. A
-        // stream that DROPPED a frame is allowed exactly one more, its
-        // `.resyncRequired` re-read (which skips the coalescing delay by
-        // design); 64 frames are never 64 reads.
-        #expect((1 ... 2).contains(backend.callCount("queue")))
+        #expect(backend.callCount("queue") == 1)
     }
 
     /// The server emits `generation_states_committed` explicitly so a bulk
@@ -71,7 +73,8 @@ struct QueueStoreLiveTests {
 
         await settle { !queue.entries(on: plato.id).isEmpty }
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
-        #expect((1 ... 2).contains(backend.callCount("queue")))
+        // ONE frame, so one coalescer, so one read. There is no path to two.
+        #expect(backend.callCount("queue") == 1)
     }
 
     /// **Fails today**: there is no resync handling at all. A long
@@ -119,6 +122,80 @@ struct QueueStoreLiveTests {
 
         await queue.refresh(on: plato.id)
 
+        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+    }
+
+    // MARK: - A storm of repairs
+
+    /// **Fails today**: `refresh(on:)` has no throttle at all. `.resyncRequired`
+    /// cancels the pending coalescer and starts a fresh `refresh`, but neither
+    /// `poll` nor `hydrateNow` ever checks `Task.isCancelled`, so `cancel()`
+    /// stops nothing: K markers are K concurrent `GET /api/queue` calls and K
+    /// chained batch-status reads.
+    ///
+    /// That composes badly with the stream, which emits one `.resyncRequired`
+    /// per DROPPED frame: the repair runs on the main actor, the consumer
+    /// falls further behind, more frames drop, more markers arrive. The
+    /// mechanism that exists to close a gap is what widens it.
+    ///
+    /// A marker arriving while a read is in flight means "read once more
+    /// after this one" -- never "read N more". One in flight, at most one
+    /// queued behind it, however many callers ask.
+    @Test func aStormOfRefreshesReadsTheMachineTwiceNotOncePerCaller() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.queueListing = FakeFixtures.queueListing(["job-1"])
+        // The read has to SUSPEND, or no second caller can arrive during it.
+        backend.queueYields = true
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+
+        // Twelve callers, all created before any of them can run -- exactly
+        // the shape a burst of markers takes.
+        let callers = (0 ..< 12).map { _ in Task { await queue.refresh(on: plato.id) } }
+        for caller in callers { await caller.value }
+
+        // Two, not twelve and not one: the first read, and the ONE re-read
+        // the callers that arrived during it are owed. That second read
+        // starts only when the first has finished, so it necessarily starts
+        // after the last caller joined it.
+        #expect(backend.callCount("queue") == 2)
+        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(hosts.failures.isEmpty)
+    }
+
+    /// And one caller is one read -- the throttle must not invent a
+    /// follow-up nobody asked for.
+    @Test func oneRefreshIsOneRead() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.queueListing = FakeFixtures.queueListing(["job-1"])
+        backend.queueYields = true
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+
+        await queue.refresh(on: plato.id)
+        await queue.refresh(on: plato.id)
+
+        // Sequential callers are not a storm: each gets its own read.
+        #expect(backend.callCount("queue") == 2)
+    }
+
+    /// The consumer side of the same rule, driven the way the stream drives
+    /// it. A marker cancels the pending coalesce -- a gap must not wait out a
+    /// delay -- and then asks for a read that the throttle above bounds.
+    @Test func aBurstOfResyncMarkersRepairsTheMachineWithoutAReadEach() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.queueListing = FakeFixtures.queueListing(["job-1"])
+        backend.queueYields = true
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts, coalesceDelay: .seconds(60))
+
+        for _ in 0 ..< 12 { queue.apply(.resyncRequired, from: plato.id) }
+        await queue.coalescers[plato.id]?.value
+
+        #expect(backend.callCount("queue") <= 2)
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
     }
 

@@ -9,7 +9,9 @@ final class QueueStore {
     /// `internal(set)`: `QueueStore+Fixture.seed(from:)` writes it too, and
     /// `private(set)` does not cross a file boundary.
     internal(set) var byHost: [MoldHost.ID: [QueueEntry]] = [:]
-    private(set) var isLoading = false
+    /// `internal(set)`: `QueueStore+Refresh` sets it, and `private(set)`
+    /// does not cross a file boundary.
+    internal(set) var isLoading = false
 
     /// SOMEBODY paused this machine's whole queue -- names the QUEUE, not a
     /// row. `internal(set)`: `QueueStore+Live` writes it, and `private(set)`
@@ -36,6 +38,12 @@ final class QueueStore {
     /// .hydrate(on:)`. Not `private` for the same cross-file reason.
     var hydrations: [MoldHost.ID: Task<Void, Never>] = [:]
 
+    /// The newest refresh for each machine, and whether one is already
+    /// PROMISED behind the one in flight. Together they are the throttle
+    /// `refresh(on:)` documents: one read at a time, at most one queued.
+    var refreshes: [MoldHost.ID: Task<Void, Never>] = [:]
+    var queuedRefreshes: [MoldHost.ID: Task<Void, Never>] = [:]
+
     /// How long a burst of job frames waits before the one re-read it earns
     /// -- a stored value, not a fixed constant, so a test can shrink it
     /// instead of sleeping 250 ms per case.
@@ -56,28 +64,12 @@ final class QueueStore {
         hosts.onEvent { [weak self] host, event in self?.apply(event, from: host) }
     }
 
-    func refresh() async {
-        isLoading = true
-        defer { isLoading = false }
-        await withTaskGroup(of: Void.self) { group in
-            for host in hosts.hosts {
-                group.addTask { await self.refresh(on: host.id) }
-            }
-        }
-    }
-
-    /// One machine's queue, then its batches -- what every fallback calls.
-    func refresh(on host: MoldHost.ID) async {
-        await poll(host)
-        await hydrate(on: host)
-    }
-
     /// The one listing read: the first listing for a machine, a person
     /// asking again, a machine `wantsPoll` says cannot stream, and after any
     /// mutation this app makes (`act`, below) -- the row's new position is
     /// the server's to state.
     func poll(_ host: MoldHost.ID) async {
-        guard !isSeeded, let client = hosts.backend(for: host) else { return }
+        guard !isSeeded, !Task.isCancelled, let client = hosts.backend(for: host) else { return }
         do {
             byHost[host] = try await client.queue().merged
             hosts.succeeded(on: host, doing: "list its queue")
