@@ -18,18 +18,35 @@ public enum ClientTags {
     /// `TITLE_SLUG_MAX_LEN` (`print_title.rs:20`).
     public static let titleSlugMaxBytes = 40
 
+    /// Characters `normalize_tag_name` (`organization.rs:37-50`) REFUSES: a
+    /// control character that is not whitespace. A whitespace control is
+    /// collapsed instead, in its own words "indistinguishable from a space
+    /// once collapsed" -- and removing a tab would join two words the person
+    /// separated.
+    ///
+    /// Category `Cc`, which is what Rust's `char::is_control()` is, so C1
+    /// (`U+0080`-`U+009F`) counts as much as C0 does.
+    private static func isRefusedControl(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.properties.generalCategory == .control && !scalar.properties.isWhitespace
+    }
+
     /// The client-side mirror of `normalize_request_tags`
-    /// (`organization.rs:59-78`): interior whitespace runs collapsed to one
-    /// space, empties dropped, case-insensitive duplicates collapsed with the
-    /// FIRST spelling kept, order preserved, capped at `maxTags`. Where the
-    /// server refuses an over-long or over-full list outright, this trims and
-    /// truncates instead -- the app validates as you type rather than
-    /// erroring after a render.
+    /// (`organization.rs:59-78`): control characters stripped, interior
+    /// whitespace runs collapsed to one space, empties dropped,
+    /// case-insensitive duplicates collapsed with the FIRST spelling kept,
+    /// order preserved, capped at `maxTags`. Where the server REFUSES a tag
+    /// -- a control character, an over-long name, an over-full list -- this
+    /// strips, trims and truncates instead: the app validates as you type
+    /// rather than erroring after a render. A pasted escape byte used to ride
+    /// the request untouched, and the machine refused the whole render over
+    /// it.
     public static func normalize(_ raw: [String]) -> [String] {
         var seenFolded = Set<String>()
         var out: [String] = []
         for tag in raw {
-            let collapsed = tag.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            let stripped = String(String.UnicodeScalarView(
+                tag.unicodeScalars.filter { !isRefusedControl($0) }))
+            let collapsed = stripped.split(whereSeparator: \.isWhitespace).joined(separator: " ")
             guard !collapsed.isEmpty else { continue }
             let capped = collapsed.count > maxTagChars ? String(collapsed.prefix(maxTagChars)) : collapsed
             let folded = capped.lowercased()
