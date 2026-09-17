@@ -12,14 +12,29 @@ struct BatchOutcome: Equatable {
     /// One sentence per child that made nothing.
     let failures: [String]
 
-    /// The one settled answer for a status, or nil while anything is live.
+    /// The one answer for a status that has come to rest, or nil while
+    /// anything can still move on its own. A HELD child counts as at rest
+    /// (`BatchStatus.isAtRest`): the machine has parked it until someone
+    /// decides in the Queue, and its sentence says so -- a pane that kept
+    /// waiting for it spun "Getting ready…" for ever, and again at every
+    /// launch after.
     init?(settling status: BatchStatus) {
-        guard status.isSettled else { return nil }
+        guard status.isAtRest else { return nil }
         let ordered = status.children.sorted { $0.index < $1.index }
         results = ordered.compactMap(\.result)
         failures = ordered.compactMap { child in
-            child.result == nil ? (child.error ?? "The render didn't finish.") : nil
+            guard child.result == nil else { return nil }
+            if child.state == .held { return Self.heldSentence(child.error) }
+            return child.error ?? "The render didn't finish."
         }
+    }
+
+    /// The machine's own reason, then where the decision lives.
+    static func heldSentence(_ reason: String?) -> String {
+        let cause = reason.map { "The machine is holding this render: \($0)" }
+            ?? "The machine is holding this render"
+        let stop = cause.hasSuffix(".") ? "" : "."
+        return "\(cause)\(stop) Try it again, move it or cancel it in the Queue."
     }
 }
 

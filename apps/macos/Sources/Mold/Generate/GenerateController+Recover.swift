@@ -23,7 +23,11 @@ extension GenerateController {
             let backend = hosts.backend(for: host)
             do {
                 let status = try await backend.batchStatus(clientBatchId: clientBatchId)
-                guard !status.isSettled else {
+                // Settled, or HELD: the machine knows the batch either way,
+                // so there is no lost admission to recover, and a hold is the
+                // Queue's to show -- re-attaching to one made every launch
+                // look like the app had started generating on its own.
+                guard !status.isAtRest else {
                     PendingBatch.forget(clientBatchId)
                     continue
                 }

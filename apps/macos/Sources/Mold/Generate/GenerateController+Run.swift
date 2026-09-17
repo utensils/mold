@@ -75,7 +75,8 @@ extension GenerateController {
             for try await status in backend.batchEvents(id: initial.id) {
                 guard !Task.isCancelled else { return }
                 settle(status, host: host)
-                if status.isSettled { return }
+                // At rest, not merely settled: a hold ends the follow too.
+                if status.isAtRest { return }
             }
             // The stream ended without a settled frame; READ the status once
             // rather than leaving the pane spinning. Re-submitting to find out

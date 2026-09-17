@@ -11,6 +11,13 @@ public struct BatchStatus: Codable, Hashable, Sendable {
 
     /// Nothing left that could still change.
     public var isSettled: Bool { children.allSatisfy { !$0.state.isLive } }
+
+    /// Nothing left that will change WITHOUT A PERSON: every child is either
+    /// settled or held. A hold is live on the wire -- Retry can still move
+    /// it -- but the machine has parked it until someone decides in the
+    /// Queue, so a pane that waits for it waits for ever. Following stops
+    /// here; `isSettled` stays the stricter "nothing can ever change".
+    public var isAtRest: Bool { children.allSatisfy { !$0.state.isLive || $0.state == .held } }
 }
 
 public struct BatchChild: Codable, Hashable, Sendable, Identifiable {
