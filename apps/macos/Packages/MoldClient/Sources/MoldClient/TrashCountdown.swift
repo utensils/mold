@@ -15,13 +15,20 @@ public enum TrashCountdown {
     /// Whole days from `now` until the host purges this print, NEGATIVE once
     /// it is due, and `nil` where the machine gave no purge date at all.
     ///
-    /// Calendar days, not elapsed 86,400s chunks: "deleting in 2 days" is a
-    /// promise about a date on a calendar, and the two disagree across a
-    /// daylight-saving boundary.
-    public static func days(until purgeAt: UInt64?, now: Date = .now) -> Int? {
+    /// CALENDAR days -- the count of midnights between here and there, in the
+    /// viewer's own calendar -- not elapsed 86,400-second chunks and not
+    /// `dateComponents` between two instants, which is the same elapsed count
+    /// with daylight saving folded in. "Deleting in 2 days" is a promise
+    /// about a DATE: at 23:00 on Monday, a purge at 01:00 on Tuesday is
+    /// tomorrow, and both of the other two readings call it today.
+    public static func days(until purgeAt: UInt64?, now: Date = .now,
+                            calendar: Calendar = .current) -> Int? {
         guard let purgeAt else { return nil }
         let due = Date(timeIntervalSince1970: TimeInterval(purgeAt))
+        // Already due is its own answer, before any rounding to a date.
         guard due > now else { return -1 }
-        return Calendar.current.dateComponents([.day], from: now, to: due).day ?? 0
+        return calendar.dateComponents([.day],
+                                       from: calendar.startOfDay(for: now),
+                                       to: calendar.startOfDay(for: due)).day ?? 0
     }
 }
