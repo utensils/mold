@@ -27,11 +27,14 @@ struct PromptWand: View {
 
         Group {
             if isWorking {
-                ProgressView().controlSize(.small)
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Rewriting…").font(.caption).foregroundStyle(.secondary)
+                }
             } else if case .hidden = visibility {
                 EmptyView()
             } else {
-                button(offer: offer, visibility: visibility)
+                splitButton(offer: offer, visibility: visibility)
             }
         }
         .onModifierKeysChanged(mask: .option, initial: false) { _, new in
@@ -47,17 +50,34 @@ struct PromptWand: View {
         return false
     }
 
-    private func button(offer: ExpansionOffer, visibility: Visibility) -> some View {
-        Button { tap(offer: offer, visibility: visibility) } label: {
-            Image(systemName: optionHeld ? "wand.and.rays" : "wand.and.sparkles")
+    /// The split button under the prompt (M8 decision 4): a click asks for
+    /// whatever the primary action means right now; the menu spells out both
+    /// choices by name for anyone who wants to pick rather than hold ⌥.
+    private func splitButton(offer: ExpansionOffer, visibility: Visibility) -> some View {
+        Menu {
+            Button("Rewrite This Prompt", action: expand)
+            if visibility.canRemix {
+                Button("Suggest Other Ways to Say This", action: remix)
+            }
+        } label: {
+            Label(optionHeld && visibility.canRemix ? "Remix" : "Expand",
+                  systemImage: optionHeld ? "wand.and.rays" : "wand.and.sparkles")
+        } primaryAction: {
+            tap(offer: offer, visibility: visibility)
         }
-        .buttonStyle(.borderless)
-        .controlSize(.small)
-        .opacity(visibility.isReady ? 1 : 0.4)
+        .menuStyle(.button)
+        .controlSize(.regular)
+        .fixedSize()
+        // The "pull this model" press must stay live to reveal itself --
+        // only a truly empty prompt with nothing to reveal is disabled.
+        .disabled(!visibility.isReady && !isNeedsModel(offer))
         .help(help(for: visibility))
-        // A symbol-only button has no name of its own; VoiceOver would read
-        // the glyph's identifier. The help text is the name.
         .accessibilityLabel(help(for: visibility))
+    }
+
+    private func isNeedsModel(_ offer: ExpansionOffer) -> Bool {
+        if case .needsModel = offer { return true }
+        return false
     }
 
     private var showsPopover: Binding<Bool> {
@@ -90,56 +110,21 @@ struct PromptWand: View {
             // Only the "pull this model" case has anything to reveal; an
             // empty prompt has nothing to explain, so pressing it is inert.
             guard case .needsModel = offer else { return }
-            Task { await controller.expand(on: host, backend: hosts.backend(for: host)) }
+            expand()
         case let .ready(canRemix):
-            Task {
-                if Self.wantsRemix(optionHeld: optionHeld, canRemix: canRemix) {
-                    await controller.remix(on: host, backend: hosts.backend(for: host))
-                } else {
-                    await controller.expand(on: host, backend: hosts.backend(for: host))
-                }
-            }
-        }
-    }
-}
-
-extension PromptWand {
-    /// What the button shows, decided once from the same three questions a
-    /// view would otherwise ask itself: whether there is a wand at all,
-    /// whether the machine can do anything with a click right now, and
-    /// whether that click could also mean a remix.
-    enum Visibility: Equatable {
-        case hidden
-        case disabled(reason: String)
-        case ready(canRemix: Bool)
-
-        var isReady: Bool { if case .ready = self { true } else { false } }
-
-        var canRemix: Bool {
-            if case let .ready(canRemix) = self { return canRemix }
-            return false
-        }
-
-        static func resolve(offer: ExpansionOffer, promptMode: PromptRequirement, prompt: String) -> Visibility {
-            guard promptMode != .ignored else { return .hidden }
-            switch offer {
-            case .hidden:
-                return .hidden
-            case let .needsModel(model):
-                return .disabled(reason: "Pull \(model) to expand prompts on this machine.")
-            case let .wand(canRemix):
-                guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return .disabled(reason: "Write a prompt to expand it.")
-                }
-                return .ready(canRemix: canRemix)
+            if Self.wantsRemix(optionHeld: optionHeld, canRemix: canRemix) {
+                remix()
+            } else {
+                expand()
             }
         }
     }
 
-    /// Whether a click, with ⌥ held, asks for a remix rather than an expand --
-    /// only where the machine offers one at all. Holding ⌥ on a host with no
-    /// remix still expands, it just never says "remix" while doing it.
-    static func wantsRemix(optionHeld: Bool, canRemix: Bool) -> Bool {
-        optionHeld && canRemix
+    private func expand() {
+        Task { await controller.expand(on: host, backend: hosts.backend(for: host)) }
+    }
+
+    private func remix() {
+        Task { await controller.remix(on: host, backend: hosts.backend(for: host)) }
     }
 }

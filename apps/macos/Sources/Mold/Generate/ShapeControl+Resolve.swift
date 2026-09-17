@@ -2,10 +2,11 @@ import Foundation
 import MoldClient
 
 /// Aspect + size, drawn as two menus under the prompt instead of one buried
-/// "1024 × 1024" menu (M8 design, decision 3). The view lands in S2; this is
-/// the pure resolution behind it.
-enum ShapeControl {}
-
+/// "1024 × 1024" menu (M8 design, decision 3). This is the pure resolution
+/// behind it; the view (`ShapeControl.swift`, S2) is `ShapeControl`'s primary
+/// declaration -- a zero-case enum can never be constructed, so it cannot
+/// also conform to `View`, and this file only extends the struct declared
+/// there.
 extension ShapeControl {
     struct Shape: Equatable {
         /// The aspect the current size belongs to -- the group's own id when

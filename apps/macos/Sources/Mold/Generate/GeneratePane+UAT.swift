@@ -20,3 +20,16 @@ extension GeneratePane {
         controller.draft.media.sourceImageName = URL(fileURLWithPath: path).lastPathComponent
     }
 }
+
+/// `MOLD_NATIVE_LIBRARY_PICKER=1` opens `SourceImageWell`'s "From Library…"
+/// sheet at launch, mirroring `SettingsUAT`'s `MOLD_NATIVE_SETTINGS_TAB` --
+/// a deterministic capture instead of a menu press.
+enum GenerateUAT {
+    static let envVar = "MOLD_NATIVE_LIBRARY_PICKER"
+
+    static func wantsLibraryPicker(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[envVar] != nil
+    }
+}

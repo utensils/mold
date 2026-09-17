@@ -15,9 +15,15 @@ struct PromptPanel: View {
     @Binding var destination: Destination
     let submit: () -> Void
     let cancel: () -> Void
+    /// Stops every batch this pane has admitted, not just the one on screen
+    /// (M8 decision 8). Neither this nor `cancel` takes a backend any more --
+    /// each batch resolves its own machine.
+    let stopAll: () -> Void
     let maxBatch: Int
 
-    @Environment(GenerateController.self) private var controller
+    /// Not `private`: `PromptPanel+Actions`, an extension in another file,
+    /// reads the run and the queue depth to build the trailing button group.
+    @Environment(GenerateController.self) var controller
     @FocusState private var promptFocused: Bool
 
     var body: some View {
@@ -27,10 +33,9 @@ struct PromptPanel: View {
             }
             if let recipe {
                 prompt(recipe)
+                promptTools(recipe)
                 Divider()
-                HStack(alignment: .bottom, spacing: 12) {
-                    ControlsRow(recipe: recipe, maxBatch: maxBatch, draft: $draft)
-                    Spacer(minLength: 12)
+                ControlsRow(recipe: recipe, maxBatch: maxBatch, draft: $draft) {
                     actions(recipe)
                 }
             } else {
@@ -63,7 +68,6 @@ struct PromptPanel: View {
                         .font(.body)
                         .lineLimit(2...6)
                         .focused($promptFocused)
-                        .overlay(alignment: .bottomTrailing) { wand(recipe) }
                     if recipe.capabilities.negativePrompt?.isAvailable == true {
                         TextField("Avoid…", text: $draft.negativePrompt, axis: .vertical)
                             .textFieldStyle(.plain)
@@ -77,12 +81,6 @@ struct PromptPanel: View {
                             // needs.
                             .focused($promptFocused)
                     }
-                    if controller.canRevertExpansion {
-                        Button("\(undoLabel) · Undo") { controller.revertExpansion() }
-                            .buttonStyle(.plain)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 if let references = recipe.capabilities.referenceImages,
                    references.mode.isVisible {
@@ -90,6 +88,24 @@ struct PromptPanel: View {
                 } else if Self.showsSourceWell(for: recipe) {
                     SourceImageWell(draft: $draft)
                 }
+            }
+        }
+    }
+
+    /// The wand's split button and, once a rewrite has been accepted, the
+    /// way back out of it -- under the prompt rather than a glyph pinned to
+    /// its corner (M8 decision 4).
+    @ViewBuilder private func promptTools(_ recipe: GenerationRecipe) -> some View {
+        if recipe.capabilities.promptRequirement != .ignored, let host {
+            HStack(spacing: 10) {
+                PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination)
+                if controller.canRevertExpansion {
+                    Button("\(undoLabel) · Undo") { controller.revertExpansion() }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
             }
         }
     }
@@ -103,46 +119,9 @@ struct PromptPanel: View {
     /// Absence of `sourceImage` means YES -- raw `sourceImage?.isSupported` had it backwards.
     static func showsSourceWell(for recipe: GenerationRecipe) -> Bool { recipe.capabilities.readsSourceImage }
 
-    @ViewBuilder private func wand(_ recipe: GenerationRecipe) -> some View {
-        if let host {
-            PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination)
-                .padding(6)
-        }
-    }
-
     /// What `canRevertExpansion`'s affordance says was just done to the
     /// prompt -- the operation the accepted choice actually carried out.
     private var undoLabel: String {
         draft.promptTransform?.operation == .remix ? "remixed" : "expanded"
-    }
-
-    private func actions(_ recipe: GenerationRecipe) -> some View {
-        HStack(spacing: 10) {
-            // The flexible member: plato's own "infeasible" answer names
-            // every GPU and runs to hundreds of characters. Letting THIS
-            // absorb the row's width (and truncate) is what keeps the
-            // capsule -- and the window's minimum width behind it -- from
-            // being dragged past `Self.maxWidth` and off the screen.
-            PlacementHint(placement: controller.placement, error: controller.placementError)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            if controller.run.isBusy {
-                Button("Stop", role: .destructive, action: cancel)
-                    .controlSize(.large)
-                    .fixedSize()
-            } else {
-                Button(action: submit) {
-                    HStack(spacing: 6) {
-                        Text("Generate")
-                        Text("⌘↩").foregroundStyle(.secondary)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(draft.refusal(for: recipe) != nil)
-                .help(draft.refusal(for: recipe) ?? "Render this")
-                .fixedSize()
-            }
-        }
     }
 }

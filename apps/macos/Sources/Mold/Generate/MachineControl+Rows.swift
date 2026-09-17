@@ -4,8 +4,9 @@ import MoldClient
 /// The Machine control's menu contents (M8 design, decision 2): Auto plus
 /// every machine that is up and generates, with the CHOSEN machine always
 /// listed so the choice stays visible and changeable even while it is down.
-enum MachineControl {}
-
+/// `MachineControl`'s primary declaration is the view (`MachineControl.swift`,
+/// S2) -- a zero-case enum can never be constructed, so it cannot also
+/// conform to `View`, and this file only extends the struct declared there.
 extension MachineControl {
     struct Row: Equatable, Identifiable {
         let id: MoldHost.ID

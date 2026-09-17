@@ -12,7 +12,10 @@ struct ReferenceStrip: View {
     let capability: ReferenceImagesCapability
     @Binding var draft: RenderDraft
 
+    @Environment(HostStore.self) private var hosts
+    @Environment(LibraryStore.self) private var library
     @State private var targeted = false
+    @State private var showsLibrary = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -56,21 +59,30 @@ struct ReferenceStrip: View {
         .help("Remove this reference")
     }
 
+    /// The same "Choose File…" / "From Library…" menu the source well
+    /// offers (M8 decision 5), reusing `PictureSource` for both.
     private var addWell: some View {
-        RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
-            .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
-            .frame(width: 52, height: 52)
-            .overlay { Image(systemName: "plus").foregroundStyle(.tertiary) }
-            .onTapGesture { choose() }
-            .dropDestination(for: URL.self) { urls, _ in
-                for url in urls { append(url) }
-                return true
-            } isTargeted: { targeted = $0 }
-            .help(addWellLabel)
-            .accessibilityElement()
-            .accessibilityLabel(addWellLabel)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { choose() }
+        Menu {
+            Button("Choose File…", action: chooseFile)
+            Button("From Library…") { showsLibrary = true }
+        } label: {
+            RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
+                .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
+                .frame(width: 52, height: 52)
+                .overlay { Image(systemName: "plus").foregroundStyle(.tertiary) }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .dropDestination(for: PictureDrop.self) { drops, _ in
+            for drop in drops { handle(drop) }
+            return true
+        } isTargeted: { targeted = $0 }
+        .help(addWellLabel)
+        .accessibilityLabel(addWellLabel)
+        .sheet(isPresented: $showsLibrary) {
+            LibraryPickerSheet { entry, data in append((data, entry.print.filename)) }
+        }
     }
 
     /// The one sentence the add well's tooltip and its VoiceOver label share.
@@ -85,19 +97,26 @@ struct ReferenceStrip: View {
         return index == 0 ? "The picture being edited" : "Reference \(index)"
     }
 
-    private func choose() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .webP, .heic, .tiff]
-        panel.allowsMultipleSelection = true
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls { append(url) }
+    private func handle(_ drop: PictureDrop) {
+        Task {
+            do {
+                append(try await PictureSource.bytes(of: drop, hosts: hosts, library: library))
+            } catch {
+                if case let .print(id) = drop {
+                    hosts.report(error, on: id.host, doing: "fetch that picture")
+                }
+            }
+        }
     }
 
-    private func append(_ url: URL) {
-        guard draft.media.editImages.count < (capability.maxCount ?? 1),
-              let data = try? Data(contentsOf: url)
-        else { return }
-        draft.media.editImages.append(data.base64EncodedString())
+    private func chooseFile() {
+        guard let url = PictureSource.chooseFile(), let data = try? Data(contentsOf: url) else { return }
+        append((data, url.lastPathComponent))
+    }
+
+    private func append(_ picked: (data: Data, name: String)) {
+        guard draft.media.editImages.count < (capability.maxCount ?? 1) else { return }
+        draft.media.editImages.append(picked.data.base64EncodedString())
     }
 }
 

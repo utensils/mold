@@ -29,7 +29,7 @@ struct PromptWandPopover: View {
             }
         }
         .padding(14)
-        .frame(width: 320)
+        .frame(width: 380)
     }
 
     // MARK: - Choices
@@ -42,15 +42,26 @@ struct PromptWandPopover: View {
                 choiceRow(choice)
             }
             .listStyle(.plain)
-            .frame(height: min(CGFloat(offer.choices.count) * 56, 220))
+            // Sized by its rows, not left to the List's own ideal height,
+            // which settles at the minimum and showed one and a half
+            // choices: a four-line prompt is about 56pt, one with a
+            // dimensions caption under it nearer 70.
+            .frame(height: min(CGFloat(offer.choices.count) * 72, 320))
             .focused($listFocused)
             .onAppear { selection = offer.choices.first?.id; listFocused = true }
             .onKeyPress(.return) { acceptSelected(from: offer); return .handled }
             .onExitCommand { controller.dismissExpansion() }
             Divider()
-            Text("Escape leaves the prompt as it was.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Escape leaves the prompt as it was.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Use") { acceptSelected(from: offer) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selection == nil)
+            }
         }
     }
 
@@ -64,7 +75,10 @@ struct PromptWandPopover: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { controller.accept(choice) }
+        // A plain `.onTapGesture(count: 2)` here ate the single click
+        // `List(selection:)` needs to highlight a row at all (M8 decision 9)
+        // -- `simultaneousGesture` lets both live on the same row.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { controller.accept(choice) })
     }
 
     private func acceptSelected(from offer: Expansion.Offer) {

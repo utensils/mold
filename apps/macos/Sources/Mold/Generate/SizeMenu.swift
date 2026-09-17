@@ -1,35 +1,9 @@
 import MoldClient
 import SwiftUI
 
-/// Sizes the recipe advertises, grouped by aspect.
-struct SizeMenu: View {
-    let resolution: ResolutionProfile
-    @Binding var draft: RenderDraft
-
-    var body: some View {
-        Menu {
-            ForEach(resolution.aspectGroups ?? []) { group in
-                Section(group.label) {
-                    ForEach(group.presets) { preset in
-                        Button {
-                            draft.width = preset.width
-                            draft.height = preset.height
-                        } label: {
-                            Text(preset.label)
-                        }
-                    }
-                }
-            }
-        } label: {
-            // Verbatim: pixel dimensions take no thousands separator, and
-            // `Text` interpolation would render 1024 as "1,024".
-            Text(verbatim: "\(draft.width) × \(draft.height)").monospacedDigit()
-        }
-        .menuStyle(.button)
-        .buttonStyle(.accessoryBar)
-        .fixedSize()
-    }
-}
+// `SizeMenu` (one buried "1024 × 1024" menu) is retired -- `ShapeControl.swift`
+// replaces it with aspect + size, two menus (M8 decision 3). This file keeps
+// its name; only `SeedControl` below still lives here.
 
 /// The seed, and whether it is held still between renders.
 struct SeedControl: View {

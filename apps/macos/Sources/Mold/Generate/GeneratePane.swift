@@ -30,7 +30,8 @@ struct GeneratePane: View {
             PromptTuck(tucked: $controller.promptTucked, steps: controller.run.steps) {
                 PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
                             host: host, destination: $destination,
-                            submit: startRun, cancel: cancelRun, maxBatch: maxBatch)
+                            submit: startRun, cancel: cancelRun, stopAll: { controller.stopAll() },
+                            maxBatch: maxBatch)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -82,9 +83,12 @@ struct GeneratePane: View {
 
     // MARK: - Selection
 
-    /// Not `private`: the toolbar's model picker needs it too.
+    /// Not `private`, same reason. An explicit Machine choice wins; else the
+    /// machine the model was adopted on; else Auto's own answer (decision 2).
     var host: MoldHost? {
-        hosts.hosts.first { $0.id == controller.hostID } ?? hosts.preferredHost
+        controller.machineChoice.flatMap(hosts.host)
+            ?? hosts.hosts.first { $0.id == controller.hostID }
+            ?? hosts.preferredHost
     }
 
     /// Not `private`, same reason.
