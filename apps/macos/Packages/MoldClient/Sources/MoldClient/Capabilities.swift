@@ -23,6 +23,10 @@ public struct Capabilities: Codable, Hashable, Sendable {
     public let videoUpscale: VideoUpscaleCapabilities?
     public let durableMedia: DurableMediaCapabilities?
     public let referenceUploads: ReferenceUploadCapabilities?
+    /// 3-D. Absent on a host with no mesh family at all, which is why it is
+    /// read through `meshExports` rather than directly -- see
+    /// `MeshCapabilities`.
+    public let mesh: MeshCapabilities?
 }
 
 public struct GalleryCapabilities: Codable, Hashable, Sendable {
