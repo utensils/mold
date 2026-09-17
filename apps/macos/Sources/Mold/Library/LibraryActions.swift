@@ -118,8 +118,24 @@ struct LibraryActions {
     }
 
     /// The stored bytes for a print, fetched from the machine that holds it.
+    ///
+    /// Bounded, because the whole body is buffered before anything here sees
+    /// it: a host answering without limit would take the process down, and
+    /// `copy` decodes up to ten of these into `NSImage` at once. The ceiling
+    /// is the server's own for one member -- see `ResponseCeiling`, and the
+    /// note there about where this belongs once the transport streams.
     func data(for entry: LibraryEntry) async -> Data? {
-        try? await hosts.backend(for: entry.hostID)?.media(entry.print.filename,
-                                                            trashed: entry.print.trashedAt != nil)
+        guard let backend = hosts.backend(for: entry.hostID) else { return nil }
+        do {
+            let bytes = try await backend.media(entry.print.filename,
+                                                trashed: entry.print.trashedAt != nil)
+            return try ResponseCeiling.checked(bytes, ceiling: ResponseCeiling.media,
+                                               what: "that print")
+        } catch is CancellationError {
+            return nil
+        } catch {
+            hosts.report(error, on: entry.hostID, doing: "read that print")
+            return nil
+        }
     }
 }

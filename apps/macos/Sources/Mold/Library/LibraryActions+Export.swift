@@ -23,7 +23,11 @@ extension LibraryActions {
             guard let client = hosts.backend(for: entry.hostID) else { return }
             let data: Data
             do {
-                data = try await client.export(entry.print.filename, format: format)
+                // Bounded like every other buffered body -- a conversion the
+                // machine performs is still an answer this app holds whole.
+                data = try ResponseCeiling.checked(
+                    await client.export(entry.print.filename, format: format),
+                    ceiling: ResponseCeiling.media, what: "that export")
                 hosts.succeeded(on: entry.hostID)
             } catch {
                 hosts.report(error, on: entry.hostID, doing: "export that print")
