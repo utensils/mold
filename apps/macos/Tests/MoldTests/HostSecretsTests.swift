@@ -108,6 +108,54 @@ struct HostSecretsTests {
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == nil)
     }
 
+    /// **Fails today**: `.found` wrote the Keychain value unconditionally, and
+    /// one `.unreadable` host leaves the done-flag off so the WHOLE migration
+    /// re-runs next launch. So: launch 1 the keychain is locked and `plato`
+    /// loads keyless; the user opens Edit Machine and types the current key;
+    /// launch 2 the item reads and the OLD, rotated value silently replaces
+    /// what they just typed, and the item is deleted. The file is newer by
+    /// construction -- nothing but a deliberate save puts a value there -- so
+    /// a value already in it wins, and the stale item still goes.
+    @Test func aRetriedMigrationKeepsTheKeyTheUserJustTyped() throws {
+        let (defaults, secrets) = try scratch()
+        let plato = StoredHost(host("plato"))
+        let name = SecretStore.remoteAPIKeyName(for: plato.id)
+
+        // Launch 1: the item will not read, so the move stays unfinished.
+        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+                                       from: source([plato.id: .unreadable]))
+        #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey))
+
+        // The user retypes the current key while the old one sits in the item.
+        try HostPersistence.setAPIKey("k-typed", for: plato.id, in: secrets)
+
+        // Launch 2: the item reads at last -- and holds the rotated key.
+        let deleted = Deletions()
+        LegacyKeychain.migrateIfNeeded([plato], into: secrets, defaults: defaults,
+                                       from: source([plato.id: .found("k-rotated")], into: deleted))
+
+        #expect(try secrets.value(for: name) == "k-typed")
+        #expect(deleted.ids == [plato.id], "the stale item still goes")
+        #expect(defaults.bool(forKey: LegacyKeychain.migratedKey))
+    }
+
+    /// The Keychain item is the only other copy, so it is deleted only once
+    /// the FILE says it holds the key -- read back from disk, not from the
+    /// cache that would answer with what we meant to write.
+    @Test func anItemGoesOnlyAfterTheFileProvesItHasTheKey() throws {
+        let (_, secrets) = try scratch()
+        let plato = StoredHost(host("plato"))
+        let name = SecretStore.remoteAPIKeyName(for: plato.id)
+
+        try secrets.set("k-plato", for: name)
+        #expect(try secrets.persistedValue(for: name) == "k-plato")
+
+        // A write another instance made behind this one's warm cache is what
+        // `persistedValue` has to see.
+        try SecretStore(directory: secrets.directory).set("k-elsewhere", for: name)
+        #expect(try secrets.persistedValue(for: name) == "k-elsewhere")
+    }
+
     /// One item the Keychain will not give up must not cost the others theirs,
     /// and must not be written off: the move stays unfinished so the next
     /// launch tries again.

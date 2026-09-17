@@ -44,6 +44,17 @@ enum LegacyKeychain {
     /// Moves what it can and answers whether the move is COMPLETE. One host
     /// failing -- an unreadable item, a file that would not write -- never
     /// stops the others: each is its own read, write and delete.
+    ///
+    /// **A value already in the file WINS.** Because one unreadable item
+    /// leaves the whole move unfinished, this runs again next launch -- and in
+    /// between, the person whose machine was 401ing will have opened Edit
+    /// Machine and typed the current key. The file is newer by construction:
+    /// nothing but a deliberate save puts a value there, while the Keychain
+    /// item is whatever was last written before this build. Overwriting was
+    /// the same "resurrect a key the person has since changed" hazard
+    /// `PreferencesReset.kept` guards for the reset path (review E1). The
+    /// stale item is still deleted -- leaving it would only make this happen
+    /// again.
     static func migrate(_ hosts: [StoredHost], into secrets: SecretStore,
                         from source: Source) -> Bool {
         var complete = true
@@ -54,15 +65,29 @@ enum LegacyKeychain {
             case .unreadable:
                 complete = false
             case let .found(key):
-                do {
-                    try secrets.set(key, for: SecretStore.remoteAPIKeyName(for: host.id))
-                    source.delete(host.id)
-                } catch {
-                    complete = false
-                }
+                if !move(key, of: host, into: secrets, from: source) { complete = false }
             }
         }
         return complete
+    }
+
+    /// One host's key: keep what the file already holds, otherwise write, and
+    /// delete the item only once the FILE says so -- read back from disk, not
+    /// from the cache that would answer with what we meant to write. The
+    /// Keychain item is the only other copy there is.
+    private static func move(_ key: String, of host: StoredHost, into secrets: SecretStore,
+                             from source: Source) -> Bool {
+        let name = SecretStore.remoteAPIKeyName(for: host.id)
+        do {
+            if try secrets.persistedValue(for: name)?.isEmpty != false {
+                try secrets.set(key, for: name)
+                guard try secrets.persistedValue(for: name) == key else { return false }
+            }
+            source.delete(host.id)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private static func readItem(_ hostID: UUID) -> Item {

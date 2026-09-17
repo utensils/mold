@@ -51,6 +51,10 @@ public final class SecretStore: Sendable {
         url = directory.appending(path: "secrets.json")
     }
 
+    /// Where the document lives -- for a diagnostic, and for a second instance
+    /// on the same home.
+    public var directory: URL { url.deletingLastPathComponent() }
+
     /// `~/Library/Application Support/io.utensils.mold.native`. Deliberately
     /// does not throw and does not create anything: resolving where the file
     /// GOES cannot fail, and the directory is made by the first write.
