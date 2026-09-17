@@ -131,6 +131,9 @@ struct NotificationTests {
         await queue.refresh(on: plato.id)
         // A second reconcile of the same settled state -- must not fire again.
         await queue.refresh(on: plato.id)
+        // Delivery waits for authorization to be ANSWERED, so this awaits
+        // the chain rather than polling for its side effect.
+        await notifications.deliveries?.value
 
         #expect(center.posted.count == 1)
         #expect(center.posted.first?.title == "Failed on plato")
@@ -183,6 +186,7 @@ struct NotificationTests {
         async let first: Void = queue.hydrate(on: plato.id)
         async let second: Void = queue.hydrate(on: plato.id)
         _ = await (first, second)
+        await notifications.deliveries?.value
 
         // Both callers still get a fresh read -- serialized, not coalesced.
         // Three in all: the one the setup's `refresh` made, plus these two.
@@ -278,6 +282,69 @@ struct NotificationTests {
         #expect(center.posted.isEmpty)
         #expect(center.authorizationRequests == 0)
         #expect(notifications.enabled)
+    }
+
+    // MARK: - Authorization
+
+    /// **Fails today**: `requestAuthorizationIfNeeded()` is fire-and-forget
+    /// and `add` runs in the same turn, so the very first notification of a
+    /// session is handed to the centre while authorization is still
+    /// `.notDetermined` -- and dropped. The person sees the permission alert
+    /// and no notification, which reads as the toggle not working.
+    ///
+    /// Asking on FIRST NEED is right and stays; what changes is waiting for
+    /// the ANSWER.
+    @Test func theFirstNotificationWaitsForTheAnswerInsteadOfBeingDropped() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let defaults = scratchDefaults()
+        let landed = LandedPrints(hosts: hosts, defaults: defaults)
+        landed.isActive = false
+        let center = FakeNotificationCenter()
+        // The person has not answered the alert yet -- which is the whole
+        // state this bug lives in.
+        center.defersAuthorization = true
+        let notifications = MoldNotifications(
+            landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
+            library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
+            coalesceDelay: .milliseconds(20), executablePath: insideBundle)
+        await connect(plato, hosts: hosts, backend: backend)
+
+        backend.emit(.gallery(.added(filename: "a.png", row: nil)))
+        await settle { center.authorizationRequests == 1 }
+        #expect(center.posted.isEmpty)
+
+        center.answerAuthorization(true)
+        await notifications.deliveries?.value
+
+        #expect(center.dropped == 0)
+        #expect(center.posted.map(\.title) == ["Finished on plato"])
+    }
+
+    /// One alert, however many notifications follow it.
+    @Test func authorizationIsAskedForOnceAndTheRestJustArrive() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let defaults = scratchDefaults()
+        let landed = LandedPrints(hosts: hosts, defaults: defaults)
+        landed.isActive = false
+        let center = FakeNotificationCenter()
+        let notifications = MoldNotifications(
+            landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
+            library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
+            coalesceDelay: .milliseconds(5), executablePath: insideBundle)
+        await connect(plato, hosts: hosts, backend: backend)
+
+        backend.emit(.gallery(.added(filename: "a.png", row: nil)))
+        await settle { center.posted.count == 1 }
+        backend.emit(.gallery(.added(filename: "b.png", row: nil)))
+        await settle { center.posted.count == 2 }
+        await notifications.deliveries?.value
+
+        #expect(center.authorizationRequests == 1)
+        #expect(center.dropped == 0)
     }
 
     // MARK: - Routing, pure over `userInfo`
