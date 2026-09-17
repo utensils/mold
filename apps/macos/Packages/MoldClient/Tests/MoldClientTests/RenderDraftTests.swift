@@ -271,3 +271,50 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
     // An empty array and an absent field are different instructions.
     #expect(draft.request(model: "m").editImages == nil)
 }
+
+private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
+    GenerationRecipe(
+        id: "r", label: "R",
+        defaults: GenerationDefaults(width: 1024, height: 1024, steps: wide.default,
+                                     guidance: guidance.default, frames: nil, fps: nil,
+                                     negativePrompt: nil),
+        resolution: resolution,
+        steps: wide, guidance: guidance, temporal: nil,
+        capabilities: RecipeCapabilities(
+            prompt: nil, negativePrompt: nil, output: nil, referenceImages: nil,
+            supportsStrength: nil, supportsLora: nil, supportsIdentity: nil,
+            supportsSequence: nil, supportsExtend: nil, supportsAudio: nil, sourceImage: nil)
+    )
+}
+
+/// A draft kept across a model switch is the one path that carries a size
+/// nobody validated against the NEW recipe -- a fresh model already takes
+/// its defaults, which are valid by construction. See `RenderDraft.fit`.
+@Test func aKeptDraftSnapsToTheNearestBucketOnABucketedRecipe() {
+    let buckets = ResolutionProfile(
+        domain: .buckets, alignment: nil, minWidth: nil, minHeight: nil,
+        maxPixels: nil, maxAxisPixels: nil, offBucket: .reject,
+        aspectGroups: [AspectGroup(id: "square", label: "Square", presets: [
+            SizePreset(id: "a", width: 832, height: 832, tier: nil),
+            SizePreset(id: "b", width: 1216, height: 1216, tier: nil),
+        ])])
+    var draft = RenderDraft()
+    draft.width = 1024
+    draft.height = 1024
+    // 1024 sits closer to 832 than to 1216.
+    let adopted = draft.adopting(sizedRecipe(buckets), isNewModel: false)
+    #expect(adopted.width == 832)
+    #expect(adopted.height == 832)
+}
+
+@Test func aKeptDraftClampsToTheRangeOnADynamicRecipe() {
+    let ranged = ResolutionProfile(
+        domain: .dynamic, alignment: 16, minWidth: nil, minHeight: nil,
+        maxPixels: nil, maxAxisPixels: 768, offBucket: nil, aspectGroups: nil)
+    var draft = RenderDraft()
+    draft.width = 1024
+    draft.height = 1024
+    let adopted = draft.adopting(sizedRecipe(ranged), isNewModel: false)
+    #expect(adopted.width == 768)
+    #expect(adopted.height == 768)
+}

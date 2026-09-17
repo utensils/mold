@@ -25,14 +25,20 @@ public extension HTTPBackend {
     /// A URL a player can open directly.
     ///
     /// On a keyless host this is just the plain URL; on a keyed one it carries
-    /// the ticket. Either way the caller does not have to know which.
-    func playableURL(for filename: String) async -> URL {
+    /// the ticket. Either way the caller does not have to know which -- but
+    /// on a keyed host a ticket that fails to mint is a `throw`, not a plain
+    /// URL the player would send with no credential and get a 401 from.
+    func playableURL(for filename: String) async throws -> URL {
         let urls = MediaURL(baseURL: host.baseURL)
         let plain = urls.media(filename)
         guard host.apiKey?.isEmpty == false else { return plain }
 
-        guard let ticket = try? await mediaToken(forPath: "/api/gallery/image/\(filename)"),
-              ticket.authRequired, let token = ticket.token,
+        // Signed over the same encoded path `plain` carries, not a hand-built
+        // string -- a filename with a space used to sign the raw form while
+        // the server compares against the request's (encoded) path, so the
+        // ticket never matched.
+        let ticket = try await mediaToken(forPath: urls.mediaPath(filename))
+        guard ticket.authRequired, let token = ticket.token,
               var components = URLComponents(url: plain, resolvingAgainstBaseURL: false)
         else { return plain }
 

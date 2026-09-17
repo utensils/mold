@@ -77,7 +77,7 @@ private let backend = HTTPBackend(
         _ = try await backend.renameTag("a", to: "b")
         try await backend.cancelJob(id: "j")
         _ = try await backend.media("a.png", trashed: true)
-        _ = await backend.playableURL(for: "a.png")
+        _ = try await backend.playableURL(for: "a.png")
         _ = try await backend.startDownload(DownloadRequest(model: "m"))
         _ = try await backend.trashedPrints(etag: nil)
     }

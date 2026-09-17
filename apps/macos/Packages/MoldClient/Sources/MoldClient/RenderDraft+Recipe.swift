@@ -20,6 +20,11 @@ public extension RenderDraft {
         } else {
             draft.steps = recipe.steps.clamp(draft.steps)
             draft.guidance = recipe.guidance.clamp(draft.guidance)
+            // A KEPT draft is the one path that carries a size across models
+            // with a different resolution contract -- reuse onto a recipe
+            // with its own bucket list, or a smaller ceiling, must not submit
+            // a size the new host is going to refuse.
+            draft.fit(to: recipe.resolution)
         }
         // A fixed control has exactly one correct value, whatever was there.
         if recipe.steps.mode == .fixed { draft.steps = recipe.steps.default }

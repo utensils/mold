@@ -51,7 +51,12 @@ final class PrintMaterializer {
             touch(file)
             return file
         }
-        if let running = inFlight[key] { return await running.value }
+        // The filename rides along: `key` alone is (host, media_version), and
+        // two different prints that fall back to the same timestamp version
+        // used to coalesce onto one download and hand one of them the
+        // other's file.
+        let flightKey = "\(key)/\(entry.print.filename)"
+        if let running = inFlight[flightKey] { return await running.value }
 
         let task = Task<URL?, Never> { [cacheRoot] in
             guard let data = await fetch() else { return nil }
@@ -61,9 +66,9 @@ final class PrintMaterializer {
             guard (try? data.write(to: written)) != nil else { return nil }
             return written
         }
-        inFlight[key] = task
+        inFlight[flightKey] = task
         let url = await task.value
-        inFlight[key] = nil
+        inFlight[flightKey] = nil
         // After, never before: evicting to make room for a file whose size is
         // still unknown would either be a guess or a second round trip.
         enforceBudget()

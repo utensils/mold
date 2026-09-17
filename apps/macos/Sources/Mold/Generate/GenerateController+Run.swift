@@ -21,7 +21,7 @@ extension GenerateController {
         runTask = Task { [weak self] in
             do {
                 let accepted = try await backend.submit(admission)
-                self?.activeBatch = (accepted.id, host.id)
+                self?.activeBatch = (accepted.id, admission.clientBatchId, host.id)
                 await self?.follow(accepted, backend: backend, host: host.id)
             } catch {
                 self?.run = .failed(error.sentence)
@@ -30,8 +30,10 @@ extension GenerateController {
         }
     }
 
-    private func follow(_ initial: BatchStatus, backend: any MoldBackend,
-                        host: MoldHost.ID) async {
+    // Not `private`: `GenerateController+Recover` re-enters here for a batch
+    // still live after a relaunch.
+    func follow(_ initial: BatchStatus, backend: any MoldBackend,
+                host: MoldHost.ID) async {
         run = .running(initial, nil)
         let preview = pollPreview(initial, backend: backend)
         defer { preview.cancel() }
@@ -53,6 +55,11 @@ extension GenerateController {
             // when the batch settled. See `LineAccumulator`.
             settle(try await backend.batchStatus(id: initial.id), host: host)
         } catch {
+            // Cancelling is not losing contact -- `cancel()` already set
+            // `.idle` and reported anything worth reporting. Without this
+            // guard, the task's own cancellation raced that assignment and
+            // overwrote it with a failure on every Stop.
+            guard !Task.isCancelled else { return }
             // A dropped stream does NOT mean the work stopped: on a durable
             // host the job is still going to run.
             run = .failed("Lost contact while rendering. The job may still be running — check the Queue.")
@@ -97,6 +104,9 @@ extension GenerateController {
     func cancel(backend: any MoldBackend) {
         guard let active = activeBatch else { return }
         runTask?.cancel()
+        runTask = nil
+        // Cancelled by the user, not lost: nothing to recover on relaunch.
+        PendingBatch.forget(active.clientBatchId)
         Task { [weak self] in
             do { try await backend.cancelBatch(id: active.id) }
             catch { self?.hosts.report(error, on: active.host, doing: "cancel that render") }

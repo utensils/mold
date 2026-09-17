@@ -24,7 +24,7 @@ final class GenerateController {
 
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
-    var activeBatch: (id: String, host: MoldHost.ID)?
+    var activeBatch: (id: String, clientBatchId: String, host: MoldHost.ID)?
 
     init(hosts: HostStore) {
         self.hosts = hosts
@@ -68,6 +68,8 @@ final class GenerateController {
             do {
                 placement = try await client.placementPreview(request, copies: 1)
                 placementError = nil
+            } catch is CancellationError {
+                // Superseded by a later control change, not a failed request.
             } catch {
                 placement = nil
                 placementError = error.sentence

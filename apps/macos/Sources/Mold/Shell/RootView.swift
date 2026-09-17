@@ -12,7 +12,7 @@ struct RootView: View {
     /// Reopening where you left off is what every Mac app does. The env
     /// override exists so a UAT run can land on a named destination without
     /// driving the mouse.
-    @AppStorage("destination") private var stored = Destination.generate.rawValue
+    @AppStorage("destination", store: AppStorageSuite.defaults) private var stored = Destination.generate.rawValue
     /// Owned by the scene so a menu command can change it.
     @Binding var destination: Destination
 
@@ -61,7 +61,7 @@ enum Destination: String, Hashable, CaseIterable, Identifiable {
            let forced = Destination(rawValue: named) {
             return forced
         }
-        let remembered = UserDefaults.standard.string(forKey: "destination")
+        let remembered = AppStorageSuite.defaults.string(forKey: "destination")
         return remembered.flatMap(Destination.init(rawValue:)) ?? .generate
     }
 

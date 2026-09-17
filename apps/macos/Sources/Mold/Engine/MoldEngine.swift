@@ -99,8 +99,15 @@ final class MoldEngine {
         request.httpMethod = "POST"
         request.timeoutInterval = 5
         _ = try? await URLSession.shared.data(for: request)
-        _ = mold_engine_join(8_000)
-        state = .stopped
+        // Off the main thread: this blocks for up to 8s, and the shutdown
+        // request above already yielded, so nothing here needs to run on
+        // the actor.
+        _ = await Task.detached { mold_engine_join(8_000) }.value
+        // The engine bootstraps at most once per process (`OnceLock`, a
+        // global tracing subscriber) -- `.stopped` is what `start()` accepts,
+        // and accepting it again here would be a second bootstrap this
+        // process can't actually do.
+        state = .unavailable("The engine starts once per launch. Relaunch Mold to start it again.")
         #endif
     }
 

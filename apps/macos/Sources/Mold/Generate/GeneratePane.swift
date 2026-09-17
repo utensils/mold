@@ -35,6 +35,7 @@ struct GeneratePane: View {
             controller.promptTucked.toggle()
         })
         .task { await loadModels() }
+        .task { await controller.recoverPending() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
         .onChange(of: controller.draft) { _, _ in refreshPlacement() }
         .onChange(of: controller.modelName) { _, _ in refreshPlacement() }

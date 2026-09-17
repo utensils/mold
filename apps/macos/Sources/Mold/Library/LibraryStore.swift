@@ -14,7 +14,11 @@ final class LibraryStore {
     let hosts: HostStore
 
     private(set) var items: [LibraryEntry] = []
-    private(set) var isLoading = false
+    /// A count, not a flag: two overlapping refreshes (a manual ⌘R while an
+    /// automatic one is still in flight, say) used to have the first one's
+    /// `defer` turn this off while the second was still running.
+    private var loads = 0
+    var isLoading: Bool { loads > 0 }
 
     /// Set from here and from `+Mutations`'s `refreshTrash()`; `private(set)`
     /// does not cross that file boundary.
@@ -56,8 +60,8 @@ final class LibraryStore {
 
     /// Prints from every host, newest first.
     func refresh() async {
-        isLoading = true
-        defer { isLoading = false }
+        loads += 1
+        defer { loads -= 1 }
         // A machine that was removed must not keep contributing prints to a
         // merged timeline nobody can attribute them from.
         prune(to: hosts.hosts)

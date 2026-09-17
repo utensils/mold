@@ -73,7 +73,9 @@ public protocol MoldBackend: Sendable {
     /// decoder for every container mold can write.
     func export(_ filename: String, format: String) async throws -> Data
     /// A URL a player can open directly, ticketed where the host needs it.
-    func playableURL(for filename: String) async -> URL
+    /// Throws rather than falling back to an unticketed URL: on a keyed host
+    /// a failed ticket means the player would 401, not play silently wrong.
+    func playableURL(for filename: String) async throws -> URL
 
     // MARK: - Organization
 

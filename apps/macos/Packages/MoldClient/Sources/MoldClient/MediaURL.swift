@@ -27,6 +27,16 @@ public struct MediaURL: Sendable {
         return components.url!
     }
 
+    /// The percent-encoded path `media(_:trashed:)` serves at, with no host
+    /// and no query -- what the server actually compares a ticket against
+    /// (`request.uri().path()`). Deriving it from the same URL, rather than
+    /// hand-building `"/api/gallery/image/\(filename)"`, is what keeps a
+    /// ticket signed over a space or any other character the raw string
+    /// would not have encoded valid against what gets requested.
+    public func mediaPath(_ filename: String, trashed: Bool = false) -> String {
+        media(filename, trashed: trashed).path(percentEncoded: true)
+    }
+
     /// `appending(path:)` percent-encodes the segment itself. Pre-encoding
     /// here too would escape the escapes and ask for a file called `a%20b`.
     private func base(_ path: String) -> URLComponents {

@@ -10,19 +10,19 @@ import MoldClient
 enum PendingBatch {
     private static let key = "pendingBatches"
 
-    static func remember(_ clientBatchId: String, host: MoldHost.ID) {
-        var pending = all()
+    static func remember(_ clientBatchId: String, host: MoldHost.ID, in defaults: UserDefaults = AppStorageSuite.defaults) {
+        var pending = all(in: defaults)
         pending[clientBatchId] = host.uuidString
-        UserDefaults.standard.set(pending, forKey: key)
+        defaults.set(pending, forKey: key)
     }
 
-    static func forget(_ clientBatchId: String) {
-        var pending = all()
+    static func forget(_ clientBatchId: String, in defaults: UserDefaults = AppStorageSuite.defaults) {
+        var pending = all(in: defaults)
         pending.removeValue(forKey: clientBatchId)
-        UserDefaults.standard.set(pending, forKey: key)
+        defaults.set(pending, forKey: key)
     }
 
-    static func all() -> [String: String] {
-        UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+    static func all(in defaults: UserDefaults = AppStorageSuite.defaults) -> [String: String] {
+        defaults.dictionary(forKey: key) as? [String: String] ?? [:]
     }
 }

@@ -26,20 +26,10 @@ struct ReferenceStrip: View {
     }
 
     private func well(index: Int, encoded: String) -> some View {
-        ZStack {
-            if let data = Data(base64Encoded: encoded), let image = NSImage(data: data) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Chrome.wellFill
-            }
-        }
-        .frame(width: 52, height: 52)
-        .clipShape(RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous))
-        .overlay(alignment: .topLeading) { badge(index) }
-        .overlay(alignment: .topTrailing) { remove(index) }
-        .help(label(index))
+        ReferenceWell(encoded: encoded)
+            .overlay(alignment: .topLeading) { badge(index) }
+            .overlay(alignment: .topTrailing) { remove(index) }
+            .help(label(index))
     }
 
     @ViewBuilder private func badge(_ index: Int) -> some View {
@@ -99,5 +89,32 @@ struct ReferenceStrip: View {
               let data = try? Data(contentsOf: url)
         else { return }
         draft.editImages.append(data.base64EncodedString())
+    }
+}
+
+/// One reference thumbnail, decoded once per encoded string rather than once
+/// per keystroke -- `body` re-runs on every draft edit (a slider drag fires
+/// many), and `Data(base64Encoded:)` plus `NSImage(data:)` were both inside
+/// it. The pattern `RunCanvas` uses for its own preview and result images.
+private struct ReferenceWell: View {
+    let encoded: String
+
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Chrome.wellFill
+            }
+        }
+        .frame(width: 52, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous))
+        .task(id: encoded) {
+            image = Data(base64Encoded: encoded).flatMap(NSImage.init(data:))
+        }
     }
 }

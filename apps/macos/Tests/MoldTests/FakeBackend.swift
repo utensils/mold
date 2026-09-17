@@ -144,10 +144,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func export(_ filename: String, format: String) async throws -> Data {
         try record("export"); throw notPlanted()
     }
-    /// Not throwing, per the protocol -- so this cannot honor `refuses`, and
-    /// always answers with something plausible instead of a planted value.
-    func playableURL(for filename: String) async -> URL {
-        calls.append("playableURL")
+    func playableURL(for filename: String) async throws -> URL {
+        try record("playableURL")
         return host.baseURL.appendingPathComponent(filename)
     }
 
