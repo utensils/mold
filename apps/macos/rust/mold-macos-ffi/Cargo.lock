@@ -2775,6 +2775,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-server",
+ "serde_json",
  "tokio",
  "tracing",
 ]

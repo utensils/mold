@@ -42,6 +42,14 @@ const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
 ///
 /// The app itself is unaffected: `URLSession` sends no `Origin` header and
 /// enforces no CORS, and the local `MoldHost` carries the API key.
+///
+/// This is DEFENCE IN DEPTH and nothing more. CORS never stops the server
+/// EXECUTING a simple cross-origin request -- an `<img>`, a form POST, a
+/// `text/plain` POST, `sendBeacon`, `fetch(mode: "no-cors")` all still reach
+/// their handler; it only stops the page reading the reply. The API key is the
+/// protection, and every state-changing route is behind it: `EXEMPT_PATHS`
+/// (`crates/mold-server/src/auth.rs`) is `/health`, `/api/docs`,
+/// `/api/openapi.json` and `/api/pairing/claim` alone.
 const EMBEDDED_CORS_ORIGIN: &str = "mold-embedded-engine no browser origin";
 
 static ENGINE: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();
@@ -277,6 +285,71 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
     }
 }
 
+/// The pid of another process publishing into THIS home's gallery, or 0.
+///
+/// mold already has an authority for "is something writing here", and it is
+/// not a port: `<output_dir>/.mold-gallery-writer.lease`, a file every writing
+/// process holds a SHARED flock on for its whole life, with its pid in the
+/// body (CLAUDE.md, "Gallery archive authority storage"). The first version of
+/// this check probed `127.0.0.1:7680` instead and detected nothing, because
+/// this app always binds an ephemeral port and Mold Desktop only PREFERS 7680
+/// (`desktop/src-tauri/src/server.rs:119-131`) -- so the ordinary sequence,
+/// native engine first and Desktop second, saw neither (review F3).
+///
+/// Read-only, and deliberately not `gallery_authority::storage_status`: that
+/// takes the bookkeeping flock, which creates and locks a file under
+/// `.mold-batch-transactions`, and a question must not write. The lock is the
+/// authority exactly as it is there -- a lease nobody holds is STALE, whatever
+/// the body says -- and the exclusive probe is non-blocking and dropped
+/// immediately, which is what `mold system gallery-authority status` does too.
+///
+/// * `> 0` — a live writer, and this is its pid
+/// * `0` — nobody is publishing here (no lease, or a stale one)
+/// * `-1` — this could not be determined; the caller must not refuse on it
+/// * `-2` — a live writer whose lease body could not be read
+#[no_mangle]
+pub extern "C" fn mold_engine_home_writer_pid() -> i64 {
+    guarded("home_writer_pid", -1, home_writer_pid)
+}
+
+/// `<gallery root>/.mold-gallery-writer.lease`. A second spelling of
+/// `gallery_authority::WRITER_LEASE_FILE`, which is private to that crate --
+/// `the_lease_file_name_is_the_servers_own` reads its source and fails if the
+/// two ever part.
+const WRITER_LEASE_FILE: &str = ".mold-gallery-writer.lease";
+
+fn home_writer_pid() -> i64 {
+    let root = mold_core::Config::load_or_default().effective_output_dir();
+    writer_pid_at(&root)
+}
+
+fn writer_pid_at(root: &std::path::Path) -> i64 {
+    let path = root.join(WRITER_LEASE_FILE);
+    // Opened read-only, so a home that has never published stays untouched.
+    let Ok(file) = std::fs::File::open(&path) else {
+        return 0;
+    };
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // Non-blocking, and released at once: this asks "does anyone hold it",
+    // never "give it to me". flock is per open-file-description, so our own
+    // engine's shared hold would answer here too -- which is why this is only
+    // ever called BEFORE starting one.
+    let taken = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if taken == 0 {
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        return 0; // Stale: a file nobody holds is a leftover, not a refusal.
+    }
+    match serde_json::from_reader::<_, serde_json::Value>(file) {
+        Ok(body) => body
+            .get("pid")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|pid| *pid > 0)
+            .unwrap_or(-2),
+        Err(_) => -2,
+    }
+}
+
 /// Whether the engine thread is still running.
 #[no_mangle]
 pub extern "C" fn mold_engine_is_alive() -> bool {
@@ -299,10 +372,26 @@ fn join(timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     if ALIVE.load(Ordering::SeqCst) {
-        // Still draining. The lease is this process's claim on the gallery,
-        // and the app is about to end the process, so hand it back now rather
-        // than leave a file that says a server is publishing (review 05-M7).
-        mold_server::gallery_authority::release_gallery_writer_leases();
+        // Still draining, and NOTHING is done about it here.
+        //
+        // This used to call `release_gallery_writer_leases()`, which upgrades
+        // this process's own SHARED flock to exclusive -- succeeding, because
+        // it is the only holder -- and then UNLINKS the lease, while the
+        // engine thread is still inside `run_server`. That is not an edge
+        // case: the server's budget covers its GPU-owner join only, and it
+        // releases its own leases on the line AFTER that join, behind the
+        // HTTP drain -- so whenever a render is in flight, which is the only
+        // case a budget exists for, this deadline expires first and the lease
+        // of a LIVE publisher is stripped. `mold system gallery-authority
+        // downgrade` would then read "none" and rewrite the store under a
+        // server still appending v3 deltas: UAT final-2 D9, from the other
+        // side.
+        //
+        // Nothing needs doing. `run_server` releases on every clean stop, the
+        // kernel drops the flock however the process ends, and a lease file
+        // nobody holds is already STALE to every reader -- "a lease file
+        // NOBODY holds is stale, which is a leftover and not a refusal"
+        // (CLAUDE.md, "Gallery archive authority storage").
         return false;
     }
     let handle = match engine().lock() {
@@ -340,9 +429,98 @@ fn joined_within(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{guarded, joined_within, AliveGuard, ALIVE, EMBEDDED_CORS_ORIGIN};
+    use super::{
+        guarded, joined_within, writer_pid_at, AliveGuard, ALIVE, EMBEDDED_CORS_ORIGIN,
+        WRITER_LEASE_FILE,
+    };
+    use std::os::unix::io::AsRawFd;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
+
+    fn scratch_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "mold-ffi-lease-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// **Fails today**: the interlock asked `127.0.0.1:7680`, which this app
+    /// never binds and Mold Desktop only PREFERS, so it detected nothing. The
+    /// authority is the lease, and this is the detection itself rather than an
+    /// injected stub.
+    #[test]
+    fn a_home_with_no_lease_has_no_writer() {
+        assert_eq!(writer_pid_at(&scratch_root()), 0);
+    }
+
+    #[test]
+    fn a_lease_nobody_holds_is_stale_and_not_a_writer() {
+        let root = scratch_root();
+        std::fs::write(
+            root.join(WRITER_LEASE_FILE),
+            br#"{"pid":999999,"program":"mold serve","since_ms":0}"#,
+        )
+        .unwrap();
+        assert_eq!(writer_pid_at(&root), 0);
+    }
+
+    #[test]
+    fn a_held_lease_names_the_writer_and_is_never_taken_from_it() {
+        let root = scratch_root();
+        let path = root.join(WRITER_LEASE_FILE);
+        std::fs::write(
+            &path,
+            br#"{"pid":4242,"program":"mold serve","since_ms":7}"#,
+        )
+        .unwrap();
+        // Held SHARED, the way a writing process holds it.
+        let held = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) },
+            0
+        );
+
+        assert_eq!(writer_pid_at(&root), 4242);
+        // Read-only: the file is still there and still held.
+        assert!(path.is_file());
+        assert_eq!(writer_pid_at(&root), 4242);
+
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
+        assert_eq!(writer_pid_at(&root), 0);
+    }
+
+    #[test]
+    fn a_held_lease_with_an_unreadable_body_still_refuses() {
+        let root = scratch_root();
+        let path = root.join(WRITER_LEASE_FILE);
+        std::fs::write(&path, b"not json at all").unwrap();
+        let held = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(writer_pid_at(&root), -2);
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    /// The lease's name is spelled here AND in `gallery_authority`, which keeps
+    /// it private. This is what stops the two drifting.
+    #[test]
+    fn the_lease_file_name_is_the_servers_own() {
+        let source = include_str!("../../../../../crates/mold-server/src/gallery_authority.rs");
+        assert!(
+            source.contains(&format!(
+                "const WRITER_LEASE_FILE: &str = \"{WRITER_LEASE_FILE}\""
+            )),
+            "the gallery writer lease is not named {WRITER_LEASE_FILE} any more"
+        );
+    }
 
     /// `ALIVE` is process-wide, so the tests that move it take turns.
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -377,6 +555,36 @@ mod tests {
         let answered = guarded("test", 7, || panic!("boom"));
         std::panic::set_hook(previous);
         assert_eq!(answered, 7);
+    }
+
+    /// **Fails today**: a timed-out join called
+    /// `release_gallery_writer_leases()`, which unlinks the lease of an engine
+    /// that is still writing.
+    ///
+    /// Asserted against the SOURCE rather than by observing a lease, because
+    /// `release_gallery_writer_leases` only touches leases this process
+    /// REGISTERED -- a test cannot register one from outside `mold-server`, so
+    /// a behavioural test would pass against the bug. What the bug was is a
+    /// call in this function, and that is exactly what this refuses.
+    #[test]
+    fn joining_never_reaches_into_the_gallery_authority() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("\nfn join(timeout: Duration) -> bool {")
+            .expect("join's definition")
+            .1
+            .split_once("\n}\n")
+            .expect("join's closing brace")
+            .0;
+        // A comment may NAME it -- the one above the early return explains why
+        // it is absent -- but nothing may call it.
+        for line in body.lines() {
+            let code = line.split("//").next().unwrap_or_default();
+            assert!(
+                !code.contains("gallery_authority"),
+                "join must not touch the gallery authority: {line}"
+            );
+        }
     }
 
     /// **Fails today**: the final `handle.join()` carried no bound at all, on
