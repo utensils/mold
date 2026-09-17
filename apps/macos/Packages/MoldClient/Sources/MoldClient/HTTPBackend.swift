@@ -69,6 +69,31 @@ struct APIError: Decodable, Sendable {
 }
 
 extension HTTPBackend {
+    /// How much of a refused stream's body is worth reading.
+    ///
+    /// A refusal body is mold's small `APIError` envelope. Nothing about a
+    /// non-2xx promises the other side closes the connection, though, so this
+    /// is a ceiling and not an expectation -- 8 KiB is an order of magnitude
+    /// more than the largest licence refusal and still nothing to hold.
+    static let refusalBodyLimit = 8 * 1024
+
+    /// At most `refusalBodyLimit` bytes of a refused response.
+    ///
+    /// Whatever arrived before a read failed is what there is to report: the
+    /// status is already known, and a truncated body simply decodes to
+    /// nothing, which is the same answer as no body at all.
+    static func refusalBody(_ bytes: some AsyncSequence<UInt8, some Error>) async -> Data {
+        var data = Data()
+        data.reserveCapacity(refusalBodyLimit)
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= refusalBodyLimit { break }
+            }
+        } catch {}
+        return data
+    }
+
     /// A body that is not mold's JSON envelope, when it is short enough to be
     /// a sentence rather than a proxy's HTML page.
     static func plainMessage(_ data: Data) -> String? {
