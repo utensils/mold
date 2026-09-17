@@ -105,6 +105,13 @@ extension MachinesPane {
         }
     }
 
+    /// Mobile pairing, directly under Address -- its own type
+    /// (`PairingSection.swift`) rather than a function here, since it needs
+    /// its own `@State` for the sheet and the pending revoke.
+    @ViewBuilder func pairing(_ host: MoldHost) -> some View {
+        PairingSection(host: host)
+    }
+
     // MARK: - The figures
 
     private func uptime(_ seconds: UInt64) -> String {

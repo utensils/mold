@@ -68,8 +68,18 @@ extension FakeBackend {
         return pairedClientsAnswer
     }
 
+    /// Mutates the planted `pairedClientsAnswer` in place, the way a live
+    /// server's next `GET /api/pairing/clients` would reflect a revoke it
+    /// just accepted -- the same reason `applyToPlantedListing` mutates
+    /// `configListing` on a write, so `PairingStore.revoke`'s re-read
+    /// (M7 S5) has something real to see.
     func revokePairedClient(_ id: String) async throws {
         try record("revokePairedClient")
         revokedClients.append(id)
+        if let answer = pairedClientsAnswer {
+            pairedClientsAnswer = PairedClients(
+                authRequired: answer.authRequired, pairingAvailable: answer.pairingAvailable,
+                clients: answer.clients.filter { $0.id != id })
+        }
     }
 }

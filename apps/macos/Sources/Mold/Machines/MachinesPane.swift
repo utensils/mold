@@ -64,6 +64,7 @@ struct MachinesPane: View {
                 memory(host)
                 work(host)
                 address(host)
+                pairing(host)
                 PeerSection(host: host)
             }
             .formStyle(.grouped)

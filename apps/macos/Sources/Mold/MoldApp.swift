@@ -24,6 +24,7 @@ struct MoldApp: App {
     @State private var downloads: DownloadStore
     @State private var catalog: CatalogStore
     @State private var machines: MachineStore
+    @State private var pairing: PairingStore
     @State private var promptHistory: PromptHistoryStore
     @State private var modelDefaults: ConfigStore
     @State private var adapters: LoraStore
@@ -54,6 +55,7 @@ struct MoldApp: App {
         _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
         _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))
         _machines = State(initialValue: MachineStore(hosts: hosts))
+        _pairing = State(initialValue: PairingStore(hosts: hosts))
         _adapters = State(initialValue: LoraStore(hosts: hosts))
         let landedPrints = LandedPrints(hosts: hosts)
         _landedPrints = State(initialValue: landedPrints)
@@ -99,6 +101,7 @@ struct MoldApp: App {
                 .environment(downloads)
                 .environment(catalog)
                 .environment(machines)
+                .environment(pairing)
                 .environment(promptHistory)
                 .environment(modelDefaults)
                 .environment(adapters)
