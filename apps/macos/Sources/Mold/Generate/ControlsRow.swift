@@ -16,6 +16,9 @@ struct ControlsRow: View {
     /// a question about the CHECKPOINT, not about the recipe (`ClipLengthBounds`).
     let model: Model?
     let maxBatch: Int
+    /// The HOST's own chain limits for this model, or `nil` on a host too old
+    /// to publish them -- absence is where this app's ported constants belong.
+    let chainLimits: ChainLimits?
     @Binding var draft: RenderDraft
 
     var body: some View {
@@ -30,7 +33,7 @@ struct ControlsRow: View {
     /// Resolved once per pass: the slider's range, the sentence under it and
     /// where a render of that length GOES are one answer (`ClipRouting`).
     private var routing: ClipRouting? {
-        ClipRouting.resolve(recipe: recipe, model: model, draft: draft)
+        ClipRouting.resolve(recipe: recipe, model: model, draft: draft, limits: chainLimits)
     }
 
     @ViewBuilder private var controls: some View {

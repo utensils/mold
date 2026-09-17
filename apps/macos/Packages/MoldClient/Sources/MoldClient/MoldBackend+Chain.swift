@@ -19,4 +19,7 @@ public protocol MoldChainBackend: Sendable {
     func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error>
     func chainJob(id: String) async throws -> ChainJobDetail
     func cancelChainJob(id: String) async throws
+    /// What this machine will chain for one model -- the HOST's own limits,
+    /// which outrank every constant this app carries.
+    func chainLimits(model: String, fps: Int?) async throws -> ChainLimits
 }

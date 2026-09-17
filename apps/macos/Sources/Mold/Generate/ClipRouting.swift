@@ -37,20 +37,29 @@ extension ClipRouting {
     /// all. Where chaining is allowed, the ceiling is the longest chain
     /// `MAX_CHAIN_STAGES` permits, and the refusal a text-only wan or a legacy
     /// LTX-Video earns is the SERVER's sentence rather than a shorter slider.
+    /// `limits` is the HOST's own answer for this model
+    /// (`/api/capabilities/chain-limits`) and outranks every constant this app
+    /// carries. `nil` is a host too OLD to publish the route, which is where
+    /// the ported constants belong -- and nowhere else.
     static func resolve(
-        recipe: GenerationRecipe, model: Model?, draft: RenderDraft
+        recipe: GenerationRecipe, model: Model?, draft: RenderDraft,
+        limits: ChainLimits? = nil
     ) -> ClipRouting? {
         guard let temporal = recipe.temporal else { return nil }
         let fps = draft.fps ?? temporal.fps.value
         let sourceImage = recipe.capabilities.sourceImage
         let single = temporal.lengthBounds(
             fps: fps, family: model?.family, model: model?.name, sourceImage: sourceImage)
-        let decision = ChainRouting.decide(
+        let decision = limits.map {
+            ChainRouting.decide(
+                frames: draft.frames, family: model?.family, model: model?.name ?? "",
+                limits: $0, sourceImage: sourceImage)
+        } ?? ChainRouting.decide(
             frames: draft.frames, family: model?.family, model: model?.name ?? "",
             sourceImage: sourceImage, tierDefault: temporal.frames.default,
             advertisedMaxFrames: temporal.durationCappedMaxFrames(fps: fps))
-        return ClipRouting(bounds: chainedBounds(single, temporal: temporal,
-                                                 model: model, sourceImage: sourceImage),
+        return ClipRouting(bounds: chainedBounds(single, temporal: temporal, model: model,
+                                                 sourceImage: sourceImage, limits: limits),
                            decision: decision)
     }
 
@@ -62,23 +71,26 @@ extension ClipRouting {
     /// a resource guard the host still enforces per clip and per request.
     private static func chainedBounds(
         _ single: ClipLengthBounds, temporal: TemporalProfile,
-        model: Model?, sourceImage: SourceImageCapability?
+        model: Model?, sourceImage: SourceImageCapability?, limits: ChainLimits?
     ) -> ClipLengthBounds {
         let family = ChainRouting.canonical(model?.family)
         guard ChainRouting.autoChainCapableFamilies.contains(family) else { return single }
+        if let limits, !limits.supportsSequence { return single }
         // A wan tier that hands nothing across a seam has no chain to become,
         // so its clip size IS its ceiling and the note explains why.
         if family == "wan", sourceImage == .unsupported { return single }
-        let clip = family == "wan"
+        let clip = limits?.framesPerClipRecommended ?? (family == "wan"
             ? ClipLengthBounds.wanRoutingClipFrames(
                 model: model?.name ?? "", tierDefault: temporal.frames.default)
-            : ChainRouting.ltx2DefaultClipFrames
+            : ChainRouting.ltx2DefaultClipFrames)
         let tail = family == "wan"
             ? (ChainRouting.wanCarriesContext(sourceImage)
                 ? ChainRouting.wanHandoffDuplicatedFrames : 0)
             : ChainRouting.defaultMotionTail
         guard tail < clip else { return single }
-        let longest = clip + (ChainRouting.maxChainStages - 1) * (clip - tail)
+        let stages = limits?.maxStages ?? ChainRouting.maxChainStages
+        var longest = clip + (stages - 1) * (clip - tail)
+        if let total = limits?.maxTotalFrames { longest = Swift.min(longest, total) }
         let ceiling = Swift.min(temporal.snapDown(longest), temporal.frames.max)
         guard ceiling > single.max else { return single }
         return ClipLengthBounds(min: single.min, max: ceiling, note: nil)

@@ -23,9 +23,11 @@ struct GeneratePane: View {
     /// destination.
     @AppStorage("generateShowsInspector", store: AppStorageSuite.defaults)
     var showsInspector = true
-    /// The draft this pane was holding when the app last quit. Not
-    /// `private`: `GeneratePane+Models` asks it which model to adopt.
+    /// The draft this pane was holding when the app last quit (`+Models`
+    /// asks it which model to adopt), and what each machine says it will
+    /// chain (`+Chain`). Neither is `private`: both are read from extensions.
     @State var drafts = DraftPersistence()
+    @State var chainLimits = ChainLimitsStore()
 
     var body: some View {
         @Bindable var controller = controller
@@ -37,7 +39,7 @@ struct GeneratePane: View {
                 PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
                             host: host, destination: $destination,
                             submit: startRun, cancel: cancelRun, stopAll: { controller.stopAll() },
-                            maxBatch: maxBatch)
+                            maxBatch: maxBatch, chainLimits: advertisedChainLimits)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,6 +48,8 @@ struct GeneratePane: View {
                               draft: $controller.draft, destination: $destination)
         }
         .persistingDraft(controller, in: drafts)
+        // Once per machine, model and rate -- never from `body`.
+        .task(id: chainLimitsKey) { refreshChainLimits() }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
@@ -132,7 +136,8 @@ struct GeneratePane: View {
     private func startRun() {
         guard let host else { return }
         let routing = recipe.flatMap {
-            ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft)
+            ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
+                                limits: advertisedChainLimits)
         }?.decision ?? .single()
         controller.submit(on: host, backend: hosts.backend(for: host), routing: routing)
     }

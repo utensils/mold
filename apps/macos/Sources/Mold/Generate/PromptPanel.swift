@@ -20,6 +20,8 @@ struct PromptPanel: View {
     /// each batch resolves its own machine.
     let stopAll: () -> Void
     let maxBatch: Int
+    /// This machine's own chain limits for the chosen model.
+    let chainLimits: ChainLimits?
 
     /// Not `private`: `PromptPanel+Actions`, an extension in another file,
     /// reads the run and the queue depth to build the trailing button group.
@@ -35,7 +37,8 @@ struct PromptPanel: View {
                 prompt(recipe)
                 promptTools(recipe)
                 Divider()
-                ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch, draft: $draft)
+                ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch,
+                            chainLimits: chainLimits, draft: $draft)
                 actions(recipe)
             } else {
                 Text("Pick a model to see its controls.")

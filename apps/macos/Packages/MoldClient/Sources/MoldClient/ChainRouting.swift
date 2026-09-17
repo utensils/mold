@@ -59,7 +59,9 @@ public enum ChainRouting {
         frames: Int?, family: String?, model: String,
         motionTail: Int = defaultMotionTail,
         sourceImage: SourceImageCapability? = nil,
-        tierDefault: Int? = nil, advertisedMaxFrames: Int? = nil
+        tierDefault: Int? = nil, advertisedMaxFrames: Int? = nil,
+        maxStages: Int = maxChainStages, maxTotalFrames: Int? = nil,
+        routingClipFrames: Int? = nil
     ) -> Decision {
         guard let frames, frames > 0 else { return .single() }
         let normalized = canonical(family)
@@ -71,10 +73,19 @@ public enum ChainRouting {
                 + "Reduce frames to \(cap) or less.")
         }
 
+        if let maxTotalFrames, frames > maxTotalFrames {
+            // The host's own ceiling for every clip together, which is a
+            // different number from the stage cap times the clip.
+            return .reject("Chained video supports at most \(maxTotalFrames) frames for "
+                + "this model. Reduce the frame count.")
+        }
         let isWan = normalized == "wan"
-        let clipFrames = isWan
+        // The host's advertised routing clip wins outright where there is
+        // one: the family floor and the tier default are how this app guesses
+        // for a machine that publishes nothing.
+        let clipFrames = routingClipFrames ?? (isWan
             ? ClipLengthBounds.wanRoutingClipFrames(model: model, tierDefault: tierDefault)
-            : ltx2DefaultClipFrames
+            : ltx2DefaultClipFrames)
         guard frames > clipFrames else { return .single() }
 
         // A family that carries nothing across a seam cannot be auto-chained
@@ -100,10 +111,10 @@ public enum ChainRouting {
         let effective = clipFrames - effectiveTail
         let remainder = frames - clipFrames
         let stageCount = 1 + Int((Double(remainder) / Double(effective)).rounded(.up))
-        guard stageCount <= maxChainStages else {
-            let maxFrames = clipFrames + (maxChainStages - 1) * effective
+        guard stageCount <= maxStages else {
+            let maxFrames = clipFrames + (maxStages - 1) * effective
             return .reject("Chained video supports at most \(maxFrames) frames "
-                + "(\(maxChainStages) clips) for this model. Reduce the frame count.")
+                + "(\(maxStages) clips) for this model. Reduce the frame count.")
         }
         return .chain(clipFrames: clipFrames, motionTail: effectiveTail, stageCount: stageCount)
     }

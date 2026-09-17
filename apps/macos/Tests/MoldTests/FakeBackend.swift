@@ -396,6 +396,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return chainJobAnswer
     }
 
+    /// Answered per MODEL -- absent is an older host, which answers nothing.
+    nonisolated(unsafe) var chainLimitRows: [String: ChainLimits] = [:]
+
+    func chainLimits(model: String, fps: Int?) async throws -> ChainLimits {
+        try record("chainLimits")
+        guard let limits = chainLimitRows[model] else { throw notPlanted() }
+        return limits
+    }
+
     func chainJob(id: String) async throws -> ChainJobDetail {
         try record("chainJob")
         guard let detail = chainJobDetails[id] else { throw notPlanted() }
