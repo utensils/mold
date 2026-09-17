@@ -81,8 +81,8 @@ struct PairingSection: View {
             }
         }
         .contentShape(Rectangle())
-        .contextMenu {
-            Button("Revoke…", role: .destructive) { confirmRevoke(client) }
+        .rowActionMenu([RowAction(kind: client.id, title: "Revoke…", isDestructive: true)]) { _ in
+            confirmRevoke(client)
         }
     }
 

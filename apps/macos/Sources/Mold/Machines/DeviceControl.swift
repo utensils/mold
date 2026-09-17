@@ -54,23 +54,20 @@ extension DeviceControl {
     /// accessibility name does ("Use NVIDIA L40S  #0"). A card mid-transition
     /// is `.live(_, isEnabled: false)`: it has already been asked, and asking
     /// again is a second request, not a second answer.
-    struct MenuItem: Equatable {
-        let title: String
-        /// What the item asks the machine for.
-        let enable: Bool
-    }
-
-    func menuItem(named name: String) -> MenuItem? {
+    /// The card's one control as a menu row, or none at all -- a machine
+    /// this app cannot change offers nothing rather than a disabled item.
+    /// The kind is what the row would ask the machine FOR.
+    func menu(named name: String) -> [RowAction<Bool>] {
         switch self {
         case let .live(isOn, isEnabled):
-            guard isEnabled else { return nil }
+            guard isEnabled else { return [] }
             return isOn
-                ? MenuItem(title: "Stop Using \(name)", enable: false)
-                : MenuItem(title: "Use \(name)", enable: true)
+                ? [RowAction(kind: false, title: "Stop Using \(name)")]
+                : [RowAction(kind: true, title: "Use \(name)")]
         case .enableAtRestart:
-            return MenuItem(title: "Enable at next restart", enable: true)
+            return [RowAction(kind: true, title: "Enable at next restart")]
         case .readOnly:
-            return nil
+            return []
         }
     }
 }

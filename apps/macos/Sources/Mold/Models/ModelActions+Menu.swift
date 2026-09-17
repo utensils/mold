@@ -5,26 +5,17 @@ import SwiftUI
 // the one dispatcher that turns a picked item back into a call on
 // `ModelActions` -- split from the actions themselves for size.
 extension ModelActions {
-    /// One offered action, in menu order. Both the contextual menu and the
-    /// Model menu draw exactly this list -- nothing here is ever disabled,
-    /// the way `ModelStateCell` already refuses a disabled control.
-    struct Item: Identifiable, Equatable {
-        enum Kind: Equatable {
-            case install, repair, cancelDownload, load, unload, components, licence, delete
-        }
-
-        let kind: Kind
-        let title: String
-        let systemImage: String
-
-        var id: Kind { kind }
-        var role: ButtonRole? { kind == .delete ? .destructive : nil }
-        /// Whether a separator belongs ABOVE this item. The destructive one
-        /// is last and behind a divider wherever it is drawn, so a right
-        /// click cannot land Delete under the cursor by accident -- the same
-        /// shape `QueueHoldRow`'s and `QueueRow`'s menus take.
-        var startsGroup: Bool { kind == .delete }
+    /// What can be done to one model. Both the contextual menu and the Model
+    /// menu draw exactly this list -- nothing here is ever disabled, the way
+    /// `ModelStateCell` already refuses a disabled control.
+    enum Kind: Hashable {
+        case install, repair, cancelDownload, load, unload, components, licence, delete
     }
+
+    /// One row of that list, in the app's one menu model -- which is also
+    /// what puts Delete last and behind a divider wherever it is drawn, so a
+    /// right click cannot land the destructive item under the cursor.
+    typealias Item = RowAction<Kind>
 
     /// The exact items that apply to one model right now -- pure, so the
     /// four load/unload cases and the licence gate are tested without a
@@ -34,29 +25,21 @@ extension ModelActions {
     ) -> [Item] {
         guard !isBusy else { return [] }
         var items: [Item] = []
-        if isDownloading {
-            items.append(Item(kind: .cancelDownload, title: "Cancel Download", systemImage: "xmark.circle"))
-        }
+        if isDownloading { items.append(Item(kind: .cancelDownload, title: "Cancel Download")) }
         switch installState {
         case .available:
-            if !isDownloading {
-                items.append(Item(kind: .install, title: "Install", systemImage: "arrow.down.circle"))
-            }
+            if !isDownloading { items.append(Item(kind: .install, title: "Install")) }
             return items
         case .needsRepair:
-            if !isDownloading {
-                items.append(Item(kind: .repair, title: "Repair", systemImage: "wrench.and.screwdriver"))
-            }
+            if !isDownloading { items.append(Item(kind: .repair, title: "Repair")) }
         case .installed:
-            items.append(Item(kind: .load, title: "Load", systemImage: "bolt"))
+            items.append(Item(kind: .load, title: "Load"))
         case .loaded:
-            items.append(Item(kind: .unload, title: "Unload", systemImage: "bolt.slash"))
+            items.append(Item(kind: .unload, title: "Unload"))
         }
-        items.append(Item(kind: .components, title: "Components…", systemImage: "square.stack.3d.up"))
-        if licensed {
-            items.append(Item(kind: .licence, title: "Show Licence…", systemImage: "doc.text"))
-        }
-        items.append(Item(kind: .delete, title: "Delete…", systemImage: "trash"))
+        items.append(Item(kind: .components, title: "Components…"))
+        if licensed { items.append(Item(kind: .licence, title: "Show Licence…")) }
+        items.append(Item(kind: .delete, title: "Delete…", isDestructive: true))
         return items
     }
 
@@ -64,7 +47,7 @@ extension ModelActions {
     /// there is exactly one place that turns a picked `Item` into the store
     /// call it means (design S5 test: the menu and the contextual menu call
     /// the same thing).
-    func perform(_ kind: Item.Kind, on model: Model, host: MoldHost) {
+    func perform(_ kind: Kind, on model: Model, host: MoldHost) {
         switch kind {
         case .install: install(model, on: host)
         case .repair: repair(model, on: host)

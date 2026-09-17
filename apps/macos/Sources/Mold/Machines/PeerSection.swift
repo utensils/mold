@@ -75,17 +75,30 @@ struct PeerSection: View {
         // the ellipsis (a sheet for a peer that wants a key) is drawn in both
         // places or neither. `offered` has already dropped every `.skip`, so
         // this is never an empty menu in practice.
-        .contextMenu { add(peer) }
+        .rowActionMenu(menu(for: peer)) { _ in accept(peer) }
     }
 
     @ViewBuilder private func add(_ peer: DiscoveryPeer) -> some View {
+        if let item = menu(for: peer).first {
+            Button(item.title) { accept(peer) }
+        }
+    }
+
+    /// What this peer offers, as the one menu model -- a peer already on the
+    /// list offers nothing, and so gets no menu at all.
+    private func menu(for peer: DiscoveryPeer) -> [RowAction<String>] {
         switch action(for: peer) {
-        case let .add(name, url):
-            Button("Add") { hosts.add(name: name, url: url, apiKey: nil) }
-        case .edit:
-            Button("Add…") { addingPeer = peer }
-        case .skip:
-            EmptyView()
+        case .add: [RowAction(kind: peer.id, title: "Add")]
+        case .edit: [RowAction(kind: peer.id, title: "Add…")]
+        case .skip: []
+        }
+    }
+
+    private func accept(_ peer: DiscoveryPeer) {
+        switch action(for: peer) {
+        case let .add(name, url): hosts.add(name: name, url: url, apiKey: nil)
+        case .edit: addingPeer = peer
+        case .skip: break
         }
     }
 }

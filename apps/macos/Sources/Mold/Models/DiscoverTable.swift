@@ -60,7 +60,9 @@ struct DiscoverTable: View {
             TableColumn("State") { entry in stateCell(entry) }
         } rows: {
             ForEach(Self.rows(for: entries)) { entry in
-                TableRow(entry).contextMenu { menu(for: entry) }
+                TableRow(entry).rowActionMenu(DiscoverRow.menuItems(for: entry)) {
+                    perform($0, on: entry)
+                }
             }
         }
         .alternatingRowBackgrounds(.disabled)

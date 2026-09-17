@@ -130,7 +130,7 @@ struct DiscoverTests {
             id: "hf:x", supported: false, pageUrl: "https://example.com/x")
         #expect(DiscoverRow.menuItems(for: unsupported).map(\.title) == ["Details…", "Open Page"])
         let url = try #require(URL(string: "https://example.com/x"))
-        #expect(DiscoverRow.menuItems(for: unsupported).last == .openPage(url))
+        #expect(DiscoverRow.menuItems(for: unsupported).last?.kind == .openPage(url))
 
         // No page to open is no item, not an item that goes nowhere.
         let nowhere = FakeFixtures.catalogEntry(id: "hf:y", supported: false)

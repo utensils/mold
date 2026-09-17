@@ -34,18 +34,17 @@ struct DeviceRow: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .contextMenu { menu }
+        .rowActionMenu(menu, perform: flip)
     }
 
     /// The row's one control a second way -- the same `DeviceControl` answer,
     /// never a second reading of the capabilities. Nothing destructive
-    /// happens to a card, so there is no divider to draw.
-    @ViewBuilder private var menu: some View {
-        if let item = DeviceControl.resolve(
+    /// happens to a card, so there is no divider to draw; a card this app
+    /// cannot change offers no menu at all.
+    private var menu: [RowAction<Bool>] {
+        DeviceControl.resolve(
             device, on: hosts.capabilities(of: host), isChanging: machines.isChanging(device)
-        ).menuItem(named: title) {
-            Button(item.title) { flip(item.enable) }
-        }
+        ).menu(named: title)
     }
 
     /// A MIG slice has no ordinal worth printing -- it is a partition of a

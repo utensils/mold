@@ -93,21 +93,21 @@ struct DeviceControlTests {
         let live = capabilities(lifecycle: true, v2Authoritative: true)
         let name = "NVIDIA L40S  #0"
 
-        #expect(DeviceControl.resolve(card(), on: live, isChanging: false).menuItem(named: name)
-            == DeviceControl.MenuItem(title: "Stop Using \(name)", enable: false))
+        #expect(DeviceControl.resolve(card(), on: live, isChanging: false).menu(named: name)
+            == [RowAction(kind: false, title: "Stop Using \(name)")])
         #expect(DeviceControl.resolve(card("disabled", on: false), on: live, isChanging: false)
-            .menuItem(named: name) == DeviceControl.MenuItem(title: "Use \(name)", enable: true))
+            .menu(named: name) == [RowAction(kind: true, title: "Use \(name)")])
 
+        // Absent, never a disabled placeholder -- so no menu is attached.
         #expect(DeviceControl.resolve(card("draining", on: false), on: live, isChanging: false)
-            .menuItem(named: name) == nil)
-        #expect(DeviceControl.resolve(card(), on: live, isChanging: true).menuItem(named: name) == nil)
-        #expect(DeviceControl.resolve(card(), on: nil, isChanging: false).menuItem(named: name) == nil)
+            .menu(named: name).isEmpty)
+        #expect(DeviceControl.resolve(card(), on: live, isChanging: true).menu(named: name).isEmpty)
+        #expect(DeviceControl.resolve(card(), on: nil, isChanging: false).menu(named: name).isEmpty)
 
         // The other power, worded exactly as the row's own button is.
         let restart = capabilities(restartEnable: true)
         #expect(DeviceControl.resolve(card("disabled", on: false), on: restart, isChanging: false)
-            .menuItem(named: name)
-            == DeviceControl.MenuItem(title: "Enable at next restart", enable: true))
+            .menu(named: name) == [RowAction(kind: true, title: "Enable at next restart")])
     }
 
     /// **Fails today**: `MachineRow` hardcodes "Check Now" and "Set as

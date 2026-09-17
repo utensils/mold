@@ -38,14 +38,38 @@ struct QueueHoldTests {
     /// (`routes.rs:7495-7499`). Cancel Job is always offered, always last.
     @Test func everyHoldCanBeCancelledFromItsOwnMenu() {
         let stuck = QueueHold.prose("Something needs repair on the host.", retryable: false)
-        #expect(QueueHoldRow.menuTitles(for: stuck, canMoveTo: false) == ["Cancel Job"])
+        #expect(titles(of: stuck) == ["Cancel Job"])
 
         let oom = QueueHold.prose("GPU ran out of memory.", retryable: true)
-        #expect(QueueHoldRow.menuTitles(for: oom, canMoveTo: true) == ["Try Again", "Move to", "Cancel Job"])
+        #expect(titles(of: oom, canMoveTo: true) == ["Try Again", "Move to", "Cancel Job"])
 
         let missing = QueueHold.missingModel("z-image-turbo", sentence: "Mold can't find z-image-turbo.")
-        #expect(QueueHoldRow.menuTitles(for: missing, canMoveTo: false)
-            == ["Pull z-image-turbo, then Retry", "Cancel Job"])
+        #expect(titles(of: missing) == ["Pull z-image-turbo, then Retry", "Cancel Job"])
+    }
+
+    /// Cancel Job is destructive, so it is last and behind a divider --
+    /// `RowAction.rendered`'s rule, which the hand-written menu this replaced
+    /// spelt out for itself.
+    @Test func givingUpOnAHoldIsLastAndBehindADivider() {
+        let drawn = RowAction.rendered(
+            QueueHoldRow.offered(for: .prose("GPU ran out of memory.", retryable: true),
+                                 destinations: []))
+        #expect(drawn.last?.kind == .cancel)
+        #expect(drawn.last?.isDestructive == true)
+        #expect(drawn.dropLast().last?.isSeparator == true)
+    }
+
+    /// What the menu draws, in order, without rendering one. A machine to
+    /// send the job to is a SUBMENU, so it is named rather than enumerated,
+    /// and it is absent where there is nowhere to send it.
+    private func titles(of hold: QueueHold, canMoveTo: Bool = false) -> [String] {
+        let destinations = canMoveTo
+            ? [TransferStore.TransferDestination(id: machine("zeno").id, name: "zeno",
+                                                 queueDepth: nil)]
+            : []
+        return RowAction.rendered(QueueHoldRow.offered(for: hold, destinations: destinations))
+            .filter { !$0.isSeparator }
+            .map(\.title)
     }
 
     // MARK: - Pull-then-Retry

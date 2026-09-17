@@ -35,20 +35,11 @@ extension ModelsPane {
             ForEach(sections, id: \.family) { section in
                 Section(section.family) {
                     ForEach(section.rows) { model in
-                        TableRow(model).contextMenu { contextMenu(for: model) }
+                        TableRow(model).rowActionMenu(menuItems(for: model)) { kind in
+                            if let host { actions.perform(kind, on: model, host: host) }
+                        }
                     }
                 }
-            }
-        }
-    }
-
-    /// The same items the Model menu offers for this row -- one door, one
-    /// list, both surfaces (design S5).
-    @ViewBuilder private func contextMenu(for model: Model) -> some View {
-        if let host {
-            ForEach(menuItems(for: model)) { item in
-                if item.startsGroup { Divider() }
-                Button(item.title, role: item.role) { actions.perform(item.kind, on: model, host: host) }
             }
         }
     }

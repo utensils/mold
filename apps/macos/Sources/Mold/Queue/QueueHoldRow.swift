@@ -11,6 +11,23 @@ struct QueueHoldRow: View {
     enum Action: Hashable {
         case pullThenRetry(model: String)
         case tryAgain
+
+        /// The words, once: the inline button and the menu item are the same
+        /// offer and used to spell it in two places.
+        var title: String {
+            switch self {
+            case let .pullThenRetry(model): "Pull \(model), then Retry"
+            case .tryAgain: "Try Again"
+            }
+        }
+    }
+
+    /// Everything the row offers, including the two things the retry-shaped
+    /// buttons are not: a machine to send the job to, and giving up on it.
+    enum Item: Hashable {
+        case act(Action)
+        case moveTo(MoldHost.ID)
+        case cancel
     }
 
     let entry: QueueEntry
@@ -52,34 +69,38 @@ struct QueueHoldRow: View {
                 .help("Cancel this job")
         }
         .padding(.vertical, 4)
-        .contextMenu { menu }
+        // The row's own buttons a second way -- a contextual menu is where a
+        // Mac user looks first for "get rid of this", and the row had none.
+        // The SAME list, drawn by the app's one renderer: it was a
+        // hand-written `@ViewBuilder` beside a `menuTitles` a test read, which
+        // is two lists that agreed by hand.
+        .rowActionMenu(Self.offered(for: hold, destinations: moveToDestinations),
+                       perform: perform)
         .help(entry.id)
     }
 
-    /// The row's own buttons a second way -- a contextual menu is where a
-    /// Mac user looks first for "get rid of this", and the row had none.
-    @ViewBuilder private var menu: some View {
-        ForEach(Self.actions(for: hold), id: \.self) { action in
-            button(for: action)
-        }
-        MoveToMenu(destinations: moveToDestinations, send: moveTo)
-        Divider()
-        Button("Cancel Job", role: .destructive, action: cancel)
+    /// Everything the row offers, in order, so a test can pin that Cancel Job
+    /// is always there and always last without rendering a menu. Move to is a
+    /// submenu, and `RowAction.rendered` drops it where there is nowhere to
+    /// send the job -- the gate `MoveToMenu` keeps for the inline control.
+    static func offered(
+        for hold: QueueHold, destinations: [TransferStore.TransferDestination]
+    ) -> [RowAction<Item>] {
+        var items = actions(for: hold).map { RowAction(kind: Item.act($0), title: $0.title) }
+        items.append(RowAction(title: "Move to", children: destinations.map {
+            RowAction(kind: Item.moveTo($0.id), title: $0.caption)
+        }))
+        items.append(RowAction(kind: .cancel, title: "Cancel Job", isDestructive: true))
+        return RowAction.ordered(items)
     }
 
-    /// The titles `menu` draws, in order, so a test can pin that Cancel Job
-    /// is always there and always last without rendering a menu --
-    /// `QueueSelection.offeredTitles`'s shape.
-    static func menuTitles(for hold: QueueHold, canMoveTo: Bool) -> [String] {
-        var titles: [String] = actions(for: hold).map { action in
-            switch action {
-            case let .pullThenRetry(model): "Pull \(model), then Retry"
-            case .tryAgain: "Try Again"
-            }
+    private func perform(_ item: Item) {
+        switch item {
+        case let .act(.pullThenRetry(model)): pullThenRetry(model)
+        case .act(.tryAgain): tryAgain()
+        case let .moveTo(host): moveTo(host)
+        case .cancel: cancel()
         }
-        if canMoveTo { titles.append("Move to") }
-        titles.append("Cancel Job")
-        return titles
     }
 
     private var sentence: String {
@@ -89,13 +110,12 @@ struct QueueHoldRow: View {
         }
     }
 
-    @ViewBuilder
     private func button(for action: Action) -> some View {
-        switch action {
-        case let .pullThenRetry(model):
-            Button("Pull \(model), then Retry") { pullThenRetry(model) }
-        case .tryAgain:
-            Button("Try Again", action: tryAgain)
+        Button(action.title) {
+            switch action {
+            case let .pullThenRetry(model): pullThenRetry(model)
+            case .tryAgain: tryAgain()
+            }
         }
     }
 

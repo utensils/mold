@@ -1,3 +1,4 @@
+import AppKit
 import MoldClient
 import SwiftUI
 
@@ -6,20 +7,17 @@ import SwiftUI
 // the file-size advisory -- nothing here is `private`, because `private`
 // does not cross a file boundary even within one type.
 extension DiscoverTable {
-    /// The row's own controls a second way -- nothing here is ever disabled,
-    /// the same "absent, not disabled" rule the State column follows, and
-    /// nothing destructive happens to a catalog row so there is no divider
-    /// to draw.
-    @ViewBuilder func menu(for entry: CatalogEntry) -> some View {
-        ForEach(DiscoverRow.menuItems(for: entry)) { item in
-            switch item {
-            case .details:
-                Button(item.title) { detailEntry = entry }
-            case .install:
-                Button(item.title) { Task { await downloads.install(entry.id, on: host) } }
-            case let .openPage(url):
-                Link(item.title, destination: url)
-            }
+    /// The row's own controls a second way. Open Page is a `Button` that
+    /// hands the URL to the workspace rather than a `Link`: a menu is one
+    /// list, and a `Link` is the one row `RowActionMenu` could not draw.
+    func perform(_ item: DiscoverRow.Item, on entry: CatalogEntry) {
+        switch item {
+        case .details:
+            detailEntry = entry
+        case .install:
+            Task { await downloads.install(entry.id, on: host) }
+        case let .openPage(url):
+            NSWorkspace.shared.open(url)
         }
     }
 

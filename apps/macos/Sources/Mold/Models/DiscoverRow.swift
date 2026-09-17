@@ -23,14 +23,12 @@ enum DiscoverRow: Equatable {
 /// beside the state it mirrors, so the menu cannot offer Install on a row
 /// whose State column does not.
 extension DiscoverRow {
-    enum Item: Equatable, Identifiable {
+    enum Item: Hashable {
         /// What the double-click opens.
         case details
         case install
         /// The machine cannot take this one; its own page is all there is.
         case openPage(URL)
-
-        var id: String { title }
 
         var title: String {
             switch self {
@@ -42,8 +40,10 @@ extension DiscoverRow {
     }
 
     /// In the row's own reading order: the name cell leads, the State column
-    /// trails.
-    static func menuItems(for entry: CatalogEntry) -> [Item] {
+    /// trails. Nothing here is ever disabled -- the same "absent, not
+    /// disabled" rule the State column follows -- and nothing destructive
+    /// happens to a catalog row, so there is no divider to draw.
+    static func menuItems(for entry: CatalogEntry) -> [RowAction<Item>] {
         var items: [Item] = [.details]
         switch resolve(entry) {
         case .install:
@@ -55,6 +55,6 @@ extension DiscoverRow {
             // Installed table, which has the whole install/load/delete menu.
             break
         }
-        return items
+        return items.map { RowAction(kind: $0, title: $0.title) }
     }
 }

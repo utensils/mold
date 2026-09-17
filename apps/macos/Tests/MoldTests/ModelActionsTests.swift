@@ -24,9 +24,9 @@ struct ModelActionsTests {
     /// **Fails today**: there is no `ModelActions`.
     @Test func theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled() {
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
-        func kinds(_ state: ModelInstallState) -> [ModelActions.Item.Kind] {
+        func kinds(_ state: ModelInstallState) -> [ModelActions.Kind] {
             ModelActions.menu(for: model, installState: state, isBusy: false, isDownloading: false, licensed: false)
-                .map(\.kind)
+                .compactMap(\.kind)
         }
         #expect(!kinds(.available(nil)).contains(.load))
         #expect(!kinds(.needsRepair(10)).contains(.load))
@@ -36,25 +36,25 @@ struct ModelActionsTests {
         #expect(!kinds(.loaded).contains(.load))
     }
 
-    /// **Fails today**: `Item` has no `startsGroup`, so both menus draw
-    /// Delete… straight under Show Licence… with nothing between them -- a
-    /// right click can land the destructive item under the cursor. Every
-    /// other menu in this app (`QueueRow`, `QueueBatchRow`, `QueueHoldRow`)
-    /// puts its destructive item last and behind a divider.
+    /// **Fails today**: nothing marks Delete… destructive, so both menus draw
+    /// it straight under Show Licence… with nothing between them -- a right
+    /// click can land the destructive item under the cursor. Every other menu
+    /// in this app puts its destructive item last and behind a divider, which
+    /// is now `RowAction.rendered`'s rule rather than a per-item flag.
     @Test func deleteIsLastAndBehindADividerWhereverItIsDrawn() {
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
         for state in [ModelInstallState.installed, .loaded, .needsRepair(10)] {
-            let items = ModelActions.menu(
-                for: model, installState: state, isBusy: false, isDownloading: false, licensed: true)
-            #expect(items.last?.kind == .delete)
-            #expect(items.filter(\.startsGroup).map(\.kind) == [.delete])
-            #expect(items.last?.role == .destructive)
+            let drawn = RowAction.rendered(ModelActions.menu(
+                for: model, installState: state, isBusy: false, isDownloading: false, licensed: true))
+            #expect(drawn.last?.kind == .delete)
+            #expect(drawn.last?.isDestructive == true)
+            #expect(drawn.dropLast().last?.isSeparator == true)
         }
         // A row with nothing installed has nothing to delete, so there is no
         // divider either.
-        let available = ModelActions.menu(
-            for: model, installState: .available(nil), isBusy: false, isDownloading: false, licensed: false)
-        #expect(!available.contains { $0.startsGroup })
+        let available = RowAction.rendered(ModelActions.menu(
+            for: model, installState: .available(nil), isBusy: false, isDownloading: false, licensed: false))
+        #expect(!available.contains { $0.isSeparator })
     }
 
     @Test func showLicenceAppearsOnlyForAGatedModel() {
@@ -63,8 +63,8 @@ struct ModelActionsTests {
                                        isDownloading: false, licensed: true)
         let ungated = ModelActions.menu(for: model, installState: .installed, isBusy: false,
                                          isDownloading: false, licensed: false)
-        #expect(gated.map(\.kind).contains(.licence))
-        #expect(!ungated.map(\.kind).contains(.licence))
+        #expect(gated.compactMap(\.kind).contains(.licence))
+        #expect(!ungated.compactMap(\.kind).contains(.licence))
     }
 
     @Test func deleteAsksFirstAndTheFakeRecordsNothingUntilPerform() async {

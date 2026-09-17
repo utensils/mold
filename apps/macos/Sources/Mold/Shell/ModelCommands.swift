@@ -14,10 +14,7 @@ struct ModelCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Model") {
-            ForEach(selection?.items ?? []) { item in
-                if item.startsGroup { Divider() }
-                Button(item.title, role: item.role) { selection?.perform(item.kind) }
-            }
+            RowActionMenu(actions: selection?.items ?? []) { selection?.perform($0) }
         }
     }
 }
@@ -30,7 +27,7 @@ struct ModelCommands: Commands {
 /// every rebuild of the pane (`LibraryCommands.swift`'s own rule).
 struct ModelSelection: Equatable {
     let items: [ModelActions.Item]
-    let perform: (ModelActions.Item.Kind) -> Void
+    let perform: (ModelActions.Kind) -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.items == rhs.items }
 }
