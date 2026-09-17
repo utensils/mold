@@ -33,9 +33,16 @@ private func routeLiterals(in source: String) -> [String] {
     source.matches(of: /"(\/api\/[^"]*)"/).map { String($0.1) }
 }
 
-/// Every `\(…)` inside a route literal, as written.
-private func interpolations(in literal: String) -> [String] {
-    var found: [String] = []
+/// Every `\(…)` inside a route literal, as written, and WHERE it sits.
+///
+/// The half that matters: a path component and a query VALUE take different
+/// escapers, and using the path one on a query value is finding 01#6 --
+/// `.urlPathAllowed` includes `&`, `=` and `+`, so the host silently parses a
+/// different request. An interpolation after the literal's first `?` is a
+/// query value.
+private func interpolations(in literal: String) -> [(text: String, inQuery: Bool)] {
+    let queryStart = literal.firstIndex(of: "?")
+    var found: [(text: String, inQuery: Bool)] = []
     var rest = Substring(literal)
     while let open = rest.range(of: "\\(") {
         var depth = 1
@@ -45,18 +52,18 @@ private func interpolations(in literal: String) -> [String] {
             if rest[index] == ")" { depth -= 1 }
             if depth > 0 { index = rest.index(after: index) }
         }
-        found.append(String(rest[open.upperBound..<index]))
+        let inQuery = queryStart.map { open.lowerBound > $0 } ?? false
+        found.append((String(rest[open.upperBound..<index]), inQuery))
         rest = rest[rest.index(after: index)...]
     }
     return found
 }
 
 /// **Fails today**: nine routes in `HTTPBackend+Work.swift` and
-/// `HTTPBackend+Generation.swift` interpolate an id straight into the path.
-/// Every one carries a UUID today so none of it is reachable -- but
-/// `URLComponents.percentEncodedPath` raises rather than returning nil, so an
-/// id shape that ever grows a space or a `?` crashes the app instead of
-/// failing one request. Every comparable route already escapes.
+/// `HTTPBackend+Generation.swift` interpolate an id straight into the path,
+/// and `Catalog.queryString` / `loraPath` escape a QUERY value with the PATH
+/// escaper (01#6). Accepting either escaper anywhere would let the second of
+/// those back in unnoticed, so the position decides which one is required.
 @Test func everyDynamicRouteComponentGoesThroughAnEscaper() throws {
     let sources = RepoFixtures.testDirectory
         .deletingLastPathComponent()  // Tests/
@@ -70,12 +77,16 @@ private func interpolations(in literal: String) -> [String] {
     for file in files {
         let source = try String(contentsOf: file, encoding: .utf8)
         for literal in routeLiterals(in: source) {
-            for expression in interpolations(in: literal) {
-                let escaped = expression.contains("escaped(")
-                    || expression.contains("escapedQueryValue(")
+            for (expression, inQuery) in interpolations(in: literal) {
+                // A query value takes `escapedQueryValue` and NOTHING else --
+                // `escaped` there is the bug, not a lesser form of right.
+                let escaped = inQuery
+                    ? expression.contains("escapedQueryValue(")
+                    : expression.contains("escaped(")
                 let excused = "\(file.lastPathComponent): \(expression)"
                 guard !escaped, !deliberatelyRaw.contains(excused) else { continue }
-                unescaped.append("\(excused)  in  \(literal)")
+                unescaped.append(
+                    "\(excused)  in  \(literal)  (\(inQuery ? "query value" : "path component"))")
             }
         }
     }
