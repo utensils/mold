@@ -53,6 +53,18 @@ nonisolated enum PictureImport {
         }.value
     }
 
+    /// A picture's pixel dimensions, read from its HEADER -- no decode, so
+    /// this is cheap enough to call on the main actor right after an import.
+    static func pixelSize(of data: Data) -> (width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                  as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return (width, height)
+    }
+
     /// Passes acceptable bytes through untouched; re-encodes anything else as
     /// PNG, which every decoder behind mold reads.
     static func conform(

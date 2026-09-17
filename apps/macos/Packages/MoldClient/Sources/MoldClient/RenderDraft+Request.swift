@@ -48,6 +48,7 @@ public extension RenderDraft {
         applyIdentity(to: &request, maxPhotos: maxIdentityPhotos)
         applyControl(to: &request)
         applyAdvanced(to: &request)
+        applySourceFit(to: &request, carriesSource: carriesSource)
         applyClip(to: &request)
 
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)

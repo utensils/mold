@@ -97,6 +97,14 @@ enum GenerateMenus {
         return Row.ordered([GenerateAction.resetSampler.row])
     }
 
+    /// The Fit row. Crop to fill is the intentional default for every newly
+    /// attached picture on every surface (`sourceFit.ts:26-29`), so a row
+    /// already there has nothing to put back.
+    static func sourceFit(isAtDefault: Bool) -> [Row] {
+        guard !isAtDefault else { return [] }
+        return Row.ordered([GenerateAction.resetSourceFit.row])
+    }
+
     /// A recent prompt. There is no per-entry delete verb on the wire -- the
     /// history route offers `clear` alone -- so "Remove from History" is
     /// deliberately absent rather than shown and broken.

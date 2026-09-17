@@ -13,6 +13,9 @@ import Foundation
 public struct ParkedConditioning: Hashable, Sendable {
     public var sourceImage: String?
     public var sourceImageName: String?
+    /// The unfitted copy, parked with the picture it belongs to.
+    public var sourceImageOriginal: String?
+    public var sourceImageOriginalName: String?
     public var editImages: [String] = []
     /// The IP-Adapter weight, held for a recipe that advertises no weight
     /// control. Parked rather than dropped for the same reason a picture is:

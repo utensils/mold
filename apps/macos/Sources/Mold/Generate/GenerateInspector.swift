@@ -65,7 +65,7 @@ struct GenerateInspector: View {
                 }
                 .font(.callout)
             }
-            if RefineGroup.isShown(recipe: recipe, models: hostModels) {
+            if RefineGroup.isShown(recipe: recipe, models: hostModels, media: draft.media) {
                 DisclosureGroup("Refine", isExpanded: $showsRefine) {
                     RefineGroup(recipe: recipe, models: hostModels, draft: $draft, destination: $destination)
                         .padding(.top, 6)

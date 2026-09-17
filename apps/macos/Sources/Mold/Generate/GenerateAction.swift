@@ -46,6 +46,7 @@ enum GenerateAction: Hashable, CaseIterable {
     // A numeric control whose default is the recipe's own.
     case resetReferenceWeight
     case resetSampler
+    case resetSourceFit
 
     // A recent prompt.
     case usePrompt
@@ -71,6 +72,7 @@ enum GenerateAction: Hashable, CaseIterable {
         case .resetStrength: "Reset Strength"
         case .resetReferenceWeight: "Reset Weight"
         case .resetSampler: "Reset Sampler Controls"
+        case .resetSourceFit: "Reset Fit"
         case .usePrompt: "Use Prompt"
         }
     }

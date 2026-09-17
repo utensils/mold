@@ -56,8 +56,7 @@ struct ShapeControl: View {
         Menu {
             ForEach(shape.sizes) { preset in
                 Button {
-                    draft.width = preset.width
-                    draft.height = preset.height
+                    chooseSize(preset)
                 } label: {
                     if preset.width == draft.width, preset.height == draft.height {
                         Label(preset.label, systemImage: "checkmark")
@@ -74,12 +73,20 @@ struct ShapeControl: View {
         .fixedSize()
     }
 
+    /// Choosing a canvas RECORDS that somebody chose it (#1166): the intent
+    /// is written when the act happens, never inferred from the size
+    /// afterwards, so an attached source stops moving this canvas from here on.
+    private func chooseSize(_ preset: SizePreset) {
+        draft.width = preset.width
+        draft.height = preset.height
+        draft.canvasIntent = .manual
+    }
+
     /// Moves to the preset in `group` nearest the current pixel count --
     /// picking 16:9 from a 1024x1024 canvas lands on 1024x576, not on the
     /// group's smallest.
     private func choose(_ group: AspectGroup) {
         guard let preset = ShapeControl.size(in: group, nearWidth: draft.width, height: draft.height) else { return }
-        draft.width = preset.width
-        draft.height = preset.height
+        chooseSize(preset)
     }
 }

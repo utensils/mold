@@ -65,6 +65,9 @@ public struct RenderDraft: Hashable, Sendable {
     /// (`AdvancedControls.swift`). Every one is absent from the request until
     /// somebody moves it.
     public var advanced = AdvancedControls()
+    /// WHY the canvas holds the size it holds -- recorded when somebody acts,
+    /// never inferred from the size afterwards (#1166, `CanvasIntent`).
+    public var canvasIntent: CanvasIntent = .modelDefault
 
     /// Filing: title, tags and a collection to file the finished print
     /// under, gated on `canOrganize` at the call site.

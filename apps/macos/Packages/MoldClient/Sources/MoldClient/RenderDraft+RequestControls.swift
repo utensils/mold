@@ -46,6 +46,13 @@ public extension RenderDraft {
         request.guidanceOverrides = guidanceOverrides
     }
 
+    /// The crop policy, as PROVENANCE. Only alongside a source image that
+    /// really ships: the value describes what was done to those bytes, and on
+    /// a render carrying none it would describe nothing.
+    internal func applySourceFit(to request: inout GenerateRequest, carriesSource: Bool) {
+        request.sourceFit = carriesSource ? media.sourceFit : nil
+    }
+
     /// LTX-2's overrides, or NOTHING. An empty object is refused outright
     /// ("guidance_overrides must set at least one field; omit it to keep
     /// pipeline defaults", `validation.rs:1728-1733`), so the absent case has

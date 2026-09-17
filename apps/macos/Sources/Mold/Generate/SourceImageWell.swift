@@ -12,6 +12,9 @@ import SwiftUI
 /// `PictureDrop`/`PictureSource` the reference strip also uses.
 struct SourceImageWell: View {
     @Binding var draft: RenderDraft
+    /// The recipe this picture is being attached FOR -- read only to decide
+    /// the canvas a newly attached source moves to (`attachSourceShape`).
+    var recipe: GenerationRecipe?
     /// Whether this recipe has a mask path at all -- `RefineGroup.maskCapable`'s
     /// answer, passed in rather than re-derived.
     var canEditMask: Bool = false
@@ -66,6 +69,7 @@ struct SourceImageWell: View {
         .task(id: draft.media.sourceImage) {
             preview = await PicturePreview.decode(draft.media.sourceImage)
         }
+        .refittingSource(draft: $draft)
         .task { seedLibraryPickerIfRequested() }
         .accessibilityLabel("Source picture")
         .sheet(isPresented: $showsLibrary) {

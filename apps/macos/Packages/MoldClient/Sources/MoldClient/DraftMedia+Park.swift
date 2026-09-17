@@ -28,14 +28,24 @@ public extension DraftMedia {
             if sourceImage == nil, let restored = parked.sourceImage {
                 sourceImage = restored
                 sourceImageName = parked.sourceImageName
+                sourceImageOriginal = parked.sourceImageOriginal
+                sourceImageOriginalName = parked.sourceImageOriginalName
                 parked.sourceImage = nil
                 parked.sourceImageName = nil
+                parked.sourceImageOriginal = nil
+                parked.sourceImageOriginalName = nil
             }
         } else if sourceImage != nil {
             parked.sourceImage = sourceImage
             parked.sourceImageName = sourceImageName
+            // The UNFITTED copy travels with it, or the picture comes back
+            // frozen at the old canvas's crop with nothing left to re-fit from.
+            parked.sourceImageOriginal = sourceImageOriginal
+            parked.sourceImageOriginalName = sourceImageOriginalName
             sourceImage = nil
             sourceImageName = nil
+            sourceImageOriginal = nil
+            sourceImageOriginalName = nil
         }
     }
 

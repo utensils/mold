@@ -24,10 +24,17 @@ struct RefineGroup: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            fitSection
             maskSection
             controlNetSection
         }
         .task(id: draft.media.maskImage) { await loadMaskPreview() }
+    }
+
+    /// The fit comes FIRST: it decides what pixels the mask is over.
+    @ViewBuilder private var fitSection: some View {
+        let modes = SourceFitRow.resolve(recipe: recipe, media: draft.media)
+        if !modes.isEmpty { SourceFitRow(modes: modes, draft: $draft) }
     }
 
     @ViewBuilder private var maskSection: some View {
@@ -112,8 +119,9 @@ extension RefineGroup {
     /// Whether the whole Refine `DisclosureGroup` is worth drawing at all --
     /// a mask-only recipe still shows the group even with no ControlNet
     /// adapter installed, and vice versa.
-    static func isShown(recipe: GenerationRecipe?, models: [Model]) -> Bool {
+    static func isShown(recipe: GenerationRecipe?, models: [Model], media: DraftMedia) -> Bool {
         guard let recipe else { return false }
+        if !SourceFitRow.resolve(recipe: recipe, media: media).isEmpty { return true }
         if maskCapable(recipe.capabilities) { return true }
         return ControlNetRow.resolve(control: recipe.capabilities.controlNet, models: models) != .hidden
     }

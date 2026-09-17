@@ -25,6 +25,7 @@ struct ImageConditioningWells: View {
                     if layout.showsSourceWell {
                         SourceImageWell(
                             draft: $draft,
+                            recipe: recipe,
                             canEditMask: RefineGroup.maskCapable(recipe.capabilities),
                             openMaskEditor: { controller.showsMaskEditor = true })
                             .opacity(layout.parked == .source ? Self.parkedOpacity : 1)

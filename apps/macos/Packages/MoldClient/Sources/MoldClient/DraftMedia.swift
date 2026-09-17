@@ -14,6 +14,16 @@ public struct DraftMedia: Hashable, Sendable {
     /// should record for it.
     public var sourceImage: String?
     public var sourceImageName: String?
+    /// The picture as it was PICKED, before any fit -- `sourceImage` above is
+    /// what will actually ship, and is regenerated from this whenever the
+    /// canvas or the policy moves. Held so a re-fit never compounds: fitting
+    /// an already-fitted picture crops a crop.
+    public var sourceImageOriginal: String?
+    public var sourceImageOriginalName: String?
+    /// How a source whose shape differs from the canvas is mapped onto it.
+    /// Recorded on the request as provenance -- the engine never reads it,
+    /// the fitting happens here (`types.rs:3268-3273`).
+    public var sourceFit: SourceFit = .default
     /// Ordered reference images, base64. For a recipe whose first image is the
     /// Target, index 0 is that one.
     public var editImages: [String] = []
