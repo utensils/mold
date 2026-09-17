@@ -9,12 +9,23 @@ import Testing
 // the two retention keys) must still be one named constant each rather than
 // each arm re-declaring its own copy of the same number.
 
+/// The keys checked by the two shared-constant tests below instead of by
+/// `everyNumericBoundIsTheOneTheSetterEnforces` -- `scheduler.*` and the two
+/// retention keys route through `crate::config::SCHEDULER_TIMING_MAX_MS` /
+/// `GALLERY_TRASH_RETENTION_MAX_DAYS` rather than a literal, so they never
+/// match the one-line `parse_(u16|u32|f64)(raw, MIN, MAX, key)` shape a
+/// numeric arm otherwise has.
+private let sharedConstantKeys: Set<String> = [
+    "scheduler.replan_debounce_ms", "scheduler.replan_max_delay_ms", "scheduler.warm_wait_max_ms",
+    "gallery.trash_retention_days", "queue.held_retention_days",
+]
+
 /// One-line arms only: `"<key>" => config.<field> = parse_(u16|u32|f64)(raw,
 /// MIN, MAX, key)?,`. `scheduler.*` and the two retention keys are NOT
 /// one-liners -- they route through a shared symbolic constant instead of a
 /// literal (`theThreeSchedulerBoundsAreTheSharedConstant`,
-/// `theTwoRetentionBoundsAreTheSharedConstant`) -- so this only ever needs to
-/// answer for the keys S4a curates.
+/// `theTwoRetentionBoundsAreTheSharedConstant`), which is what
+/// `sharedConstantKeys` excludes them for.
 private func oneLineNumericBounds(_ body: Substring) -> [String: (min: Double, max: Double)] {
     var result: [String: (min: Double, max: Double)] = [:]
     let pattern = /"([a-zA-Z0-9_.]+)"\s*=>\s*config\.[\w.]+\s*=\s*parse_(u16|u32|f64)\(raw,\s*([\d.]+),\s*([\d.]+),\s*key\)\?,/
@@ -31,6 +42,7 @@ private func oneLineNumericBounds(_ body: Substring) -> [String: (min: Double, m
 
     for setting in curatedSettingKeys().compactMap(curatedSetting) {
         guard case let .number(min, max, _) = setting.editor else { continue }
+        if sharedConstantKeys.contains(setting.key) { continue }
         let found = try #require(bounds[setting.key], "no one-line parse_ arm found for \(setting.key)")
         #expect(found.min == min, "\(setting.key) min")
         #expect(found.max == max, "\(setting.key) max")
@@ -48,29 +60,56 @@ private func rustU32Constant(_ source: String, _ name: String) throws -> UInt32 
 /// `SCHEDULER_TIMING_MAX_MS` (`config.rs:809`) backs all three
 /// `scheduler.*` keys through ONE shared match arm
 /// (`config_keys.rs:687-689`), not three copies of the same number --
-/// counting the reference is the whole test, since a literal 30_000 typed
-/// three times would drift the day only one of them changed.
+/// counting the reference is most of the test, since a literal 30_000 typed
+/// three times would drift the day only one of them changed. S4b adds the
+/// other half: `SettingKeys.performance`'s three `scheduler.*` rows must
+/// carry that SAME number as their `.number` bound, not a client-chosen
+/// copy of it.
 @Test func theThreeSchedulerBoundsAreTheSharedConstant() throws {
     let root = try #require(RepoFixtures.repoRoot)
     let configSource = try rustSource(root, "crates/mold-core/src/config.rs")
-    #expect(try rustU32Constant(configSource, "SCHEDULER_TIMING_MAX_MS") == 30_000)
+    let maxMs = try rustU32Constant(configSource, "SCHEDULER_TIMING_MAX_MS")
+    #expect(maxMs == 30_000)
 
     let keysSource = try rustSource(root, "crates/mold-core/src/config_keys.rs")
     let occurrences = keysSource.components(separatedBy: "crate::config::SCHEDULER_TIMING_MAX_MS").count - 1
     #expect(occurrences == 1, "the three scheduler.* keys should share one parse_u32 call")
+
+    for key in ["scheduler.replan_debounce_ms", "scheduler.replan_max_delay_ms", "scheduler.warm_wait_max_ms"] {
+        let setting = try #require(curatedSetting(key), "\(key) should be curated in SettingKeys.performance")
+        guard case let .number(min, max, _) = setting.editor else {
+            Issue.record("\(key) should be a .number editor")
+            continue
+        }
+        #expect(min == 0, "\(key) min")
+        #expect(max == Double(maxMs), "\(key) max should be SCHEDULER_TIMING_MAX_MS")
+    }
 }
 
 /// `GALLERY_TRASH_RETENTION_MAX_DAYS` (`config.rs:812`) backs
 /// `gallery.trash_retention_days` AND `queue.held_retention_days`, each its
 /// own arm but citing the same named constant rather than each hard-coding
-/// `3650`.
+/// `3650`. S4b adds the same "and the Swift array agrees" half as the
+/// scheduler test above -- `SettingKeys.library`'s two retention rows must
+/// bound at the constant, not a re-typed `3650`.
 @Test func theTwoRetentionBoundsAreTheSharedConstant() throws {
     let root = try #require(RepoFixtures.repoRoot)
     let configSource = try rustSource(root, "crates/mold-core/src/config.rs")
-    #expect(try rustU32Constant(configSource, "GALLERY_TRASH_RETENTION_MAX_DAYS") == 3650)
+    let maxDays = try rustU32Constant(configSource, "GALLERY_TRASH_RETENTION_MAX_DAYS")
+    #expect(maxDays == 3650)
 
     let keysSource = try rustSource(root, "crates/mold-core/src/config_keys.rs")
     let occurrences =
         keysSource.components(separatedBy: "crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS").count - 1
     #expect(occurrences == 2, "gallery.trash_retention_days and queue.held_retention_days should each cite it")
+
+    for key in ["gallery.trash_retention_days", "queue.held_retention_days"] {
+        let setting = try #require(curatedSetting(key), "\(key) should be curated in SettingKeys.library")
+        guard case let .number(min, max, _) = setting.editor else {
+            Issue.record("\(key) should be a .number editor")
+            continue
+        }
+        #expect(min == 0, "\(key) min")
+        #expect(max == Double(maxDays), "\(key) max should be GALLERY_TRASH_RETENTION_MAX_DAYS")
+    }
 }

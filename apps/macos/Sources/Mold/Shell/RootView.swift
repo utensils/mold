@@ -53,7 +53,8 @@ extension RootView {
     func openSettingsIfRequested() {
         let requested = ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"]
         let sheets = [MachinesSettings.addOnLaunch, MachinesSettings.editOnLaunch]
-        guard requested == "settings" || sheets.contains(requested ?? "") else { return }
+        guard requested == "settings" || sheets.contains(requested ?? "") || SettingsUAT.wantsSettings()
+        else { return }
         openSettings()
     }
 }

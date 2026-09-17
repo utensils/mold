@@ -52,6 +52,15 @@ struct SettingRow: View {
             Text(setting.help)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // The server's own answer (`entry.needsRestart`), never a
+            // client-authored list -- `SourceBadge` draws the identical
+            // caption in Advanced, but a curated pane shows no source badge
+            // for this to ride beside, so it stands alone here.
+            if entry.needsRestart {
+                Text("Needs a restart")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
             if let refusal {
                 Text(refusal)
                     .font(.caption2)

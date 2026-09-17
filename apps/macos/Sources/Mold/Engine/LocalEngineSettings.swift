@@ -42,6 +42,20 @@ struct LocalEngineSettings: View {
                     controls
                 }
             }
+
+            // Fact 7 (design): this engine is keyless, so `auth_required`
+            // is always false and it can never hold a paired client.
+            // Pairing lives on the Machines destination instead, for a
+            // machine the app holds an operator key for (design decision
+            // 12) -- the actual pairing UI there is S5, not yet built.
+            Section {
+                Text("""
+                     This Mac's engine has no API key, so there's nothing to pair. \
+                     Pair a phone with a machine under Machines instead.
+                     """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }
