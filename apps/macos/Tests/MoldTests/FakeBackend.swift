@@ -683,6 +683,17 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         completedTransfers.append(authority)
     }
 
+    // MARK: - Lane F3's own seams
+
+    /// Upscale, activity and the queue gate, in ONE box.
+    ///
+    /// A class cannot hold stored properties in an extension, so three new
+    /// seams would have meant three blocks of state in this file -- which
+    /// four lanes are editing at once. One line here, and every field and
+    /// every witness lives in `FakeBackend+Upscale.swift` /
+    /// `FakeBackend+Activity.swift` beside the tests that plant them.
+    nonisolated(unsafe) var extras = FakeExtras()
+
     // MARK: - Downloads
 
     func startDownload(_ request: DownloadRequest) async throws -> DownloadTicket {

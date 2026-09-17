@@ -1,0 +1,87 @@
+[
+    {
+        "contract_version": 1,
+        "id": "vup-9af89dc8-1a9d-42b0-b742-37ee268a8049",
+        "state": "completed",
+        "source": {
+            "kind": "library",
+            "filename": "mold-minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p-1788285590035~thermalnuclear-explosion.mp4"
+        },
+        "model": "real-esrgan-x4plus:fp16",
+        "scale_factor": 4,
+        "tile_size": null,
+        "completed_frames": 124,
+        "total_frames": 124,
+        "source_facts": {
+            "container": "mov,mp4,m4a,3gp,3g2,mj2",
+            "video_codec": "h264",
+            "width": 960,
+            "height": 960,
+            "frame_count": 124,
+            "fps": "24/1",
+            "duration_ms": 5167,
+            "primary_audio_codec": "aac",
+            "primary_audio_sample_rate": 32000,
+            "primary_audio_channels": 2
+        },
+        "output_facts": {
+            "container": "mov,mp4,m4a,3gp,3g2,mj2",
+            "video_codec": "h264",
+            "width": 3840,
+            "height": 3840,
+            "frame_count": 124,
+            "fps": "24/1",
+            "duration_ms": 5167,
+            "primary_audio_codec": "aac",
+            "primary_audio_sample_rate": 32000,
+            "primary_audio_channels": 2
+        },
+        "output_filename": "mold-minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p-1788285590035~thermalnuclear-explosion-framewise-upscaled-268a8049.mp4",
+        "error": null,
+        "created_at_ms": 1788302263565,
+        "updated_at_ms": 1788304038245,
+        "disclosure": "Framewise upscale processes each frame independently; temporal flicker may remain."
+    },
+    {
+        "contract_version": 1,
+        "id": "vup-aff270d7-b8f1-4c6d-bf75-81f7dc99ec32",
+        "state": "failed",
+        "source": {
+            "kind": "library",
+            "filename": "mold-minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p-1788232377097~nsfw.mp4"
+        },
+        "model": "real-esrgan-x4plus:fp16",
+        "scale_factor": 4,
+        "tile_size": null,
+        "completed_frames": 0,
+        "total_frames": 0,
+        "source_facts": null,
+        "output_facts": null,
+        "output_filename": null,
+        "error": "ffprobe is required for Framewise upscale: No such file or directory (os error 2)",
+        "created_at_ms": 1788265569718,
+        "updated_at_ms": 1788265570080,
+        "disclosure": "Framewise upscale processes each frame independently; temporal flicker may remain."
+    },
+    {
+        "contract_version": 1,
+        "id": "vup-5d6d458b-e4e8-4571-8977-15ed0c13a1bf",
+        "state": "failed",
+        "source": {
+            "kind": "library",
+            "filename": "mold-minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p-1788234666107~nsfw.mp4"
+        },
+        "model": "real-esrgan-x4plus:fp16",
+        "scale_factor": 4,
+        "tile_size": null,
+        "completed_frames": 0,
+        "total_frames": 0,
+        "source_facts": null,
+        "output_facts": null,
+        "output_filename": null,
+        "error": "ffprobe is required for Framewise upscale: No such file or directory (os error 2)",
+        "created_at_ms": 1788265506833,
+        "updated_at_ms": 1788265507080,
+        "disclosure": "Framewise upscale processes each frame independently; temporal flicker may remain."
+    }
+]
