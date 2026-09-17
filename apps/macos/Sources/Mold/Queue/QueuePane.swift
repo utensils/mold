@@ -8,6 +8,10 @@ struct QueuePane: View {
     @Environment(HostStore.self) var hosts
     @Environment(QueueStore.self) var queue
     @Environment(TransferStore.self) var transfers
+    /// What the machines are doing that never becomes a queue row, and the
+    /// clip upscales this app started -- both drawn under Also Running.
+    @Environment(ActivityStore.self) var activity
+    @Environment(UpscaleStore.self) var upscales
     /// For `pullThenRetry(_:entry:host:)`'s own `QueueHoldRow.pullThenRetry` call.
     @Environment(DownloadStore.self) var downloads
     /// Not `private`, and deliberately: the toolbar button that raises this
@@ -20,7 +24,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty {
+            if queue.all.isEmpty, alsoRunning.isEmpty {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
@@ -39,6 +43,7 @@ struct QueuePane: View {
                                 rows(host: host, entries: entries)
                             }
                         }
+                        alsoRunningSection(host)
                     }
                 }
                 .listStyle(.inset)

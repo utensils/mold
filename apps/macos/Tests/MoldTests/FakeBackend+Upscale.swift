@@ -38,6 +38,12 @@ final class FakeExtras: @unchecked Sendable {
     }
     nonisolated(unsafe) var framewiseReleased = false
     nonisolated(unsafe) var framewiseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// What `/api/activity` answers. `nil` THROWS, the same rule as every
+    /// other unplanted route on this fake -- a store that reaches for it
+    /// unexpectedly fails the test rather than quietly getting an idle
+    /// machine.
+    nonisolated(unsafe) var activitySnapshot: ActiveWorkSnapshot?
 }
 
 extension FakeBackend {

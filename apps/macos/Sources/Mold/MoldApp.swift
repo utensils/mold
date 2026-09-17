@@ -20,6 +20,7 @@ struct MoldApp: App {
     @State private var generate: GenerateController
     @State private var queue: QueueStore
     @State private var upscales: UpscaleStore
+    @State private var activity: ActivityStore
     @State private var transfers: TransferStore
     @State private var licenses: LicenseStore
     @State private var downloads: DownloadStore
@@ -55,6 +56,7 @@ struct MoldApp: App {
         _queue = State(initialValue: queue)
         _upscales = State(initialValue: UpscaleStore(
             hosts: hosts, models: models, library: library))
+        _activity = State(initialValue: ActivityStore(hosts: hosts))
         _transfers = State(initialValue: TransferStore(hosts: hosts, queue: queue))
         let licenses = LicenseStore(hosts: hosts)
         _licenses = State(initialValue: licenses)
@@ -96,6 +98,10 @@ struct MoldApp: App {
                     // next activation costs nothing.
                     delegate.heartbeat = heartbeat
                     if NSApp.isActive { heartbeat.start() }
+                    // The same signal: `ActivityStore` watches for the two
+                    // activation notifications itself, and this is the launch
+                    // start that has already fired by the time this runs.
+                    if NSApp.isActive { activity.start() }
                     // A notification click reaches the delegate, not a view
                     // -- this is where it meets the destination binding and
                     // the Library's own navigation.
@@ -112,6 +118,7 @@ struct MoldApp: App {
                 .environment(generate)
                 .environment(queue)
                 .environment(upscales)
+                .environment(activity)
                 .environment(transfers)
                 .environment(licenses)
                 .environment(downloads)
