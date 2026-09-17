@@ -13,7 +13,7 @@ APP      := $(BUILD)/$(CONFIG)/Mold.app
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
             -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG)
 
-.PHONY: help gen build run uat test lint lint-layers lint-color lint-size clean \
+.PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size clean \
         engine engine-clean engine-config signed dmg notarize release
 
 help: ## Show this help
@@ -84,7 +84,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@cd Packages/MoldClient && swift test
 	@$(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
 
-lint: lint-layers lint-color lint-size ## Run every architecture lint
+lint: lint-layers lint-color lint-size lint-type-size ## Run every architecture lint
 
 lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	@# MoldStyle is the design system and of course imports SwiftUI. MoldClient
@@ -114,6 +114,20 @@ lint-color: ## No literal colors -- the system owns the palette
 lint-size: ## Advisory: flag files over 150 lines
 	@find Sources Packages/*/Sources -name '*.swift' -exec wc -l {} + \
 	  | awk '$$1 > 150 && $$2 != "total" { print "  large: " $$2 " (" $$1 " lines)" }'
+
+# A type's size is the sum of Type.swift and every Type+Concern.swift beside
+# it. Splitting a 400-line type into three files does not make it smaller, and
+# `lint-size` alone cannot see that.
+TYPE_MAX ?= 600
+
+lint-type-size: ## Advisory: flag a type whose files together exceed $(TYPE_MAX) lines
+	@find Sources Packages/*/Sources -name '*.swift' -exec wc -l {} + \
+	  | awk -v max=$(TYPE_MAX) '$$2 != "total" { \
+	      name = $$2; sub(/.*\//, "", name); sub(/\.swift$$/, "", name); sub(/\+.*$$/, "", name); \
+	      total[name] += $$1 } \
+	    END { for (t in total) if (total[t] > max) \
+	      printf "  large type: %s (%d lines across its files)\n", t, total[t] }' \
+	  | sort
 
 VERSION ?= 0.1.0
 DIST := $(CURDIR)/dist
