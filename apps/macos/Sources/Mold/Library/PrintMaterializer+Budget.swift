@@ -10,27 +10,39 @@ extension PrintMaterializer {
     /// One directory per print, so the directory is the unit that gets
     /// evicted -- not the file inside it, which would leave an empty folder
     /// behind and an entry that looks present until something tries to read it.
+    ///
+    /// The whole folder is summed, because a folder is NOT one print: the key
+    /// excludes the filename (it is the host and the folded `media_version`,
+    /// or the timestamp where a host sends none), so a batch published in one
+    /// second shares one. Reporting `files.first`'s size meant the cache
+    /// under-reported by the size of the batch, "Using" in Settings said the
+    /// same wrong number, and the cap was never reached -- on exactly the
+    /// hosts the timestamp fallback exists for.
+    ///
+    /// A folder with nothing measurable in it -- what a failed write leaves
+    /// behind -- is size 0 rather than absent, so eviction can still see it.
     var contents: [CacheBudget.File] {
         let manager = FileManager.default
         let keys: Set<URLResourceKey> = [.contentAccessDateKey, .contentModificationDateKey,
                                          .fileSizeKey]
         let folders = (try? manager.contentsOfDirectory(
             at: cacheRoot, includingPropertiesForKeys: Array(keys))) ?? []
-        return folders.compactMap { folder in
+        return folders.map { folder in
             let files = (try? manager.contentsOfDirectory(
                 at: folder, includingPropertiesForKeys: Array(keys))) ?? []
-            guard let file = files.first,
-                  let values = try? file.resourceValues(forKeys: keys),
-                  let bytes = values.fileSize
-            else { return nil }
+            let values = files.compactMap { try? $0.resourceValues(forKeys: keys) }
             // Modification date FIRST, because `touch` is what maintains the
             // recency this is meant to read and modification is all it writes.
             // Preferring the access date meant APFS's own answer -- which the
             // OS updates for its own reasons, and never for ours -- decided
             // the eviction order, and the LRU's hand-kept signal was never
-            // read at all.
-            let used = values.contentModificationDate ?? values.contentAccessDate ?? .distantPast
-            return CacheBudget.File(name: folder.lastPathComponent, bytes: bytes, lastUsed: used)
+            // read at all. The NEWEST date in the folder speaks for it: one
+            // print in it being read is the folder being used.
+            let used = values.compactMap { $0.contentModificationDate ?? $0.contentAccessDate }
+                .max() ?? .distantPast
+            return CacheBudget.File(name: folder.lastPathComponent,
+                                    bytes: values.compactMap(\.fileSize).reduce(0, +),
+                                    lastUsed: used)
         }
     }
 
@@ -53,9 +65,17 @@ extension PrintMaterializer {
         var spared = Set(inUse().map {
             $0.deletingLastPathComponent().lastPathComponent
         })
+        // A folder being written into right now is empty for as long as the
+        // download takes, and sweeping it would leave the write with nowhere
+        // to land.
+        spared.formUnion(inFlightKeys)
         if let key { spared.insert(key) }
-        for name in CacheBudget.evictions(from: contents, cap: capBytes)
-        where !spared.contains(name) {
+        let holdings = contents
+        var doomed = Set(CacheBudget.evictions(from: holdings, cap: capBytes))
+        // Nothing measurable in it is not a budget question: it is rubbish,
+        // and it was invisible to both halves of this function before.
+        doomed.formUnion(holdings.filter { $0.bytes == 0 }.map(\.name))
+        for name in doomed.subtracting(spared) {
             try? FileManager.default.removeItem(at: cacheRoot.appending(path: name))
         }
     }

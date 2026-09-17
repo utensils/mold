@@ -22,15 +22,17 @@ struct PrintMaterializerTests {
             .appending(path: "mold-materializer-\(UUID().uuidString)")
     }
 
-    private func entry(_ filename: String, mediaVersion: String? = "v1") -> LibraryEntry {
+    private func entry(_ filename: String, mediaVersion: String? = "v1",
+                       host: UUID = UUID()) -> LibraryEntry {
         let version = mediaVersion.map { "\"\($0)\"" } ?? "null"
         let json = """
         {"filename": "\(filename)", "metadata": {}, "timestamp": 1000,
          "media_version": \(version)}
         """
         let print = try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(json.utf8))
-        return LibraryEntry(host: MoldHost(name: "plato", baseURL: URL(string: "http://p")!),
-                            print: print)
+        return LibraryEntry(
+            host: MoldHost(id: host, name: "plato", baseURL: URL(string: "http://p")!),
+            print: print)
     }
 
     @Test func theFileLandsInsideTheKeyedDirectoryUnderItsOwnName() async throws {
@@ -124,6 +126,47 @@ struct PrintMaterializerTests {
         materializer.enforceBudget()
 
         #expect(!FileManager.default.fileExists(atPath: old.path))
+    }
+
+    /// **Fails today**: `contents` takes `files.first` and reports THAT file's
+    /// size as the whole folder's (`PrintMaterializer+Budget.swift:24`). The
+    /// folder key excludes the filename -- it is the host and the folded
+    /// `media_version`, or the TIMESTAMP where a host sends none -- so a batch
+    /// published in one second shares a folder and the cache under-reports by
+    /// the size of the batch. "Using" in Settings lies by the same factor and
+    /// the cap is never reached.
+    @Test func afolderHoldingSeveralPrintsIsMeasuredWhole() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = PrintMaterializer(root: root)
+        // Same host, same version -- one folder, the collision the materializer
+        // documents and the flight key already guards against.
+        let plato = UUID()
+        for name in ["a.png", "b.png", "c.png"] {
+            _ = await materializer.url(for: entry(name, mediaVersion: "shared", host: plato)) {
+                Data(repeating: 1, count: 1_000)
+            }
+        }
+
+        #expect(materializer.contents.count == 1)
+        #expect(materializer.usedBytes == 3_000)
+    }
+
+    /// A folder with nothing measurable in it -- what a failed write leaves
+    /// behind -- was invisible to accounting AND to eviction, so it was never
+    /// cleaned up.
+    @Test func anEmptyFolderIsAccountedForAndSweptAway() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = PrintMaterializer(root: root)
+        let stray = root.appending(path: "stray-folder")
+        try FileManager.default.createDirectory(at: stray, withIntermediateDirectories: true)
+
+        #expect(materializer.contents.map(\.name) == ["stray-folder"])
+        #expect(materializer.usedBytes == 0)
+
+        materializer.enforceBudget()
+        #expect(!FileManager.default.fileExists(atPath: stray.path))
     }
 
     /// **Fails today**: `contents` prefers `contentAccessDate`

@@ -31,6 +31,13 @@ final class PrintMaterializer {
     /// Two askers for the same print share one download.
     private var inFlight: [String: Task<URL?, Never>] = [:]
 
+    /// The folders a download is landing in right now. Read by `+Budget`,
+    /// which must not sweep a folder that is empty only because its bytes
+    /// have not arrived yet.
+    var inFlightKeys: Set<String> {
+        Set(inFlight.keys.compactMap { $0.split(separator: "/").first.map(String.init) })
+    }
+
     /// Files something is reading right now, which eviction must spare.
     ///
     /// The Quick Look panel by default -- it reads its item's URL lazily, from
