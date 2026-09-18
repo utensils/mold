@@ -14,7 +14,7 @@ struct MoldApp: App {
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
 
     var body: some Scene {
-        Window("Mold", id: "main") {
+        Window("Mold Studio", id: "main") {
             RootView(destination: $destination)
                 .task { ClickModifiers.startObserving() }
                 // Whether a caret owns the keyboard, asked once for the whole

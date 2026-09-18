@@ -86,7 +86,16 @@ targets:
       - sdk: AVKit.framework
     settings:
       base:
-        PRODUCT_NAME: Mold
+        # "Mold Studio", so the bundle is `Mold Studio.app`: the Tauri app
+        # installs as `Mold.app`, and while both ship, a native install must
+        # not land on top of it in /Applications. The executable keeps the
+        # short name -- it is a path the Makefile, the scripts and the test
+        # host all spell, and nothing a user sees.
+        PRODUCT_NAME: Mold Studio
+        EXECUTABLE_NAME: Mold
+        # And the Swift module: derived from PRODUCT_NAME it would become
+        # `Mold_Studio`, breaking every `@testable import Mold`.
+        PRODUCT_MODULE_NAME: Mold
         # Deliberately NOT com.utensils.mold -- the Tauri app owns that, and
         # sharing it would collide in Launch Services.
         PRODUCT_BUNDLE_IDENTIFIER: io.utensils.mold.native
@@ -129,5 +138,5 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Mold.app/Contents/MacOS/Mold"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Mold Studio.app/Contents/MacOS/Mold"
         BUNDLE_LOADER: "$(TEST_HOST)"

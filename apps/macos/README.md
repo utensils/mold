@@ -3,7 +3,10 @@
 An experimental native Swift app for mold, developed on the
 `feat/macos-native-app` branch and merged through PR #1728. It ships as
 `Mold-native-<version>.dmg` beside the Tauri DMG, on the same stable and
-nightly channels.
+nightly channels, and installs as **Mold Studio.app** -- the Tauri app is
+`Mold.app`, and while both ship a native install must not land on top of it
+in /Applications (the bundle id was already its own, `io.utensils.mold.native`).
+The executable inside keeps the short name `Mold`.
 
 It is a candidate replacement for the Tauri `desktop/` app on macOS, scoped to
 generation and the library. No 3-D studio.
@@ -107,7 +110,13 @@ gitignored, so override it if this disk is the one you care about:
 notarize` — or `make release` for all three. `signed` depends on `engine` and
 refuses a bundle whose binary does not actually contain the engine, because
 `Engine.xcconfig` is gitignored and a fresh clone would otherwise notarize a
-remote-only client in silence; `ALLOW_REMOTE_ONLY=1` says you meant it. Before
+remote-only client in silence; `ALLOW_REMOTE_ONLY=1` says you meant it. It
+also refuses a bundle with no icon (`scripts/assert-app-icon.sh`): actool only
+WARNS about a missing image, and the first nightly shipped with a generic icon
+because the root `.gitignore`'s `*.png` had swallowed the whole icon set --
+`scripts/tests/app-icon-tracked.sh` now asks git, not the disk. The disk image
+mounts with that same icon: `create-dmg.sh` builds it writable, sets the
+volume's custom-icon flag beside `.VolumeIcon.icns`, then compresses. Before
 signing, `scripts/fix-macos-native-linkage.sh` retargets the `/nix/store`
 libc++ and libiconv loads the devshell link leaves behind and **fails the
 release** on any that survive — that path does not exist on anyone else's Mac

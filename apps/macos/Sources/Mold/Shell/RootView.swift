@@ -31,7 +31,7 @@ struct RootView: View {
         } detail: {
             DestinationDetail(destination: $destination)
         }
-        .navigationTitle("Mold")
+        .navigationTitle("Mold Studio")
         .task { await hosts.refreshAll() }
         .task { openSettingsIfRequested() }
         // `HostStore` cannot reach `DownloadStore` -- it is the root every

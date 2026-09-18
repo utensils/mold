@@ -25,7 +25,7 @@ extension UNUserNotificationCenter: NotificationCenterProtocol {}
 /// `Bundle.main.bundleIdentifier` -- a bundle identifier can be swizzled
 /// process-wide by a dependency, so an identifier-based guard passes and
 /// aborts a second time; no dependency can swizzle `executablePath`.
-/// `make run` and `make test` both go through `Mold.app`, so this is defence
+/// `make run` and `make test` both go through `Mold Studio.app`, so this is defence
 /// against a stray `swift run` during a slice, which is exactly when it
 /// would bite.
 ///

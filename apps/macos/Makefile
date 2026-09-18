@@ -9,7 +9,7 @@ PROJECT  := Mold.xcodeproj
 SCHEME   := Mold
 CONFIG   ?= Debug
 BUILD    := $(CURDIR)/build
-APP      := $(BUILD)/$(CONFIG)/Mold.app
+APP      := $(BUILD)/$(CONFIG)/Mold Studio.app
 
 # Dev builds are signed with a real identity when this Mac has one, so the
 # app keeps ONE identity across rebuilds and macOS remembers its answers --
@@ -94,7 +94,7 @@ build: gen ## Build the app
 	@$(XCB) build | grep -Ev '^\s*$$' | tail -5
 
 run: build ## Build and launch the app
-	@open $(APP)
+	@open "$(APP)"
 
 # TMPDIR carries its trailing slash on macOS; `or` covers a shell that has none.
 UAT_HOME ?= $(or $(TMPDIR),/tmp/)mold-native-uat
@@ -115,7 +115,7 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	@# Absolute, so `macos-uat`'s `pkill -f` pattern can match this argv
 	@# and reap the previous run (review F6).
 	@MOLD_NATIVE_FRESH=1 MOLD_HOME="$(UAT_HOME)" \
-	  "$(BUILD)/$(CONFIG)/Mold.app/Contents/MacOS/Mold"
+	  "$(BUILD)/$(CONFIG)/Mold Studio.app/Contents/MacOS/Mold"
 
 test: gen ## Run every test bundle: the package, then the app's own store tests
 	@# The release path's testable scripts. They synthesise what a remote-only
@@ -128,6 +128,9 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/appcast-recipe.sh
 	@scripts/tests/notarize-credentials.sh
 	@scripts/tests/release-names.sh
+	@scripts/tests/app-icon-tracked.sh
+	@scripts/tests/app-icon-gate.sh
+	@scripts/tests/dmg-volume-icon.sh
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
 	@cd Packages/MoldClient && swift test
@@ -219,7 +222,7 @@ VERSION ?= $(MARKETING_VERSION)
 # Molds on one release page is only confusing if they are not saying which.
 DMG_NAME ?= Mold-native-$(VERSION).dmg
 DIST := $(CURDIR)/dist
-RELEASE_APP := $(BUILD)/Release/Mold.app
+RELEASE_APP := $(BUILD)/Release/Mold Studio.app
 
 # `release` used to depend on nothing that builds the engine, and
 # Engine.xcconfig is gitignored -- so a fresh clone notarized a remote-only
@@ -238,6 +241,9 @@ endif
 	@# A Release that cannot verify an update must not ship. Debug never runs
 	@# this and has no updater at all.
 	@scripts/assert-sparkle-key.sh "$(RELEASE_APP)"
+	@# An icon set whose images never reached the runner builds green with a
+	@# generic icon; the first nightly shipped that way.
+	@scripts/assert-app-icon.sh "$(RELEASE_APP)"
 	@# BEFORE signing: `install_name_tool` invalidates a signature, so the
 	@# order is not a preference. Fails closed on a surviving /nix/store ref.
 	@scripts/fix-macos-native-linkage.sh "$(RELEASE_APP)"

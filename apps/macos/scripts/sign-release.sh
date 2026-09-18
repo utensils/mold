@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign Mold.app for distribution.
+# Sign the app for distribution.
 #
 # Deliberately NOT `--deep`: Apple has discouraged it for years because it
 # re-signs nested code with the OUTER bundle's entitlements, which is how a

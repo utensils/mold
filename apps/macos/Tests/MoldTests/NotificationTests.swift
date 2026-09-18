@@ -11,7 +11,7 @@ import Testing
 struct NotificationTests {
     /// A real `.app` executable, and a bare one -- the shape the bundle
     /// guard actually reads (`MoldNotifications.isInsideBundle`).
-    private let insideBundle = "/Applications/Mold.app/Contents/MacOS/Mold"
+    private let insideBundle = "/Applications/Mold Studio.app/Contents/MacOS/Mold"
     private let outsideBundle = "/Users/dev/.build/debug/mold"
 
     private func machine(_ name: String = "workstation") -> MoldHost {

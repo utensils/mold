@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Make Mold.app's Mach-O linkage portable, or fail.
+# Make the app's Mach-O linkage portable, or fail.
 #
 # The engine is linked inside `nix develop`, where `-lc++ -liconv` resolve
 # through LIBRARY_PATH to the Nix store. The resulting binary carries
