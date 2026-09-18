@@ -14,6 +14,17 @@ enum RunState {
     case finished(BatchOutcome, host: MoldHost.ID)
     case failed(String)
 
+    /// The machine a finished batch actually ran on -- which is where its
+    /// bytes are. The canvas and the result bar used to fetch from the pane's
+    /// CURRENT machine, so switching machines (or a default changing under
+    /// you) after pressing Generate turned a finished render into "That
+    /// didn't arrive · Image not found" with Save and Copy still offered
+    /// (2026-09-17).
+    var finishedHost: MoldHost.ID? {
+        guard case let .finished(_, host) = self else { return nil }
+        return host
+    }
+
     var isBusy: Bool {
         switch self {
         case .submitting, .running, .runningChain: true

@@ -91,7 +91,7 @@ struct GeneratePane: View {
                      : "Choose a model from the toolbar to start.")
             }
         } else {
-            RunCanvas(state: controller.run, host: host, actions: resultActions,
+            RunCanvas(state: controller.run, actions: resultActions,
                       togglePrompt: { controller.promptTucked.toggle() },
                       onResultShown: controller.handoff.acknowledge)
         }

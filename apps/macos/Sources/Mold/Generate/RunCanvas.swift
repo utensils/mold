@@ -5,7 +5,6 @@ import SwiftUI
 /// What the Generate pane shows while and after a render.
 struct RunCanvas: View {
     let state: RunState
-    let host: MoldHost?
     /// What a finished result can do -- the same closures the result bar's
     /// buttons and the contextual menu beside them both perform.
     let actions: ResultActions
@@ -20,6 +19,8 @@ struct RunCanvas: View {
     /// extension methods, and `private` does not cross files for the same
     /// type.
     @Environment(HostStore.self) var hosts
+    /// The machine the finished batch ran on, never the pane's current one.
+    var host: MoldHost? { state.finishedHost.flatMap(hosts.host) }
     @State private var preview: NSImage?
     @State var result: RunResultMedia = .loading
     @State var selected = 0

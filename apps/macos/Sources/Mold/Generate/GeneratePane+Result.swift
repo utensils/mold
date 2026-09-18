@@ -44,11 +44,15 @@ extension GeneratePane {
         return references.hasRoom(for: controller.draft.media.editImages.count)
     }
 
+    /// The machine the result is ON. Never `host`: that is the pane's current
+    /// choice, which may have moved since Generate was pressed.
+    private var finishedHost: MoldHost? { controller.run.finishedHost.flatMap(hosts.host) }
+
     /// Reports rather than shrugging: Save a Copy and Copy both start with
     /// this fetch, and a machine that has gone away or refused made all three
     /// of their buttons do nothing at all.
     private func bytes(of result: BatchResult) async -> Data? {
-        guard let host, let filename = result.filename else { return nil }
+        guard let host = finishedHost, let filename = result.filename else { return nil }
         do {
             return try await hosts.backend(for: host).media(filename, trashed: false)
         } catch {
@@ -65,7 +69,7 @@ extension GeneratePane {
         do {
             try data.write(to: url)
         } catch {
-            guard let host else { return }
+            guard let host = finishedHost else { return }
             hosts.report(error, on: host.id, doing: "save that picture")
         }
     }

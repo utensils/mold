@@ -81,6 +81,22 @@ struct BatchOutcomeTests {
         #expect(outcome?.failures.isEmpty == true)
     }
 
+    /// The canvas and the result bar fetch a finished render from the
+    /// machine it RAN on. They read the pane's current machine, so switching
+    /// machines after Generate -- or a default changing underneath -- turned
+    /// a finished render into "That didn't arrive · Image not found" with
+    /// Save and Copy still offered (2026-09-17).
+    ///
+    /// **Fails today**: `RunState` has no such reading.
+    @Test func aFinishedRunRemembersTheMachineItRanOn() {
+        let ran = UUID()
+        let status = FakeFixtures.batchStatus([.init(1, state: "complete", seed: 1)])
+        let outcome = try! #require(BatchOutcome(settling: status))
+        #expect(RunState.finished(outcome, host: ran).finishedHost == ran)
+        #expect(RunState.idle.finishedHost == nil)
+        #expect(RunState.failed("x").finishedHost == nil)
+    }
+
     @Test func aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot() async {
         let workstation = machine()
         let backend = FakeBackend(host: workstation)
