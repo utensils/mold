@@ -347,6 +347,81 @@ struct ReuseTests {
         #expect(backend.retainedSessionRequests.isEmpty)
     }
 
+    /// **Fails today**: a mint that answers `_ARCHIVE_CHANGED` -- the print
+    /// re-published between the probe and the submit, which is exactly the
+    /// transient the 120 s TTL exists for -- kills the render outright.
+    @Test func aHandleThatWentStaleIsMintedOnceMore() async throws {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        backend.retainedSessionFailures = [
+            MoldClientError.http(status: 409,
+                                 code: "RETAINED_MEDIA_REUSE_ARCHIVE_CHANGED",
+                                 message: "gallery item identity changed"),
+        ]
+        backend.retainedSession = try MoldJSON.decoder.decode(
+            RetainedSourceMedia.ReuseSession.self,
+            from: Data(#"{"instance_id":"i","expires_at":9,"request_sha256":"s","session_handle":"second"}"#.utf8))
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+
+        let sending = try await RetainedMedia.hydrated(
+            BatchAdmission(requests: [request()]),
+            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
+            on: plato, backend: backend)
+
+        #expect(sending.retainedMediaSession == "second")
+        #expect(backend.retainedSessionRequests.count == 2)
+    }
+
+    /// And when the second mint fails too, the bytes are on this very machine
+    /// -- so carry them rather than refuse a render it can obviously make.
+    @Test func aSessionThatKeepsFailingFallsBackToTheBytes() async throws {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        let stale = MoldClientError.http(
+            status: 409, code: "RETAINED_MEDIA_REUSE_ARCHIVE_CHANGED", message: nil)
+        backend.retainedSessionFailures = [stale, stale]
+        backend.retainedMemberBytes["m1"] = Data([5])
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+
+        let sending = try await RetainedMedia.hydrated(
+            BatchAdmission(requests: [request()]),
+            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
+            on: plato, backend: backend)
+
+        #expect(sending.retainedMediaSession == nil)
+        #expect(sending.requests[0].sourceImage == Data([5]).base64EncodedString())
+    }
+
+    /// A refusal that describes the ARCHIVE is not asked twice, and it
+    /// reaches the pane as this app's sentence with the way forward in it --
+    /// never the host's own API prose.
+    @Test func aSettledRefusalIsSaidOnceInThisAppsWords() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        backend.retainedSessionFailures = [
+            MoldClientError.http(
+                status: 409, code: "RETAINED_SOURCE_MEDIA_UNAVAILABLE",
+                message: "retained source media is unavailable"),
+        ]
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+
+        var said: String?
+        do {
+            _ = try await RetainedMedia.hydrated(
+                BatchAdmission(requests: [request()]),
+                with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
+                on: plato, backend: backend)
+        } catch {
+            said = error.sentence
+        }
+        let sentence = said ?? ""
+        #expect(sentence.contains("no longer has its source media"))
+        #expect(sentence.contains("press Develop again"))
+        #expect(!sentence.contains("retained source media is unavailable"))
+        // Asked once: a settled answer would only be given again.
+        #expect(backend.retainedSessionRequests.count == 1)
+    }
+
     /// A picture someone reattached by hand wins, and the retained one is not
     /// asked for at all -- so the host's own target-conflict refusal can never
     /// fire for something this client chose to send.

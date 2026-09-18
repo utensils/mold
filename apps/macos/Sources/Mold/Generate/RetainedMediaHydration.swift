@@ -47,12 +47,35 @@ struct RetainedMediaHydration: Sendable {
         guard let first = requests.first else { return .nothingToDo }
         let wanted = RetainedSourceMedia.members(authority.members, forHydrating: first)
         guard !wanted.isEmpty else { return .nothingToDo }
-        if target == authority.origin, requests.count == 1 {
-            let session = try await backend.retainedMediaReuseSession(
-                for: authority.filename, members: wanted.map(\.memberId), target: first)
-            return .session(session.sessionHandle)
+        guard target == authority.origin, requests.count == 1 else {
+            return .requests(try await relay(wanted, into: requests))
         }
-        return .requests(try await relay(wanted, into: requests))
+        do {
+            return .session(try await mint(wanted, for: first, on: backend))
+        } catch let error as MoldClientError {
+            guard case let .http(_, code, _) = error,
+                  let refusal = code.flatMap(RetainedSourceMedia.Refusal.init(rawValue:)),
+                  refusal.isWorthOneMoreAttempt
+            else { throw error }
+            // The handle expired, or the print was re-published between the
+            // probe and now. Both describe the HANDLE, not the archive, so
+            // one more mint is the whole repair.
+            if let handle = try? await mint(wanted, for: first, on: backend) {
+                return .session(handle)
+            }
+            // Still not: the bytes are on this very machine, so carry them
+            // rather than refuse a render it can obviously make.
+            return .requests(try await relay(wanted, into: requests))
+        }
+    }
+
+    private func mint(
+        _ members: [RetainedSourceMedia.Member], for request: GenerateRequest,
+        on backend: any MoldBackend
+    ) async throws -> String {
+        try await backend.retainedMediaReuseSession(
+            for: authority.filename, members: members.map(\.memberId), target: request
+        ).sessionHandle
     }
 
     /// Downloads each member ONCE from the print's origin and inlines it into
@@ -82,6 +105,14 @@ struct RetainedMediaHydration: Sendable {
 /// live inside `GenerateController`.
 @MainActor
 enum RetainedMedia {
+    /// A machine's retained-media refusal, in this app's words. Its own type
+    /// so `Error.sentence` reads it and the pane shows the sentence rather
+    /// than the host's API prose.
+    struct Refused: LocalizedError {
+        let sentence: String
+        var errorDescription: String? { sentence }
+    }
+
     /// The admission to actually send. The client batch id is CARRIED, never
     /// re-minted: it is the idempotency fence, and a relay that changed it
     /// would make a lost response unrecoverable.
@@ -90,8 +121,20 @@ enum RetainedMedia {
         on host: MoldHost, backend: any MoldBackend
     ) async throws -> BatchAdmission {
         guard let hydration else { return admission }
-        switch try await hydration.hydrate(
-            admission.requests, on: host.id, backend: backend) {
+        let outcome: RetainedMediaHydration.Outcome
+        do {
+            outcome = try await hydration.hydrate(
+                admission.requests, on: host.id, backend: backend)
+        } catch let error as MoldClientError {
+            // A machine's retained-media code becomes THIS app's sentence,
+            // with the way forward in it. Anything else is an ordinary
+            // transport failure and already reads as one.
+            guard case let .http(_, code, _) = error,
+                  let sentence = RetainedSourceMedia.refusalSentence(for: code)
+            else { throw error }
+            throw Refused(sentence: sentence)
+        }
+        switch outcome {
         case .nothingToDo:
             return admission
         case let .session(handle):

@@ -82,6 +82,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var retainedMemberBytes: [String: Data] = [:]
     nonisolated(unsafe) var retainedMemberRequests: [String] = []
     nonisolated(unsafe) var retainedSession: RetainedSourceMedia.ReuseSession?
+    /// One planted failure per mint ATTEMPT, consumed in order. `refuses` and
+    /// `plantedErrors` are per ROUTE, so neither can say what the second mint
+    /// of the same reuse does -- which is the whole question a re-mint asks.
+    nonisolated(unsafe) var retainedSessionFailures: [any Error] = []
     /// Every session mint, with the request it was bound to.
     nonisolated(unsafe) var retainedSessionRequests:
         [(filename: String, members: [String], target: GenerateRequest)] = []

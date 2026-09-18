@@ -31,6 +31,10 @@ extension FakeBackend {
         // it: a test's real question is whether the session was minted
         // against the request that was then submitted.
         retainedSessionRequests.append((filename, memberIds, target))
+        // Planted per ATTEMPT, in order, so a test can pin what the SECOND
+        // mint does -- `refuses` and `plantedErrors` are per route and cannot
+        // tell one attempt from the next.
+        if !retainedSessionFailures.isEmpty { throw retainedSessionFailures.removeFirst() }
         guard let planted = retainedSession else { throw notPlanted() }
         return planted
     }

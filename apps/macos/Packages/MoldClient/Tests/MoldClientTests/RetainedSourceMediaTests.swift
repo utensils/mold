@@ -236,6 +236,44 @@ struct RetainedSourceMediaTests {
         #expect(RetainedSourceMedia.relayBodyBytes([], copies: 4) == 0)
     }
 
+    /// **Fails today**: every refusal reaches the pane as the host's own API
+    /// prose, with nothing said about what to do next.
+    @Test func everyRefusalCodeHasASentenceAndAWayForward() throws {
+        // The whole set the two doors can answer with
+        // (`gallery_source_media.rs`), so a code added there without one here
+        // is a code this app would show raw.
+        for code in ["RETAINED_MEDIA_REUSE_INVALID",
+                     "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH",
+                     "RETAINED_MEDIA_REUSE_ARCHIVE_CHANGED",
+                     "RETAINED_MEDIA_REUSE_TARGET_CONFLICT",
+                     "RETAINED_MEDIA_REUSE_ROLE_UNSUPPORTED",
+                     "RETAINED_MEDIA_REUSE_BATCH_AMBIGUOUS",
+                     "RETAINED_MEDIA_REUSE_AUTH_REQUIRED",
+                     "RETAINED_SOURCE_MEDIA_UNAVAILABLE",
+                     "RETAINED_SOURCE_MEDIA_TOO_LARGE"] {
+            let sentence = try #require(RetainedSourceMedia.refusalSentence(for: code),
+                                        "\(code) has no sentence")
+            #expect(sentence.contains("press Develop again"), "\(code) offers no way on")
+            #expect(!sentence.isEmpty)
+        }
+        // Not ours: an ordinary transport failure keeps its own wording.
+        #expect(RetainedSourceMedia.refusalSentence(for: "MODEL_NOT_FOUND") == nil)
+        #expect(RetainedSourceMedia.refusalSentence(for: nil) == nil)
+    }
+
+    /// Exactly two describe the HANDLE rather than the archive, and only
+    /// those are worth asking twice: everything else would answer the same.
+    @Test func onlyTheHandlesOwnTwoFailuresAreWorthAskingAgain() {
+        #expect(RetainedSourceMedia.Refusal.invalid.isWorthOneMoreAttempt)
+        #expect(RetainedSourceMedia.Refusal.archiveChanged.isWorthOneMoreAttempt)
+        for settled: RetainedSourceMedia.Refusal in [
+            .scopeMismatch, .targetConflict, .roleUnsupported, .batchAmbiguous,
+            .authRequired, .unavailable, .tooLarge,
+        ] {
+            #expect(!settled.isWorthOneMoreAttempt, "\(settled.rawValue)")
+        }
+    }
+
     // MARK: - The one-use handle
 
     @Test func theHandleRidesAHeaderAndNeverTheBody() throws {
