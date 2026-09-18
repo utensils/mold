@@ -498,7 +498,140 @@ pub struct H3FactoryTargetBudgetInput {
     pub predicted_device_peak_bytes: u64,
 }
 
+/// One authoritative phase budget row from the existing target-budget
+/// authority. `combined_bytes` is the checked device+host sum for that single
+/// phase; it is not an additive total across phases. `binding_maximum` marks
+/// the row that the unified-memory peak binds on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct H3PhaseBudgetRow {
+    pub phase: &'static str,
+    pub device_bytes: u64,
+    pub host_bytes: u64,
+    pub combined_bytes: u64,
+    pub binding_maximum: bool,
+}
+
 impl H3FactoryTargetBudgetInput {
+    /// Export the existing phase-budget authority without recomputing it.
+    ///
+    /// This is intentionally a checked view of the same 15 phase prefixes that
+    /// the unified-memory peak uses. It is not a new memory model: it exists so
+    /// qualification tooling and tests can name the binding row and preserve
+    /// every host/device column before the Metal owner-fence projection.
+    pub fn phase_budget_rows(&self) -> Result<Vec<H3PhaseBudgetRow>> {
+        let phases = [
+            (
+                "reference_decode",
+                self.reference_decode_phase_device_bytes,
+                self.reference_decode_phase_host_bytes,
+            ),
+            (
+                "reference_preprocess",
+                self.reference_preprocess_phase_device_bytes,
+                self.reference_preprocess_phase_host_bytes,
+            ),
+            (
+                "reference_visual_encode",
+                self.reference_visual_encode_phase_device_bytes,
+                self.reference_visual_encode_phase_host_bytes,
+            ),
+            (
+                "reference_audio_encode",
+                self.reference_audio_encode_phase_device_bytes,
+                self.reference_audio_encode_phase_host_bytes,
+            ),
+            (
+                "vae_load",
+                self.vae_load_phase_device_bytes,
+                self.vae_load_phase_host_bytes,
+            ),
+            (
+                "qwen_encode",
+                self.qwen_encode_phase_device_bytes,
+                self.qwen_encode_phase_host_bytes,
+            ),
+            (
+                "qwen_transfer",
+                self.qwen_transfer_phase_device_bytes,
+                self.qwen_transfer_phase_host_bytes,
+            ),
+            (
+                "condition_encode",
+                self.condition_encode_phase_device_bytes,
+                self.condition_encode_phase_host_bytes,
+            ),
+            (
+                "noise_allocation",
+                self.noise_allocation_phase_device_bytes,
+                self.noise_allocation_phase_host_bytes,
+            ),
+            (
+                "transformer_load",
+                self.transformer_load_phase_device_bytes,
+                self.transformer_load_phase_host_bytes,
+            ),
+            (
+                "denoise",
+                self.denoise_phase_device_bytes,
+                self.denoise_phase_host_bytes,
+            ),
+            (
+                "visual_decode",
+                self.visual_decode_phase_device_bytes,
+                self.visual_decode_phase_host_bytes,
+            ),
+            (
+                "audio_decode",
+                self.audio_decode_phase_device_bytes,
+                self.audio_decode_phase_host_bytes,
+            ),
+            (
+                "waveform_transfer",
+                self.waveform_transfer_phase_device_bytes,
+                self.waveform_transfer_phase_host_bytes,
+            ),
+            (
+                "mux",
+                self.mux_phase_device_bytes,
+                self.mux_phase_host_bytes,
+            ),
+        ];
+        let binding_peak =
+            phases
+                .iter()
+                .try_fold(0_u64, |peak, (_, device_bytes, host_bytes)| {
+                    device_bytes
+                        .checked_add(*host_bytes)
+                        .map(|combined| peak.max(combined))
+                        .ok_or_else(|| anyhow!("private H3 unified-memory target phase overflow"))
+                })?;
+        Ok(phases
+            .into_iter()
+            .map(|(phase, device_bytes, host_bytes)| {
+                let combined_bytes = device_bytes
+                    .checked_add(host_bytes)
+                    .expect("phase budget was already overflow-checked");
+                H3PhaseBudgetRow {
+                    phase,
+                    device_bytes,
+                    host_bytes,
+                    combined_bytes,
+                    binding_maximum: combined_bytes == binding_peak,
+                }
+            })
+            .collect())
+    }
+
+    /// The exact unified-memory peak used by the reviewed Metal owner fence.
+    pub fn unified_peak_bytes(&self) -> Result<u64> {
+        Ok(self
+            .phase_budget_rows()?
+            .iter()
+            .map(|row| row.combined_bytes)
+            .max()
+            .unwrap_or(0))
+    }
+
     /// Append every semantically authoritative memory field to `hash`.
     ///
     /// The exhaustive destructure is intentional: adding a field to the
@@ -8332,6 +8465,60 @@ mod tests {
             mux_phase_device_bytes,
             predicted_device_peak_bytes,
         );
+    }
+
+    #[test]
+    fn target_budget_phase_rows_are_exact_and_binding_is_max_combined() {
+        let prepared_attempt = prepared_attempt();
+        let budget = &prepared_attempt.target_budget;
+        let rows = budget.phase_budget_rows().unwrap();
+
+        assert_eq!(
+            rows.iter().map(|row| row.phase).collect::<Vec<_>>(),
+            [
+                "reference_decode",
+                "reference_preprocess",
+                "reference_visual_encode",
+                "reference_audio_encode",
+                "vae_load",
+                "qwen_encode",
+                "qwen_transfer",
+                "condition_encode",
+                "noise_allocation",
+                "transformer_load",
+                "denoise",
+                "visual_decode",
+                "audio_decode",
+                "waveform_transfer",
+                "mux",
+            ]
+        );
+        for row in &rows {
+            assert_eq!(
+                row.combined_bytes,
+                row.device_bytes
+                    .checked_add(row.host_bytes)
+                    .expect("phase bytes are u64-additive"),
+                "{} must combine without overflow",
+                row.phase
+            );
+        }
+        let max_combined = rows
+            .iter()
+            .map(|row| row.combined_bytes)
+            .max()
+            .expect("the target budget has phase rows");
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.binding_maximum)
+                .map(|row| row.phase)
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .filter(|row| row.combined_bytes == max_combined)
+                .map(|row| row.phase)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(budget.unified_peak_bytes().unwrap(), max_combined);
     }
 
     #[test]
