@@ -20,7 +20,7 @@ struct InspectorActions: View {
         } else {
             VStack(spacing: 10) {
                 if let reuse = actions.reuse, entries.count == 1, let entry = entries.first {
-                    Button("Use These Settings") { reuse(entry) }
+                    Button(LibraryMenuPlan.reuseTitle) { reuse(entry) }
                         .frame(maxWidth: .infinity)
                 }
                 HStack {

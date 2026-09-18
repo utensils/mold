@@ -24,7 +24,7 @@ public extension LibraryMenuPlan {
             Item(kind: .quickLook, title: quickLookTitle),
         ]
         if canReuse, count == 1 {
-            items += [.separator, Item(kind: .reuse, title: "Use These Settings")]
+            items += [.separator, Item(kind: .reuse, title: Self.reuseTitle)]
         }
         // Beside Use These Settings, because both make a NEW print out of
         // this one. One print at a time: the clip half is a durable job per

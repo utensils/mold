@@ -76,7 +76,9 @@ public struct MeshViewMenuPlan: Sendable {
         }
         // Before Export, and in the Library's own words -- one name for one
         // thing, whichever surface it is read on.
-        if canReuse { items.append(Item(kind: .reuse, title: "Use These Settings")) }
+        if canReuse {
+            items.append(Item(kind: .reuse, title: LibraryMenuPlan.reuseTitle))
+        }
         items.append(Item(title: "Export", children: exportItems))
         if canSave { items.append(Item(kind: .save, title: "Save a Copy…")) }
         if canShowInLibrary {

@@ -90,6 +90,13 @@ public struct LibraryMenuPlan: Sendable {
     }
 }
 
+public extension LibraryMenuPlan {
+    /// The ONE name for restoring a print's recipe, wherever it is read: the
+    /// tile's menu, the menu bar, the inspector, and the mesh viewer's own
+    /// controls. A second literal is a second name waiting to drift.
+    static let reuseTitle = "Use These Settings"
+}
+
 /// Which shelf the Library is showing, as the plan needs to know it.
 public enum LibraryScopeKind: Hashable, Sendable {
     case prints

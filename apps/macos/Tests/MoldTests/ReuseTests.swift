@@ -93,6 +93,30 @@ struct ReuseTests {
             == "Connect this machine with an API key to restore its private source media.")
     }
 
+    /// **Fails today**: a LATER copy answering a state this build cannot name
+    /// replaces the concrete one already held, and `disclosure(.unknown)` is
+    /// nil -- so a newer machine on the fleet silences the sentence a machine
+    /// that answered plainly had already earned.
+    @Test func aStateThisBuildCannotNameNeverErasesAConcreteAnswer() async {
+        let plato = machine("plato"), hal = machine("hal")
+        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
+        onPlato.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
+            availability: .unavailableMissingOrCorrupt)
+        onHal.retainedInventories["a.png"] = try! MoldJSON.decoder.decode(
+            RetainedSourceMedia.Inventory.self,
+            from: Data(#"{"availability":"unavailable_quarantined"}"#.utf8))
+        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let store = ReuseStore(hosts: hosts)
+
+        await store.probe([PrintID(host: plato.id, filename: "a.png"),
+                           PrintID(host: hal.id, filename: "a.png")],
+                          fence: store.begin(), disclosing: conditioned())
+
+        #expect(store.notice
+            == "This print\u{2019}s retained source media is missing or damaged. "
+            + "Reattach it before developing.")
+    }
+
     @Test func oneUnreachableCopyNeverHidesAReachableArchive() async {
         let plato = machine("plato"), hal = machine("hal")
         let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)

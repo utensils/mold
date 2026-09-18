@@ -79,6 +79,14 @@ final class ReuseStore {
                                       members: inventory.members)
                 return
             }
+            // Replace a held answer only with one that has something to SAY.
+            // Studio's condition is the same two clauses, but studio has no
+            // `.unknown` member -- this build added one deliberately, and
+            // without this a newer machine answering a fifth state would
+            // overwrite a concrete `legacy` and leave the person told nothing
+            // at all (`disclosure(.unknown)` is nil).
+            guard RetainedSourceMedia.disclosure(inventory.availability) != nil
+            else { continue }
             if unavailable == nil || unavailable?.1 == .unavailableLegacy {
                 unavailable = (copy, inventory.availability)
             }
