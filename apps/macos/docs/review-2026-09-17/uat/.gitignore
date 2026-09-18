@@ -1,0 +1,3 @@
+# The UAT ledger cites these screenshots; the root .gitignore excludes *.png
+# and its exception only covers the top-level docs/ tree.
+!*.png
