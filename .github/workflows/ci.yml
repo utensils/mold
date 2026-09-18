@@ -274,6 +274,8 @@ jobs:
               - 'scripts/tests/android-apk-distribution.sh'
               - 'scripts/tests/windows-self-signing.sh'
               - 'scripts/tests/release-sync-pr.sh'
+              - 'scripts/tests/docker-release-validation.py'
+              - 'scripts/tests/nix-crate-downloads.sh'
               - 'scripts/tests/changelog-fragments-contract.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/actionlint.yaml'
@@ -516,6 +518,7 @@ jobs:
           bash scripts/tests/android-apk-distribution.sh
           bash scripts/tests/windows-self-signing.sh
           bash scripts/tests/cuda-distribution-contract.sh
+          bash scripts/tests/nix-crate-downloads.sh
           python3 scripts/tests/cuda-ptx-parser-contract.py
           bash scripts/tests/install-cuda-arch.sh
           bash scripts/tests/cuda-qualification-contract.sh

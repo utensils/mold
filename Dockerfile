@@ -65,11 +65,13 @@ RUN set -eux; \
             git \
             ca-certificates \
             python3 \
+            protobuf-compiler \
             curl \
         && break \
         || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
     done; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    protoc --version
 
 # Install Rust (stable)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -123,6 +125,8 @@ RUN mkdir -p crates/mold-core/src \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
     && echo "// stub" > crates/mold-discord/src/lib.rs
 
+# Cache base dependencies only (this is not validation of the shipping feature set).
+# The complete build below and Docker validation CI exercise optional dependencies.
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
 RUN cargo build --release -p mold-ai --features cuda,cudnn,expand,discord,webp,mp4,metrics
 

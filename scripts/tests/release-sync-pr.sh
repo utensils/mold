@@ -235,7 +235,9 @@ grep -q 'render-release-pr-body.sh' "$workflow" || fail "workflow does not popul
 grep -Fq 'if [ -z "$version" ]; then' "$workflow" || fail "workflow does not validate the workspace version"
 grep -Fq 'actions: read' "$workflow" || fail "release tag job cannot inspect candidate workflows"
 grep -Fq 'Detect an unpublished release candidate' "$workflow" || fail "release tag job does not distinguish ordinary main pushes"
-grep -Fq 'Wait for exact Apple candidate delivery' "$workflow" || fail "release tag job does not wait for Apple candidates"
+grep -Fq 'Wait for exact Apple and Docker candidate delivery' "$workflow" || fail "release tag job does not wait for candidates"
+grep -Fq 'docker-validation.yml|push|Docker validation complete' "$workflow" || fail "release tag job does not gate on real Docker builds"
+python3 "$(dirname "$workflow")/../../scripts/tests/docker-release-validation.py"
 grep -Fq 'Desktop|push|Publish nightly update' "$workflow" || fail "release tag job does not gate on macOS publication"
 grep -Fq 'iOS TestFlight|workflow_run|Build, upload, and validate' "$workflow" || fail "release tag job does not gate on TestFlight delivery"
 # These dollar signs are literal workflow source assertions.

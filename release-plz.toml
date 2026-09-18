@@ -1,6 +1,6 @@
 # release-plz drives the release PR (workspace version bump) and the vX.Y.Z
 # tag ONLY. Everything downstream — GitHub release with binaries + desktop DMG,
-# Docker, AUR, FlakeHub — stays in the tag-triggered release.yml and
+# Docker, AUR — stays in the tag-triggered release.yml and
 # desktop-distribution.yml, so publishing and GitHub releases are deliberately
 # disabled here. (Same split as utensils/nxv.)
 
@@ -36,7 +36,7 @@ semver_check = false
 
 # All crates inherit [workspace.package] version, so they bump in lockstep.
 # Emit a single v{version} tag (on mold-ai, the binary crate) instead of one
-# tag per crate — release.yml, desktop-distribution, FlakeHub, and AUR all
+# tag per crate — release.yml, desktop-distribution and AUR all
 # key on that tag shape.
 git_tag_enable = false
 

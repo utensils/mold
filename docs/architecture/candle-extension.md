@@ -87,7 +87,7 @@ multiple sources, and Flash Attention must compile without a private cfg flag.
 ## Distribution boundary
 
 Mold no longer publishes workspace crates to crates.io. Releases use GitHub
-artifacts, Nix/FlakeHub, Docker, AUR, and source builds, which preserve the pinned
+artifacts, Nix, Docker, AUR, and source builds, which preserve the pinned
 backend. Existing registry versions are historical, not a current installation
 channel.
 

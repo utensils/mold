@@ -1,7 +1,7 @@
 # Installation
 
 Mold no longer publishes new versions to crates.io. Existing registry versions
-are historical; use GitHub releases, Nix/FlakeHub, Docker, AUR, or a source build
+are historical; use GitHub releases, Nix, Docker, AUR, or a source build
 for current versions.
 
 ## Native apps

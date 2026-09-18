@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/utensils/mold/actions/workflows/ci.yml/badge.svg)](https://github.com/utensils/mold/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/utensils/mold/graph/badge.svg)](https://codecov.io/gh/utensils/mold)
-[![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/utensils/mold/badge)](https://flakehub.com/flake/utensils/mold)
 [![Rust](https://img.shields.io/badge/rust-1.93%2B-orange.svg)](https://www.rust-lang.org)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 [![CLI native](https://img.shields.io/badge/CLI-native-7c3aed.svg)](https://utensils.io/mold/guide/cli-reference)
@@ -40,7 +39,7 @@ Arch, Windows, Android, and source builds.
 GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
 Mold no longer publishes new versions to crates.io. Existing registry versions
-are historical; use GitHub releases, Nix/FlakeHub, Docker, AUR, or a source build
+are historical; use GitHub releases, Nix, Docker, AUR, or a source build
 for current versions.
 
 ## Quick start

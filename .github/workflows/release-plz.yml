@@ -124,9 +124,9 @@ jobs:
           fi
 
   # After the release PR merges, wait for the exact main revision's macOS
-  # nightly and TestFlight upload to pass, then create and push the vX.Y.Z tag.
-  # This keeps the candidate proof ahead of stable publication without putting
-  # slow Linux, Nix, or Docker work back on the Apple critical path.
+  # nightly, TestFlight upload, and all Docker targets to pass, then push vX.Y.Z.
+  # Nightly Apple delivery remains independent; stable tagging requires the
+  # complete container build environment to have passed at this exact revision.
   #
   # Deliberately NO concurrency group: cancelling a release mid-flight can
   # skip it entirely (release-plz docs).
@@ -134,18 +134,12 @@ jobs:
     name: Release (tag)
     if: github.repository_owner == 'utensils'
     runs-on: ubuntu-latest
+    timeout-minutes: 210
     permissions:
       actions: read
       contents: write
       pull-requests: read
     steps:
-      - name: Generate app token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -185,14 +179,16 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for exact Apple candidate delivery
+      - name: Wait for exact Apple and Docker candidate delivery
         if: steps.candidate.outputs.pending == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Bound all candidate waits together, leaving time for tagging.
+          deadline=$((SECONDS + 10800))
           while IFS='|' read -r workflow event job_name; do
-            for attempt in $(seq 1 150); do
+            for attempt in $(seq 1 450); do
               runs_json=$(
                 gh run list \
                   --repo "$GITHUB_REPOSITORY" \
@@ -232,7 +228,7 @@ jobs:
                 echo "::error::$workflow / $job_name candidate $failed_job"
                 exit 1
               fi
-              if [[ "$attempt" -eq 150 ]]; then
+              if [[ "$attempt" -eq 450 || "$SECONDS" -ge "$deadline" ]]; then
                 echo "::error::timed out waiting for $workflow / $job_name for $GITHUB_SHA"
                 exit 1
               fi
@@ -241,7 +237,16 @@ jobs:
           done <<'WORKFLOWS'
           Desktop|push|Publish nightly update
           iOS TestFlight|workflow_run|Build, upload, and validate
+          docker-validation.yml|push|Docker validation complete
           WORKFLOWS
+
+      # Mint after the potentially long candidate wait; App tokens expire in one hour.
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release
         uses: release-plz/action@v0.5

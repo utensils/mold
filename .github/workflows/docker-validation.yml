@@ -1,0 +1,127 @@
+name: Docker validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'studio/**'
+      - 'ui/**'
+      - 'web/**'
+      - 'desktop/package.json'
+      - 'scripts/**'
+      - '.github/workflows/docker-validation.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-plz.yml'
+  push:
+    # The tag gate needs an exact-SHA result even for changelog-only repairs.
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-validation-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.select.outputs.build }}
+      targets: ${{ steps.select.outputs.targets }}
+      version: ${{ steps.select.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select validation targets
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo 'targets=["89","120"]' >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == workflow_dispatch ]] || ! git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo 'targets=["80","86","89","90","100","120"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo 'targets=[]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: candidate
+    if: needs.candidate.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_cap: ${{ fromJSON(needs.candidate.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          docker system prune -af --volumes
+      - uses: docker/setup-buildx-action@v4
+      - name: Build release image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: mold-validation:local
+          build-args: |
+            CUDA_COMPUTE_CAP=${{ matrix.cuda_cap }}
+            MOLD_DISTRIBUTION_IMAGE_VERSION=v${{ needs.candidate.outputs.version }}
+            MOLD_GIT_SHA=${{ github.sha }}
+          # Candidate builds warm the existing release cache so tagging reuses
+          # their work. PRs only read it; no extra cache namespace is allocated.
+          cache-from: type=gha,scope=${{ matrix.cuda_cap == '89' && 'docker' || format('docker-sm{0}', matrix.cuda_cap) }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,mode=max,scope={0}', matrix.cuda_cap == '89' && 'docker' || format('docker-sm{0}', matrix.cuda_cap)) || '' }}
+      - name: Verify runtime loader and source identity
+        run: |
+          set -euo pipefail
+          version=$(docker run --rm --entrypoint /bin/sh \
+            -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64 \
+            -e EXPECTED_SOURCE_SHA="$GITHUB_SHA" mold-validation:local \
+            -c 'grep -aFq "$EXPECTED_SOURCE_SHA" "$(command -v mold)" && exec mold version')
+          grep -Fq "${GITHUB_SHA:0:7}" <<< "$version"
+
+  complete:
+    name: Docker validation complete
+    needs: [candidate, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected target to pass
+        env:
+          CANDIDATE_RESULT: ${{ needs.candidate.result }}
+          BUILD_REQUIRED: ${{ needs.candidate.outputs.build }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          test "$CANDIDATE_RESULT" = success
+          if test "$BUILD_REQUIRED" = true; then
+            test "$BUILD_RESULT" = success
+          else
+            test "$BUILD_RESULT" = skipped
+          fi
