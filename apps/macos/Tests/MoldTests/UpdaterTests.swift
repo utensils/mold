@@ -82,20 +82,50 @@ struct UpdaterTests {
 
     // MARK: - Whether there is an updater at all
 
-    /// All eight combinations. Only a plain Release launch may update itself:
-    /// a Debug build is newer than anything published, a UAT run must touch
-    /// neither the network nor the real preferences, and a test host would
-    /// schedule a check in the middle of a suite.
+    /// All sixteen combinations. Only a plain Release launch of a real bundle
+    /// may update itself: a Debug build is newer than anything published, a
+    /// UAT run must touch neither the network nor the real preferences, a
+    /// test host would schedule a check in the middle of a suite, and outside
+    /// a `.app` Sparkle has nothing to install over.
     @Test func onlyAPlainReleaseLaunchMayReplaceItself() {
+        var enabledCount = 0
         for debug in [true, false] {
             for fresh in [true, false] {
                 for tests in [true, false] {
-                    let enabled = UpdaterActivation.isEnabled(
-                        isDebugBuild: debug, isFreshUAT: fresh, isRunningTests: tests)
-                    #expect(enabled == (!debug && !fresh && !tests), "\(debug) \(fresh) \(tests)")
+                    for bundled in [true, false] {
+                        let enabled = UpdaterActivation.isEnabled(
+                            isDebugBuild: debug, isFreshUAT: fresh, isRunningTests: tests,
+                            isInsideBundle: bundled)
+                        #expect(enabled == (!debug && !fresh && !tests && bundled),
+                                "\(debug) \(fresh) \(tests) \(bundled)")
+                        if enabled { enabledCount += 1 }
+                    }
                 }
             }
         }
+        // Exactly one of the sixteen says yes. A gate that answered `true`
+        // everywhere, or nowhere, would satisfy an assertion written only as
+        // "enabled == expected" if `expected` were computed the same wrong
+        // way.
+        #expect(enabledCount == 1)
+    }
+
+    /// **Fails today**: the bundle question was asked as a `guard` in
+    /// `applicationDidFinishLaunching`, and `.commands` is evaluated during
+    /// scene construction -- `UpdateCommands` reads `SoftwareUpdates.shared`
+    /// there, so the static was already forced before the delegate ran. The
+    /// guard decided nothing while its comment claimed it did.
+    @Test func theBundleQuestionIsAskedWhereItCanHold() {
+        // Every other condition satisfied, and it still refuses outside a
+        // bundle -- which is the only arm the old guard was meant to cover.
+        #expect(
+            UpdaterActivation.isEnabled(
+                isDebugBuild: false, isFreshUAT: false, isRunningTests: false,
+                isInsideBundle: false) == false)
+        #expect(
+            UpdaterActivation.isEnabled(
+                isDebugBuild: false, isFreshUAT: false, isRunningTests: false,
+                isInsideBundle: true))
     }
 
     /// And the gate is really wired to this process. Deliberately NOT under

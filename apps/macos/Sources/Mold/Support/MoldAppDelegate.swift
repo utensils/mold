@@ -38,13 +38,16 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         UATScript.runIfRequested()
         #endif
+        // Touching `shared` is what builds the updater; in a build with no
+        // updater this is `nil` and nothing is constructed, scheduled or
+        // fetched. It is NOT behind the bundle guard below: `.commands` is
+        // evaluated during scene construction and `UpdateCommands` reads
+        // `shared` there, so a guard here would already be too late. The
+        // bundle question is asked where it can hold instead, as the fourth
+        // condition in `UpdaterActivation` (review F5#7).
+        _ = SoftwareUpdates.shared
         guard MoldNotifications.isInsideBundle() else { return }
         UNUserNotificationCenter.current().delegate = self
-        // Sparkle needs a real `.app` around it too -- it installs over the
-        // bundle it is running from -- so it starts behind the same guard.
-        // Touching `shared` is what builds it; in a build with no updater
-        // this is `nil` and nothing is constructed, scheduled or fetched.
-        _ = SoftwareUpdates.shared
     }
 
     /// Mirrors `NSApp.isActive` onto `LandedPrints`, which is what decides

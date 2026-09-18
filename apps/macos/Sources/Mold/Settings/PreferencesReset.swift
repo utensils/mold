@@ -53,6 +53,16 @@ enum PreferencesReset {
     /// or a chain the app is still waiting on. And the Keychain migration flag is
     /// a fact about this install: clearing it would re-read the old Keychain
     /// items and could resurrect a key the person has since removed.
+    ///
+    /// SPARKLE'S OWN KEYS are deliberately out of scope and cannot be listed
+    /// here: `SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`,
+    /// `SUScheduledCheckInterval`, `SUSendProfileInfo` and `SULastCheckTime`
+    /// are written by `SPUUpdaterSettings`, not by mold, so no `forKey:` for
+    /// them exists in these sources and the test below is blind to them. They
+    /// stay for the reason the two toggles above do -- the Updates group on
+    /// that same page owns them -- and clearing them behind Sparkle's back
+    /// would desynchronise its scheduler from what it believes it agreed with
+    /// the user (review F5#6).
     static let kept: Set<String> = [
         "appearance",
         "badgeLandedPrints",

@@ -62,7 +62,16 @@ final class SoftwareUpdates {
     /// only one anywhere.
     var channel: UpdateChannel {
         get { UpdateChannel(stored: AppStorageSuite.defaults.string(forKey: UpdateChannel.storageKey)) }
-        set { AppStorageSuite.defaults.set(newValue.rawValue, forKey: UpdateChannel.storageKey) }
+        set {
+            AppStorageSuite.defaults.set(newValue.rawValue, forKey: UpdateChannel.storageKey)
+            // The delegate is asked afresh at every check, but nothing was
+            // asking: `SUScheduledCheckInterval` is a day, so moving to
+            // Nightly could sit idle until tomorrow. `resetUpdateCycle` is
+            // Sparkle's own hook for exactly this -- it re-reads the feed URL
+            // and, when it differs from the last one checked, schedules the
+            // next check immediately (review F5#8).
+            controller.updater.resetUpdateCycle()
+        }
     }
 
     var automaticallyChecksForUpdates: Bool {

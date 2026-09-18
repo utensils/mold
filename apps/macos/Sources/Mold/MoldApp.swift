@@ -58,8 +58,12 @@ struct MoldApp: App {
         // scene's task runs, so the launch start is here rather than there;
         // `start()` is idempotent, so the next activation costs nothing.
         delegate.heartbeat = stores.heartbeat
-        // `ActivityStore` watches the two activation notifications itself;
-        // this is the launch start.
+        // THE LAUNCH START. A store that watches the activation notifications
+        // itself still needs its first one from here, because
+        // `applicationDidBecomeActive` has already fired. A NEW STORE THAT
+        // STARTS AT LAUNCH GOES ON THIS LINE -- it is the one hunk of the old
+        // composition root that did not move into `AppStores`, and the one a
+        // lane re-applying its work would otherwise miss (review F5#4).
         if NSApp.isActive { stores.heartbeat.start(); stores.activity.start() }
         // A notification click reaches the delegate, not a view -- this is
         // where it meets the destination binding and the Library's own
