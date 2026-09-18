@@ -26,7 +26,8 @@ final class ReuseStore {
     private(set) var authority: Authority?
     /// The draft the reuse landed in. The authority is good only while the
     /// draft still IS that one -- see `pending(for:)`.
-    private var restored: RenderDraft?
+    /// Not `private`: `+Release` puts it down, and `private` does not cross a file.
+    var restored: RenderDraft?
     /// What to say about a print whose media cannot be restored. Shown once,
     /// beside the prompt, and cleared by the next reuse or the next submit.
     var notice: String?
