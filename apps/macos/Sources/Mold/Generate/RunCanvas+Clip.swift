@@ -20,7 +20,7 @@ extension RunCanvas {
             // same shared verb the Library plays through.
             player = AVPlayer(url: try await backend.playableURL(for: filename))
         } catch {
-            show(.unavailable(error.reasonSentence))
+            show(.unavailable(error.failureSentence))
             return
         }
         player.play()
@@ -36,8 +36,8 @@ extension RunCanvas {
                 // A lapsed ticket looks exactly like a broken file from here,
                 // so the honest move is to mint a fresh one and try once.
                 guard remintsLeft > 0 else {
-                    show(.unavailable(item.error?.reasonSentence
-                        ?? "That clip could not be played on this Mac."))
+                    show(.unavailable(item.error?.failureSentence
+                        ?? "This clip couldn't be played on this Mac. It is in the Library."))
                     return
                 }
                 await playClip(filename, backend: backend, remintsLeft: remintsLeft - 1)

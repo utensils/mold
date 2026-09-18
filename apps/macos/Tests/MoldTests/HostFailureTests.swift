@@ -101,7 +101,7 @@ struct HostFailureTests {
 
         #expect(hosts.failures.count == 1)
         #expect(hosts.failures.first?.sentence
-            == "192.0.2.1 can't be reached — the request timed out.")
+            == "192.0.2.1 can't be reached — the request timed out. Check the machine under Machines.")
     }
 
     /// Whichever order they arrive in, the reach line always wins over a
@@ -182,6 +182,28 @@ struct HostFailureTests {
 
         #expect(hosts.failures.count == 1)
         #expect(hosts.failures.first?.sentence == "workstation couldn't list its queue — busy.")
+    }
+
+    /// The banner speaks the same three-part voice every other surface does,
+    /// and it speaks it from `Error+Sentence` -- the machine, its own reason,
+    /// and the way forward. A retryable refusal says so; one nothing can
+    /// retry stops at the machine's words rather than inventing a route.
+    ///
+    /// **Fails today**: a banner was the machine and its reason and nothing
+    /// else, whatever the failure was.
+    @Test func aBannerEndsWithTheWayForwardWhenThereIsOne() {
+        let machine = host("workstation")
+        let retryable = HostStore(hosts: [machine])
+        retryable.report(MoldClientError.http(status: 503, code: nil, message: "Busy."),
+                         on: machine.id, doing: "list its queue")
+        #expect(retryable.failures.first?.sentence
+            == "workstation couldn't list its queue — busy. Try again in a moment.")
+
+        let final = HostStore(hosts: [machine])
+        final.report(MoldClientError.http(status: 404, code: nil, message: "Image not found."),
+                     on: machine.id, doing: "fetch that print")
+        #expect(final.failures.first?.sentence
+            == "workstation couldn't fetch that print — image not found.")
     }
 
     @Test func anUnauthorizedMachineSaysItNeedsAKey() {

@@ -25,7 +25,9 @@ extension Error {
         case let .unreachable(reason):
             return lowercasingFirstLetter(of: reason)
         case .unauthorized:
-            return "it needs an API key. Add one in Settings."
+            // The key is the REASON; adding one is the way forward, and that
+            // half lives in `advice` so nothing says it twice.
+            return "it needs an API key."
         case let .http(status, _, message):
             return message.map(lowercasingFirstLetter(of:)) ?? "it answered with an error (\(status))."
         case .malformedResponse:
@@ -45,6 +47,44 @@ extension Error {
         let reason = reason
         guard let first = reason.first else { return reason }
         return first.uppercased() + reason.dropFirst()
+    }
+
+    /// The way forward, where this failure has one.
+    ///
+    /// The third part of what a person reads: what did not happen, the
+    /// machine's own reason for it, and what to do about it. A failure with
+    /// no route out of it is a dead end, which is what "our error handling is
+    /// kind of lacking" meant -- so every route is worded HERE, once, and no
+    /// surface carries a second copy. `nil` where there is honestly nothing
+    /// to do; an offer that cannot help is worse than none.
+    ///
+    /// Whether waiting could work is asked of `MoldClientError.isTransient`
+    /// rather than re-decided here. An unreachable machine is transient too,
+    /// but it has something better to say than "try again".
+    var advice: String? {
+        guard let clientError = self as? MoldClientError else { return nil }
+        switch clientError {
+        case .unreachable:
+            return "Check the machine under Machines."
+        case .unauthorized:
+            return "Add one in Settings."
+        case .http:
+            return clientError.isTransient ? "Try again in a moment." : nil
+        case .malformedResponse:
+            return "Update Mold here, or on that machine."
+        case .licenseRequired:
+            return "Accept the terms under Models."
+        }
+    }
+
+    /// The whole thing, for a surface that would otherwise be a dead end: the
+    /// machine's own reason, then the way forward.
+    ///
+    /// Not what a compact STATUS line reads -- a machine row in the sidebar
+    /// is already sitting under Machines, and telling it to go there would be
+    /// noise. Those keep `reasonSentence`.
+    var failureSentence: String {
+        [reasonSentence, advice].compactMap { $0 }.joined(separator: " ")
     }
 }
 

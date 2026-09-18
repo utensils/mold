@@ -75,8 +75,15 @@ extension RunCanvas {
                 canShowInLibrary: true,
                 perform: { perform($0, on: selectedResult(in: outcome)) })
         case let .unavailable(sentence):
-            ContentUnavailableView("That didn't arrive", systemImage: "exclamationmark.triangle",
-                                   description: Text(sentence))
+            // Only the BYTES failed to arrive, so the route out is the
+            // copy the machine already filed.
+            ContentUnavailableView {
+                Label("This render didn't arrive", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(sentence)
+            } actions: {
+                Button("Show in Library", action: actions.showInLibrary)
+            }
         }
     }
 
@@ -109,7 +116,8 @@ extension RunCanvas {
                 }
                 show(.picture(image))
             } catch {
-                show(.unavailable(error.reasonSentence))
+                // Not `reasonSentence`: a refusal with no route is a dead end.
+                show(.unavailable(error.failureSentence))
             }
         }
     }

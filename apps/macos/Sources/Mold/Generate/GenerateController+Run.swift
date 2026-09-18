@@ -90,7 +90,10 @@ extension GenerateController {
                     return
                 }
                 switch self.submissions.land(admission.clientBatchId) {
-                case .follow: self.run = .failed(error.sentence)
+                // The canvas's own headline already says the render didn't
+                // finish, so what this carries is the reason and the way
+                // forward -- not `sentence`, which repeats the headline.
+                case .follow: self.run = .failed(error.failureSentence)
                 // Stop already answered for this one; the queue still moves,
                 // unless something has taken the canvas since.
                 case .cancel: if !self.run.isBusy { self.followNext() }

@@ -22,9 +22,9 @@ enum MeshViewFailure: Error {
         case .shaders:
             "The 3-D view couldn't start, so here's the poster."
         case .upload:
-            "There wasn't room on the graphics card for this mesh."
+            "There wasn't room on the graphics card for this mesh, so here's the poster."
         case let .unreadable(reason):
-            "This mesh file couldn't be read. \(reason)"
+            "This mesh file couldn't be read. \(reason) It is still in the Library."
         case let .transport(reason):
             "That mesh didn't arrive. \(reason)"
         }
@@ -34,6 +34,6 @@ enum MeshViewFailure: Error {
     /// wrong with the file rather than saying only that something was.
     @MainActor static func reading(_ error: any Error) -> MeshViewFailure {
         if let parse = error as? GLBParseError { return .unreadable(parse.description) }
-        return .transport(error.reasonSentence)
+        return .transport(error.failureSentence)
     }
 }

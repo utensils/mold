@@ -38,7 +38,11 @@ struct RunCanvas: View {
                 // appearing: at that instant `result` is still `.loading`.
                 finishedView(outcome)
             case let .failed(message):
-                ContentUnavailableView("That didn't finish", systemImage: "exclamationmark.triangle",
+                // The message is the machine's own reason AND its way
+                // forward -- see `Error.failureSentence`, which every
+                // producer of this state goes through.
+                ContentUnavailableView("This render didn't finish",
+                                       systemImage: "exclamationmark.triangle",
                                        description: Text(message))
                     // A failure sentence is a drawn outcome too.
                     .task(id: message) { onResultShown() }

@@ -29,12 +29,12 @@ extension HostStore {
         let name = name(of: host) ?? "That machine"
         guard case MoldClientError.unreachable = error else {
             failures.removeAll { $0.host == host && $0.verb == verb }
-            let sentence = "\(name) couldn't \(verb) — \(error.reason)"
+            let sentence = HostFailure.sentence("\(name) couldn't \(verb)", because: error)
             failures.insert(HostFailure(host: host, verb: verb, sentence: sentence, at: now), at: 0)
             return
         }
         failures.removeAll { $0.host == host }
-        let sentence = "\(name) can't be reached — \(error.reason)"
+        let sentence = HostFailure.sentence("\(name) can't be reached", because: error)
         failures.insert(HostFailure(host: host, verb: HostFailure.reachVerb, sentence: sentence, at: now), at: 0)
     }
 
