@@ -5,8 +5,8 @@ import Testing
 @testable import Mold
 
 /// Following a clip upscale is the whole of this store, and every way it can
-/// go wrong is a SEQUENCE: a second press, a cancel landing before the id
-/// does, a job that settles between two asks, a machine that goes away
+/// go wrong is a SEQUENCE: a second press, a job somebody else already
+/// started, a job that settles between two asks, a machine that goes away
 /// mid-poll, and an answer about a job that has already been replaced.
 ///
 /// **Fails today**: nothing in this app starts or follows an upscale.
@@ -198,25 +198,5 @@ struct UpscaleStoreTests {
         // And still one once the job is being followed rather than started.
         await store.start(clip)
         #expect(backend.callCount("startFramewiseUpscale") == 1)
-    }
-
-    /// A cancel during the await. There is no id yet, so the cancel is
-    /// remembered and spent the instant the host hands one over -- otherwise
-    /// the job upscales every frame on a machine nobody is watching.
-    @Test func aCancelBeforeTheIdArrivesStillReachesTheJob() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        backend.delays["startFramewiseUpscale"] = .milliseconds(30)
-        let (store, _) = await bench(backend, host: plato, interval: .seconds(9))
-        let clip = entry("clip.mp4", on: plato)
-
-        async let started: Void = store.start(clip)
-        await settle { store.isBusy(with: clip) }
-        await store.transition(UpscaleStore.Key(host: plato.id, filename: "clip.mp4"), to: .cancel)
-        await started
-
-        await settle { !backend.extras.framewiseTransitions.isEmpty }
-        #expect(backend.extras.framewiseTransitions.map(\.id) == ["vup-1"])
-        #expect(backend.extras.framewiseTransitions.first?.to == .cancel)
     }
 }

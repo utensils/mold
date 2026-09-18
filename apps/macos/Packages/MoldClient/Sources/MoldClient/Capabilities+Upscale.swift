@@ -18,8 +18,4 @@ public extension Capabilities {
         guard let block = videoUpscale, block.available else { return false }
         return block.galleryImage == true
     }
-
-    /// The host's own caveat about what framewise upscaling does to a clip,
-    /// shown verbatim wherever the action is offered.
-    var framewiseDisclosure: String? { videoUpscale?.disclosure }
 }

@@ -79,11 +79,6 @@ final class UpscaleStore {
     /// claim.
     var pollTokens: [Key: Int] = [:]
 
-    /// A print whose clip job was cancelled BEFORE the host had told us its
-    /// id. Without this the create lands on a machine nobody is watching and
-    /// upscales 124 frames for a print the person already gave up on.
-    var cancelOnArrival: Set<Key> = []
-
     init(hosts: HostStore, models: ModelStore, library: LibraryStore,
          interval: Duration = .milliseconds(750)) {
         self.hosts = hosts

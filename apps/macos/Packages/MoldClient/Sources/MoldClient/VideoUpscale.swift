@@ -26,10 +26,6 @@ public struct VideoUpscaleJob: Codable, Hashable, Sendable, Identifiable {
     public let outputFilename: String?
     /// The host's own sentence about why it stopped.
     public let error: String?
-    /// "Framewise upscale processes each frame independently; temporal
-    /// flicker may remain." Shown verbatim -- paraphrasing a caveat weakens
-    /// it, the same rule `canUpscaleClips`' own disclosure follows.
-    public let disclosure: String?
 
     /// The library print this job is upscaling, or nil for an upload.
     public var libraryFilename: String? {

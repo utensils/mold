@@ -57,13 +57,7 @@ extension UpscaleStore {
         }
     }
 
-    /// The clip half, and the one sequence that is easy to get wrong: a
-    /// cancel arriving while the create is still in flight.
-    ///
-    /// There is no id to cancel with until the host answers, so the cancel is
-    /// REMEMBERED and spent the instant there is one. Dropping it instead
-    /// leaves a job upscaling every frame of a clip on a machine nobody is
-    /// watching, for a print the person has already given up on.
+    /// The clip half.
     private func startClip(
         _ key: Key, on backend: any MoldBackend, model: String, epoch: Int
     ) async throws {
@@ -88,10 +82,6 @@ extension UpscaleStore {
             filename: key.filename, model: model, tileSize: nil)
         guard epochs[key] == epoch else { return }
         jobs[key] = job
-        guard cancelOnArrival.remove(key) == nil else {
-            await transition(key, to: .cancel)
-            return
-        }
         poll(key)
     }
 
@@ -102,12 +92,9 @@ extension UpscaleStore {
     /// a paused job moves when somebody resumes it, and that reply is the
     /// next answer.
     func transition(_ key: Key, to transition: FramewiseTransition) async {
-        guard let job = jobs[key] else {
-            // Nothing to act on yet. A cancel is still meaningful: it is
-            // about the create that is in flight right now.
-            if transition == .cancel, working.contains(key) { cancelOnArrival.insert(key) }
-            return
-        }
+        // Nothing to act on. Every surface that can reach this draws its
+        // rows from `jobs`, so a key with no job has no row to press.
+        guard let job = jobs[key] else { return }
         guard let backend = hosts.backend(for: key.host) else { return }
         // The epoch is bumped here for the same reason `start` bumps it: an
         // `ask` already in flight is about the job BEFORE this transition,
