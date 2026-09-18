@@ -18,7 +18,8 @@ struct MenuBarTests {
         let hal9000 = machine("hal9000")
         let selection = MachineSelection(
             machines: [plato, hal9000], selected: plato.id, defaultID: hal9000.id,
-            check: {}, choose: { _ in }, setDefault: {})
+            offered: MachineCardActions.offered(isThisMac: false, isDefault: false),
+            choose: { _ in }, perform: { _ in })
 
         #expect(selection.rows == [
             .init(name: "plato", isDefault: false),
@@ -30,7 +31,8 @@ struct MenuBarTests {
         let plato = machine("plato")
         let selection = MachineSelection(
             machines: [plato], selected: plato.id, defaultID: nil,
-            check: {}, choose: { _ in }, setDefault: {})
+            offered: MachineCardActions.offered(isThisMac: false, isDefault: false),
+            choose: { _ in }, perform: { _ in })
 
         #expect(selection.rows == [.init(name: "plato", isDefault: false)])
     }

@@ -16,17 +16,15 @@ struct MachineCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Machine") {
-            // Present and disabled off no machine, the rule `Refresh` set:
-            // Help ▸ Search finds "Set as Default" from every pane.
-            // The words come from `SidebarMachineActions`, which is also what
-            // a machine row's right-click menu draws -- one spelling, two
-            // surfaces. The shortcut and the disabled-off-nothing rule stay
-            // here, because a `RowAction` carries neither.
-            Button(SidebarMachineActions.checkNow) { selection?.check() }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(selection == nil)
-            Button(SidebarMachineActions.setAsDefault) { selection?.setDefault() }
-                .disabled(selection == nil)
+            // The CARD's own list (`MachineCardActions`), so a right click on
+            // a machine and this menu can never mean different things. Off no
+            // machine it is present and inert, the rule `Refresh` set: Help ▸
+            // Search finds "Set as Default" from every pane. The chords stay
+            // here, because a `RowAction` carries none and a contextual menu
+            // shows none.
+            RowActionMenu(actions: selection?.offered ?? MachineCardActions.unavailable(),
+                          perform: { selection?.perform($0) },
+                          shortcut: Self.shortcut)
             if let selection, !selection.machines.isEmpty {
                 Divider()
                 ForEach(selection.machines) { machine in
@@ -43,6 +41,22 @@ struct MachineCommands: Commands {
             }
         }
     }
+
+    /// ⇧⌘R is one machine asked what it is -- a narrower question than ⌘R's
+    /// whole-pane refresh, which is why it is its own chord and not a second
+    /// binding for one. ⌘⌫ is the app's own "this row leaves" chord, the same
+    /// one the Library's Move to Trash and the Queue's Cancel Job carry; only
+    /// one of the three is ever focus-eligible.
+    ///
+    /// Open takes NO chord: Return opens the focused card, and binding it here
+    /// as well would take Return away from every default button in the app.
+    static func shortcut(_ kind: MachineCardActions.Kind) -> KeyboardShortcut? {
+        switch kind {
+        case .checkNow: KeyboardShortcut("r", modifiers: [.command, .shift])
+        case .remove: KeyboardShortcut(.delete, modifiers: .command)
+        case .open, .setDefault, .copyAddress, .edit: nil
+        }
+    }
 }
 
 /// What the Machines pane's current machine can do, and how -- resolved once
@@ -51,18 +65,26 @@ struct MachineCommands: Commands {
 /// own empty state), which is an empty menu.
 struct MachineSelection: Equatable {
     let machines: [MoldHost]
-    let selected: MoldHost.ID
+    /// The machine the items act on: the one whose page is open, else the
+    /// card the keyboard is on. `nil` on the overview with nothing picked,
+    /// which is what makes every item inert rather than acting on a machine
+    /// nobody pointed at.
+    let selected: MoldHost.ID?
     /// The default's id, or `nil` when nothing has been chosen -- no row in
     /// the list below carries the checkmark.
     let defaultID: MoldHost.ID?
-    let check: () -> Void
+    /// The card's own items (`MachineCardActions`), already resolved for the
+    /// selected machine -- so Set as Default is absent on the default machine
+    /// and Remove… is absent on This Mac, here as well as on the card.
+    let offered: [RowAction<MachineCardActions.Kind>]
     /// Sets the default to whichever machine's row this is -- the same call
-    /// `setDefault` makes for `selected`, parameterized for the list.
+    /// `perform(.setDefault)` makes for `selected`, parameterized for the list.
     let choose: (MoldHost.ID) -> Void
-    let setDefault: () -> Void
+    let perform: (MachineCardActions.Kind) -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.machines == rhs.machines && lhs.selected == rhs.selected && lhs.defaultID == rhs.defaultID
+        lhs.machines == rhs.machines && lhs.selected == rhs.selected
+            && lhs.defaultID == rhs.defaultID && lhs.offered == rhs.offered
     }
 
     /// One row per machine, in list order, with whether it carries the

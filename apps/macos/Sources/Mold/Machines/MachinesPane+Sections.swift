@@ -6,18 +6,6 @@ import SwiftUI
 // that says something rather than leaving a gap.
 extension MachinesPane {
 
-    /// What the Machine menu offers for the machine currently showing --
-    /// `nil` off the empty state, same rule `ModelSelection` already follows.
-    var machineSelection: MachineSelection? {
-        guard let selected else { return nil }
-        return MachineSelection(
-            machines: hosts.hosts, selected: selected.id, defaultID: hosts.defaultMachine,
-            check: { Task { await hosts.refresh(selected) } },
-            choose: { id in hosts.host(id).map(hosts.setDefault) },
-            setDefault: { hosts.setDefault(selected) }
-        )
-    }
-
     /// The Form's first, unlabelled section: the grouped-Form idiom for "what
     /// this thing is". `navigationTitle` and `navigationSubtitle` already
     /// carry the name and the state, so there is no header band here.

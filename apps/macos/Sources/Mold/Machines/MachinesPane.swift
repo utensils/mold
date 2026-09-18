@@ -54,9 +54,11 @@ struct MachinesPane: View {
             await pairing.load(on: id)
             machines.watchResources(on: id)
         }
+        // Both the overview and this page are inside ONE `NavigationStack`, so
+        // the Machine menu's selection and ⌘R are published once, by
+        // `MachinesDestination` -- two views offering the same focused value
+        // in one scene is two answers to "which machine".
         .onDisappear { machines.stopWatchingResources() }
-        .focusedSceneValue(\.refreshAction) { refresh() }
-        .focusedSceneValue(\.machineSelection, machineSelection)
     }
 
     @ViewBuilder private func machine(_ host: MoldHost) -> some View {
@@ -112,13 +114,14 @@ struct MachinesPane: View {
         }
     }
 
+    /// The toolbar button, and what ⌘R reaches while this page is open
+    /// (`MachinesDestination.refresh`) -- one implementation, in the type that
+    /// knows how to read a machine (`MachineFleet.swift`).
     private func refresh() {
         guard let host = selected else { return }
         Task {
-            await hosts.refresh(host)
-            await machines.refresh(host.id)
-            await queue.refresh(on: host.id)
-            await models.refresh(on: host.id)
+            await MachineFleet(hosts: hosts, machines: machines,
+                               queue: queue, models: models).refresh(one: host)
         }
     }
 

@@ -15,7 +15,9 @@ struct DestinationDetail: View {
         case .queue:
             QueuePane()
         case .machines:
-            MachinesPane(destination: $destination)
+            // The fleet, with one machine's page a push inside it -- never
+            // `MachinesPane` alone, which IS that page.
+            MachinesDestination(destination: $destination)
         }
     }
 }
