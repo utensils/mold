@@ -16,6 +16,10 @@ struct RowActionMenu<Kind: Hashable>: View {
     /// property of the SURFACE rather than of the action: the same Cancel Job
     /// is ⌘⌫ in the Queue menu and bare on a row.
     var shortcut: (Kind) -> KeyboardShortcut? = { _ in nil }
+    /// The system controls a `RowAction` cannot model, drawn with the
+    /// ordinary items at `RowAction.extraInsertionIndex` so the destructive
+    /// tail stays last. Type-erased: a menu row's identity is its position.
+    var extra: () -> AnyView = { AnyView(EmptyView()) }
 
     /// Keyed by POSITION, not by content: a drawn menu repeats itself --
     /// every separator is the same value, and two submenus can share a title
@@ -23,20 +27,29 @@ struct RowActionMenu<Kind: Hashable>: View {
     /// child views" for any menu with two dividers. The Queue menu draws up
     /// to four.
     var body: some View {
-        ForEach(Array(RowAction.rendered(actions).enumerated()), id: \.offset) { _, action in
-            if action.isSeparator {
-                Divider()
-            } else if action.isSubmenu {
-                Menu(action.title) {
-                    RowActionMenu(actions: action.children, perform: perform, shortcut: shortcut)
-                }
-            } else if let kind = action.kind {
-                Button(action.title, role: action.isDestructive ? .destructive : nil) {
-                    perform(kind)
-                }
-                .disabled(action.isDisabled)
-                .keyboardShortcut(shortcut(kind))
+        let drawn = RowAction.rendered(actions)
+        let insertion = RowAction.extraInsertionIndex(drawn)
+        ForEach(Array(drawn.enumerated()), id: \.offset) { offset, action in
+            if offset == insertion { extra() }
+            row(action)
+        }
+        if insertion == drawn.count { extra() }
+    }
+
+    @ViewBuilder
+    private func row(_ action: RowAction<Kind>) -> some View {
+        if action.isSeparator {
+            Divider()
+        } else if action.isSubmenu {
+            Menu(action.title) {
+                RowActionMenu(actions: action.children, perform: perform, shortcut: shortcut)
             }
+        } else if let kind = action.kind {
+            Button(action.title, role: action.isDestructive ? .destructive : nil) {
+                perform(kind)
+            }
+            .disabled(action.isDisabled)
+            .keyboardShortcut(shortcut(kind))
         }
     }
 }
@@ -49,7 +62,8 @@ extension View {
     /// `ShareLink` is AirDrop, Messages and Mail, not something this app
     /// performs -- and it rides along rather than deciding whether a menu
     /// appears, because a menu holding nothing but a Share sheet is the empty
-    /// menu by another name.
+    /// menu by another name. It is drawn among the ordinary items, never
+    /// under the destructive tail.
     @ViewBuilder
     func rowActionMenu<Kind: Hashable, Extra: View>(
         _ actions: [RowAction<Kind>],
@@ -58,8 +72,7 @@ extension View {
     ) -> some View {
         if RowAction.offersMenu(actions) {
             contextMenu {
-                RowActionMenu(actions: actions, perform: perform)
-                extra()
+                RowActionMenu(actions: actions, perform: perform, extra: { AnyView(extra()) })
             }
         } else {
             self

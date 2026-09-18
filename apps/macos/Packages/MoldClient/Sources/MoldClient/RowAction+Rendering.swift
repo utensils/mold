@@ -57,6 +57,16 @@ public extension RowAction {
         return ordinary + [.separator] + destructive
     }
 
+    /// Where a system control that is not an action rides in a DRAWN list:
+    /// a `ShareLink` is AirDrop, Messages and Mail, and it belongs with the
+    /// ordinary items, ahead of the divider that leads the destructive tail
+    /// -- appended after the list, it put Share… under Move to Trash on every
+    /// Library tile (UAT 2026-09-17 #7). `drawn.count` when there is no tail.
+    static func extraInsertionIndex(_ drawn: [RowAction]) -> Int {
+        guard let first = drawn.firstIndex(where: \.isDestructive) else { return drawn.count }
+        return first > 0 && drawn[first - 1].isSeparator ? first - 1 : first
+    }
+
     private static func trimmingSeparators(_ actions: [RowAction]) -> [RowAction] {
         var kept: [RowAction] = []
         for action in actions

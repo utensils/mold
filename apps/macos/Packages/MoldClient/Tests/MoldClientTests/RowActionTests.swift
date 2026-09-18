@@ -30,6 +30,33 @@ import Testing
         #expect(RowAction.rendered([Item(kind: "edit", title: "Edit…")]).count == 1)
     }
 
+    /// A system control that rides along -- the tile's Share… -- is drawn
+    /// with the ordinary items, ahead of the divider that leads the
+    /// destructive tail. Appended after the list, it sat under Move to Trash
+    /// on every Library tile (UAT 2026-09-17 #7).
+    ///
+    /// **Fails today**: there is no insertion index; the renderer appends.
+    @Test func aRiderIsDrawnAheadOfTheDestructiveTail() {
+        let drawn = RowAction.rendered([
+            Item(kind: "open", title: "Open"),
+            Item(kind: "trash", title: "Move to Trash", isDestructive: true),
+        ])
+        // Before the divider: [Open, Share…, ─, Move to Trash].
+        #expect(RowAction.extraInsertionIndex(drawn) == 1)
+        // A list of its own grouping: still ahead of the FIRST destructive
+        // item's divider, never under a later group.
+        let grouped = RowAction.rendered([
+            Item(kind: "open", title: "Open"), .separator,
+            Item(kind: "trash", title: "Move to Trash", isDestructive: true), .separator,
+            Item(kind: "rename", title: "Rename…"),
+            Item(kind: "delete", title: "Delete Collection…", isDestructive: true),
+        ])
+        #expect(RowAction.extraInsertionIndex(grouped) == 1)
+        // Nothing destructive: it rides at the end.
+        let plain = RowAction.rendered([Item(kind: "open", title: "Open")])
+        #expect(RowAction.extraInsertionIndex(plain) == plain.count)
+    }
+
     /// A right-click that opens an empty menu says there is something here and
     /// then does not say what. A disabled placeholder is the same lie with an
     /// extra row.
