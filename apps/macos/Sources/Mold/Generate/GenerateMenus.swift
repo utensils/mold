@@ -24,16 +24,45 @@ enum GenerateMenus {
         return Row.ordered(actions.map(\.row))
     }
 
+    /// The three doors every well that TAKES a picture offers, in the same
+    /// order, by the same names -- a file, a print already in the fleet, or
+    /// whatever is on the pasteboard. The owner's ask: one selector
+    /// everywhere, not four.
+    ///
+    /// Paste is absent, not disabled, when the pasteboard holds no picture.
+    private static func doors(canPaste: Bool) -> [GenerateAction] {
+        canPaste ? [.chooseFile, .chooseFromLibrary, .paste] : [.chooseFile, .chooseFromLibrary]
+    }
+
     /// The source well. `canEditMask` is `RefineGroup.maskCapable`'s answer --
     /// the recipe's own mask path, not a guess.
     static func sourceWell(
         hasPicture: Bool, canEditMask: Bool, canPaste: Bool
     ) -> [Row] {
-        var actions: [GenerateAction] = [.chooseFile, .chooseFromLibrary]
-        if canPaste { actions.append(.paste) }
+        var actions = doors(canPaste: canPaste)
         if hasPicture, canEditMask { actions.append(.editMask) }
         if hasPicture { actions.append(.removeSource) }
         return Row.ordered(actions.map(\.row))
+    }
+
+    /// The ControlNet still's well, which used to open a panel on a click and
+    /// offer no menu, no Library and no Paste at all.
+    static func controlWell(hasPicture: Bool, canPaste: Bool) -> [Row] {
+        var actions = doors(canPaste: canPaste)
+        if hasPicture { actions.append(.removeControl) }
+        return Row.ordered(actions.map(\.row))
+    }
+
+    /// The reference strip's add well. Its `+` is a well like any other.
+    static func referenceAdd(canPaste: Bool) -> [Row] {
+        Row.ordered(doors(canPaste: canPaste).map(\.row))
+    }
+
+    /// The identity group's add well, which used to be an `NSOpenPanel` and
+    /// nothing else -- so a photograph already in the fleet could not be used
+    /// as a face without saving it to this Mac first.
+    static func identityAdd(canPaste: Bool) -> [Row] {
+        Row.ordered(doors(canPaste: canPaste).map(\.row))
     }
 
     /// One reference picture. Order MATTERS here: on a `primaryIsTarget`
@@ -43,23 +72,23 @@ enum GenerateMenus {
         var actions: [GenerateAction] = []
         if index > 0 { actions.append(.moveLeft) }
         if index < count - 1 { actions.append(.moveRight) }
-        actions.append(.replacePicture)
-        actions.append(.removeReference)
+        actions.append(contentsOf: [.replacePicture, .replaceFromLibrary, .removeReference])
         return Row.ordered(actions.map(\.row))
     }
 
-    /// The strip's background. Nothing applies to an empty strip with no room,
-    /// which is a menu that must not appear.
-    static func referenceStrip(count: Int, hasRoom: Bool, canPaste: Bool) -> [Row] {
-        var actions: [GenerateAction] = []
-        if hasRoom { actions.append(.addReference) }
-        if hasRoom, canPaste { actions.append(.paste) }
-        if count > 0 { actions.append(.removeAllReferences) }
-        return Row.ordered(actions.map(\.row))
+    /// The strip's BACKGROUND, which is about the whole strip. Add and Paste
+    /// are the add well's own -- and the add well is drawn whenever there is
+    /// room -- so repeating them here would be two menus one hover apart
+    /// offering the same door. An empty strip has nothing to say at all.
+    static func referenceStrip(count: Int) -> [Row] {
+        guard count > 0 else { return [] }
+        return Row.ordered([GenerateAction.removeAllReferences.row])
     }
 
+    /// One staged identity photograph. Replaced from either door, like every
+    /// other staged picture.
     static func identityPhoto() -> [Row] {
-        Row.ordered([GenerateAction.replacePhoto, .removePhoto].map(\.row))
+        Row.ordered([GenerateAction.replacePhoto, .replaceFromLibrary, .removePhoto].map(\.row))
     }
 
     /// The mask row. Only where a mask has actually been painted -- an

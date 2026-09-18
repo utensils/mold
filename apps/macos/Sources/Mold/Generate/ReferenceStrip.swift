@@ -7,27 +7,26 @@ import SwiftUI
 ///
 /// Order matters: where `primaryIsTarget` is set, the first one is the picture
 /// being edited and the rest are references for it — so the strip is numbered
-/// rather than a bag.
+/// rather than a bag. Every square in it is a `PictureWell`: the add well
+/// chooses, and a staged one is replaced from the same two doors.
 struct ReferenceStrip: View {
     let capability: ReferenceImagesCapability
     @Binding var draft: RenderDraft
+    /// What the strip is, under it. Passed in because only
+    /// `ImageConditioningWells` knows whether this recipe has PARKED it.
+    var caption: String?
 
-    @Environment(HostStore.self) var hosts
-    @Environment(LibraryStore.self) var library
-    /// Not `private`: `ReferenceStrip+Import`, an extension in another file,
-    /// owns getting a picture in and the menus that ask for one.
-    @State var targeted = false
-    @State var showsLibrary = false
-    /// What a file the engine cannot read said, beside the control that
-    /// collected it rather than in a 422 after the upload (finding 02#7).
-    @State var importFailure: String?
-    /// The one import in flight. Cancelled by the next pick, and the reason a
-    /// multi-file drop lands in DROP order.
-    @State var importTask: Task<Void, Never>?
+    /// A staged reference is smaller than a well you pick into -- four of them
+    /// sit beside the prompt.
+    static let thumbnailSize: CGFloat = 52
+    /// Deliberately NOT the source well's glyph: the two squares sit side by
+    /// side on every `combines` recipe, and the owner could not tell them
+    /// apart.
+    static let addGlyph = "plus"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: WellCaption.spacing) {
+            HStack(alignment: .top, spacing: 6) {
                 ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
                     well(index: index, encoded: encoded)
                 }
@@ -35,48 +34,38 @@ struct ReferenceStrip: View {
                     addWell
                 }
             }
-            if let importFailure {
-                Text(importFailure)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 160, alignment: .leading)
-            }
+            if let caption { WellCaption.text(caption) }
         }
         .rowActionMenu(stripMenu) { perform($0, at: nil) }
     }
 
+    /// A staged reference keeps its inline controls -- the order badge and the
+    /// ✕ -- so it does not open its menu on a plain click: a `Menu` label
+    /// swallows the taps those need. Its contextual menu and its drop are the
+    /// chooser's, like every other well.
     private func well(index: Int, encoded: String) -> some View {
-        ReferenceWell(encoded: encoded)
+        PictureWell(
+            rows: itemMenu(index),
+            picture: encoded,
+            size: Self.thumbnailSize,
+            opensOnClick: false,
+            label: label(index),
+            pick: { replace($0, at: index) },
+            perform: { perform($0, at: index) })
             .overlay(alignment: .topLeading) { badge(index) }
             .overlay(alignment: .topTrailing) { remove(index) }
-            .help(label(index))
-            .rowActionMenu(itemMenu(index)) { perform($0, at: index) }
     }
 
-    /// The same "Choose File…" / "From Library…" menu the source well
-    /// offers (M8 decision 5), reusing `PictureSource` for both.
+    /// The same three doors the source well offers, on a `+` that says what it
+    /// is rather than being a second anonymous square.
     private var addWell: some View {
-        Menu {
-            Button("Choose File…", action: chooseFile)
-            Button("From Library…") { showsLibrary = true }
-        } label: {
-            RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
-                .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
-                .frame(width: 52, height: 52)
-                .overlay { Image(systemName: "plus").foregroundStyle(.tertiary) }
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .dropDestination(for: PictureDrop.self) { drops, _ in
-            handle(drops)
-            return true
-        } isTargeted: { targeted = $0 }
-        .help(addWellLabel)
-        .accessibilityLabel(addWellLabel)
-        .sheet(isPresented: $showsLibrary) {
-            LibraryPickerSheet(pick: append)
-        }
+        PictureWell(
+            rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
+            placeholder: Self.addGlyph,
+            allowsMultiple: true,
+            size: Self.thumbnailSize,
+            label: addWellLabel,
+            pick: append)
     }
 
     /// The one sentence the add well's tooltip and its VoiceOver label share.

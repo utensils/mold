@@ -36,6 +36,13 @@ enum GenerateAction: Hashable, CaseIterable {
     case replacePhoto
     case removePhoto
 
+    // Either of the two above, from the OTHER door. One case, because a well
+    // knows which of its slots is being replaced and the door does not.
+    case replaceFromLibrary
+
+    // The ControlNet still.
+    case removeControl
+
     // The mask row.
     case clearMask
 
@@ -59,11 +66,18 @@ enum GenerateAction: Hashable, CaseIterable {
         case .showInLibrary: "Show in Library"
         case .useAsSourceImage: "Use as Source Image"
         case .addAsReference: "Add as Reference"
-        case .chooseFile, .replacePicture, .replacePhoto: "Choose File…"
+        case .chooseFile: "Choose File…"
         case .chooseFromLibrary: "Choose from Library…"
+        // A slot that already holds a picture is REPLACED, from either door.
+        // Both used to read "Choose File…", which says nothing about what
+        // happens to what is already there -- and the Library door was not
+        // offered at all.
+        case .replacePicture, .replacePhoto: "Replace from File…"
+        case .replaceFromLibrary: "Replace from Library…"
         case .paste: "Paste"
         case .editMask: "Edit Mask…"
-        case .removeSource, .removeReference, .removePhoto, .removeAdapter: "Remove"
+        case .removeSource, .removeReference, .removePhoto, .removeAdapter, .removeControl:
+            "Remove"
         case .moveLeft: "Move Left"
         case .moveRight: "Move Right"
         case .addReference: "Add…"
@@ -82,7 +96,7 @@ enum GenerateAction: Hashable, CaseIterable {
     var isDestructive: Bool {
         switch self {
         case .removeSource, .removeReference, .removePhoto, .removeAdapter,
-             .removeAllReferences, .clearMask:
+             .removeAllReferences, .removeControl, .clearMask:
             true
         default:
             false

@@ -52,7 +52,8 @@ struct MenuSurfaceTests {
         #expect(hold.map(\.kind) == [.act(.tryAgain), nil, .cancel])
 
         #expect(TagEditor.menu(for: "smurf").map(\.kind) == [.filter, nil, .rename, .delete])
-        #expect(GenerateMenus.identityPhoto().map(\.kind) == [.replacePhoto, .removePhoto])
+        #expect(GenerateMenus.identityPhoto().map(\.kind)
+            == [.replacePhoto, .replaceFromLibrary, .removePhoto])
         #expect(DiscoverRow.menuItems(for: FakeFixtures.catalogEntry(id: "cv:1", supported: false))
             .map(\.title) == ["Details…"])
     }

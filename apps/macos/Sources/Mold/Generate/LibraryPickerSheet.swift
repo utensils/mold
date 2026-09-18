@@ -10,6 +10,11 @@ import SwiftUI
 /// `rows` and `caption` are pure (`LibraryPicker.rows`, `caption(count:)`),
 /// so the grid's own filtering and footer text are tested with no view.
 struct LibraryPickerSheet: View {
+    /// What the well that opened this sheet can read. A print is bytes mold
+    /// made, which is not the same as bytes that well's path decodes -- the
+    /// identity encoder reads PNG and JPEG and nothing else -- so the picture
+    /// is conformed on the way out exactly as a file would be.
+    var accepting: Set<String> = PictureImport.engineReadable
     /// Handed an `ImportedPicture`, already base64'd off the main actor
     /// (`PictureImport`) -- the wells hold what will be sent, not raw bytes
     /// they would have to encode on the main thread (finding 02#10).
@@ -76,7 +81,8 @@ struct LibraryPickerSheet: View {
             defer { isFetching = false }
             do {
                 pick(try await PictureSource.bytes(
-                    of: .print(selected), hosts: hosts, library: library))
+                    of: .print(selected), accepting: accepting,
+                    hosts: hosts, library: library))
                 dismiss()
             } catch {
                 hosts.report(error, on: selected.host, doing: "fetch that picture")

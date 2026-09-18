@@ -27,8 +27,8 @@ struct GenerateMenusTests {
     @Test func aRowWithNothingApplicableHasNoMenuAtAll() {
         // An unpainted mask row's inline button already IS "Edit mask…".
         #expect(GenerateMenus.maskRow(hasMask: false).isEmpty)
-        // An empty, full strip: nothing to add, nothing to remove.
-        #expect(GenerateMenus.referenceStrip(count: 0, hasRoom: false, canPaste: true).isEmpty)
+        // An empty strip: nothing to remove, and Add is the add well's own.
+        #expect(GenerateMenus.referenceStrip(count: 0).isEmpty)
     }
 
     // MARK: - A finished result
@@ -66,23 +66,21 @@ struct GenerateMenusTests {
     /// and the ends carry no move.
     @Test func aReferenceOffersOnlyTheMovesThatExist() {
         #expect(GenerateMenus.referenceItem(index: 0, count: 3).map(\.kind)
-            == [.moveRight, .replacePicture, .removeReference])
+            == [.moveRight, .replacePicture, .replaceFromLibrary, .removeReference])
         #expect(GenerateMenus.referenceItem(index: 1, count: 3).map(\.kind)
-            == [.moveLeft, .moveRight, .replacePicture, .removeReference])
+            == [.moveLeft, .moveRight, .replacePicture, .replaceFromLibrary, .removeReference])
         #expect(GenerateMenus.referenceItem(index: 2, count: 3).map(\.kind)
-            == [.moveLeft, .replacePicture, .removeReference])
+            == [.moveLeft, .replacePicture, .replaceFromLibrary, .removeReference])
         #expect(GenerateMenus.referenceItem(index: 0, count: 1).map(\.kind)
-            == [.replacePicture, .removeReference])
+            == [.replacePicture, .replaceFromLibrary, .removeReference])
     }
 
-    @Test func theStripBackgroundFollowsItsRoomAndItsContents() {
-        #expect(GenerateMenus.referenceStrip(count: 0, hasRoom: true, canPaste: false).map(\.kind)
-            == [.addReference])
-        #expect(GenerateMenus.referenceStrip(count: 2, hasRoom: true, canPaste: true).map(\.kind)
-            == [.addReference, .paste, .removeAllReferences])
-        // Full: nothing to add or paste, but there is something to clear.
-        #expect(GenerateMenus.referenceStrip(count: 4, hasRoom: false, canPaste: true).map(\.kind)
-            == [.removeAllReferences])
+    /// The background is about the whole strip: its Add and its Paste are the
+    /// add well's own, one square away (`PictureWellTests`).
+    @Test func theStripBackgroundFollowsItsContents() {
+        #expect(GenerateMenus.referenceStrip(count: 0).isEmpty)
+        #expect(GenerateMenus.referenceStrip(count: 2).map(\.kind) == [.removeAllReferences])
+        #expect(GenerateMenus.referenceStrip(count: 4).map(\.kind) == [.removeAllReferences])
     }
 
     /// An ABSENT `max_count` is UNBOUNDED, the way studio reads it -- treating
@@ -104,7 +102,8 @@ struct GenerateMenusTests {
     // MARK: - The rest
 
     @Test func theRemainingRowsOfferWhatTheyCan() {
-        #expect(GenerateMenus.identityPhoto().map(\.kind) == [.replacePhoto, .removePhoto])
+        #expect(GenerateMenus.identityPhoto().map(\.kind)
+            == [.replacePhoto, .replaceFromLibrary, .removePhoto])
         #expect(GenerateMenus.maskRow(hasMask: true).map(\.kind) == [.editMask, .clearMask])
         #expect(GenerateMenus.adapterRow(isAtDefaultStrength: true).map(\.kind) == [.removeAdapter])
         #expect(GenerateMenus.adapterRow(isAtDefaultStrength: false).map(\.kind)

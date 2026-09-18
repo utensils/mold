@@ -1,51 +1,56 @@
 import MoldClient
 import SwiftUI
 
-// Getting a photograph in, and what one offers on a right-click. Split from
-// the group's own shape purely for size.
+// Where a picked photograph goes, and what one offers on a right-click. Split
+// from the group's own shape purely for size.
+//
+// The two staging rules are VALUES, not view methods: the host's own photo
+// limit has to be checked against the list a picture is JOINING rather than
+// the one the pick started with -- a four-file drop onto a two-photo group
+// must not stage four -- and a replacement has to keep its slot.
 extension IdentityGroup {
-    /// Reads, conforms to PNG/JPEG and encodes off the main actor. A HEIC or
-    /// TIFF photograph is TRANSCODED rather than refused -- it is the likeliest
-    /// picture of a face on this Mac, and re-encoding it is the whole fix.
-    ///
-    /// Awaited in SEQUENCE: a task per file let a slow one's `importFailure =
-    /// nil` clear a newer file's error message (review 06, medium).
-    func append(_ urls: [URL]) {
-        importTask?.cancel()
-        importTask = Task {
-            for url in urls {
-                guard !Task.isCancelled, photos.count < maxPhotos else { return }
-                do {
-                    let picked = try await PictureImport.load(
-                        url, accepting: PictureImport.identityReadable)
-                    guard !Task.isCancelled, photos.count < maxPhotos else { return }
-                    var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
-                    conditioning.photos.append(
-                        IdentityPhoto(encoded: picked.encoded, name: picked.name))
-                    draft.media.identity = conditioning
-                    importFailure = nil
-                } catch is CancellationError {
-                    return
-                } catch {
-                    importFailure = error.reasonSentence
-                }
-            }
-        }
+    /// One photograph staged, if there is room for it.
+    static func staging(
+        _ picked: ImportedPicture, in media: DraftMedia, maxPhotos: Int
+    ) -> DraftMedia {
+        var media = media
+        var conditioning = media.identity ?? IdentityConditioning(photos: [])
+        guard conditioning.photos.count < maxPhotos else { return media }
+        conditioning.photos.append(IdentityPhoto(encoded: picked.encoded, name: picked.name))
+        media.identity = conditioning
+        return media
     }
 
-    /// One photograph's menu. Replace is Choose File… aimed at this slot;
-    /// Remove is the well's own ✕ (`GenerateMenus.identityPhoto`).
-    var photoMenu: [GenerateMenus.Row] { GenerateMenus.identityPhoto() }
+    /// One photograph replaced IN PLACE. A remove-then-add sent the
+    /// replacement to the end of the group; one that is no longer staged --
+    /// removed while the panel was open -- changes nothing rather than
+    /// appending a stranger.
+    static func replacing(
+        _ photo: IdentityPhoto, with picked: ImportedPicture, in media: DraftMedia
+    ) -> DraftMedia {
+        var media = media
+        guard var conditioning = media.identity,
+              let index = conditioning.photos.firstIndex(where: { $0.id == photo.id })
+        else { return media }
+        conditioning.photos[index] = IdentityPhoto(encoded: picked.encoded, name: picked.name)
+        media.identity = conditioning
+        return media
+    }
 
+    /// A drop onto the group -- rather than onto one of its wells -- appends,
+    /// through the same pipeline every well uses.
+    func stage(_ drops: [PictureDrop]) {
+        importTask?.cancel()
+        importTask = PictureIntake(
+            accepting: PictureImport.identityReadable, hosts: hosts, library: library,
+            deliver: { draft.media = Self.staging($0, in: draft.media, maxPhotos: maxPhotos) },
+            report: { importFailure = $0 }
+        ).drops(drops)
+    }
+
+    /// Only the rows the chooser does not own reach here.
     func perform(_ action: GenerateAction, on photo: IdentityPhoto) {
-        switch action {
-        case .replacePhoto:
-            remove(photo)
-            choose()
-        case .removePhoto:
-            remove(photo)
-        default:
-            break
-        }
+        guard action == .removePhoto else { return }
+        remove(photo)
     }
 }

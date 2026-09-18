@@ -44,6 +44,18 @@ nonisolated enum PictureImport {
         }.value
     }
 
+    /// Conforms and encodes bytes that are already in hand -- a Library
+    /// print's, fetched from the machine that holds it -- off the main actor.
+    /// Same policy as a file: bytes mold MADE are not necessarily bytes the
+    /// well asking for them can decode.
+    static func conforming(
+        _ data: Data, name: String, accepting: Set<String>
+    ) async throws -> ImportedPicture {
+        try await Task.detached(priority: .userInitiated) {
+            try conform(data, name: name, accepting: accepting)
+        }.value
+    }
+
     /// Base64 for bytes that already came from a machine -- no transcode, but
     /// still off the main actor: the encode alone is a third of a second on a
     /// large still.

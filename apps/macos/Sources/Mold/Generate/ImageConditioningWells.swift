@@ -27,11 +27,15 @@ struct ImageConditioningWells: View {
                             draft: $draft,
                             recipe: recipe,
                             canEditMask: RefineGroup.maskCapable(recipe.capabilities),
-                            openMaskEditor: { controller.showsMaskEditor = true })
+                            openMaskEditor: { controller.showsMaskEditor = true },
+                            caption: WellCaption.source(parked: layout.parked == .source))
                             .opacity(layout.parked == .source ? Self.parkedOpacity : 1)
                     }
                     if let references = layout.references {
-                        ReferenceStrip(capability: references, draft: $draft)
+                        ReferenceStrip(
+                            capability: references, draft: $draft,
+                            caption: WellCaption.references(
+                                max: references.maxCount, parked: layout.parked == .references))
                             .opacity(layout.parked == .references ? Self.parkedOpacity : 1)
                     }
                 }
@@ -47,7 +51,9 @@ struct ImageConditioningWells: View {
     }
 
     /// A parked well is dimmed, not hidden: its picture is kept and comes
-    /// straight back when the active one is removed.
+    /// straight back when the active one is removed. The dimming is the
+    /// SECOND signal -- its caption says "(not used)" in words, because
+    /// opacity tells you something is different and never what.
     private static let parkedOpacity = 0.45
 }
 

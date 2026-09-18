@@ -13,14 +13,15 @@ enum PicturePaste {
         NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
     }
 
-    /// PNG bytes for whatever is on the pasteboard, conformed and encoded off
-    /// the main actor exactly as an imported file is.
-    static func read(_ data: Data?) async throws -> ImportedPicture? {
+    /// Whatever is on the pasteboard, conformed to what the WELL accepts and
+    /// encoded off the main actor exactly as an imported file is.
+    static func read(_ data: Data?, accepting: Set<String>) async throws -> ImportedPicture? {
         guard let data else { return nil }
-        return try await Task.detached(priority: .userInitiated) {
-            try PictureImport.conform(
-                data, name: "Pasted picture.png", accepting: PictureImport.engineReadable)
-        }.value
+        // Named for what the pasteboard actually hands over. `conform` renames
+        // only what it TRANSCODES, so calling these bytes a PNG shipped TIFF
+        // under a PNG name to every well that reads TIFF.
+        return try await PictureImport.conforming(
+            data, name: "Pasted picture.tiff", accepting: accepting)
     }
 
     /// The pasteboard's own bytes, read on the main actor because `NSPasteboard`

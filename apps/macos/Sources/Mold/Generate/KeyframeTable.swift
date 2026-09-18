@@ -68,16 +68,15 @@ struct KeyframeTable: View {
         }
     }
 
-    /// Through `PictureImport` like every other still: read and encoded off
-    /// the main actor, and conformed to something the engine decodes rather
-    /// than uploaded and refused (findings 02#7 and 02#10). The frame is
+    /// Through `PictureSource`'s one panel and `PictureImport` like every
+    /// other still: read and encoded off the main actor, and conformed to
+    /// something the engine decodes rather than uploaded and refused (findings
+    /// 02#7 and 02#10). Its own panel offered PNG and JPEG alone, so an iPhone
+    /// photograph could not be picked as a keyframe at all. The frame is
     /// chosen when the bytes arrive, so two picks in a row cannot land on
     /// the same one.
     private func addKeyframe(temporal: TemporalProfile) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = PictureSource.choose().first else { return }
         Task {
             do {
                 let picked = try await PictureImport.load(

@@ -13,13 +13,14 @@ extension ReferenceStrip {
         GenerateMenus.referenceItem(index: index, count: draft.media.editImages.count)
     }
 
+    /// The strip's background. Add and Paste live on the add well itself, one
+    /// square away, so this is about the strip as a whole.
     var stripMenu: [GenerateMenus.Row] {
-        GenerateMenus.referenceStrip(
-            count: draft.media.editImages.count,
-            hasRoom: capability.hasRoom(for: draft.media.editImages.count),
-            canPaste: PicturePaste.hasPicture)
+        GenerateMenus.referenceStrip(count: draft.media.editImages.count)
     }
 
+    /// Only the rows the chooser does not own reach here -- the ORDER, and the
+    /// removals.
     func perform(_ action: GenerateAction, at index: Int?) {
         switch action {
         case .moveLeft:
@@ -28,16 +29,9 @@ extension ReferenceStrip {
         case .moveRight:
             guard let index, index < draft.media.editImages.count - 1 else { return }
             draft.media.editImages.swapAt(index, index + 1)
-        case .replacePicture:
-            guard let index else { return }
-            replace(at: index)
         case .removeReference:
             guard let index, draft.media.editImages.indices.contains(index) else { return }
             draft.media.editImages.remove(at: index)
-        case .addReference:
-            chooseFile()
-        case .paste:
-            pasteReference()
         case .removeAllReferences:
             draft.media.editImages.removeAll()
         default:

@@ -24,29 +24,39 @@ enum PictureDrop: Transferable {
 
 /// The bytes for a picture from either place a well accepts one.
 enum PictureSource {
-    /// The `NSOpenPanel` every well already opened for "Choose File…":
-    /// png/jpeg/webP/heic/tiff, one file.
-    static func chooseFile() -> URL? {
+    /// THE `NSOpenPanel` for a picture: png/jpeg/webP/heic/tiff. Several files
+    /// only where the well behind it feeds a LIST -- the reference strip and
+    /// the identity group -- because everywhere else a second file would
+    /// silently overwrite the first.
+    ///
+    /// The panel offers more than any one well accepts on the wire on purpose:
+    /// HEIC is the format every iPhone photograph arrives in, and
+    /// `PictureImport` transcodes it rather than the panel pretending the
+    /// picture does not exist.
+    static func choose(allowsMultiple: Bool = false) -> [URL] {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .webP, .heic, .tiff]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK else { return nil }
-        return panel.url
+        panel.allowsMultipleSelection = allowsMultiple
+        guard panel.runModal() == .OK else { return [] }
+        return panel.urls
     }
 
     /// A print's bytes come from the machine that holds it, through the same
     /// route Quick Look uses (`MoldBackend.media`) -- never a second copy
     /// kept on this Mac.
     ///
-    /// A FILE goes through `PictureImport`, which reads, conforms and encodes
-    /// it off the main actor; a print's bytes are already something mold made,
-    /// so only the encode moves.
+    /// Both doors answer the WELL's own acceptance policy. A print's bytes are
+    /// something mold made, which is not the same as something this well's
+    /// path can decode: the identity encoder reads a PNG signature and then
+    /// JPEG markers and nothing else, so a WebP print is transcoded here
+    /// exactly as a HEIC file is, rather than uploaded whole and refused.
     static func bytes(
-        of drop: PictureDrop, hosts: HostStore, library: LibraryStore
+        of drop: PictureDrop, accepting: Set<String>,
+        hosts: HostStore, library: LibraryStore
     ) async throws -> ImportedPicture {
         switch drop {
         case let .file(url):
-            return try await PictureImport.load(url, accepting: PictureImport.engineReadable)
+            return try await PictureImport.load(url, accepting: accepting)
         case let .print(id):
             guard let entry = (library.items + library.trashed).first(where: { $0.id == id }) else {
                 throw MoldClientError.malformedResponse
@@ -56,7 +66,8 @@ enum PictureSource {
             }
             let trashed = entry.print.trashedAt != nil
             let data = try await backend.media(entry.print.filename, trashed: trashed)
-            return await PictureImport.encoded(data, name: entry.print.filename)
+            return try await PictureImport.conforming(
+                data, name: entry.print.filename, accepting: accepting)
         }
     }
 }

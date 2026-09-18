@@ -11,31 +11,51 @@ import SwiftUI
 /// host (this build actually links the identity adapter), and a staged
 /// photo that fails either question is held rather than dropped (decision 5,
 /// M4 design).
+///
+/// Its wells are `PictureWell`s like every other picture well in the app. They
+/// used to be an `NSOpenPanel` and nothing else -- no Library door, no Paste,
+/// no menu -- so a photograph of a face already in the fleet could not be used
+/// as one without saving it to this Mac first (the owner's ask, 2026-09-17).
 struct IdentityGroup: View {
     let maxPhotos: Int
     @Binding var draft: RenderDraft
 
     /// Not `private`: `IdentityGroup+Import`, an extension in another file,
-    /// owns getting a photograph in.
+    /// owns where a picked photograph goes.
     @State var targeted = false
     /// The server reads a PNG signature and then JPEG markers and nothing
-    /// else (`identity.rs:831-880`), while the panel offered HEIC -- the
-    /// default format of every iPhone photograph. The refusal belongs beside
-    /// the control, not in a 422 after the upload (finding 02#7).
+    /// else (`identity.rs:831-880`), while the panel offers HEIC -- the
+    /// default format of every iPhone photograph -- and the Library holds
+    /// WebP. Both are transcoded on the way in; what cannot be read at all
+    /// says so beside the control (finding 02#7).
     @State var importFailure: String?
     /// The one import in flight, so a slower file can never clear a newer
     /// one's message.
     @State var importTask: Task<Void, Never>?
 
+    @Environment(HostStore.self) var hosts
+    @Environment(LibraryStore.self) var library
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             WrappingHStack(horizontalSpacing: 6, verticalSpacing: 6) {
                 ForEach(photos) { photo in
-                    IdentityPhotoWell(photo: photo) { remove(photo) }
-                        .rowActionMenu(photoMenu) { perform($0, on: photo) }
+                    photoWell(photo)
                 }
                 if photos.count < maxPhotos { addWell }
             }
+            // The whole group takes a drop, not just its add well: the wells
+            // wrap, and the empty space beside them is where a dragged
+            // photograph naturally lands.
+            .dropDestination(for: PictureDrop.self) { drops, _ in
+                stage(drops)
+                return true
+            } isTargeted: { targeted = $0 }
+            // The padding is unconditional: a group that only pads itself
+            // WHILE targeted jumps its whole inspector row under the cursor.
+            .padding(2)
+            .background(targeted ? Chrome.wellFillTargeted : .clear,
+                        in: RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous))
             LabeledSection("Weight") {
                 SliderControl(name: "Identity weight", value: weightBinding,
                               range: Identity.weightRange, step: Identity.weightStep) {
@@ -63,36 +83,14 @@ struct IdentityGroup: View {
 
     var photos: [IdentityPhoto] { draft.media.identity?.photos ?? [] }
 
-    private var addWell: some View {
-        RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
-            .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
-            .frame(width: 52, height: 52)
-            .overlay { Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(.tertiary) }
-            .onTapGesture { choose() }
-            .dropDestination(for: URL.self) { urls, _ in
-                append(urls)
-                return true
-            } isTargeted: { targeted = $0 }
-            .help("Add a photograph of the face to preserve")
-            .accessibilityElement()
-            .accessibilityLabel("Add a photograph of the face to preserve")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { choose() }
-    }
-
-    func choose() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .webP, .heic, .tiff]
-        panel.allowsMultipleSelection = true
-        guard panel.runModal() == .OK else { return }
-        append(panel.urls)
-    }
-
     func remove(_ photo: IdentityPhoto) {
         guard var conditioning = draft.media.identity else { return }
         conditioning.photos.removeAll { $0.id == photo.id }
         draft.media.identity = conditioning.photos.isEmpty ? nil : conditioning
     }
+
+    /// The same square the reference strip stages one in.
+    static let photoSize = ReferenceStrip.thumbnailSize
 
     private var weightBinding: Binding<Double> {
         Binding(
