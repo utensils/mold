@@ -181,15 +181,19 @@ private func metadata(_ json: String) -> OutputMetadata {
     #expect(draft.height == 768)
 }
 
-@Test func reuseRestoresTheSeedWithoutPinningIt() {
+@Test func reuseRestoresTheSeedAndLocksIt() {
     let draft = RenderDraft(reusing: metadata("""
     {"prompt":"p","model":"m","seed":42,"steps":4,"guidance":0,"width":512,"height":512}
     """))
-    // "Like that one, but different" is what reuse usually means; pinning the
-    // seed would make every reuse produce the identical picture.
+    // Use These Settings means these settings, the seed among them -- web
+    // makes a recorded seed static too. A print with no seed recorded locks
+    // nothing.
     #expect(draft.seed == 42)
-    #expect(draft.locksSeed == false)
-    #expect(draft.request(model: "m").seed == nil)
+    #expect(draft.locksSeed == true)
+    #expect(draft.request(model: "m").seed == 42)
+    #expect(RenderDraft(reusing: metadata("""
+    {"prompt":"p","model":"m","steps":4,"guidance":0,"width":512,"height":512}
+    """)).locksSeed == false)
 }
 
 @Test func reusingASequenceTakesOnlyItsFirstStage() {

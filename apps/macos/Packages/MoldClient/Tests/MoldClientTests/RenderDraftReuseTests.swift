@@ -25,8 +25,8 @@ import Testing
         #expect(clip.height == metadata.generationHeight)
         #expect(clip.steps == metadata.steps)
         #expect(clip.seed == metadata.seed)
-        // Restored but NOT locked: reuse means "like that one, but different".
-        #expect(clip.locksSeed == false)
+        // Restored AND locked, as web's `seedMode: "static"` does.
+        #expect(clip.locksSeed == true)
     }
 
     @Test func restoresTheFilingAndTheRewriteProvenance() throws {

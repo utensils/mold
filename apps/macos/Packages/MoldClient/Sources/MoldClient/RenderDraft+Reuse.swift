@@ -44,10 +44,13 @@ public extension RenderDraft {
         steps = metadata.steps ?? steps
         guidance = metadata.guidance ?? guidance
         if let strength = metadata.strength { self.strength = strength }
-        // Restored but NOT locked: reuse usually means "like that one, but
-        // different", and pinning it would make every reuse identical.
+        // Restored AND locked, as web does (`useGenerateForm.ts`: a recorded
+        // seed makes `seedMode` static): Use These Settings means these
+        // settings, the seed among them, and the lock is one click to undo.
+        // Left unlocked, a reuse silently rendered a different picture from
+        // the one it was named after (UAT 2026-09-17 #3).
         seed = metadata.seed
-        locksSeed = false
+        locksSeed = metadata.seed != nil
 
         restoreSampler(from: metadata)
         restoreConditioning(from: metadata)
