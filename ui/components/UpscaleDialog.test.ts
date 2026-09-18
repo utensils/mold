@@ -65,7 +65,9 @@ describe("UpscaleDialog", () => {
     host.value = "workstation";
     host.dispatchEvent(new Event("change"));
     await wrapper.vm.$nextTick();
-    expect(wrapper.emitted("update:executionHostValue")).toEqual([["workstation"]]);
+    expect(wrapper.emitted("update:executionHostValue")).toEqual([
+      ["workstation"],
+    ]);
     wrapper.unmount();
 
     const oneHost = mount(UpscaleDialog, {
