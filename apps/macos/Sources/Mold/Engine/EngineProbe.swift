@@ -56,11 +56,15 @@ enum EngineProbe {
 
     /// `nil` when nothing answered at all, which is the ordinary "not yet".
     private static func status(port: UInt16, apiKey: String) async -> Int? {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/status") else { return nil }
+        guard let origin = URL(string: "http://127.0.0.1:\(port)"),
+              let url = URL(string: "http://127.0.0.1:\(port)/api/status") else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
         request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
-        guard let (_, response) = try? await APISession.api.data(for: request) else { return nil }
+        // Whatever squats the port before the engine binds it must not be
+        // handed the key by a redirect off the loopback -- `RedirectGuard`.
+        guard let (_, response) = try? await APISession.api.data(
+            for: request, delegate: RedirectGuard(origin: origin)) else { return nil }
         return (response as? HTTPURLResponse)?.statusCode
     }
 }

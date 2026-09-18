@@ -249,7 +249,7 @@ could not build at all.
 ## Not built yet
 
 Chain jobs (scripted sequences are CLI and API only by design), the 3-D
-studio, and large reference uploads -- mold's upload-session protocol is for
+studio, RunPod provisioning, and large reference uploads -- mold's upload-session protocol is for
 MiniMax H3 and 3-D meshes, neither of which this app makes, so reference
 pictures always travel inline.
 

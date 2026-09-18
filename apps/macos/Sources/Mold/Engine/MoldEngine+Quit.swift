@@ -10,11 +10,12 @@ extension MoldEngine {
         guard case let .running(port) = state else { return }
         watchdog?.cancel()
         transition(to: .stopping("Finishing this Mac's renders and closing the library."))
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/shutdown")!)
+        let origin = URL(string: "http://127.0.0.1:\(port)")!
+        var request = URLRequest(url: origin.appending(path: "api/shutdown"))
         request.httpMethod = "POST"
         request.timeoutInterval = TimeInterval(EngineShutdownBudget.shutdownRequestSeconds)
         if let key = launch?.apiKey { request.setValue(key, forHTTPHeaderField: "X-Api-Key") }
-        _ = try? await APISession.api.data(for: request)
+        _ = try? await APISession.api.data(for: request, delegate: RedirectGuard(origin: origin))
         // Off the main thread: this blocks for the whole budget, and the
         // shutdown request above already yielded.
         let budget = EngineShutdownBudget.joinMilliseconds
