@@ -114,7 +114,13 @@ struct Sidebar: View {
             set: { row in
                 guard let pick = SidebarRows.pick(row) else { return }
                 if let scope = pick.scope { navigation.scope = scope }
-                if let machine = pick.machine { selectedMachine = machine.uuidString }
+                if let machine = pick.machine {
+                    selectedMachine = machine.uuidString
+                } else if pick.destination == .machines {
+                    // The top-level row is the FLEET; a machine still selected
+                    // here would map the row straight back to that machine's page.
+                    selectedMachine = ""
+                }
                 destination = pick.destination
             }
         )
