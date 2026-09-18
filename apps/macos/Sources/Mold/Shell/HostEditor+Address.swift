@@ -14,7 +14,7 @@ extension HostEditor {
     }
 
     var suggestedName: String {
-        resolved.map(HostAddress.suggestedName) ?? "plato"
+        resolved.map(HostAddress.suggestedName) ?? "Workstation"
     }
 
     /// The one line under the address: what went wrong, whose address this

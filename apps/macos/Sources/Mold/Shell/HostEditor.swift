@@ -57,7 +57,7 @@ struct HostEditor: View {
             Form {
                 LabeledContent("Address:") {
                     VStack(alignment: .leading, spacing: 4) {
-                        TextField("Address", text: $address, prompt: Text(verbatim: "plato"))
+                        TextField("Address", text: $address, prompt: Text(verbatim: "workstation.local"))
                             .labelsHidden()
                             .autocorrectionDisabled()
                             .onSubmit(commit)
