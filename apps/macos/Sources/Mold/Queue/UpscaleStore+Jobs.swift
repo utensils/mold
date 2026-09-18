@@ -22,12 +22,15 @@ extension UpscaleStore {
         guard !working.contains(key), !UpscalePlan.shouldPoll(jobs[key]) else { return }
         guard let backend = hosts.backend(for: entry.hostID) else { return }
 
-        let choices = upscalers(on: entry.hostID)
-        guard choices.contains(where: \.isDownloaded) else {
-            hosts.report(NoUpscalerInstalled(), on: entry.hostID, doing: Self.startVerb)
-            return
-        }
-        let model = UpscalePlan.defaultUpscaler(choices)
+        // No local "is one installed" check. Nothing reads `/api/models` on
+        // the way to the Library, so that cache is EMPTY there -- and a
+        // machine with `real-esrgan-x4plus:fp16` ready was refused in a
+        // machine-failure banner naming the wrong problem. The ported policy
+        // already answers for a machine whose upscalers this app has never
+        // listed: its last fallback is the manifest name (`upscale.ts:24`),
+        // and the HOST is the authority on whether it has it. A real refusal
+        // then arrives in the machine's own words, which name the model.
+        let model = UpscalePlan.defaultUpscaler(upscalers(on: entry.hostID))
         let epoch = bump(key)
         working.insert(key)
         defer { working.remove(key) }

@@ -124,13 +124,3 @@ final class UpscaleStore {
         working.contains(Key(host: entry.hostID, filename: entry.print.filename))
     }
 }
-
-/// A machine that can upscale, with nothing installed to do it with.
-///
-/// Reported through `HostStore.report`, which makes the machine the subject
-/// -- so this is the clause that follows it, and it names where to go.
-struct NoUpscalerInstalled: LocalizedError {
-    var errorDescription: String? {
-        "there is no upscaler on it yet. Install one from Models."
-    }
-}

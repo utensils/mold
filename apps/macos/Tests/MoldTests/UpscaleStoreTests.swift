@@ -77,20 +77,47 @@ struct UpscaleStoreTests {
         #expect(!store.canUpscale(entry("shape.glb", on: plato)))
     }
 
-    /// A machine that CAN upscale with nothing installed to do it with never
-    /// gets the request, and the person is told where to go.
-    @Test func withNoUpscalerInstalledNothingIsSentAndItSaysSo() async {
+    /// Nothing reads `/api/models` on the way to the Library, so the model
+    /// cache is EMPTY there -- a local "is an upscaler installed" check
+    /// refused a machine that had one, in a machine-failure banner, naming
+    /// the wrong problem.
+    ///
+    /// The ported policy already answers for a machine whose upscalers this
+    /// app has never listed: its last fallback is the manifest name
+    /// (`upscale.ts:24`), and the HOST is the authority on whether it has it.
+    ///
+    /// **Fails today**: the `isDownloaded` guard makes that fallback
+    /// unreachable and reports `NoUpscalerInstalled` instead.
+    @Test func aMachineWhoseModelsWereNeverListedIsStillAsked() async {
         let plato = machine()
         let backend = fake(for: plato)
-        backend.modelRows = [FakeFixtures.upscaler("real-esrgan-x4plus:fp16", downloaded: false)]
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        await hosts.refresh(plato)
+        // Deliberately NO `models.refresh()` -- this is the Library path.
+        let store = UpscaleStore(hosts: hosts, models: ModelStore(hosts: hosts),
+                                 library: LibraryStore(hosts: hosts),
+                                 interval: .seconds(9))
+
+        await store.start(entry("clip.mp4", on: plato))
+
+        #expect(backend.extras.startedFramewise.map(\.model) == ["real-esrgan-x4plus:fp16"])
+        #expect(hosts.failures.isEmpty, "nothing failed, so nothing is said about the machine")
+    }
+
+    /// And a machine that really has none refuses in ITS OWN words, which
+    /// name the model it could not find -- not this app's guess at why.
+    @Test func aRefusalIsTheMachinesOwnSentence() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.plantedErrors["startFramewiseUpscale"] = MoldClientError.http(
+            status: 404, code: nil, message: "Unknown upscaler model real-esrgan-x4plus:fp16")
         let (store, hosts) = await bench(backend, host: plato)
 
         await store.start(entry("clip.mp4", on: plato))
 
-        #expect(backend.callCount("startFramewiseUpscale") == 0)
-        let sentence = try? #require(hosts.failures.first?.sentence)
-        #expect(sentence?.contains("no upscaler") == true)
-        #expect(sentence?.contains("Models") == true)
+        // `HostStore.report` makes the machine the subject, so the host's
+        // own clause follows it in lower case.
+        #expect(hosts.failures.first?.sentence.contains("unknown upscaler model") == true)
     }
 
     // MARK: - The sequences
