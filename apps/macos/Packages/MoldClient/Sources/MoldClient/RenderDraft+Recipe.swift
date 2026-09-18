@@ -52,7 +52,8 @@ public extension RenderDraft {
             // with a different resolution contract -- reuse onto a recipe
             // with its own bucket list, or a smaller ceiling, must not submit
             // a size the new host is going to refuse.
-            draft.fit(to: recipe.resolution)
+            (draft.width, draft.height) = CanvasFit.fitted(
+                (draft.width, draft.height), to: recipe.resolution)
         }
         // A fixed control has exactly one correct value, whatever was there.
         if recipe.steps.mode == .fixed { draft.steps = recipe.steps.default }

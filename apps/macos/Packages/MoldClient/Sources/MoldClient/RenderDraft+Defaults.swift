@@ -19,7 +19,8 @@ public extension RenderDraft {
             if let height = defaults.height { draft.height = height }
             // A default outside the recipe's own bucket list or bounds must
             // not be submitted -- the same fit a carried-over size gets.
-            draft.fit(to: recipe.resolution)
+            (draft.width, draft.height) = CanvasFit.fitted(
+                (draft.width, draft.height), to: recipe.resolution)
         }
         if let negativePrompt = defaults.negativePrompt,
            recipe.capabilities.negativePrompt?.isAvailable == true {

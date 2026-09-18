@@ -1,17 +1,23 @@
 import Foundation
 
-// Snapping a carried-over size onto a recipe's resolution contract. Split
-// from `RenderDraft+Recipe` purely for size -- `adopting` calls straight into
-// `fit(to:)` for a KEPT draft, which is the one path that carries a size
-// across models with a different contract.
-public extension RenderDraft {
-    /// Snaps `width`/`height` onto what `resolution` will actually accept.
+/// What a recipe's resolution contract will actually accept, as arithmetic.
+///
+/// Its own namespace rather than more of `RenderDraft`: none of this reads or
+/// writes a draft. It is a size and a `ResolutionProfile`, and the answer is
+/// the size that profile would admit -- the client half of
+/// `validate_resolution` (`generation_profile.rs:1327-1404`). The draft calls
+/// it wherever a size arrives from somewhere that cannot vouch for it: a model
+/// change, a stored default, a source picture's own shape.
+public enum CanvasFit {
+    /// Snaps a size onto what `resolution` will actually accept.
     ///
     /// Only meaningful on a size carried over from elsewhere -- a fresh
     /// model's defaults are valid for its own recipe by construction.
     /// `.sourceDriven`, `.none` and `.unknown` are left alone: the size either
     /// comes from somewhere else, or there is no canvas to size.
-    mutating func fit(to resolution: ResolutionProfile) {
+    public static func fitted(
+        _ size: (width: Int, height: Int), to resolution: ResolutionProfile
+    ) -> (width: Int, height: Int) {
         switch resolution.domain {
         case .buckets:
             // `warn` switches off the BUCKET-MEMBERSHIP check and nothing
@@ -23,18 +29,19 @@ public extension RenderDraft {
             // `warn` and its checkpoints carry a real grid (32 on
             // `wan22-ti2v-5b`), so a 1360x768 carried off a FLUX recipe is
             // refused outright where the old snap at least rendered.
+            var fitted = size
             if (resolution.offBucket ?? .reject) == .warn {
-                clampToContract(resolution)
+                fitted = clampedToContract(size, resolution)
                 // Aspect cannot be clamped without changing the shape the
                 // size is FOR, so a size still outside the band falls back to
                 // the ladder -- the only legal answer left.
-                guard !satisfiesAspect(resolution) else { return }
+                if satisfiesAspect(fitted, resolution) { return fitted }
             }
-            snapToNearestPreset(resolution)
+            return snappedToNearestPreset(fitted, resolution)
         case .dynamic:
-            clampToContract(resolution)
+            return clampedToContract(size, resolution)
         case .sourceDriven, .none, .unknown:
-            break
+            return size
         }
     }
 
@@ -42,7 +49,11 @@ public extension RenderDraft {
     /// minimums, the axis ceiling, the pixel budget and the alignment grid.
     /// Shared by the `.dynamic` arm and by a `warn` bucket profile, because
     /// the server applies one rule to both.
-    private mutating func clampToContract(_ resolution: ResolutionProfile) {
+    private static func clampedToContract(
+        _ size: (width: Int, height: Int), _ resolution: ResolutionProfile
+    ) -> (width: Int, height: Int) {
+        var width = size.width
+        var height = size.height
         if let minWidth = resolution.minWidth { width = Swift.max(width, minWidth) }
         if let minHeight = resolution.minHeight { height = Swift.max(height, minHeight) }
         if let maxAxis = resolution.maxAxisPixels {
@@ -56,10 +67,10 @@ public extension RenderDraft {
             width = Swift.max(1, Int(Double(width) * scale))
             height = Swift.max(1, Int(Double(height) * scale))
         }
-        guard let alignment = resolution.alignment, alignment > 1 else { return }
+        guard let alignment = resolution.alignment, alignment > 1 else { return (width, height) }
         let unaligned = (width: width, height: height)
-        width = Self.aligned(width, to: alignment, atLeast: resolution.minWidth)
-        height = Self.aligned(height, to: alignment, atLeast: resolution.minHeight)
+        width = aligned(width, to: alignment, atLeast: resolution.minWidth)
+        height = aligned(height, to: alignment, atLeast: resolution.minHeight)
         // Rounding to the NEAREST multiple can grow both axes back past the
         // budget just enforced -- 1788x1006 (1,798,728 under FLUX's
         // 1,800,000) aligns to 1792x1008 = 1,806,336, which
@@ -68,30 +79,36 @@ public extension RenderDraft {
         // falls to the multiple BELOW the scaled pair (not below the
         // already-rounded-up one) (finding 01#8).
         if let maxPixels = resolution.maxPixels, width * height > maxPixels {
-            width = Self.alignedDown(unaligned.width, to: alignment, atLeast: resolution.minWidth)
-            height = Self.alignedDown(unaligned.height, to: alignment, atLeast: resolution.minHeight)
+            width = alignedDown(unaligned.width, to: alignment, atLeast: resolution.minWidth)
+            height = alignedDown(unaligned.height, to: alignment, atLeast: resolution.minHeight)
         }
+        return (width, height)
     }
 
-    private func satisfiesAspect(_ resolution: ResolutionProfile) -> Bool {
-        guard height > 0 else { return false }
-        let aspect = Double(width) / Double(height)
+    private static func satisfiesAspect(
+        _ size: (width: Int, height: Int), _ resolution: ResolutionProfile
+    ) -> Bool {
+        guard size.height > 0 else { return false }
+        let aspect = Double(size.width) / Double(size.height)
         if let minimum = resolution.minAspectRatio, aspect < minimum { return false }
         if let maximum = resolution.maxAspectRatio, aspect > maximum { return false }
         return true
     }
 
-    private mutating func snapToNearestPreset(_ resolution: ResolutionProfile) {
+    private static func snappedToNearestPreset(
+        _ size: (width: Int, height: Int), _ resolution: ResolutionProfile
+    ) -> (width: Int, height: Int) {
         guard let nearest = resolution.presets.min(by: {
-            distanceSquared(to: $0) < distanceSquared(to: $1)
-        }) else { return }
-        width = nearest.width
-        height = nearest.height
+            distanceSquared(from: size, to: $0) < distanceSquared(from: size, to: $1)
+        }) else { return size }
+        return (nearest.width, nearest.height)
     }
 
-    private func distanceSquared(to preset: SizePreset) -> Int {
-        let dw = preset.width - width
-        let dh = preset.height - height
+    private static func distanceSquared(
+        from size: (width: Int, height: Int), to preset: SizePreset
+    ) -> Int {
+        let dw = preset.width - size.width
+        let dh = preset.height - size.height
         return dw * dw + dh * dh
     }
 
