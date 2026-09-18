@@ -34,13 +34,18 @@ extension View {
             // Hidden, there is no column and no divider, so the switch is an
             // ordinary trailing button whatever the pane does with search.
             let reservesColumn = isShowing.wrappedValue && !searchFillsTheColumn
+            // The reservation is a spacer BESIDE the button, never a frame
+            // on it: a frame widens the button's hit region too, and a click
+            // anywhere in the empty band over the column toggled the column.
             ToolbarItem {
-                Button { isShowing.wrappedValue.toggle() } label: {
-                    Label("Inspector", systemImage: "sidebar.trailing")
+                HStack(spacing: 0) {
+                    if reservesColumn { Spacer(minLength: 0) }
+                    Button { isShowing.wrappedValue.toggle() } label: {
+                        Label("Inspector", systemImage: "sidebar.trailing")
+                    }
+                    .help(isShowing.wrappedValue ? "Hide the inspector" : "Show the inspector")
                 }
-                .help(isShowing.wrappedValue ? "Hide the inspector" : "Show the inspector")
-                .frame(width: reservesColumn ? TrailingColumn.toolbarRegion : nil,
-                       alignment: .trailing)
+                .frame(width: reservesColumn ? TrailingColumn.toolbarRegion : nil)
             }
         }
     }
