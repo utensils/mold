@@ -8,7 +8,7 @@ Built with `make build CONFIG=Debug`; **BUILD SUCCEEDED**.
 Driven with throwaway state, the way `make uat` does:
 
 ```
-MOLD_NATIVE_FRESH=1 MOLD_HOME=/Volumes/ExternalStorage/mold-uat-home \
+MOLD_NATIVE_FRESH=1 MOLD_HOME="$TMPDIR/mold-native-uat" \
   apps/macos/build/Debug/Mold.app/Contents/MacOS/Mold
 ```
 
