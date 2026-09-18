@@ -11,6 +11,21 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-18
+
+- **Build Nix release dependencies with valid Cargo sources.** Keep static crate
+  downloads without introducing a duplicate crates.io registry definition, verify
+  the Crane helper with a real build, and fix isolated desktop type checking.
+- **Fetch Nix release dependencies reliably.** Download checksum-verified Cargo
+  archives directly from the static crates.io endpoint for the Crane helper and
+  desktop package. Report failed cache builds as failures while keeping cache
+  publication independent of native release delivery.
+- **Validate containers before tagging releases.** Install the Protobuf compiler
+  required by mesh matting in CUDA images, build real images on relevant pull
+  requests and all six GPU targets for release candidates, and preserve sibling
+  build results when one target fails. Retire FlakeHub publication and its README
+  installation reference; GitHub releases and Nix remain available.
+
 ## [0.30.0] - 2026-09-16
 
 - **Restore CUDA container releases.** Include the complete Hunyuan3D mesh pipeline in every Docker target so the SM89 server build passes its required feature checks.
@@ -5862,7 +5877,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/utensils/mold/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/utensils/mold/compare/v0.27.1...v0.28.0
