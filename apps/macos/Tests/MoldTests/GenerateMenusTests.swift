@@ -7,6 +7,12 @@ import Testing
 /// What each Generate surface offers on a right-click: the ORDER, the GATING
 /// and the shared source, not a list of titles. Every one of these is the same
 /// list the inline control beside it renders.
+private extension [GenerateMenus.Row] {
+    /// The actions a rendered list really offers -- separators and submenus
+    /// carry no kind.
+    var kinds: Set<GenerateAction> { Set(compactMap(\.kind)) }
+}
+
 @MainActor
 struct GenerateMenusTests {
     // MARK: - The house rules
@@ -116,6 +122,44 @@ struct GenerateMenusTests {
         for action in GenerateAction.allCases {
             #expect(!action.title.isEmpty)
         }
+    }
+
+    /// **Fails today**: `.addReference` is declared, titled and routed, and no
+    /// menu emits it any more -- the strip's background offered it beside an
+    /// add well that offers the same door one square away, and lost it. A case
+    /// nothing emits is a row nobody can reach, and reads in the source like a
+    /// feature that exists.
+    ///
+    /// Every gate of every menu, so the union really is everything on offer.
+    @Test func everyDeclaredActionIsOfferedBySomeMenu() {
+        var offered: Set<GenerateAction> = []
+        for yes in [false, true] {
+            for also in [false, true] {
+                offered.formUnion(
+                    GenerateMenus.result(canUseAsSource: yes, canAddReference: also).kinds)
+                offered.formUnion(GenerateMenus.controlWell(hasPicture: yes, canPaste: also).kinds)
+                for mask in [false, true] {
+                    offered.formUnion(GenerateMenus.sourceWell(
+                        hasPicture: yes, canEditMask: mask, canPaste: also).kinds)
+                }
+            }
+            offered.formUnion(GenerateMenus.referenceAdd(canPaste: yes).kinds)
+            offered.formUnion(GenerateMenus.identityAdd(canPaste: yes).kinds)
+            offered.formUnion(GenerateMenus.maskRow(hasMask: yes).kinds)
+            offered.formUnion(GenerateMenus.adapterRow(isAtDefaultStrength: yes).kinds)
+            offered.formUnion(GenerateMenus.referenceWeight(isAtDefault: yes).kinds)
+            offered.formUnion(GenerateMenus.sampler(touched: yes).kinds)
+            offered.formUnion(GenerateMenus.sourceFit(isAtDefault: yes).kinds)
+        }
+        for index in 0 ..< 3 {
+            offered.formUnion(GenerateMenus.referenceItem(index: index, count: 3).kinds)
+        }
+        offered.formUnion(GenerateMenus.referenceStrip(count: 1).kinds)
+        offered.formUnion(GenerateMenus.identityPhoto().kinds)
+        offered.formUnion(GenerateMenus.recentPrompt().kinds)
+
+        #expect(Set(GenerateAction.allCases).subtracting(offered) == [],
+                "a declared action no menu offers")
     }
 
     // MARK: - Bare arrow keys (finding 02#15)

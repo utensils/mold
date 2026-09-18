@@ -31,9 +31,11 @@ struct PictureWell: View {
     /// a well that only previews what it loaded itself drew the placeholder
     /// over a picture that was really there.
     var picture: String?
-    /// The glyph for an empty well. Different per well ON PURPOSE: the source
-    /// still and the strip's add well sit side by side.
-    var placeholder = SourceImageWell.placeholderGlyph
+    /// The glyph for an empty well. Every well that can be picked INTO names
+    /// its own, ON PURPOSE -- the source still and the strip's add well sit
+    /// side by side. The default is for a well that always holds a picture and
+    /// draws this only while its bytes are decoding.
+    var placeholder = "photo"
     /// What the machine can read from this well, applied to every door.
     var accepting: Set<String> = PictureImport.engineReadable
     /// Whether one pick may bring several pictures -- true for the wells that

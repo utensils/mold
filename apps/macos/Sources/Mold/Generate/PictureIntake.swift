@@ -30,28 +30,22 @@ struct PictureIntake {
     /// that collected the file rather than in a 422 after the upload (02#7).
     let report: (String?) -> Void
 
-    /// A drop is ORDERED, so its files are awaited in sequence: a task per
-    /// file appended in COMPLETION order, and a small local file could
-    /// overtake a Library print fetched over the network.
+    /// A drop is ORDERED, and so is the strip: a task per file appended in
+    /// COMPLETION order, and a small local file could overtake a Library print
+    /// fetched over the network, so a render edited the wrong picture. They are
+    /// awaited in sequence instead.
     func drops(_ drops: [PictureDrop]) -> Task<Void, Never> {
-        Task {
-            for drop in drops {
-                guard !Task.isCancelled else { return }
-                do {
-                    deliver(try await PictureSource.bytes(
-                        of: drop, accepting: accepting, hosts: hosts, library: library))
-                    report(nil)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    // A print that would not come off its machine is that
-                    // machine's failure, reported where every other one is.
-                    if case let .print(id) = drop {
-                        hosts.report(error, on: id.host, doing: "fetch that picture")
-                    } else {
-                        report(error.reasonSentence)
-                    }
-                }
+        run(drops) { drop in
+            do {
+                deliver(try await PictureSource.bytes(
+                    of: drop, accepting: accepting, hosts: hosts, library: library))
+                return nil
+            } catch {
+                // A print that would not come off its machine is that
+                // machine's failure, reported where every other one is.
+                guard case let .print(id) = drop else { throw error }
+                hosts.report(error, on: id.host, doing: "fetch that picture")
+                return nil
             }
         }
     }
@@ -59,18 +53,9 @@ struct PictureIntake {
     /// The panel runs on the main actor -- it has to -- but the read, the
     /// transcode and the base64 do not (02#10).
     func files(_ urls: [URL]) -> Task<Void, Never> {
-        Task {
-            for url in urls {
-                guard !Task.isCancelled else { return }
-                do {
-                    deliver(try await PictureImport.load(url, accepting: accepting))
-                    report(nil)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    report(error.reasonSentence)
-                }
-            }
+        run(urls) { url in
+            deliver(try await PictureImport.load(url, accepting: accepting))
+            return nil
         }
     }
 
@@ -79,17 +64,51 @@ struct PictureIntake {
     /// everything after that is not.
     func paste() -> Task<Void, Never> {
         let data = PicturePaste.pasteboardData()
-        return Task {
-            do {
-                guard let picked = try await PicturePaste.read(data, accepting: accepting),
-                      !Task.isCancelled else { return }
-                deliver(picked)
-                report(nil)
-            } catch is CancellationError {
-                return
-            } catch {
-                report(error.reasonSentence)
+        return run([data]) { data in
+            guard let picked = try await PicturePaste.read(data, accepting: accepting)
+            else { return nil }
+            deliver(picked)
+            return nil
+        }
+    }
+
+    /// One pick, however many pictures it brought.
+    ///
+    /// The sentence is cleared ONCE, at the start, and never again inside the
+    /// loop: clearing it per delivery meant three files where the first two
+    /// could not be read and the third could ended with nothing said at all.
+    /// And a file that fails does not end the pick -- the rest are still
+    /// attempted, the `return`-instead-of-`continue` that lost nine of ten
+    /// files in the Library's own import (03-M-ish, `LibraryActions.send`).
+    private func run<Item>(
+        _ items: [Item], each: @escaping (Item) async throws -> String?
+    ) -> Task<Void, Never> {
+        Task {
+            report(nil)
+            var failures: [String] = []
+            for item in items {
+                guard !Task.isCancelled else { return }
+                do {
+                    if let refusal = try await each(item) { failures.append(refusal) }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    failures.append(error.reasonSentence)
+                }
             }
+            guard !Task.isCancelled else { return }
+            report(Self.summary(of: failures))
+        }
+    }
+
+    /// What one pick's failures say. Several are one line that says HOW MANY,
+    /// the way the Library's own import reports a batch -- naming only the
+    /// first would under-report what did not arrive.
+    static func summary(of failures: [String]) -> String? {
+        switch failures.count {
+        case 0: nil
+        case 1: failures[0]
+        default: "\(failures.count) of those files couldn't be used."
         }
     }
 }

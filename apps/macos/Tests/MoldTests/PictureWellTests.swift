@@ -215,6 +215,21 @@ struct PictureWellTests {
         #expect(media.identity?.photos.map(\.name) == ["a.png", "new.png", "c.png"])
     }
 
+    /// **Fails today**: every well cleared its failure sentence on each
+    /// DELIVERY, so a four-file pick whose first three could not be read and
+    /// whose fourth could ended with nothing said at all -- the pick looked
+    /// like it had worked and three pictures were simply missing.
+    @Test func aPickReportsWhatDidNotArriveEvenWhenSomethingDid() {
+        #expect(PictureIntake.summary(of: []) == nil)
+        // One names the file, because that is the useful thing to say.
+        #expect(PictureIntake.summary(of: ["notes.txt isn't a picture this Mac can read."])
+            == "notes.txt isn't a picture this Mac can read.")
+        // Several are one line that says HOW MANY: naming only the first
+        // under-reports what did not arrive (`LibraryImportTests`' rule).
+        let several = PictureIntake.summary(of: ["a", "b", "c"])
+        #expect(several == "3 of those files couldn't be used.")
+    }
+
     // MARK: - Wells that say what they are
 
     /// Opacity is not an explanation: a parked well says so in words.

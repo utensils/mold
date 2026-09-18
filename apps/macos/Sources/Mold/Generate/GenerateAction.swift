@@ -29,7 +29,6 @@ enum GenerateAction: Hashable, CaseIterable {
     case moveRight
     case replacePicture
     case removeReference
-    case addReference
     case removeAllReferences
 
     // An identity photograph.
@@ -80,7 +79,6 @@ enum GenerateAction: Hashable, CaseIterable {
             "Remove"
         case .moveLeft: "Move Left"
         case .moveRight: "Move Right"
-        case .addReference: "Add…"
         case .removeAllReferences: "Remove All"
         case .clearMask: "Clear Mask"
         case .resetStrength: "Reset Strength"
