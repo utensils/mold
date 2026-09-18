@@ -20,16 +20,16 @@ extension GenerateController {
     func submit(on host: MoldHost, backend: any MoldBackend,
                 routing: ChainRouting.Decision = .single()) {
         guard let modelName else { return }
-        if ChainSubmission.take(routing, request: draft.request(model: modelName),
-                                on: host, backend: backend, controller: self) { return }
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
-        let admission = BatchAdmission(requests: draft.requests(
+        let built = draft.requests(
             model: modelName, copies: copies,
             randomBase: .random(in: 0 ... UInt64(UInt32.max)),
-            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
-        ))
+            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0)
+        if ChainSubmission.take(routing, requests: built,
+                                on: host, backend: backend, controller: self) { return }
+        let admission = BatchAdmission(requests: built)
         PendingBatch.remember(admission.clientBatchId, host: host.id)
 
         // Decided HERE, synchronously, before the `Task` below is even

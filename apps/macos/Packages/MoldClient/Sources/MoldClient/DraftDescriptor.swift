@@ -22,13 +22,13 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public static let currentVersion = 1
 
     public var version: Int = DraftDescriptor.currentVersion
-    /// What was chosen, so the pane can put the model and machine back. A
-    /// model that is gone simply does not match anything, and the rest of the
-    /// draft still restores.
+    /// What was chosen, so the pane can put the model back. A model that is
+    /// gone simply does not match anything, and the rest of the draft still
+    /// restores. The MACHINE is deliberately not here: `MachineChoiceStore`
+    /// already persists it, and a second copy would be a second authority.
     public var model: String?
     public var family: String?
     public var recipeID: String?
-    public var host: String?
 
     public var prompt: String
     public var negativePrompt: String
@@ -69,7 +69,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var skipStep: Int?
 
     enum CodingKeys: String, CodingKey {
-        case version, model, family, recipeID, host, prompt, negativePrompt, width, height
+        case version, model, family, recipeID, prompt, negativePrompt, width, height
         case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline
         case enableAudio, videoOnly, strength, title, tags, collectionName, autoTagTitle
         case outputFormat, upscaleModel, savesToGallery, canvasIntent, sourceFit

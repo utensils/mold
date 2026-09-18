@@ -21,9 +21,10 @@ enum ChainSubmission {
     /// was running perfectly well. It is admitted and waits its turn, which is
     /// what M8 decision 8 says for every press.
     static func take(
-        _ routing: ChainRouting.Decision, request: GenerateRequest,
+        _ routing: ChainRouting.Decision, requests: [GenerateRequest],
         on host: MoldHost, backend: any MoldBackend, controller: GenerateController
     ) -> Bool {
+        guard !requests.isEmpty else { return false }
         switch routing {
         case .single:
             return false
@@ -33,18 +34,27 @@ enum ChainSubmission {
             controller.run = .failed(reason)
             return true
         case let .chain(clipFrames, motionTail, stageCount):
-            let body = AutoChainRequest(request, clipFrames: clipFrames, motionTail: motionTail)
+            // Four copies of a long clip are FOUR chains, one per seed. One
+            // press used to build a single request and ignore `batchSize`
+            // entirely, so asking for four silently rendered one.
+            let bodies = requests.map {
+                AutoChainRequest($0, clipFrames: clipFrames, motionTail: motionTail)
+            }
             // Decided HERE, synchronously, before any `Task` is scheduled --
             // the same rule `submit` follows, so two presses in one turn can
             // never both think they are the one being followed.
-            guard controller.run.isBusy else {
-                controller.run = .submitting
-                controller.chain.start(body, stageCount: stageCount, on: host.id,
-                                       backend: backend, report: reporter(for: controller))
-                return true
+            var following = !controller.run.isBusy
+            for body in bodies {
+                if following {
+                    controller.run = .submitting
+                    controller.chain.start(body, stageCount: stageCount, on: host.id,
+                                           backend: backend, report: reporter(for: controller))
+                    following = false
+                } else {
+                    admitAndQueue(body, stageCount: stageCount, on: host,
+                                  backend: backend, controller: controller)
+                }
             }
-            admitAndQueue(body, stageCount: stageCount, on: host,
-                          backend: backend, controller: controller)
             return true
         }
     }

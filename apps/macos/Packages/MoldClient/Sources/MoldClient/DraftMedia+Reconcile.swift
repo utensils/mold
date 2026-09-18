@@ -85,6 +85,12 @@ public extension DraftMedia {
         // family and defensively on submit" (`sourceFit.ts:261-266`); this is
         // the first half, and `applySourceFit` is the second.
         if !acceptsMask { sourceFit = sourceFit.coercedForMaskless() }
+        // This app has no client-side upscale to run first, so a restored or
+        // reused `upscale-then-fit` is normalised to the fit it will ACTUALLY
+        // perform. Leaving it would bind the Fit picker to a selection
+        // matching no row, caption it "Enhances a small picture first…", and
+        // then record a policy the pixels never got.
+        if sourceFit.mode == .upscaleThenFit { sourceFit = sourceFit.effective }
 
         // Identity is positive-only: `supportsIdentity != true` means the
         // well is not drawn and the staged photo is held, because sending it

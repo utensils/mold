@@ -55,12 +55,23 @@ extension PromptPanel {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(draft.refusal(for: recipe) != nil)
+            .disabled(submitRefusal != nil)
             .help(controller.run.isBusy
                   ? "Queue another render"
-                  : (draft.refusal(for: recipe) ?? "Render this"))
+                  : (submitRefusal ?? "Render this"))
             .fixedSize()
         }
+    }
+
+    /// Why Generate is not offered. The draft's own refusal, and -- for a
+    /// clip past what this model can chain -- the ROUTING's, which used to be
+    /// computed for the caption under the slider and then only discovered
+    /// after the press, as a failure on the canvas.
+    private var submitRefusal: String? {
+        guard let recipe else { return nil }
+        if let refusal = draft.refusal(for: recipe) { return refusal }
+        return ClipRouting.resolve(recipe: recipe, model: model, draft: draft,
+                                   limits: chainLimits)?.refusal
     }
 
     @ViewBuilder private var stopButton: some View {

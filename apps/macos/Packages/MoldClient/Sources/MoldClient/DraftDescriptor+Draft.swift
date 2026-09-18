@@ -8,12 +8,10 @@ import Foundation
 // whatever the live session already staged rather than clearing it, and a
 // persisted descriptor can never resurrect a picture whose bytes are gone.
 public extension DraftDescriptor {
-    init(_ draft: RenderDraft, model: String?, family: String?,
-         recipeID: String?, host: String?) {
+    init(_ draft: RenderDraft, model: String?, family: String?, recipeID: String?) {
         self.model = model
         self.family = family
         self.recipeID = recipeID
-        self.host = host
         prompt = draft.prompt
         negativePrompt = draft.negativePrompt
         width = draft.width

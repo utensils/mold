@@ -47,7 +47,6 @@ public enum AutoChainField: String, Hashable, Sendable, CaseIterable {
     case extendVideo = "video continuation"
     case keyframes
     case pipeline = "pipeline selection"
-    case retakeRange = "retake range"
     case guidanceOverrides = "guidance overrides"
 
     /// The label this reads as in a sentence. It IS the raw value for all but

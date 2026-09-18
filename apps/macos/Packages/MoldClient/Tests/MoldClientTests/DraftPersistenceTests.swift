@@ -41,7 +41,7 @@ struct DraftPersistenceTests {
     @Test func noByteBearingRootReachesTheFile() throws {
         let store = DraftStore(directory: temporary())
         store.save(DraftDescriptor(loadedDraft(), model: "m", family: "f",
-                                   recipeID: nil, host: nil))
+                                   recipeID: nil))
         let written = try String(contentsOf: store.url, encoding: .utf8)
         let sentinels = ["SOURCEBYTES", "ORIGINALBYTES", "REFBYTES", "MASKBYTES", "FACEBYTES",
                          "CONTROLBYTES", "KEYBYTES", "EXTENDBYTES", "AUDIOBYTES", "VIDEOBYTES",
@@ -69,7 +69,7 @@ struct DraftPersistenceTests {
 
         let store = DraftStore(directory: temporary())
         store.save(DraftDescriptor(draft, model: "flux-dev:q4", family: "flux",
-                                   recipeID: "auto", host: "H"))
+                                   recipeID: "auto"))
         let restored = try #require(store.load())
         #expect(restored.model == "flux-dev:q4")
 
@@ -96,7 +96,7 @@ struct DraftPersistenceTests {
         let directory = temporary()
         let store = DraftStore(directory: directory)
         var descriptor = DraftDescriptor(RenderDraft(), model: "m", family: nil,
-                                         recipeID: nil, host: nil)
+                                         recipeID: nil)
         descriptor.version = DraftDescriptor.currentVersion + 1
         store.save(descriptor)
 
@@ -134,7 +134,7 @@ struct DraftPersistenceTests {
     @Test func theDocumentSpellsItsKeysExactlyAsTheTypeDoes() throws {
         let store = DraftStore(directory: temporary())
         store.save(DraftDescriptor(RenderDraft(), model: "m", family: "f",
-                                   recipeID: "auto", host: "H"))
+                                   recipeID: "auto"))
         let written = try String(contentsOf: store.url, encoding: .utf8)
         #expect(written.contains("\"recipeID\""))
         #expect(written.contains("\"negativePrompt\""))

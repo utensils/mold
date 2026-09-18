@@ -122,6 +122,29 @@ struct ChainQueueTests {
         #expect(controller.run.stage == "Clip 1 of 3")
     }
 
+    /// **Fails today**: `ChainSubmission` built ONE request and never read
+    /// `draft.batchSize`, so asking for three long clips silently rendered
+    /// one. Four copies are four chains, one per seed, sharing one batch id.
+    @Test func abatchOfLongClipsRendersEveryCopyItWasAskedFor() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        controller.draft.batchSize = 3
+        backend.chainJobAnswer = chainAnswer("chain-b1")
+        backend.chainEventsHeldOpen.insert("chain-b1")
+
+        controller.submit(on: plato, backend: backend, routing: routing)
+        await settle { backend.chainJobRequests.count == 3 }
+
+        let bodies = backend.chainJobRequests
+        #expect(Set(bodies.compactMap(\.seed)).count == 3, "the copies share a seed")
+        #expect(Set(bodies.compactMap(\.batchId)).count == 1, "the copies are not one batch")
+        #expect(bodies.compactMap(\.batchCount).allSatisfy { $0 == 3 })
+        // One on the canvas, the rest waiting -- never all three at once.
+        await settle { controller.queuedCount == 2 }
+        #expect(controller.run.stage == "Clip 1 of 3")
+    }
+
     /// Stop All withdraws the waiting chain on its own machine too -- a queued
     /// chain is a REAL job on the host, not a local intention.
     @Test func stopAllWithdrawsAWaitingChain() async {

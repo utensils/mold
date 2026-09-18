@@ -72,6 +72,13 @@ public struct AutoChainRequest: Encodable, Hashable, Sendable {
     public let title: String?
     public let tags: [String]?
     public let collection: CollectionRef?
+    /// The batch trio, forwarded exactly as desktop's own builder forwards it
+    /// (`desktop/src/lib/chainRouting.ts:52-54`): four long clips from one
+    /// press are four siblings of one logical batch, and the host records
+    /// them as such.
+    public let batchId: String?
+    public let batchIndex: Int?
+    public let batchCount: Int?
     public let ephemeral = true
 
     public init(_ request: GenerateRequest, clipFrames: Int, motionTail: Int) {
@@ -94,5 +101,8 @@ public struct AutoChainRequest: Encodable, Hashable, Sendable {
         title = request.title
         tags = request.tags
         collection = request.collection
+        batchId = request.batchId
+        batchIndex = request.batchIndex
+        batchCount = request.batchCount
     }
 }
