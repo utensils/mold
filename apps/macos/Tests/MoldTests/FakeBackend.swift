@@ -225,8 +225,83 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try? await Task.sleep(for: delay)
     }
 
+    /// Tests parked in `entered(_:atLeast:)`, with the count each is waiting
+    /// for. Read and written under `callsLock`, the SAME lock `recorded` is --
+    /// deciding whether to park and deciding whether to wake are one question
+    /// about one list, and two locks (or none) is how a fence loses a wake-up
+    /// it was entitled to.
+    nonisolated(unsafe) private var entryWaiters:
+        [(id: UUID, route: String, count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    /// How many times `route` has been asked. `callsLock` is already held.
+    private func countLocked(_ route: String) -> Int {
+        recorded.lazy.filter { $0 == route }.count
+    }
+
+    /// Resumes the instant `route` has been asked `count` times -- or
+    /// immediately, if it already has been.
+    ///
+    /// An EXACT fence where `settle` can only be a BUDGET. `settle` polls and
+    /// gives up after two seconds, so a test that waits for a call to be made
+    /// at all fails when this Mac is busy rather than when the code is wrong
+    /// -- and its own assertion then reports the wrong thing. This resumes
+    /// from inside `record`, so how loaded the box is cannot reach it. It is
+    /// for the "was the other machine asked WHILE this one was still
+    /// answering" shape and nothing else: `settle` on the STATE an assertion
+    /// reads is still the rule wherever a state is what is being asserted.
+    ///
+    /// `within` is a WATCHDOG, not the fence. A call that is never made would
+    /// otherwise hang the bundle -- 22 minutes with no output, once -- so
+    /// after it the wait gives up and says which route never came, which is
+    /// the sentence a regression needs. It is never what makes a passing run
+    /// pass.
+    func entered(_ route: String, atLeast count: Int = 1,
+                 within limit: Duration = .seconds(30)) async {
+        if callCount(route) >= count { return }
+        let id = UUID()
+        let watchdog = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: limit)
+            guard !Task.isCancelled, let self else { return }
+            let asked = callCount(route)
+            Issue.record("`\(route)` was asked \(asked) times, not \(count). Calls: \(calls)")
+            giveUpWaiting(id)
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // Checking and parking under ONE hold of the lock: a call landing
+            // between the two would be a wake-up this waiter never hears.
+            let missed = callsLock.withLock { () -> Bool in
+                guard countLocked(route) < count else { return true }
+                entryWaiters.append((id, route, count, continuation))
+                return false
+            }
+            if missed { continuation.resume() }
+        }
+        watchdog.cancel()
+    }
+
+    private func giveUpWaiting(_ id: UUID) {
+        let waiter = callsLock.withLock { () -> Waiter? in
+            guard let index = entryWaiters.firstIndex(where: { $0.id == id }) else { return nil }
+            return entryWaiters.remove(at: index)
+        }
+        waiter?.continuation.resume()
+    }
+
+    private typealias Waiter =
+        (id: UUID, route: String, count: Int, continuation: CheckedContinuation<Void, Never>)
+
     func record(_ route: String) throws {
-        callsLock.withLock { recorded.append(route) }
+        // Recording the call and taking the waiters it wakes are one step:
+        // the route WAS entered, whatever it is about to answer with, and a
+        // refusal is still a call that was made.
+        let due = callsLock.withLock { () -> [Waiter] in
+            recorded.append(route)
+            let reached = countLocked(route)
+            let ready = entryWaiters.filter { $0.route == route && reached >= $0.count }
+            entryWaiters.removeAll { $0.route == route && reached >= $0.count }
+            return ready
+        }
+        for waiter in due { waiter.continuation.resume() }
         if let planted = plantedErrors[route] { throw planted }
         if refuses.contains(route) {
             throw MoldClientError.http(status: 409, code: nil, message: "Refused by the fake.")

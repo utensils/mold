@@ -217,7 +217,17 @@ struct HeartbeatTests {
     /// a machine that is off holds the loop for its whole connect timeout and
     /// every machine behind it waits. `HostStore.refreshAll` already uses a
     /// task group for exactly this reason.
-    @Test func oneSlowMachineDoesNotHoldUpTheRest() async {
+    ///
+    /// Fenced, not budgeted. This used to `settle` on the second machine's
+    /// call count, which is two seconds of polling and nothing more: on a Mac
+    /// running a dozen of these bundles at once the budget ran out before the
+    /// concurrent tick got its turn, and the failure it printed was about
+    /// concurrency when the truth was about load. `entered(_:)` resumes from
+    /// inside the fake's own `record`, so load cannot reach it; its watchdog
+    /// turns a call that is never made into a sentence naming the route,
+    /// rather than a hung bundle.
+    @Test(.timeLimit(.minutes(1)))
+    func oneSlowMachineDoesNotHoldUpTheRest() async {
         let slow = machine("workstation"), quick = machine("hal9000")
         let slowBackend = FakeBackend(host: slow)
         slowBackend.statusHeldOpen = true
@@ -233,7 +243,11 @@ struct HeartbeatTests {
 
         // `slow` is first in the list and its status never answers.
         let tick = Task { await beat.tick() }
-        await settle { quickBackend.callCount("queue") == 1 }
+        // Both halves of the claim, as latches rather than as an order the
+        // task group does not promise: the first machine HAS been asked and
+        // nothing here has answered it, and the second is asked anyway.
+        await slowBackend.entered("status")
+        await quickBackend.entered("queue")
 
         #expect(quickBackend.callCount("queue") == 1, "asked while the first machine was still answering")
         slowBackend.releaseStatus()
