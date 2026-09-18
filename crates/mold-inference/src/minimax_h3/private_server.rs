@@ -3485,6 +3485,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     {
         bail!("private H3 prepared budget differs from the scheduler owner fence")
     }
+    // The Metal campaign capture is opt-in through its environment and is a
+    // no-op in production. Under campaign variables a refusal here fails the
+    // prepare: missing evidence plumbing must fail closed, never run
+    // unobserved.
+    super::campaign_capture::prepare_capture(
+        &resolved_request_identity_sha256,
+        &prepared
+            .factory_attempt_input()
+            .target_budget
+            .phase_budget_rows()?,
+    )?;
 
     // Media facts carry the request's full reviewed identity — a Turbo tag
     // included — because the terminal gate compares them against the request
@@ -4478,6 +4489,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 } else {
                     H3MetalMemoryGuard::start(&execution_device, cancellation.clone())?
                 };
+            super::campaign_capture::attach(&execution_device)?;
             let qwen_on_cpu = matches!(
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop

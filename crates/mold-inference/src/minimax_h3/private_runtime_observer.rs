@@ -374,6 +374,7 @@ fn condition_encode_transient_bytes(state: &ObservationState) -> Result<u64> {
 }
 
 pub(crate) fn observe_event(event: H3PipelineEvent) {
+    super::campaign_capture::observe_pipeline_event(event);
     ACTIVE.with(|active| {
         let mut active = active.borrow_mut();
         let Some(state) = active.as_mut() else {
@@ -506,7 +507,7 @@ fn phase_transient_bytes(state: &ObservationState, phase: H3PipelinePhase) -> Re
 }
 
 #[cfg(all(target_os = "linux", feature = "cuda"))]
-fn process_resident_bytes() -> Result<u64> {
+pub(crate) fn process_resident_bytes() -> Result<u64> {
     let statm = fs::read_to_string("/proc/self/statm")
         .context("private H3 runtime capture requires Linux process memory evidence")?;
     let resident_pages = statm
@@ -526,7 +527,7 @@ fn process_resident_bytes() -> Result<u64> {
 }
 
 #[cfg(all(target_os = "linux", feature = "cuda"))]
-fn process_peak_resident_bytes() -> Result<u64> {
+pub(crate) fn process_peak_resident_bytes() -> Result<u64> {
     let status = fs::read_to_string("/proc/self/status")
         .context("private H3 runtime capture requires Linux peak-memory evidence")?;
     let kib = status
@@ -541,7 +542,7 @@ fn process_peak_resident_bytes() -> Result<u64> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_resident_bytes() -> Result<u64> {
+pub(crate) fn process_resident_bytes() -> Result<u64> {
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
     let expected_size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
     // SAFETY: `proc_pidinfo` writes exactly the supplied buffer size and the
@@ -570,7 +571,7 @@ fn process_resident_bytes() -> Result<u64> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_peak_resident_bytes() -> Result<u64> {
+pub(crate) fn process_peak_resident_bytes() -> Result<u64> {
     let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
     // SAFETY: `mach_task_self_` is the live task port and `task_info`

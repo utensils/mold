@@ -130,6 +130,11 @@ path = "src/bin/h3_attention_qualification.rs"
 required-features = ["dev-bins", "h3-attention-rc"]
 
 [[bin]]
+name = "h3_metal_campaign_watch"
+path = "src/bin/h3_metal_campaign_watch.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
 name = "h3_attention_benchmark"
 path = "src/bin/h3_attention_benchmark.rs"
 required-features = ["dev-bins", "h3-attention-rc"]
