@@ -279214,7 +279214,7 @@
       "type": "file",
       "name": "flake.nix",
       "filePath": "flake.nix",
-      "summary": "Defines Mold's Nix packages, development environments, checks, and release closures. Cargo lock imports for Crane's helper and the desktop package route checksum-verified crates through static.crates.io instead of the rate-limited crates.io API endpoint.",
+      "summary": "Defines Mold's Nix packages, development environments, checks, and release closures. A shared importStaticCargoLock overrides only fetchurl to rewrite crates.io API archive URLs to static.crates.io for Crane's helper and desktop dependencies, avoiding duplicate built-in crates-io source configuration.",
       "tags": [
         "code",
         "build-system",
@@ -290424,7 +290424,7 @@
       "type": "file",
       "name": "nix-crate-downloads.sh",
       "filePath": "scripts/tests/nix-crate-downloads.sh",
-      "summary": "Evaluates the Mold CLI and desktop Cargo vendor derivations for the selected Nix system, locates Crane's helper cargoDeps where needed, walks each importCargoLock vendor input through unpacked packages to its crate archive, and requires every vendored archive to use the static crates.io endpoint while ignoring unrelated derivation tools.",
+      "summary": "Evaluates the Mold CLI and desktop Cargo vendor derivations for the selected Nix system, traces importCargoLock inputs to their crate archives, requires static crates.io URLs, and builds Crane's helper on native systems to catch invalid or duplicate Cargo source configuration.",
       "tags": [
         "test",
         "nix",
@@ -290432,6 +290432,85 @@
         "shell"
       ],
       "complexity": "moderate"
+    },
+    {
+      "id": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "type": "file",
+      "name": "ShapeChip.test.ts",
+      "filePath": "desktop/src/components/create/ShapeChip.test.ts",
+      "summary": "Exercises the desktop ShapeChip canvas control, including shared shape and resolution picker behavior, resolver-consistent labels, form writes, canvasless recipes, and checkpoint-specific source-image contracts; AspectOption and a minimal optional-id resolution contract keep both normal and isolated Nix Vue type checks safe.",
+      "tags": [
+        "test",
+        "desktop",
+        "component",
+        "canvas-controls"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:desktop/src/components/create/ShapeChip.test.ts:mountChip",
+      "type": "function",
+      "name": "mountChip",
+      "filePath": "desktop/src/components/create/ShapeChip.test.ts",
+      "lineRange": [
+        22,
+        25
+      ],
+      "summary": "Mounts ShapeChip with an active Pinia instance and the supplied generate form for component tests.",
+      "tags": [
+        "test-helper",
+        "vue",
+        "desktop"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:desktop/src/components/create/ShapeChip.test.ts:squareForm",
+      "type": "function",
+      "name": "squareForm",
+      "filePath": "desktop/src/components/create/ShapeChip.test.ts",
+      "lineRange": [
+        27,
+        35
+      ],
+      "summary": "Creates the canonical square FLUX generate form used by ShapeChip interaction tests.",
+      "tags": [
+        "test-helper",
+        "form-state",
+        "desktop"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:desktop/src/components/create/ShapeChip.test.ts:openMenu",
+      "type": "function",
+      "name": "openMenu",
+      "filePath": "desktop/src/components/create/ShapeChip.test.ts",
+      "lineRange": [
+        37,
+        40
+      ],
+      "summary": "Opens the ShapeChip picker menu through the user-visible chip interaction.",
+      "tags": [
+        "test-helper",
+        "interaction",
+        "desktop"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:changelog.d/nix-vendor-source-config.md",
+      "type": "document",
+      "name": "nix-vendor-source-config.md",
+      "filePath": "changelog.d/nix-vendor-source-config.md",
+      "summary": "Release-note fragment describing static Nix crate downloads without duplicate Cargo registry definitions, native Crane helper build validation, and isolated desktop type-check repairs.",
+      "tags": [
+        "documentation",
+        "release-notes",
+        "nix",
+        "frontend"
+      ],
+      "complexity": "simple"
     },
     {
       "id": "document:changelog.d/nix-release-downloads.md",
@@ -290508,6 +290587,69 @@
     }
   ],
   "edges": [
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "function:desktop/src/components/create/ShapeChip.test.ts:mountChip",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "function:desktop/src/components/create/ShapeChip.test.ts:squareForm",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "function:desktop/src/components/create/ShapeChip.test.ts:openMenu",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "file:ui/components/ShapePicker.vue",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "file:ui/components/ResolutionSelector.vue",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "file:ui/lib/resolution.ts",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "file:desktop/src/lib/capabilities.ts",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:desktop/src/components/create/ShapeChip.test.ts",
+      "target": "file:desktop/src/lib/generateForm.ts",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "document:changelog.d/nix-vendor-source-config.md",
+      "target": "file:flake.nix",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
     {
       "source": "pipeline:.github/workflows/nix-cache.yml",
       "target": "file:flake.nix",
@@ -516146,6 +516288,7 @@
         "file:desktop/src/components/create/SequenceComposer.vue",
         "file:desktop/src/components/create/SequenceOpeningImageWell.test.ts",
         "file:desktop/src/components/create/SequenceOpeningImageWell.vue",
+        "file:desktop/src/components/create/ShapeChip.test.ts",
         "file:desktop/src/components/create/StyleChips.test.ts",
         "file:desktop/src/components/create/StyleChips.vue",
         "file:desktop/src/components/gallery/AuthedMedia.test.ts",
@@ -517725,6 +517868,7 @@
         "document:changelog.d/mobile-wide-responsive-layout.md",
         "document:changelog.d/no-legacy-generation-clients.md",
         "document:changelog.d/nix-release-downloads.md",
+        "document:changelog.d/nix-vendor-source-config.md",
         "document:changelog.d/notification-download-retry.md",
         "document:changelog.d/one-generation-admission-path.md",
         "document:changelog.d/pulid-family-wide.md",

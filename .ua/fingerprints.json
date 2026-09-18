@@ -216725,6 +216725,111 @@
       "totalLines": 137,
       "hasStructuralAnalysis": true
     },
+    "desktop/src/components/create/ShapeChip.test.ts": {
+      "filePath": "desktop/src/components/create/ShapeChip.test.ts",
+      "contentHash": "286651e6a24524e79e798aa50fd506c4b12a5e14e66ab3d9f260d7af19cd3fd6",
+      "functions": [
+        {
+          "name": "mountChip",
+          "params": [
+            "form"
+          ],
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "squareForm",
+          "params": [],
+          "returnType": "GenerateForm",
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "openMenu",
+          "params": [
+            "wrapper"
+          ],
+          "exported": false,
+          "lineCount": 4
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "vitest",
+          "specifiers": [
+            "describe",
+            "expect",
+            "it"
+          ]
+        },
+        {
+          "source": "@vue/test-utils",
+          "specifiers": [
+            "mount"
+          ]
+        },
+        {
+          "source": "pinia",
+          "specifiers": [
+            "createPinia",
+            "setActivePinia"
+          ]
+        },
+        {
+          "source": "vue",
+          "specifiers": [
+            "reactive"
+          ]
+        },
+        {
+          "source": "./ShapeChip.vue",
+          "specifiers": [
+            "ShapeChip"
+          ]
+        },
+        {
+          "source": "@ui/components/ShapePicker.vue",
+          "specifiers": [
+            "ShapePicker"
+          ]
+        },
+        {
+          "source": "@ui/lib/resolution",
+          "specifiers": [
+            "AspectOption"
+          ]
+        },
+        {
+          "source": "@ui/components/ResolutionSelector.vue",
+          "specifiers": [
+            "ResolutionSelector"
+          ]
+        },
+        {
+          "source": "../../lib/capabilities",
+          "specifiers": [
+            "capabilitiesForCreateForm"
+          ]
+        },
+        {
+          "source": "../../lib/generateForm",
+          "specifiers": [
+            "newGenerateForm",
+            "GenerateForm"
+          ]
+        },
+        {
+          "source": "../../lib/api/types",
+          "specifiers": [
+            "ModelEntry"
+          ]
+        }
+      ],
+      "exports": [],
+      "totalLines": 146,
+      "hasStructuralAnalysis": true
+    },
     "desktop/src/components/create/StyleChips.test.ts": {
       "filePath": "desktop/src/components/create/StyleChips.test.ts",
       "contentHash": "065b6ee4dbe970aece45e87722a41be897d248e389d6df7d3c05fe380faea261",

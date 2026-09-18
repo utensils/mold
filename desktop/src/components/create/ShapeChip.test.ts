@@ -13,6 +13,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import ShapeChip from "./ShapeChip.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
+import type { AspectOption } from "@ui/lib/resolution";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import { capabilitiesForCreateForm } from "../../lib/capabilities";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
@@ -67,7 +68,7 @@ describe("ShapeChip", () => {
     const wrapper = await openMenu(mountChip(form));
     const picker = wrapper.findComponent(ShapePicker);
     const wide = (picker.props("options") ?? []).find(
-      (option) => option.id !== picker.props("modelValue"),
+      (option: AspectOption) => option.id !== picker.props("modelValue"),
     );
     if (!wide) throw new Error("the ladder offers only one shape");
     picker.vm.$emit("update:modelValue", wide.id);
@@ -85,7 +86,7 @@ describe("ShapeChip", () => {
     const wrapper = await openMenu(mountChip(form));
     const selector = wrapper.findComponent(ResolutionSelector);
     const other = (selector.props("options") ?? []).find(
-      (option) => option.id !== selector.props("modelValue"),
+      (option: { id?: string }) => option.id !== selector.props("modelValue"),
     );
     if (!other) throw new Error("the ladder offers only one size");
     selector.vm.$emit("update:modelValue", other.id);
