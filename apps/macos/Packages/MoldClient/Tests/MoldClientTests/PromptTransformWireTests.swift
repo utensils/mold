@@ -96,3 +96,24 @@ import Testing
     #expect(transform["task"] as? String == "text-to-image")
     #expect(transform["dimensions"] as? [String] == ["mood"])
 }
+
+/// An EXPANDED prompt's provenance carries no `dimensions` and no
+/// `source_kind` -- both are `#[serde(default)]` and skipped when empty
+/// (`types.rs:713-728`). The exact row a keyed host answered on
+/// 2026-09-17, which refused its whole listing.
+///
+/// **Fails today**: `dimensions` is decoded as required.
+@Test func anExpandedPromptsProvenanceCarriesNoDimensions() throws {
+    let json = """
+    {"operation": "expand", "root_prompt": "An F4 phantom fighter aircraft in a hanger",
+     "source_prompt": "An F4 phantom fighter aircraft in a hanger", "source_kind": "direct",
+     "task": "text-to-image"}
+    """
+    let provenance = try MoldJSON.decoder.decode(PromptTransformProvenance.self, from: Data(json.utf8))
+    #expect(provenance.dimensions.isEmpty)
+    #expect(provenance.operation == .expand)
+    let bare = try MoldJSON.decoder.decode(PromptTransformProvenance.self, from: Data("""
+    {"operation": "expand", "source_prompt": "p", "task": "text-to-image"}
+    """.utf8))
+    #expect(bare.sourceKind == .direct)
+}

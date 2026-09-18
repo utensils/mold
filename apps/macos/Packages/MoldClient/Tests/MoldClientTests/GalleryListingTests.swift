@@ -19,6 +19,25 @@ import Testing
         return try MoldJSON.decoder.decode(GalleryListing.self, from: data)
     }
 
+    /// A NEWER machine may write a row in a shape this build cannot decode.
+    /// One such row used to refuse the whole listing (2026-09-17: 1,148
+    /// prints gone over one provenance field).
+    ///
+    /// **Fails today**: a `DecodingError` on one row throws out of the array.
+    @Test func aRowThisBuildCannotDecodeIsDroppedAndCounted() throws {
+        let rows: [[String: Any]] = [
+            ["filename": "robot.png", "metadata": [:] as [String: Any], "timestamp": 1_000, "format": "png"],
+            ["filename": "future.png", "metadata": [:] as [String: Any], "timestamp": "not a number", "format": "png"],
+            ["filename": "turtle.png", "metadata": [:] as [String: Any], "timestamp": 1_000, "format": "png"],
+        ]
+        let listed = try MoldJSON.decoder.decode(
+            GalleryListing.self, from: try JSONSerialization.data(withJSONObject: rows))
+
+        #expect(listed.prints.map(\.filename) == ["robot.png", "turtle.png"])
+        #expect(listed.unreadable == 1)
+        #expect(listed.rejected.isEmpty)
+    }
+
     @Test func aTraversingRowIsDroppedAndTheRestOfTheListingSurvives() throws {
         let listed = try listing([
             "robot.png",
@@ -36,10 +55,11 @@ import Testing
         #expect(listed.rejected.isEmpty)
     }
 
-    /// A row missing a required field is this app and that server disagreeing
-    /// about the wire, not a hostile name -- it still fails the listing, the
-    /// same answer as before.
-    @Test func aMalformedRowStillFailsTheWholeListing() throws {
+    /// A listing in which NOTHING decodes is this app and that server
+    /// disagreeing about the wire itself, not one newer row -- an empty
+    /// library would be a lie, so that still fails, the same answer as
+    /// before.
+    @Test func aListingWithNoReadableRowStillFails() throws {
         let data = try JSONSerialization.data(withJSONObject: [["filename": "a.png"]])
         #expect(throws: (any Error).self) {
             try MoldJSON.decoder.decode(GalleryListing.self, from: data)

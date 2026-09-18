@@ -17,16 +17,30 @@ public struct GalleryListing: Decodable, Sendable {
     public let prints: [GalleryPrint]
     /// What was dropped, so a caller can say so. Empty on every honest host.
     public let rejected: [SafeFilename.Rejected]
+    /// Rows a NEWER machine wrote in a shape this build cannot decode. One
+    /// such row used to refuse the whole listing -- 1,148 prints gone behind
+    /// "it answered something this version of Mold can't read" over a single
+    /// provenance field (2026-09-17). Each is logged with its coding path,
+    /// which is the part a fix needs.
+    public let unreadable: Int
 
-    public init(prints: [GalleryPrint], rejected: [SafeFilename.Rejected] = []) {
+    public init(prints: [GalleryPrint], rejected: [SafeFilename.Rejected] = [], unreadable: Int = 0) {
         self.prints = prints
         self.rejected = rejected
+        self.unreadable = unreadable
     }
 
     public init(from decoder: any Decoder) throws {
         let rows = try decoder.singleValueContainer().decode([Row].self)
         prints = rows.compactMap(\.print)
         rejected = rows.compactMap(\.rejected)
+        unreadable = rows.filter(\.isUnreadable).count
+        // Every row unreadable is the wire itself disagreeing, not a newer
+        // row or two: an empty library would be a lie, so that still fails.
+        if unreadable > 0, unreadable == rows.count {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [], debugDescription: "no gallery row decodes"))
+        }
         for refusal in rejected {
             // The name itself is the interesting part of the report and it is
             // also attacker-controlled, so it is logged privately -- a console
@@ -50,6 +64,7 @@ public struct GalleryListing: Decodable, Sendable {
     private struct Row: Decodable {
         let print: GalleryPrint?
         let rejected: SafeFilename.Rejected?
+        var isUnreadable: Bool { print == nil && rejected == nil }
 
         init(from decoder: any Decoder) throws {
             do {
@@ -58,6 +73,13 @@ public struct GalleryListing: Decodable, Sendable {
             } catch let refusal as SafeFilename.Rejected {
                 print = nil
                 rejected = refusal
+            } catch let error as DecodingError {
+                // The path is what a fix needs; the value is a stranger's
+                // prompt and stays out of the log.
+                GalleryListing.log.error(
+                    "dropped a gallery row this build cannot decode: \(DecodingFailure.summary(error), privacy: .public)")
+                print = nil
+                rejected = nil
             }
         }
     }

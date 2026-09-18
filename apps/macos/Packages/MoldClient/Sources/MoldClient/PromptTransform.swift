@@ -63,6 +63,21 @@ public struct PromptTransformProvenance: Codable, Hashable, Sendable {
         self.task = task
         self.dimensions = dimensions
     }
+
+    /// `dimensions` and `source_kind` are `#[serde(default)]` on the wire and
+    /// `skip_serializing_if` empty, so an expanded (not remixed) prompt's
+    /// provenance carries neither. Decoding them as required refused ONE
+    /// print's row and, with it, a whole 1,148-print listing: "it answered
+    /// something this version of Mold can't read" (2026-09-17).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        operation = try c.decode(PromptTransformOperation.self, forKey: .operation)
+        rootPrompt = try c.decodeIfPresent(String.self, forKey: .rootPrompt)
+        sourcePrompt = try c.decode(String.self, forKey: .sourcePrompt)
+        sourceKind = try c.decodeIfPresent(RemixSourceKind.self, forKey: .sourceKind) ?? .direct
+        task = try c.decode(ExpandTask.self, forKey: .task)
+        dimensions = try c.decodeIfPresent([RemixDimension].self, forKey: .dimensions) ?? []
+    }
 }
 
 /// Request to rewrite a short prompt into a generation-aware one.
