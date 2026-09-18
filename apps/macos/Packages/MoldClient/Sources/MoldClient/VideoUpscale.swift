@@ -3,10 +3,11 @@ import Foundation
 /// One durable framewise clip upscale, as the host reports it
 /// (`crates/mold-core/src/video_upscale.rs:61-78`).
 ///
-/// A clip upscale is NOT a queue row: `video_upscale.rs` drives its own
-/// engine cache rather than submitting scheduler work, so it never appears
-/// in `/api/queue` and never in `/api/activity` either. Its lifecycle is this
-/// job and nothing else, which is why the app polls it.
+/// A clip upscale is not a queue row -- `/api/queue` never lists one. Its
+/// frames ARE scheduler work (`video_upscale.rs:1271-1281`), so `/api/activity`
+/// reports a `standalone_upscale` under a new uuid per frame; that row knows
+/// neither which print it belongs to nor how far through the clip it is. This
+/// job is the only thing that does, which is why the app polls it.
 ///
 /// Everything beyond identity and progress is optional here. The wire carries
 /// more (`scale_factor`, both media-fact blocks, the timestamps); nothing in

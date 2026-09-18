@@ -14,7 +14,9 @@ extension QueuePane {
         AlsoRunning.rows(reported: activity.rows, queuedIDs: queuedIDs, upscales: upscales.live)
     }
 
-    /// One machine's, for the section under its name.
+    /// One machine's, for the section under its name. Filtered from the
+    /// fleet list rather than computed per machine, because the suppression
+    /// rules read across the whole answer.
     func alsoRunning(on host: MoldHost.ID) -> [AlsoRunningRow] {
         alsoRunning.filter { $0.host == host }
     }

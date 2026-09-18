@@ -81,6 +81,54 @@ struct AlsoRunningTests {
         #expect(drawn[0].canPause)
     }
 
+    /// A clip upscale IS scheduler work: `upscale_frame` routes every frame
+    /// through `schedule_standalone_upscale` on any host with a v2 scheduler
+    /// or a GPU worker (`video_upscale.rs:1271-1281`), and that mints a NEW
+    /// uuid per frame (`routes.rs:2508-2546`). So the host reports a
+    /// `standalone_upscale` row beside this app's own -- two rows both
+    /// titled "Upscale", the reported one changing identity every poll for
+    /// the length of a 124-frame job.
+    ///
+    /// **Fails today**: `AlsoRunning.rows` draws both.
+    @Test func aClipUpscaleDrawsOneRowNotTwo() {
+        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let job = FakeFixtures.framewiseJob("vup-1", state: "running", done: 31, total: 124)
+        let drawn = rows([item("standalone-upscale-\(UUID())", kind: "standalone_upscale")],
+                         upscales: [(key: key, job: job)])
+        #expect(drawn.count == 1)
+        #expect(drawn[0].subject == "clip.mp4", "and it is the row that names the print")
+    }
+
+    /// NOT a blanket suppression. A still upscale is the same
+    /// `standalone_upscale` work and has no job to follow, so that reported
+    /// row is the only feedback there is -- and so is one somebody started
+    /// from the web UI.
+    @Test func aStandaloneUpscaleThisAppIsNotFollowingStands() {
+        #expect(rows([item("standalone-upscale-1", kind: "standalone_upscale")]).count == 1)
+    }
+
+    /// A settled job of ours stops suppressing: the machine's row is then
+    /// about something else.
+    @Test func aSettledJobStopsHidingTheMachinesOwnRow() {
+        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let done = FakeFixtures.framewiseJob("vup-1", state: "completed", done: 9, total: 9)
+        let drawn = rows([item("standalone-upscale-1", kind: "standalone_upscale")],
+                         upscales: [(key: key, job: done)])
+        #expect(drawn.count == 2)
+    }
+
+    /// And only on the machine that is busy -- another machine's upscale is
+    /// its own row.
+    @Test func suppressionIsPerMachine() {
+        let socrates = UUID()
+        let key = UpscaleStore.Key(host: socrates, filename: "clip.mp4")
+        let job = FakeFixtures.framewiseJob("vup-1", state: "running", total: 9)
+        let drawn = AlsoRunning.rows(
+            reported: reported([item("standalone-upscale-1", kind: "standalone_upscale")]),
+            queuedIDs: [:], upscales: [(key: key, job: job)])
+        #expect(drawn.contains { $0.host == plato && $0.title == "Upscale" })
+    }
+
     /// Cancel is offered only where this app can actually act. A reported row
     /// saying `can_cancel: true` is a durable sequence, whose cancel is an
     /// endpoint family this app does not speak -- a button that quietly does

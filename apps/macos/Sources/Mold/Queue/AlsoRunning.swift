@@ -4,10 +4,11 @@ import MoldClient
 /// One row under **Also Running** -- work a machine is doing that has no
 /// queue row of its own.
 struct AlsoRunningRow: Identifiable, Equatable {
-    /// Where the row came from. Two sources, because a clip upscale is never
-    /// in `/api/activity` at all: `video_upscale.rs` drives its own engine
-    /// cache rather than submitting scheduler work, so this app's own
-    /// following is the only place it appears.
+    /// Where the row came from. Two sources, because what `/api/activity`
+    /// says about a clip upscale is one FRAME under a fresh uuid
+    /// (`video_upscale.rs:1271-1281`) -- the durable job this app follows is
+    /// the only thing that names the print and counts the clip. See
+    /// `AlsoRunning.rows`, which is where the machine's row gives way.
     enum Work: Equatable {
         case reported(FleetActiveWork)
         case upscale(filename: String, job: VideoUpscaleJob)

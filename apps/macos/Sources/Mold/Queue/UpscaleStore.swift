@@ -6,10 +6,15 @@ import MoldClient
 /// It lives beside the queue rather than beside the Library because a clip
 /// upscale is WORK: it outlives the pane that started it, it belongs on the
 /// machine that holds the print, and the Queue pane is where this app says
-/// what is running. It is deliberately NOT a queue row -- `video_upscale.rs`
-/// drives its own engine cache instead of submitting scheduler work, so the
-/// host reports it in neither `/api/queue` nor `/api/activity`, and polling
-/// this job is the only way anybody learns where it got to.
+/// what is running.
+///
+/// It is not a queue row: `/api/queue` never lists it. It IS scheduler work
+/// -- `upscale_frame` submits every frame through
+/// `schedule_standalone_upscale` (`video_upscale.rs:1271-1281`) -- but what
+/// `/api/activity` then reports is ONE FRAME, under a fresh uuid each time,
+/// with no idea which print it belongs to or how many frames are left. The
+/// durable job is the only thing that knows that, and polling it is the only
+/// way anybody learns where it got to. `AlsoRunning` is where the two meet.
 @MainActor
 @Observable
 final class UpscaleStore {
