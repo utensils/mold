@@ -126,6 +126,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/sparkle-key-gate.sh
 	@scripts/tests/sparkle-signing-order.sh
 	@scripts/tests/appcast-recipe.sh
+	@scripts/tests/notarize-credentials.sh
 	@scripts/tests/release-names.sh
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
