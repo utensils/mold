@@ -84,6 +84,12 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     public let controlModel: String?
     public let controlScale: Double?
     public let mesh: MeshProvenance?
+    /// The durable 3-D workflow this print is a STAGE of, if one made it.
+    /// Every stage publishes an ordinary print, so without this a
+    /// text-to-3-D run reads as four unrelated ones
+    /// (`mesh_workflow.rs:176-190`). Absence is an ordinary print or an
+    /// older host, never a refusal.
+    public let meshWorkflow: MeshWorkflowProvenance?
 
     // Clip and output shape.
     public let frames: Int?
