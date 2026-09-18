@@ -264,3 +264,12 @@ float POSITION/NORMAL/TEXCOORD_0/COLOR_0(VEC3), buffer 0, embedded PNGs, no exte
   That script only ever runs on `main`'s release PR and this branch never merges, so it could never
   fire. Instead the `mold-ai-*` path dependencies carry no `version` requirement at all
   (`publish = false`), which cannot drift. Commit `34cfa484`.
+
+- **2026-09-17 (late), owner decision**: the native app SHIPS ALONGSIDE the Tauri desktop app, both kept, for a
+  handful of releases until one path is chosen (likely native). Consequences: the branch WILL merge (drop the
+  "never merged" wording; add a `changelog.d/` fragment in Wave 4); the native DMG rides the SAME releases and
+  channels as desktop — stable on the `v*` release cut by release-plz (`release.yml`), nightly on the rolling
+  `latest` prerelease (`desktop.yml` order, verbatim) — never its own tags or Latest pointer (Sparkle review
+  HIGH 2); side-by-side installs on one Mac sharing a `MOLD_HOME` are a real UAT case (distinct bundle ids,
+  keyed engine, writer-lease advisory). The final step of the pass is that release CI, correct by reading,
+  since it can only run on `main`.
