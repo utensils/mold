@@ -137,6 +137,48 @@ struct UpscaleStoreTests {
         #expect(store.jobs.isEmpty, "a still leaves no job to follow")
     }
 
+    /// A still's POST can take five minutes. Until now it said nothing at
+    /// all: no row, no sentence, and then a tile quietly appeared somewhere
+    /// in the grid.
+    ///
+    /// **Fails today**: the store records nothing about a still.
+    @Test func aStillSaysItIsWorkingAndThenSaysWhatItMade() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.delays["upscaleLibraryImage"] = .milliseconds(30)
+        let (store, _) = await bench(backend, host: plato)
+        let still = entry("still.png", on: plato)
+        let key = UpscaleStore.Key(host: plato.id, filename: "still.png")
+
+        async let run: Void = store.start(still)
+        await settle { store.stills[key] == .working }
+        // And while it is working, the menu does not offer it again.
+        #expect(store.isBusy(with: still))
+        await run
+
+        #expect(store.stills[key] == .done(filename: "still-4x.png"))
+        #expect(!store.isBusy(with: still))
+    }
+
+    /// A failure lands beside the print it is about, not only in a banner
+    /// that names the machine.
+    @Test func aFailedStillKeepsTheMachinesSentenceOnTheRow() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.plantedErrors["upscaleLibraryImage"] = MoldClientError.http(
+            status: 507, code: nil, message: "No room left on the disk.")
+        let (store, _) = await bench(backend, host: plato)
+
+        await store.start(entry("still.png", on: plato))
+
+        let key = UpscaleStore.Key(host: plato.id, filename: "still.png")
+        guard case let .failed(sentence) = store.stills[key] else {
+            Issue.record("the still recorded no failure")
+            return
+        }
+        #expect(sentence.contains("No room left on the disk"))
+    }
+
     /// Pressing it twice is ONE request. The second press used to start a
     /// second 124-frame job against the same print, and the first job's id
     /// was lost the moment the second answered.
@@ -148,7 +190,7 @@ struct UpscaleStoreTests {
         let clip = entry("clip.mp4", on: plato)
 
         async let first: Void = store.start(clip)
-        await settle { store.isWorking(on: clip) }
+        await settle { store.isBusy(with: clip) }
         await store.start(clip)
         await first
 
@@ -169,7 +211,7 @@ struct UpscaleStoreTests {
         let clip = entry("clip.mp4", on: plato)
 
         async let started: Void = store.start(clip)
-        await settle { store.isWorking(on: clip) }
+        await settle { store.isBusy(with: clip) }
         await store.transition(UpscaleStore.Key(host: plato.id, filename: "clip.mp4"), to: .cancel)
         await started
 

@@ -57,9 +57,10 @@ extension UpscaleStore {
         jobs[key] = next
         hosts.succeeded(on: key.host, doing: Self.followVerb)
         guard next.state == .completed else { return !next.state.isTerminal }
-        // The bigger clip is a NEW row in that machine's gallery, and
-        // nothing else is going to go and look.
-        await library.refresh()
+        // The bigger clip is a NEW row in THAT MACHINE's gallery, and
+        // nothing else is going to go and look. Only that machine: a
+        // fleet-wide read is three listings for one finished clip.
+        await library.refresh(on: key.host)
         return false
     }
 

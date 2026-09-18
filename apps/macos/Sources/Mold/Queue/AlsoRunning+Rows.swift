@@ -41,10 +41,12 @@ enum AlsoRunning {
     static func rows(
         reported: [FleetActiveWork],
         queuedIDs: [MoldHost.ID: Set<String>],
-        upscales: [(key: UpscaleStore.Key, job: VideoUpscaleJob)]
+        upscales: [(key: UpscaleStore.Key, job: VideoUpscaleJob)],
+        stills: [(key: UpscaleStore.Key, state: StillUpscale)] = []
     ) -> [AlsoRunningRow] {
         let following = Set(
-            upscales.filter { !$0.job.state.isTerminal }.map(\.key.host))
+            upscales.filter { !$0.job.state.isTerminal }.map(\.key.host)
+                + stills.filter { $0.state == .working }.map(\.key.host))
         let fromMachines = reported
             .filter { $0.item.kind != "download" }
             .filter { !(queuedIDs[$0.host] ?? []).contains($0.item.id) }
@@ -57,6 +59,10 @@ enum AlsoRunning {
             .sorted { $0.key.filename < $1.key.filename }
             .map { AlsoRunningRow(host: $0.key.host,
                                   work: .upscale(filename: $0.key.filename, job: $0.job)) }
-        return fromMachines + mine
+        let pictures = stills
+            .sorted { $0.key.filename < $1.key.filename }
+            .map { AlsoRunningRow(host: $0.key.host,
+                                  work: .still(filename: $0.key.filename, state: $0.state)) }
+        return fromMachines + mine + pictures
     }
 }

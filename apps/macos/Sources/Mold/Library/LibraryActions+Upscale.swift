@@ -20,7 +20,10 @@ extension LibraryActions {
     /// preview, the viewer built without one), which is also no.
     func canUpscale(_ targets: [LibraryEntry]) -> Bool {
         guard let upscales, targets.count == 1, let entry = targets.first else { return false }
-        return upscales.canUpscale(entry)
+        // Absent while this app is already making THIS print bigger, so the
+        // action cannot be pressed twice from a menu at all. Where it got to
+        // is the Queue pane's Also Running row.
+        return upscales.canUpscale(entry) && !upscales.isBusy(with: entry)
     }
 
     /// Makes this print bigger on the machine that holds it.

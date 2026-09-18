@@ -98,7 +98,9 @@ final class LibraryStore {
         await refreshOrganization()
     }
 
-    private func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
+    /// Not `private`: `LibraryStore+OneHost.swift` re-reads a single machine
+    /// through it, and `private` does not cross a file boundary.
+    func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
         switch result {
         case let .success(.fresh(prints, etag)):
             if let etag { etags[host.id] = etag }

@@ -45,6 +45,16 @@ final class UpscaleStore {
     /// about -- a still running inline, or a clip job with no id yet.
     internal(set) var working: Set<Key> = []
 
+    /// What became of a STILL upscale on each print.
+    ///
+    /// A still is synchronous -- `POST /api/gallery/upscale` publishes the
+    /// bigger picture before it answers -- so there is no durable job to
+    /// follow and, until this, no feedback of any kind: a person pressed
+    /// Make Bigger... and for up to five minutes nothing happened, then a
+    /// tile quietly appeared somewhere in the grid. This is what the Also
+    /// Running row is drawn from.
+    internal(set) var stills: [Key: StillUpscale] = [:]
+
     /// Prints whose job is being ASKED about on a timer right now.
     ///
     /// Distinct from holding a job in `jobs`: a poll that gave up because the
@@ -116,11 +126,38 @@ final class UpscaleStore {
             .sorted { $0.key.filename < $1.key.filename }
     }
 
+    /// The still upscales worth drawing, in a stable order.
+    var liveStills: [(key: Key, state: StillUpscale)] {
+        stills.map { (key: $0.key, state: $0.value) }
+            .sorted { $0.key.filename < $1.key.filename }
+    }
+
     func job(for entry: LibraryEntry) -> VideoUpscaleJob? {
         jobs[Key(host: entry.hostID, filename: entry.print.filename)]
     }
 
-    func isWorking(on entry: LibraryEntry) -> Bool {
-        working.contains(Key(host: entry.hostID, filename: entry.print.filename))
+    /// Whether this app is in the middle of making this print bigger --
+    /// a request in flight, a clip job still moving, or a still still
+    /// running. What the Library's own offer is hidden behind, so the action
+    /// cannot be pressed twice from the menu at all.
+    func isBusy(with entry: LibraryEntry) -> Bool {
+        let key = Key(host: entry.hostID, filename: entry.print.filename)
+        return working.contains(key) || UpscalePlan.shouldPoll(jobs[key])
+            || stills[key] == .working
     }
+
+    /// Forgets a settled still, so its row leaves the pane.
+    func forgetStill(_ key: Key) {
+        guard stills[key] != .working else { return }
+        stills[key] = nil
+    }
+}
+
+/// A still upscale, which has no durable job of its own.
+enum StillUpscale: Equatable {
+    case working
+    /// The machine's own name for the bigger picture it published.
+    case done(filename: String)
+    /// The machine's own sentence about why it did not.
+    case failed(String)
 }

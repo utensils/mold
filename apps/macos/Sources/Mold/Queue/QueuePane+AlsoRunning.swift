@@ -11,7 +11,8 @@ extension QueuePane {
     /// Every such row across the fleet -- what the empty state has to ask
     /// about before saying nothing is queued.
     var alsoRunning: [AlsoRunningRow] {
-        AlsoRunning.rows(reported: activity.rows, queuedIDs: queuedIDs, upscales: upscales.live)
+        AlsoRunning.rows(reported: activity.rows, queuedIDs: queuedIDs,
+                         upscales: upscales.live, stills: upscales.liveStills)
     }
 
     /// One machine's, for the section under its name. Filtered from the
@@ -48,6 +49,10 @@ extension QueuePane {
     /// item, and reaching a reported row's cancel is not this app's to invent
     /// -- the only work here it OWNS is the clip upscale it started.
     func act(_ action: AlsoRunningActions.Kind, on row: AlsoRunningRow) {
+        if case let .still(filename, _) = row.work, action == .forget {
+            upscales.forgetStill(UpscaleStore.Key(host: row.host, filename: filename))
+            return
+        }
         guard case let .upscale(filename, _) = row.work else { return }
         let key = UpscaleStore.Key(host: row.host, filename: filename)
         switch action {

@@ -19,7 +19,8 @@ extension UpscaleStore {
         // Pressing it twice is one request. Without this the second press
         // starts a SECOND 124-frame job against the same print, and the
         // first one's id is lost the moment the second answers.
-        guard !working.contains(key), !UpscalePlan.shouldPoll(jobs[key]) else { return }
+        guard !working.contains(key), !UpscalePlan.shouldPoll(jobs[key]),
+              stills[key] != .working else { return }
         guard let backend = hosts.backend(for: entry.hostID) else { return }
 
         // No local "is one installed" check. Nothing reads `/api/models` on
@@ -39,14 +40,19 @@ extension UpscaleStore {
             if entry.print.kind == .clip {
                 try await startClip(key, on: backend, model: model, epoch: epoch)
             } else {
-                _ = try await backend.upscaleLibraryImage(
+                stills[key] = .working
+                let result = try await backend.upscaleLibraryImage(
                     filename: key.filename, model: model, tileSize: nil)
                 guard epochs[key] == epoch else { return }
-                await library.refresh()
+                stills[key] = .done(filename: result.filename)
+                await library.refresh(on: entry.hostID)
             }
             hosts.succeeded(on: entry.hostID, doing: Self.startVerb)
         } catch {
             guard epochs[key] == epoch else { return }
+            // The row says it too, beside the print it is about -- the
+            // banner names the machine and not which picture failed.
+            if stills[key] == .working { stills[key] = .failed(error.reasonSentence) }
             hosts.report(error, on: entry.hostID, doing: Self.startVerb)
         }
     }

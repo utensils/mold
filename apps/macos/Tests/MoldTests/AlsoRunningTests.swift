@@ -164,6 +164,45 @@ struct AlsoRunningTests {
         #expect(offered.last == "Cancel", "what cannot be taken back is last")
     }
 
+    /// A still has no durable job, so this row is the ONLY feedback there is
+    /// for a POST that can take five minutes.
+    ///
+    /// **Fails today**: there is no still row.
+    @Test func aStillBeingUpscaledIsARowToo() {
+        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let drawn = AlsoRunning.rows(reported: [], queuedIDs: [:], upscales: [],
+                                     stills: [(key: key, state: .working)])
+        #expect(drawn.count == 1)
+        #expect(drawn[0].title == "Upscale")
+        #expect(drawn[0].subject == "still.png")
+        #expect(drawn[0].detail == "Making a bigger copy")
+        #expect(drawn[0].progress == nil, "one picture, one pass")
+        #expect(!drawn[0].canCancel, "the request IS the work")
+        #expect(AlsoRunningActions(drawn[0]).offered().isEmpty)
+    }
+
+    /// And it says what it made, which is the confirmation the whole action
+    /// used to lack. Then it can be dismissed.
+    @Test func aFinishedStillNamesWhatItMade() {
+        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let drawn = AlsoRunning.rows(reported: [], queuedIDs: [:], upscales: [],
+                                     stills: [(key: key, state: .done(filename: "still-4x.png"))])
+        #expect(drawn[0].detail == "Complete — still-4x.png")
+        #expect(drawn[0].isSettled)
+        #expect(AlsoRunningActions(drawn[0]).offered().map(\.title) == ["Dismiss"])
+    }
+
+    /// A working still suppresses the machine's own upscale row for the same
+    /// reason a clip job does -- it is the same work, said better.
+    @Test func aWorkingStillAlsoHidesTheMachinesUpscaleRow() {
+        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let drawn = AlsoRunning.rows(
+            reported: reported([item("standalone-upscale-1", kind: "standalone_upscale")]),
+            queuedIDs: [:], upscales: [], stills: [(key: key, state: .working)])
+        #expect(drawn.count == 1)
+        #expect(drawn[0].subject == "still.png")
+    }
+
     /// A stale row says it is the last thing heard rather than pretending to
     /// be current.
     @Test func aStaleRowSaysSo() {

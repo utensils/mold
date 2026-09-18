@@ -12,6 +12,9 @@ struct AlsoRunningRow: Identifiable, Equatable {
     enum Work: Equatable {
         case reported(FleetActiveWork)
         case upscale(filename: String, job: VideoUpscaleJob)
+        /// A STILL, which has no durable job -- the request itself is the
+        /// work, and this is the only feedback there is for it.
+        case still(filename: String, state: StillUpscale)
     }
 
     let host: MoldHost.ID
@@ -21,6 +24,7 @@ struct AlsoRunningRow: Identifiable, Equatable {
         switch work {
         case let .reported(row): row.id
         case let .upscale(filename, _): "\(host):upscale:\(filename)"
+        case let .still(filename, _): "\(host):still:\(filename)"
         }
     }
 
@@ -28,7 +32,7 @@ struct AlsoRunningRow: Identifiable, Equatable {
     var title: String {
         switch work {
         case let .reported(row): row.item.kindLabel
-        case .upscale: "Upscale"
+        case .upscale, .still: "Upscale"
         }
     }
 
@@ -37,6 +41,7 @@ struct AlsoRunningRow: Identifiable, Equatable {
         switch work {
         case let .reported(row): row.item.model
         case let .upscale(filename, _): filename
+        case let .still(filename, _): filename
         }
     }
 
@@ -45,6 +50,12 @@ struct AlsoRunningRow: Identifiable, Equatable {
         switch work {
         case let .reported(row): row.item.phaseLabel
         case let .upscale(_, job): UpscalePlan.status(of: job)
+        case let .still(_, state):
+            switch state {
+            case .working: "Making a bigger copy"
+            case let .done(filename): "Complete — \(filename)"
+            case let .failed(sentence): sentence
+            }
         }
     }
 
@@ -57,6 +68,8 @@ struct AlsoRunningRow: Identifiable, Equatable {
             }
             return min(1, max(0, Double(current) / Double(total)))
         case let .upscale(_, job): return UpscalePlan.progress(of: job)
+        // One picture, one pass: there is nothing to count.
+        case .still: return nil
         }
     }
 
@@ -75,6 +88,9 @@ struct AlsoRunningRow: Identifiable, Equatable {
         switch work {
         case .reported: false
         case let .upscale(_, job): !job.state.isTerminal
+        // The request IS the work and the machine is already doing it;
+        // there is no route that would call it off.
+        case .still: false
         }
     }
 
@@ -97,7 +113,10 @@ struct AlsoRunningRow: Identifiable, Equatable {
 
     /// Settled work this app is still holding so the answer can be read.
     var isSettled: Bool {
-        guard case let .upscale(_, job) = work else { return false }
-        return job.state.isTerminal
+        switch work {
+        case .reported: false
+        case let .upscale(_, job): job.state.isTerminal
+        case let .still(_, state): state != .working
+        }
     }
 }
