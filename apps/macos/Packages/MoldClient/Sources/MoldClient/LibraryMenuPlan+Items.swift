@@ -31,7 +31,7 @@ public extension LibraryMenuPlan {
         // print, and starting several at once would queue a machine full of
         // work from one click.
         if canUpscale, count == 1 {
-            items += [.separator, Item(kind: .upscale, title: "Make Bigger…")]
+            items += [.separator, upscaleItem]
         }
         items += [
             .separator,
@@ -98,6 +98,21 @@ public extension LibraryMenuPlan {
                  title: shelf.hidden ? "Show in All Prints" : "Hide from All Prints"),
             Item(kind: .deleteCollection, title: "Delete Collection…", isDestructive: true),
         ]
+    }
+
+    /// One item, or a submenu naming each installed upscaler.
+    ///
+    /// Desktop opens a dialog with a model picker; this app has no dialog, so
+    /// the choice is where every other choice in this menu is. Fewer than two
+    /// installed upscalers is one plain item that sends no model name at all,
+    /// and the machine resolves its own default.
+    private var upscaleItem: Item {
+        guard upscalers.count > 1 else {
+            return Item(kind: .upscale(model: nil), title: "Make Bigger…")
+        }
+        return Item(title: "Make Bigger", children: upscalers.map {
+            Item(kind: .upscale(model: $0.name), title: $0.title)
+        })
     }
 
     /// Quick Look names what it is about, the way the Finder does.

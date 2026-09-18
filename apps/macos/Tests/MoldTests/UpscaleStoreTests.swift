@@ -179,6 +179,46 @@ struct UpscaleStoreTests {
         #expect(sentence.contains("No room left on the disk"))
     }
 
+    /// The upscaler a person picked from the submenu is what goes out, not
+    /// the default the policy would have chosen.
+    ///
+    /// **Fails today**: `start` takes no model and always sends the default.
+    @Test func theChosenUpscalerIsWhatIsSent() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.modelRows = [
+            FakeFixtures.upscaler("real-esrgan-x4plus:fp16", downloaded: true),
+            FakeFixtures.upscaler("swinir:fp16", downloaded: true),
+        ]
+        let (store, _) = await bench(backend, host: plato, interval: .seconds(9))
+
+        // Two installed, so the menu offers a choice -- default first.
+        #expect(store.upscalerOptions(on: plato.id).map(\.title)
+            == ["real-esrgan-x4plus:fp16 (default)", "swinir:fp16"])
+
+        await store.start(entry("clip.mp4", on: plato), model: "swinir:fp16")
+
+        #expect(backend.extras.startedFramewise.map(\.model) == ["swinir:fp16"])
+    }
+
+    /// The submenu is built from the CACHE. A right-click must not put a call
+    /// on the wire -- the cache is warmed once per machine by `recover()`,
+    /// which both panes run on appear.
+    @Test func buildingTheMenuNeverAsksTheMachineAnything() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        await hosts.refresh(plato)
+        let store = UpscaleStore(hosts: hosts, models: ModelStore(hosts: hosts),
+                                 library: LibraryStore(hosts: hosts), interval: .seconds(9))
+
+        for _ in 0 ..< 5 { _ = store.upscalerOptions(on: plato.id) }
+
+        #expect(backend.callCount("models") == 0)
+        #expect(store.upscalerOptions(on: plato.id).isEmpty,
+                "and with nothing read, the plain item is what the plan offers")
+    }
+
     /// Pressing it twice is ONE request. The second press used to start a
     /// second 124-frame job against the same print, and the first job's id
     /// was lost the moment the second answered.

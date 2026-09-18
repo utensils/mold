@@ -33,8 +33,15 @@ extension LibraryActions {
     /// neither is something a menu should hold a window open for. Where it
     /// got to is `UpscaleStore`'s to say -- in the Queue pane, under work
     /// with no queue row of its own.
-    func upscale(_ targets: [LibraryEntry]) {
+    func upscale(_ targets: [LibraryEntry], using model: String? = nil) {
         guard let upscales, let entry = targets.first else { return }
-        Task { await upscales.start(entry) }
+        Task { await upscales.start(entry, model: model) }
+    }
+
+    /// The installed upscalers to offer for this selection, the default
+    /// first. Cache-only -- see `UpscaleStore.upscalerOptions`.
+    func upscalerOptions(for targets: [LibraryEntry]) -> [UpscalerOption] {
+        guard let upscales, let entry = targets.first else { return [] }
+        return upscales.upscalerOptions(on: entry.hostID)
     }
 }

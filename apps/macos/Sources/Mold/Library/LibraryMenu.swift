@@ -47,6 +47,7 @@ struct LibraryMenu {
                 ? actions.meshExports(for: targets[0]) : nil,
             canReuse: actions.reuse != nil && open != nil,
             canUpscale: actions.canUpscale(targets),
+            upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount
         )
     }

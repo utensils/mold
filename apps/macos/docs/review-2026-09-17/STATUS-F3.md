@@ -82,8 +82,13 @@ the merge reads correctly and needs no negotiation.
   What it now has instead: an Also Running row from the moment it starts, the
   machine's own sentence on a failure, and a completion line naming the file. The
   menu item is ABSENT while this app is already making that print bigger.
-  Desktop's model PICKER is the one remaining difference; a confirm in
-  `LibraryPane` is the follow-up if it is wanted.
+  Desktop's model PICKER is closed too: with more than one upscaler installed
+  on that machine, **Make Bigger** is a submenu naming each, the default first
+  and marked as such, and the chosen one is what `start` sends. One installed or
+  none read is the plain **Make Bigger…**, which sends no model name and lets the
+  machine choose. The list is CACHE-ONLY — a right-click puts nothing on the wire
+  — and `recover()` warms that cache once per machine, since nothing else on the
+  Library path reads `/api/models`.
 - **There is no local "is an upscaler installed" check.** Nothing reads
   `/api/models` on the Library path, so that cache is empty there; the ported
   policy's last fallback is the manifest name and the HOST is the authority.
@@ -116,7 +121,7 @@ own — all additive, all one or two lines:
 | `Sources/Mold/Library/LibraryPane+Menu.swift` | `canUpscale: actions.canUpscale(entries),` |
 | `Sources/Mold/Library/LibraryPane.swift` | `@Environment(UpscaleStore.self)`, `upscales:` in `actions`, `.task { await upscales.recover() }` |
 | `Sources/Mold/Library/LibraryStore.swift` | `apply(_:for:)` loses `private` so `LibraryStore+OneHost.swift` can re-read ONE machine |
-| `Sources/Mold/Shell/LibrarySelection.swift` | `canUpscale` field, into the plan, into `==` |
+| `Sources/Mold/Shell/LibrarySelection.swift` | `canUpscale` and `upscalers` fields, into the plan, into `==` |
 | `Sources/Mold/Shell/QueueCommands.swift` | `QueueSelection.gate` (defaulted empty), `Item.pauseQueue`, its menu rows and its `perform` arm |
 | `Sources/Mold/MoldApp.swift` | two `@State` stores, two `State(initialValue:)` lines, `activity.start()` beside `heartbeat.start()`, two `.environment(…)` |
 | `Tests/MoldTests/FakeBackend.swift` | ONE line: `nonisolated(unsafe) var extras = FakeExtras()` |
@@ -139,8 +144,8 @@ findings was verified against the source and acted on. None was judged incorrect
 
 - `make lint` — green (advisories: `MoldApp.swift` 159 lines; `HTTPBackend` and
   `LibraryStore` type sizes, both pre-existing).
-- `cd Packages/MoldClient && swift test` — 669 tests, 31 suites, passed.
-- App bundle `xcodebuild … test` under the shared lock — 610 tests, 89 suites, passed.
+- `cd Packages/MoldClient && swift test` — 672 tests, 31 suites, passed.
+- App bundle `xcodebuild … test` under the shared lock — 612 tests, 89 suites, passed.
 
 ## UAT owed (a real machine, not a fake)
 
@@ -158,6 +163,9 @@ findings was verified against the source and acted on. None was judged incorrect
    go STRAIGHT TO THE QUEUE pane: the row is back, still counting. Then press
    **Make Bigger…** on the same clip from the Library: it must adopt that job, not
    start a second one (watch `/api/video-upscale-jobs` on the host).
+3b. **Choosing the upscaler.** On a machine with two installed, **Make Bigger**
+   is a submenu listing both with the default marked; picking the other one sends
+   it (check the job's `model`). With one, it is the plain item.
 4. **No upscaler.** On a machine with none installed, the request goes out and
    the MACHINE refuses; the banner carries its sentence, which names the model.
 5. **Absent, not disabled.** On a machine that does not advertise `video_upscale`,

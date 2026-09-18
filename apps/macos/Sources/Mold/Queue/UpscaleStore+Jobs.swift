@@ -14,7 +14,9 @@ extension UpscaleStore {
     /// bigger picture into that machine's Library before it answers, so
     /// there is nothing to follow and the gallery is simply re-read. A clip
     /// is a durable job, and this app follows it.
-    func start(_ entry: LibraryEntry) async {
+    /// `model` is the upscaler a person picked from the submenu, or `nil`
+    /// for "whatever this machine would choose".
+    func start(_ entry: LibraryEntry, model chosen: String? = nil) async {
         let key = Key(host: entry.hostID, filename: entry.print.filename)
         // Pressing it twice is one request. Without this the second press
         // starts a SECOND 124-frame job against the same print, and the
@@ -31,7 +33,7 @@ extension UpscaleStore {
         // listed: its last fallback is the manifest name (`upscale.ts:24`),
         // and the HOST is the authority on whether it has it. A real refusal
         // then arrives in the machine's own words, which name the model.
-        let model = UpscalePlan.defaultUpscaler(upscalers(on: entry.hostID))
+        let model = chosen ?? UpscalePlan.defaultUpscaler(upscalers(on: entry.hostID))
         let epoch = bump(key)
         working.insert(key)
         defer { working.remove(key) }

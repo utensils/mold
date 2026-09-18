@@ -11,6 +11,22 @@ public struct UpscalerChoice: Hashable, Sendable {
     }
 }
 
+/// One upscaler a person may pick, as a menu needs to see it.
+public struct UpscalerOption: Hashable, Sendable {
+    public let name: String
+    /// The one `defaultUpscaler` would have chosen. Listed first and said so,
+    /// because a menu of four model ids with nothing marked is a quiz.
+    public let isDefault: Bool
+
+    public init(name: String, isDefault: Bool) {
+        self.name = name
+        self.isDefault = isDefault
+    }
+
+    /// The default's title says so; every other row is just the model.
+    public var title: String { isDefault ? "\(name) (default)" : name }
+}
+
 /// Which upscaler to use, how far a clip job has got, and whether to keep
 /// asking -- the port of `studio/lib/upscale.ts`, which web and desktop both
 /// read. Pure, so the wording and the arithmetic are a test rather than
@@ -28,6 +44,25 @@ public enum UpscalePlan {
             ?? choices.first { isRealEsrganX4Plus($0.name) }?.name
             ?? choices.first?.name
             ?? "real-esrgan-x4plus:fp16"
+    }
+
+    /// The installed upscalers a person may choose between, the default
+    /// first. Only DOWNLOADED ones: a model the machine does not have is not
+    /// a choice, it is a download.
+    ///
+    /// Empty where this app has not read that machine's models -- the menu
+    /// then offers the plain item and the host resolves the default itself,
+    /// which is the same answer `defaultUpscaler` gives for an empty list.
+    public static func options(_ choices: [UpscalerChoice]) -> [UpscalerOption] {
+        let installed = choices.filter(\.isDownloaded)
+        guard installed.count > 1 else { return [] }
+        let preferred = defaultUpscaler(installed)
+        return installed
+            .map { UpscalerOption(name: $0.name, isDefault: $0.name == preferred) }
+            .sorted { left, right in
+                left.isDefault == right.isDefault
+                    ? left.name < right.name : left.isDefault
+            }
     }
 
     /// `/^real-esrgan-x4plus(?::|$)/` (`upscale.ts:18`). The boundary matters:

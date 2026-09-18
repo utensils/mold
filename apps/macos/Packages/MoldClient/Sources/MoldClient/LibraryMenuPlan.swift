@@ -24,8 +24,10 @@ public enum LibraryAction: Hashable, Sendable {
     case favorite(Bool)
     case file(slug: String)
     case unfile(slug: String)
-    /// Upscale this print on the machine that holds it.
-    case upscale
+    /// Upscale this print on the machine that holds it. `nil` means the
+    /// machine's own default -- what the plain item sends when this app has
+    /// not read that machine's upscalers.
+    case upscale(model: String?)
     case copy
     case save
     case export(format: String)
@@ -61,13 +63,18 @@ public struct LibraryMenuPlan: Sendable {
     /// clip needs `video_upscale`, a still `gallery_image` as well. Absence
     /// is a definitive no, and the item is then ABSENT rather than inert.
     public let canUpscale: Bool
+    /// The installed upscalers to choose between, the default first. Fewer
+    /// than two is one plain item -- a submenu with one row in it is a door
+    /// onto a corridor.
+    public let upscalers: [UpscalerOption]
     public let trashCount: Int
 
     public init(scope: LibraryScopeKind, count: Int, allFavorite: Bool = false,
                 name: String? = nil, shelves: [CollectionShelf] = [],
                 enclosingShelf: CollectionShelf? = nil, exportFormats: [String] = [],
                 meshExports: MeshExport.Split? = nil,
-                canReuse: Bool = false, canUpscale: Bool = false, trashCount: Int = 0) {
+                canReuse: Bool = false, canUpscale: Bool = false,
+                upscalers: [UpscalerOption] = [], trashCount: Int = 0) {
         self.meshExports = meshExports
         self.scope = scope
         self.count = count
@@ -78,6 +85,7 @@ public struct LibraryMenuPlan: Sendable {
         self.exportFormats = exportFormats
         self.canReuse = canReuse
         self.canUpscale = canUpscale
+        self.upscalers = upscalers
         self.trashCount = trashCount
     }
 }

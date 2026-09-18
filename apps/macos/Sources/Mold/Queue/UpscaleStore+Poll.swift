@@ -79,6 +79,11 @@ extension UpscaleStore {
     /// Not `private`: a test drives one machine.
     func recover(on host: MoldHost.ID) async {
         guard let backend = hosts.backend(for: host) else { return }
+        // Warm the model cache ONCE, here rather than from the menu: the
+        // upscaler submenu is built while a menu is opening, and a
+        // right-click must not put a call on the wire. Nothing else on the
+        // Library path reads `/api/models`.
+        if models.all(on: host).isEmpty { await models.refresh(on: host) }
         let listing: [VideoUpscaleJob]
         do {
             listing = try await backend.framewiseUpscales()

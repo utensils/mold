@@ -34,6 +34,9 @@ struct LibrarySelection: Equatable {
     /// Whether the machine holding the one selected print advertises
     /// upscaling it. The menu bar cannot see a capability block.
     let canUpscale: Bool
+    /// The installed upscalers to choose between. The menu bar cannot see a
+    /// machine's model list.
+    let upscalers: [UpscalerOption]
 
     /// Not compared: a `DraggablePrint` is a closure in a trench coat, and the
     /// count above already changes whenever this list does.
@@ -54,7 +57,8 @@ struct LibrarySelection: Equatable {
         LibraryMenuPlan(scope: scope.menuKind, count: count, allFavorite: allFavorite,
                         name: name, shelves: shelves, enclosingShelf: enclosingShelf,
                         exportFormats: exportFormats, meshExports: meshExports,
-                        canReuse: canReuse, canUpscale: canUpscale, trashCount: trashCount)
+                        canReuse: canReuse, canUpscale: canUpscale, upscalers: upscalers,
+                        trashCount: trashCount)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -65,7 +69,7 @@ struct LibrarySelection: Equatable {
             && lhs.exportFormats == rhs.exportFormats
             && lhs.meshExports == rhs.meshExports && lhs.trashCount == rhs.trashCount
             && lhs.name == rhs.name && lhs.canReuse == rhs.canReuse
-            && lhs.canUpscale == rhs.canUpscale
+            && lhs.canUpscale == rhs.canUpscale && lhs.upscalers == rhs.upscalers
     }
 }
 

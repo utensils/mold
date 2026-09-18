@@ -6,6 +6,17 @@ import MoldClient
 // file-size advisory; the state and the lifecycle stay there.
 @MainActor
 extension UpscaleStore {
+    /// The installed upscalers to offer for a print, the default first.
+    ///
+    /// Read from the CACHE and never a request: this answers while a menu is
+    /// being built, and a right-click must not put a call on the wire. The
+    /// cache is warmed once per machine by `recover()`, which both panes run
+    /// on appear; until then this is empty and the plain item is offered,
+    /// which sends no model name and lets the machine choose.
+    func upscalerOptions(on host: MoldHost.ID) -> [UpscalerOption] {
+        UpscalePlan.options(upscalers(on: host))
+    }
+
     /// The upscalers this machine has, as the default-picking policy needs to
     /// see them (`UpscalePlan.defaultUpscaler`).
     func upscalers(on host: MoldHost.ID) -> [UpscalerChoice] {

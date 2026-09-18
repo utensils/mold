@@ -11,9 +11,11 @@ import Testing
 struct LibraryMenuPlanUpscaleTests {
 
     private func plan(count: Int = 1, canUpscale: Bool, canReuse: Bool = true,
-                      scope: LibraryScopeKind = .prints) -> LibraryMenuPlan {
+                      scope: LibraryScopeKind = .prints,
+                      upscalers: [UpscalerChoice] = []) -> LibraryMenuPlan {
         LibraryMenuPlan(scope: scope, count: count, canReuse: canReuse,
-                        canUpscale: canUpscale)
+                        canUpscale: canUpscale,
+                        upscalers: UpscalePlan.options(upscalers))
     }
 
     private func titles(_ plan: LibraryMenuPlan) -> [String] {
@@ -62,5 +64,49 @@ struct LibraryMenuPlanUpscaleTests {
         #expect(!items.enumerated().contains { index, item in
             index > 0 && item.isSeparator && items[index - 1].isSeparator
         })
+    }
+
+    // MARK: - Choosing the upscaler
+
+    private func installed(_ names: [String], downloaded: Bool = true) -> [UpscalerChoice] {
+        names.map { UpscalerChoice(name: $0, isDownloaded: downloaded) }
+    }
+
+    /// Desktop lets a person choose; this app has no dialog, so the choice is
+    /// where every other choice in this menu is.
+    ///
+    /// **Fails today**: the item is always plain and always the default.
+    @Test func severalInstalledUpscalersBecomeASubmenu() throws {
+        let items = plan(canUpscale: true,
+                         upscalers: installed(["swinir:fp16", "real-esrgan-x4plus:fp16"])).items
+        let bigger = try #require(items.first { $0.title == "Make Bigger" })
+        #expect(bigger.isSubmenu)
+        #expect(bigger.children.map(\.title)
+            == ["real-esrgan-x4plus:fp16 (default)", "swinir:fp16"])
+        #expect(bigger.children.first?.kind == .upscale(model: "real-esrgan-x4plus:fp16"))
+        #expect(items.filter { $0.title == "Make Bigger…" }.isEmpty)
+    }
+
+    /// One is one item -- a submenu with a single row is a door onto a
+    /// corridor -- and so is a machine whose models this app has not read,
+    /// which sends no model name and lets the machine choose.
+    @Test func oneOrNoneKnownStaysAPlainItem() {
+        for choices in [installed(["real-esrgan-x4plus:fp16"]), []] {
+            let items = plan(canUpscale: true, upscalers: choices).items
+            let plain = items.filter { $0.kind == .upscale(model: nil) }
+            let submenus = items.filter(\.isSubmenu)
+            #expect(plain.map(\.title) == ["Make Bigger…"])
+            #expect(submenus.isEmpty)
+        }
+    }
+
+    /// An upscaler the machine does NOT have is not a choice, it is a
+    /// download -- so it never reaches the menu.
+    @Test func onlyDownloadedUpscalersAreOffered() {
+        let mixed = [UpscalerChoice(name: "real-esrgan-x4plus:fp16", isDownloaded: true),
+                     UpscalerChoice(name: "swinir:fp16", isDownloaded: false)]
+        #expect(UpscalePlan.options(mixed).isEmpty, "one installed is not a choice")
+        let items = plan(canUpscale: true, upscalers: mixed).items
+        #expect(items.filter { $0.kind == .upscale(model: nil) }.count == 1)
     }
 }
