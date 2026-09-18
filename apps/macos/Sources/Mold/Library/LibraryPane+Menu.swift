@@ -42,7 +42,7 @@ extension LibraryPane {
     var menuImport: LibraryImport {
         let actions = self.actions
         return LibraryImport(machines: hosts.hosts.filter(hosts.isUp)) { machine in
-            actions.importFiles(into: machine)
+            actions.imports.chooseFiles(for: machine)
         }
     }
 

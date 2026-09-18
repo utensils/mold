@@ -38,11 +38,11 @@ struct LibraryImportTests {
         let fake = FakeBackend(host: workstation)
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
-        let actions = LibraryActions(hosts: hosts, library: library)
+        let imports = PrintImport(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls, to: workstation)
+        await imports.send(urls, to: workstation)
 
         // Every file that could be read was sent, in order, and the one that
         // could not is the only thing reported -- AFTER the batch, because
@@ -61,11 +61,11 @@ struct LibraryImportTests {
         let fake = FakeBackend(host: workstation)
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
-        let actions = LibraryActions(hosts: hosts, library: library)
+        let imports = PrintImport(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls + [folder.appending(path: "also-gone.png")], to: workstation)
+        await imports.send(urls + [folder.appending(path: "also-gone.png")], to: workstation)
 
         #expect(fake.importedNames == ["one.png", "two.png", "three.png"])
         #expect(hosts.failures.count == 1)
@@ -80,11 +80,11 @@ struct LibraryImportTests {
         fake.refuses = ["importPrint"]
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
-        let actions = LibraryActions(hosts: hosts, library: library)
+        let imports = PrintImport(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls, to: workstation)
+        await imports.send(urls, to: workstation)
 
         #expect(fake.callCount("importPrint") == 1)
         #expect(hosts.failures.count == 1)

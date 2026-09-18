@@ -3,15 +3,26 @@ import ImageIO
 import MoldClient
 import UniformTypeIdentifiers
 
-// Putting a file from this Mac into a machine's library.
-extension LibraryActions {
+/// Files from this Mac on their way into a machine's library.
+///
+/// Its own object rather than more of `LibraryActions`: everything else there
+/// is an action on prints the library already holds, and this is a batch with
+/// a policy of its own -- what one unreadable file in the middle of ten means,
+/// what a machine refusing means, and the single line said about the lot of it
+/// once every import that could happen has. It takes the machines and the
+/// library it is filling, the arrangement `LibraryMutations` has with
+/// `LibraryStore`.
+@MainActor
+struct PrintImport {
+    let hosts: HostStore
+    let library: LibraryStore
 
     /// Asks for files, then asks which machine, then sends them.
     ///
     /// A machine, not "the" machine: a print belongs to the one that holds it,
     /// and with a fleet there is no obvious default. With exactly one reachable
     /// machine the question answers itself and is not asked.
-    func importFiles(into host: MoldHost) {
+    func chooseFiles(for host: MoldHost) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -22,13 +33,13 @@ extension LibraryActions {
         Task {
             guard await panel.begin() == .OK else { return }
             await send(panel.urls, to: host)
-            await reload()
+            await library.reload()
         }
     }
 
-    /// Not `private`: `LibraryImportTests` sends a batch without an open
-    /// panel, which is the only way to pin what a batch does with one bad
-    /// file in the middle of it.
+    /// The batch itself. `LibraryImportTests` sends one without an open panel,
+    /// which is the only way to pin what a batch does with one bad file in the
+    /// middle of it.
     func send(_ urls: [URL], to host: MoldHost) async {
         guard let client = hosts.backend(for: host.id) else { return }
         /// The files this Mac could not read, reported ONCE when the batch is

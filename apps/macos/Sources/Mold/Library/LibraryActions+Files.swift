@@ -40,6 +40,39 @@ extension LibraryActions {
         }
     }
 
+    /// Saves the original bytes. One print gets a save panel; several get a
+    /// folder, because ten save panels in a row is not a feature.
+    ///
+    /// Goes through the materializer like everything else, so saving a clip
+    /// you just previewed is a local copy rather than a second download.
+    func save(_ entries: [LibraryEntry]) {
+        Task {
+            guard let first = entries.first else { return }
+            if entries.count == 1 {
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = first.print.filename
+                guard await panel.begin() == .OK, let url = panel.url,
+                      let source = await files(for: [first]).first else { return }
+                // The panel already asked about replacing, so removing first
+                // is what the person agreed to -- but a failure here is theirs
+                // to hear about, not something to swallow.
+                do {
+                    try? FileManager.default.removeItem(at: url)
+                    try FileManager.default.copyItem(at: source.url, to: url)
+                } catch {
+                    hosts.report(error, on: first.hostID, doing: "save that print")
+                }
+            } else {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.prompt = "Save Here"
+                guard await panel.begin() == .OK, let folder = panel.url else { return }
+                await saveAll(entries, into: folder)
+            }
+        }
+    }
+
     /// Saves several prints into one folder the person chose.
     ///
     /// Nothing there is ever destroyed: a name already in the folder, or
