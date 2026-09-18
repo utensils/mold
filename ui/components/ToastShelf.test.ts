@@ -36,7 +36,7 @@ describe("ToastShelf", () => {
     // A warning here is the sticky "your machine is gone" — as time-sensitive
     // as an error, so it must not wait for a polite region to be read.
     const warned = make([
-      { id: "w", kind: "warning", text: "Can't reach plato" },
+      { id: "w", kind: "warning", text: "Can't reach workstation" },
     ]);
     expect(warned.findAll("[role=alert]")).toHaveLength(1);
   });
@@ -101,7 +101,7 @@ describe("ToastShelf", () => {
 
   it("renders warnings with the yellow tone class, glyph, and label", () => {
     const wrapper = make([
-      { id: "w", kind: "warning", text: "Can't reach plato" },
+      { id: "w", kind: "warning", text: "Can't reach workstation" },
     ]);
     const toast = wrapper.get(".ms-toast");
     expect(toast.classes()).toContain("ms-toast--warning");
@@ -114,7 +114,7 @@ describe("ToastShelf", () => {
     const wrapper = make([
       { id: "i", kind: "info", text: "Queued" },
       { id: "s", kind: "success", text: "Saved" },
-      { id: "w", kind: "warning", text: "Can't reach plato" },
+      { id: "w", kind: "warning", text: "Can't reach workstation" },
       { id: "e", kind: "error", text: "Failed" },
     ]);
     // Newest first.

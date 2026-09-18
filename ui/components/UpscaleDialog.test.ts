@@ -49,7 +49,7 @@ describe("UpscaleDialog", () => {
         modelValue: "real-esrgan-x4plus:fp16",
         executionHosts: [
           { key: "local", label: "This Mac" },
-          { key: "plato", label: "plato" },
+          { key: "workstation", label: "workstation" },
         ],
         executionHostValue: "local",
       },
@@ -60,12 +60,12 @@ describe("UpscaleDialog", () => {
     ) as HTMLSelectElement;
     expect([...host.options].map((option) => option.text)).toEqual([
       "This Mac",
-      "plato",
+      "workstation",
     ]);
-    host.value = "plato";
+    host.value = "workstation";
     host.dispatchEvent(new Event("change"));
     await wrapper.vm.$nextTick();
-    expect(wrapper.emitted("update:executionHostValue")).toEqual([["plato"]]);
+    expect(wrapper.emitted("update:executionHostValue")).toEqual([["workstation"]]);
     wrapper.unmount();
 
     const oneHost = mount(UpscaleDialog, {

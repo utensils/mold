@@ -53,7 +53,7 @@ describe("the 3-D Studio draft", () => {
     first.textureResolution = 4096;
     first.upAxis = "z";
     first.metersPerUnit = 0.001;
-    first.routing = "plato";
+    first.routing = "workstation";
     first.persist();
     expect(map.get(MESH_WORKFLOW_DRAFT_KEY)).toBeTruthy();
 
@@ -63,7 +63,7 @@ describe("the 3-D Studio draft", () => {
     expect(relaunched.textureResolution).toBe(4096);
     expect(relaunched.upAxis).toBe("z");
     expect(relaunched.metersPerUnit).toBe(0.001);
-    expect(relaunched.routing).toBe("plato");
+    expect(relaunched.routing).toBe("workstation");
   });
 
   /*

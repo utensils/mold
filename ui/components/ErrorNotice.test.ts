@@ -11,18 +11,18 @@ describe("ErrorNotice", () => {
     });
     const wrapper = mount(ErrorNotice, {
       props: {
-        message: "plato couldn’t find that model or job.",
+        message: "workstation couldn’t find that model or job.",
         copyMessage:
-          "plato couldn’t find that model or job.\n\nTechnical details: SSE request failed with HTTP 404",
+          "workstation couldn’t find that model or job.\n\nTechnical details: SSE request failed with HTTP 404",
       },
     });
 
     expect(wrapper.get("[data-test='error-notice-message']").text()).toBe(
-      "plato couldn’t find that model or job.",
+      "workstation couldn’t find that model or job.",
     );
     await wrapper.get("[data-test='copy-error-notice']").trigger("click");
     expect(writeText).toHaveBeenCalledWith(
-      "plato couldn’t find that model or job.\n\nTechnical details: SSE request failed with HTTP 404",
+      "workstation couldn’t find that model or job.\n\nTechnical details: SSE request failed with HTTP 404",
     );
     expect(
       wrapper.get("[data-test='copy-error-notice']").attributes("aria-label"),

@@ -23,8 +23,8 @@ function surface(
 ): LiveWorkSurface<Record<string, unknown>> {
   return {
     targetFor: (hostId) =>
-      hostId === "plato"
-        ? { baseUrl: "http://plato:7680", apiKey: null }
+      hostId === "workstation"
+        ? { baseUrl: "http://workstation:7680", apiKey: null }
         : null,
     go,
     fail,
@@ -43,10 +43,10 @@ function row(over: Partial<FleetActiveWork> = {}): FleetActiveWork {
     created_at_unix_ms: 0,
     updated_at_unix_ms: 0,
     can_cancel: true,
-    key: "plato:generation:chain-1",
-    hostId: "plato",
-    hostLabel: "plato",
-    routeUrl: "http://plato:7680",
+    key: "workstation:generation:chain-1",
+    hostId: "workstation",
+    hostLabel: "workstation",
+    routeUrl: "http://workstation:7680",
     instanceId: "i-1",
     stale: false,
     hostError: null,
@@ -72,7 +72,7 @@ describe("openLiveWorkWith", () => {
     await openLiveWorkWith(surface())(row({ execution: "chain" }));
     expect(findQueueEntryById).not.toHaveBeenCalled();
     expect(fail).not.toHaveBeenCalled();
-    expect(go).toHaveBeenCalledWith("/machines/plato");
+    expect(go).toHaveBeenCalledWith("/machines/workstation");
   });
 
   it("lets each surface pick that destination for itself", async () => {
@@ -86,7 +86,7 @@ describe("openLiveWorkWith", () => {
   it("sends a legacy sequence row the same way", async () => {
     await openLiveWorkWith(surface())(row({ kind: "sequence" }));
     expect(findQueueEntryById).not.toHaveBeenCalled();
-    expect(go).toHaveBeenCalledWith("/machines/plato");
+    expect(go).toHaveBeenCalledWith("/machines/workstation");
   });
 
   it("reattaches an ordinary generation through the queue", async () => {
@@ -97,12 +97,12 @@ describe("openLiveWorkWith", () => {
     });
     await openLiveWorkWith(surface())(row({ id: "job-1", execution: null }));
     expect(findQueueEntryById).toHaveBeenCalledWith(
-      { baseUrl: "http://plato:7680", apiKey: null },
+      { baseUrl: "http://workstation:7680", apiKey: null },
       "job-1",
     );
     expect(restore).toHaveBeenCalledWith(
       expect.objectContaining({ jobId: "job-1", running: true }),
-      "plato",
+      "workstation",
     );
     expect(go).toHaveBeenCalledWith("/create");
   });
@@ -151,7 +151,7 @@ describe("openLiveWorkWith", () => {
     expect(restore).not.toHaveBeenCalled();
     expect(go).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: expect.objectContaining({ workflow: "wf-9", host: "plato" }),
+        query: expect.objectContaining({ workflow: "wf-9", host: "workstation" }),
       }),
     );
   });
@@ -172,6 +172,6 @@ describe("openLiveWorkWith", () => {
     await openLiveWorkWith(surface())(
       row({ kind: "upscale" } as Partial<FleetActiveWork>),
     );
-    expect(go).toHaveBeenCalledWith("/machines/plato");
+    expect(go).toHaveBeenCalledWith("/machines/workstation");
   });
 });
