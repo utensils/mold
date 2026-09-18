@@ -85,6 +85,9 @@ engine-clean: ## Unlink the engine and go back to a remote-only build
 
 gen: ## Regenerate Mold.xcodeproj from project.yml
 	@command -v $(XCODEGEN) >/dev/null || { echo "xcodegen not found -- run inside 'nix develop'"; exit 1; }
+	@# A fresh checkout has no Engine.xcconfig (it is generated, ignored), and
+	@# xcodegen refuses the spec without it -- remote-only until `make engine`.
+	@[ -f Engine.xcconfig ] || $(MAKE) engine-clean
 	@$(XCODEGEN) generate --spec project.yml --quiet
 
 build: gen ## Build the app
