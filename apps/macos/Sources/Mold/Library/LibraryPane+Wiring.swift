@@ -108,7 +108,17 @@ extension LibraryPane {
             .filter { $0.print.filename == entry.print.filename }
             .map(\.id)
         let ordered = [entry.id] + copies.filter { $0 != entry.id }
-        Task { await reuseStore.probe(ordered, fence: fence, disclosing: metadata) }
+        Task {
+            await reuseStore.probe(ordered, fence: fence, disclosing: metadata)
+            // Then the picture itself, into the well, so the person can see
+            // what the render starts from and set its strength.
+            let outgoing = hosts.host(entry.hostID).flatMap {
+                RetainedSourcePicture.outgoing(generate, on: $0, hosts: hosts)
+            }
+            if let placed = await reuseStore.placePicture(in: generate.draft, outgoing: outgoing) {
+                generate.draft = placed
+            }
+        }
     }
 
     /// The three things the Library menu offers about the SHELF it is

@@ -150,7 +150,7 @@ struct GeneratePane: View {
         // that starts from it. The authority is TAKEN before the await, so a
         // second press finds none and takes the ordinary synchronous path.
         if case .chain = routing, let authority = reuse.pending(for: controller.draft),
-           let member = ChainRetainedSource.member(
+           let member = RetainedSourcePicture.member(
                of: authority, forHydrating: outgoingProbe(on: host)) {
             reuse.clear()
             Task { await attachThenRun(member, of: authority) }
@@ -180,27 +180,18 @@ struct GeneratePane: View {
     private func attachThenRun(
         _ member: RetainedSourceMedia.Member, of authority: ReuseStore.Authority
     ) async {
-        switch await ChainRetainedSource.fetch(member, of: authority, hosts: hosts) {
+        switch await RetainedSourcePicture.fetch(member, of: authority, hosts: hosts) {
         case let .refused(sentence):
             reuse.notice = sentence
         case let .picture(picture):
-            ChainRetainedSource.place(picture, named: authority.filename,
-                                      in: &controller.draft)
+            RetainedSourcePicture.place(picture, named: authority.filename,
+                                        in: &controller.draft)
             startRun()
         }
     }
 
-    /// The first request the draft would build, for asking whether a retained
-    /// role would be hydrated at all. Built through the request builder rather
-    /// than by reading the wells, so the answer cannot disagree with what
-    /// actually ships (an exclusive well parks its media, and a probe that
-    /// looked at `media.sourceImage` would not know).
     private func outgoingProbe(on host: MoldHost) -> GenerateRequest? {
-        guard let model = controller.modelName else { return nil }
-        return controller.draft.requests(
-            model: model, copies: 1, randomBase: 0,
-            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
-        ).first
+        RetainedSourcePicture.outgoing(controller, on: host, hosts: hosts)
     }
 
     private func cancelRun() { controller.stop() }

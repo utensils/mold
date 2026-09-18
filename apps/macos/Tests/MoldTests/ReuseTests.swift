@@ -499,20 +499,64 @@ struct ReuseTests {
             filename: "a.mp4", origin: workstation.id, members: [member()])
 
         var draft = RenderDraft()
-        let wanted = ChainRetainedSource.member(of: authority, forHydrating: request())
+        let wanted = RetainedSourcePicture.member(of: authority, forHydrating: request())
         #expect(wanted?.memberId == "m1")
-        let fetched = await ChainRetainedSource.fetch(
+        let fetched = await RetainedSourcePicture.fetch(
             try! #require(wanted), of: authority, hosts: hosts)
         guard case let .picture(picture) = fetched else {
             Issue.record("the picture should have been fetched")
             return
         }
-        ChainRetainedSource.place(picture, named: authority.filename, in: &draft)
+        RetainedSourcePicture.place(picture, named: authority.filename, in: &draft)
 
         #expect(draft.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
         #expect(draft.media.sourceImageName == "a.mp4")
         // The picked picture too, so a later re-fit cannot crop a crop.
         #expect(draft.media.sourceImageOriginal == draft.media.sourceImage)
+    }
+
+    /// UAT 2026-09-17 #3: the banner said "Using the source media from a.png"
+    /// while the well stayed empty and there was no Strength control -- the
+    /// host applied the picture at submit and nothing on screen showed it.
+    ///
+    /// **Fails today**: the store has no step that puts the picture in the
+    /// well on an ordinary render; only the long-clip route did.
+    @Test func aReusedPrintsPictureLandsInTheWellOnEveryRoute() async {
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        backend.retainedMemberBytes["m1"] = Data([3, 1, 4])
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft()
+        await armed(store, backend: backend, host: workstation, draft: draft)
+        // Said while the picture is still the host's to apply...
+        #expect(store.attachmentSentence(for: draft) != nil)
+
+        let placed = await store.placePicture(in: draft, outgoing: request())
+
+        #expect(placed?.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
+        #expect(placed?.media.sourceImageName == "a.png")
+        // ...and by the well, not a banner, once it is there. The authority
+        // survives the store's own edit.
+        #expect(store.pending(for: placed!) != nil)
+        #expect(store.attachmentSentence(for: placed!) == nil)
+    }
+
+    /// A picture of the person's own is never replaced, and a well that
+    /// already holds one is not a fetch.
+    @Test func aWellWithAPictureInItIsLeftAlone() async {
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        var draft = RenderDraft()
+        draft.media.sourceImage = "mine"
+        await armed(store, backend: backend, host: workstation, draft: draft)
+        var mine = request()
+        mine.sourceImage = "mine"
+
+        #expect(await store.placePicture(in: draft, outgoing: mine) == nil)
+        #expect(!backend.calls.contains("retainedSourceMediaBytes"))
     }
 
     @Test func aChainCarriesOnlyThePictureAndNeverAMaskOrAFace() {
@@ -521,7 +565,7 @@ struct ReuseTests {
             members: [member("mask_image", "m1"), member("identity_image", "m2")])
         // Nothing a chain body can carry: `AutoChainRequest` has one media
         // field, and the warning path is what covers the rest.
-        #expect(ChainRetainedSource.member(of: authority, forHydrating: request()) == nil)
+        #expect(RetainedSourcePicture.member(of: authority, forHydrating: request()) == nil)
     }
 
     @Test func aChainNeverOverwritesAPictureAlreadyInTheWell() {
@@ -529,7 +573,7 @@ struct ReuseTests {
             filename: "a.mp4", origin: UUID(), members: [member()])
         var mine = request()
         mine.sourceImage = "MINE"
-        #expect(ChainRetainedSource.member(of: authority, forHydrating: mine) == nil)
+        #expect(RetainedSourcePicture.member(of: authority, forHydrating: mine) == nil)
     }
 
     /// **Fails today**: the warning is gated on the authority alone, so a

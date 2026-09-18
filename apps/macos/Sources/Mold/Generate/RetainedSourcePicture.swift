@@ -1,28 +1,34 @@
 import Foundation
 import MoldClient
 
-/// Getting a reused print's own picture onto a LONG clip.
+/// Getting a reused print's own picture into the source WELL.
 ///
-/// `POST /api/chain-jobs` redeems no reuse session -- only `/api/generate`,
-/// `/api/generate/stream` and `/api/generation-batches` do (`routes.rs:3080`,
-/// `:3475`, `:4662`). But the chain WIRE carries the bytes per stage
-/// (`source_image_b64`), so the relay needs no server support at all: fetch
-/// the retained picture and put it in the draft's own source well, and the
-/// render goes out as an ordinary long clip that happens to start from it.
+/// It started as the long-clip route's workaround: `POST /api/chain-jobs`
+/// redeems no reuse session -- only `/api/generate`, `/api/generate/stream`
+/// and `/api/generation-batches` do (`routes.rs:3080`, `:3475`, `:4662`) --
+/// but the chain WIRE carries the bytes per stage (`source_image_b64`), so
+/// fetching the picture into the draft's own well needs no server support.
+/// It is now EVERY route's: an invisible authority the host applied at
+/// submit left the well empty, no Strength control, and no way to see what
+/// the render would start from (UAT 2026-09-17 #3). Once the picture is an
+/// ordinary attachment the request carries the bytes itself,
+/// `members(_:forHydrating:)` asks the host for nothing it already has, and
+/// the session is left for what a well cannot hold -- a mask, an identity
+/// photo, audio.
 ///
-/// Doing it HERE rather than inside the submit is what leaves
-/// `ChainSubmission.take`'s synchronous ordering alone: nothing about which
-/// press takes the canvas moves, because the authority is taken before the
-/// await and a second press therefore finds none and goes straight down the
-/// ordinary path.
+/// It ANSWERS rather than writing through an `inout` draft, because the
+/// draft lives on an actor-isolated store and cannot be passed `inout`
+/// across an `await`; the caller applies it in one step when the bytes are
+/// in hand.
 @MainActor
-enum ChainRetainedSource {
+enum RetainedSourcePicture {
 
-    /// The one role a chain body can carry. Anything else the print retained
-    /// cannot ride this route whatever we do.
+    /// The one role a well can hold (and the one a chain body can carry).
     static let carriedRole = "source_image"
 
-    /// The member to fetch, if this authority has one a chain can use.
+    /// The member to fetch, if this authority has one the well can take and
+    /// the well is empty -- a picture somebody attached themselves is never
+    /// overwritten.
     static func member(
         of authority: ReuseStore.Authority, forHydrating outgoing: GenerateRequest?
     ) -> RetainedSourceMedia.Member? {
@@ -32,11 +38,6 @@ enum ChainRetainedSource {
     }
 
     /// The picture, or the sentence to show instead.
-    ///
-    /// It ANSWERS rather than writing through an `inout` draft, because the
-    /// draft lives on an actor-isolated store and cannot be passed `inout`
-    /// across an `await`; the caller applies it in one step when the bytes
-    /// are in hand.
     enum Fetched: Sendable {
         case picture(String)
         case refused(String)
@@ -64,9 +65,9 @@ enum ChainRetainedSource {
         }
     }
 
-    /// Puts it in the well. The well is the point: on this route the picture
-    /// stops being invisible authority the host applies and becomes an
-    /// ordinary attachment a person can see, change and remove.
+    /// Puts it in the well. The well is the point: the picture stops being
+    /// invisible authority the host applies and becomes an ordinary
+    /// attachment a person can see, change and remove.
     static func place(_ picture: String, named name: String, in draft: inout RenderDraft) {
         draft.media.sourceImage = picture
         draft.media.sourceImageName = name
@@ -74,6 +75,20 @@ enum ChainRetainedSource {
         // IS the original, never a fitted copy of one.
         draft.media.sourceImageOriginal = picture
         draft.media.sourceImageOriginalName = name
+    }
+
+    /// The first request the draft would build, for asking whether a retained
+    /// role would be hydrated at all. Built through the request builder rather
+    /// than by reading the wells, so the answer cannot disagree with what
+    /// actually ships (an exclusive well parks its media, and a probe that
+    /// looked at `media.sourceImage` would not know).
+    static func outgoing(_ controller: GenerateController, on host: MoldHost,
+                         hosts: HostStore) -> GenerateRequest? {
+        guard let model = controller.modelName else { return nil }
+        return controller.draft.requests(
+            model: model, copies: 1, randomBase: 0,
+            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
+        ).first
     }
 
     private static func code(of error: any Error) -> String? {

@@ -18,7 +18,7 @@ import MoldClient
 @MainActor
 @Observable
 final class ReuseStore {
-    private let hosts: HostStore
+    let hosts: HostStore
 
     /// The print the draft on screen came from, once a machine has answered
     /// for it. `nil` means nothing to hydrate from -- a fresh draft, a reuse
@@ -60,6 +60,8 @@ final class ReuseStore {
 
     /// Whether the answer in hand is still about the print on screen.
     func isCurrent(_ fence: Int) -> Bool { fence == version }
+    /// The fence a step started AFTER the probe must still be current against.
+    var currentFence: Int { version }
 
     /// Asks EVERY known copy of the print, in order, and keeps the first
     /// machine that can actually hand the media over.
@@ -187,11 +189,19 @@ extension ReuseStore {
     /// The available path used to be completely silent -- the person was told
     /// when the picture would NOT come back and never when it would, which is
     /// the disclosure exactly inverted.
+    ///
+    /// Only about what the host will still apply: a picture already placed in
+    /// the well (`ReuseStore+Picture`) is said by the well, and a line about
+    /// it here would announce the same thing twice.
     func attachmentSentence(for draft: RenderDraft) -> String? {
         guard let authority = pending(for: draft) else { return nil }
+        let remaining = authority.members.filter {
+            !($0.role == RetainedSourcePicture.carriedRole && draft.media.sourceImage != nil)
+        }
+        guard !remaining.isEmpty else { return nil }
         let machine = hosts.host(authority.origin)?.name ?? "its machine"
-        let what = authority.members.count == 1
-            ? "the source media" : "\(authority.members.count) source files"
+        let what = remaining.count == 1
+            ? "the source media" : "\(remaining.count) source files"
         return "Using \(what) from \(authority.filename) on \(machine)."
     }
 }
