@@ -1324,7 +1324,7 @@
               pkgs.bun2nix
               pkgs.cargo-tauri
               pkgs.nodejs_22
-              pkgs.nodePackages.prettier
+              pkgs.prettier
               pkgs.pnpm
               pkgs.tmux
               pkgs.runpodctl
