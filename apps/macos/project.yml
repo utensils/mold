@@ -79,6 +79,11 @@ targets:
       - package: MoldClient
       - package: MoldStyle
       - package: Sparkle
+      # `import AVKit` autolinks the `_AVKit_SwiftUI` overlay and nothing
+      # else; `VideoPlayer`'s superclass lives in AVKit proper, and without
+      # this line the first clip opened aborted the app in the Swift runtime
+      # (LinkedFrameworksTests).
+      - sdk: AVKit.framework
     settings:
       base:
         PRODUCT_NAME: Mold
