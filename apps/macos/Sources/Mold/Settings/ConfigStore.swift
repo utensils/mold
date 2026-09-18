@@ -47,7 +47,7 @@ final class ConfigStore {
 
     /// A host that predates `GET /api/config/profiles` answers 404 -- that
     /// is "never had the route", not a failure worth a banner over, the same
-    /// "never said" reading `LibraryStore+Tags` gives a fresh tag's 404.
+    /// "never said" reading `LibraryTags` gives a fresh tag's 404.
     func refreshProfiles(on host: MoldHost.ID) async {
         guard let client = hosts.backend(for: host) else { return }
         do {

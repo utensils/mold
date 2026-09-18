@@ -5,6 +5,13 @@ import SwiftUI
 // every one of them is the same shape -- a label, a value, and an absence
 // that says something rather than leaving a gap.
 extension MachinesPane {
+    /// The seam the overview reads its cards through, built the same way
+    /// here so a machine's page and its card count work by one rule.
+    var fleet: MachineFleet {
+        MachineFleet(hosts: hosts, machines: machines, queue: queue, models: models,
+                     activity: activity, upscales: upscales)
+    }
+
 
     /// The Form's first, unlabelled section: the grouped-Form idiom for "what
     /// this thing is". `navigationTitle` and `navigationSubtitle` already

@@ -48,7 +48,7 @@ extension QueueStore {
             // `/api/status.queue_paused`, which is the newer fact.
             queuePaused[host] = nil
         // Gallery, machine identity and device lifecycle are the other
-        // stores' concerns -- see `LibraryStore+Live` and `MachineStore`.
+        // stores' concerns -- see `GalleryLive` and `MachineStore`.
         case .gallery, .authority, .deviceStateChanged:
             break
         }

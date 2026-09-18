@@ -262,9 +262,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         let watchdog = Task { @MainActor [weak self] in
             try? await Task.sleep(for: limit)
             guard !Task.isCancelled, let self else { return }
-            let asked = callCount(route)
-            Issue.record("`\(route)` was asked \(asked) times, not \(count). Calls: \(calls)")
-            giveUpWaiting(id)
+            // Only if the waiter is STILL parked: a wake-up that lands between
+            // the sleep ending and the cancel below is a pass, not a failure.
+            guard giveUpWaiting(id) else { return }
+            Issue.record("`\(route)` was asked \(callCount(route)) times, not \(count). Calls: \(calls)")
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             // Checking and parking under ONE hold of the lock: a call landing
@@ -279,21 +280,24 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         watchdog.cancel()
     }
 
-    private func giveUpWaiting(_ id: UUID) {
+    /// Whether a waiter was still parked -- and so is now resumed, once.
+    @discardableResult
+    private func giveUpWaiting(_ id: UUID) -> Bool {
         let waiter = callsLock.withLock { () -> Waiter? in
             guard let index = entryWaiters.firstIndex(where: { $0.id == id }) else { return nil }
             return entryWaiters.remove(at: index)
         }
         waiter?.continuation.resume()
+        return waiter != nil
     }
 
-    private typealias Waiter =
-        (id: UUID, route: String, count: Int, continuation: CheckedContinuation<Void, Never>)
-
-    func record(_ route: String) throws {
-        // Recording the call and taking the waiters it wakes are one step:
-        // the route WAS entered, whatever it is about to answer with, and a
-        // refusal is still a call that was made.
+    /// Recording the call and taking the waiters it wakes are one step: the
+    /// route WAS entered, whatever it is about to answer with, and a refusal
+    /// is still a call that was made. The stream routes, which answer
+    /// synchronously and cannot throw, come through here too -- an
+    /// `entered("events")` must not hang because its route bypassed the
+    /// waiters.
+    func noteEntered(_ route: String) {
         let due = callsLock.withLock { () -> [Waiter] in
             recorded.append(route)
             let reached = countLocked(route)
@@ -302,6 +306,13 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
             return ready
         }
         for waiter in due { waiter.continuation.resume() }
+    }
+
+    private typealias Waiter =
+        (id: UUID, route: String, count: Int, continuation: CheckedContinuation<Void, Never>)
+
+    func record(_ route: String) throws {
+        noteEntered(route)
         if let planted = plantedErrors[route] { throw planted }
         if refuses.contains(route) {
             throw MoldClientError.http(status: 409, code: nil, message: "Refused by the fake.")
@@ -556,7 +567,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
 
     func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error> {
-        callsLock.withLock { recorded.append("chainJobEvents") }
+        noteEntered("chainJobEvents")
         guard chainEventsHeldOpen.contains(id) else {
             return AsyncThrowingStream { $0.finish() }
         }
@@ -855,7 +866,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return resourceSnapshot
     }
     func resourceStream() -> AsyncThrowingStream<ResourceSnapshot, Error> {
-        callsLock.withLock { recorded.append("resourceStream") }
+        noteEntered("resourceStream")
         return AsyncThrowingStream { continuation in
             self.resourceStreamContinuation = continuation
             continuation.onTermination = { _ in self.resourceStreamEnded = true }
@@ -943,11 +954,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     // MARK: - Streams
 
     func events() -> AsyncThrowingStream<MoldEvent, Error> {
-        callsLock.withLock { recorded.append("events") }
+        noteEntered("events")
         return AsyncThrowingStream { self.eventStream = $0 }
     }
     func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error> {
-        callsLock.withLock { recorded.append("batchEvents") }
+        noteEntered("batchEvents")
         guard batchEventsHeldOpen.contains(id) else {
             return AsyncThrowingStream { $0.finish() }
         }
@@ -966,7 +977,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         batchEventsContinuations[id]?.finish()
     }
     func downloadEvents() -> AsyncThrowingStream<DownloadEvent, Error> {
-        callsLock.withLock { recorded.append("downloadEvents") }
+        noteEntered("downloadEvents")
         return AsyncThrowingStream {
             $0.onTermination = { _ in self.downloadStreamEnded = true }
             self.downloadStream = $0
