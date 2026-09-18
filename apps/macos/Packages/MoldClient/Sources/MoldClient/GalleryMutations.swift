@@ -121,3 +121,23 @@ public struct ExportOptions: Codable, Hashable, Sendable {
     /// a fact about clips rather than about one host.
     public var forVideo: [String] { formats.filter(MeshExport.animated.contains) }
 }
+
+// What a client SENDS about a collection. Beside `Collection` rather than
+// in `HTTPBackend+Organize.swift`: both are on `MoldBackend`, so they are
+// the protocol's vocabulary and not one transport's route group.
+public struct CollectionCreate: Encodable, Sendable {
+    public let name: String
+    public let description: String?
+}
+
+public struct CollectionChange: Encodable, Sendable {
+    public var name: String?
+    public var coverFilename: String?
+    public var hidden: Bool?
+
+    public init(name: String? = nil, coverFilename: String? = nil, hidden: Bool? = nil) {
+        self.name = name
+        self.coverFilename = coverFilename
+        self.hidden = hidden
+    }
+}

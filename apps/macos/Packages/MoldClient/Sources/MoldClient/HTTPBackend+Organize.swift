@@ -51,26 +51,10 @@ public extension HTTPBackend {
     }
 }
 
-/// Bodies. Each is its own type rather than a dictionary so that an optional
-/// left nil is OMITTED: on a PATCH, absent means "untouched" and null would
-/// mean "clear it".
-public struct CollectionCreate: Encodable, Sendable {
-    public let name: String
-    public let description: String?
-}
-
-public struct CollectionChange: Encodable, Sendable {
-    public var name: String?
-    public var coverFilename: String?
-    public var hidden: Bool?
-
-    public init(name: String? = nil, coverFilename: String? = nil, hidden: Bool? = nil) {
-        self.name = name
-        self.coverFilename = coverFilename
-        self.hidden = hidden
-    }
-}
-
+/// This route's body, its own type rather than a dictionary so that a name
+/// with a `/` or a `#` in it is JSON-escaped rather than interpolated raw.
+/// The COLLECTION bodies moved beside `Collection`: they are `MoldBackend`'s
+/// vocabulary, and this one is only ever this PATCH's.
 struct TagRename: Encodable, Sendable {
     let name: String
 }

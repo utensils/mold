@@ -87,5 +87,3 @@ public extension HTTPBackend {
         }
     }
 }
-
-struct EmptyBody: Encodable {}
