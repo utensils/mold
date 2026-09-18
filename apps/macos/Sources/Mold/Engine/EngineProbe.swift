@@ -1,4 +1,5 @@
 import Foundation
+import MoldClient
 
 /// Waiting for the engine to actually be listening.
 ///
@@ -59,7 +60,7 @@ enum EngineProbe {
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
         request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return nil }
+        guard let (_, response) = try? await APISession.api.data(for: request) else { return nil }
         return (response as? HTTPURLResponse)?.statusCode
     }
 }

@@ -8,7 +8,7 @@ public struct HTTPBackend: MoldBackend {
     public let host: MoldHost
     let session: URLSession
 
-    public init(host: MoldHost, session: URLSession = .shared) {
+    public init(host: MoldHost, session: URLSession = APISession.api) {
         self.host = host
         self.session = session
     }

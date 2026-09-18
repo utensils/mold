@@ -32,8 +32,13 @@ final class ThumbnailCache {
         // README's promise -- capped, and emptied when Mold quits -- was true
         // of the media cache and false of this one, which sat at 512 MB and
         // was swept by nothing. A thumbnail is cheap to fetch again.
+        // Its OWN directory. Built without one, a `URLCache` opens the
+        // process-wide `Cache.db`, the file `URLCache.shared` holds -- two
+        // caches on one SQLite file, and `purge` under a live query filled
+        // the console with `stepSQLStatement … result=1`.
         responses = URLCache(memoryCapacity: 32 * 1024 * 1024,
-                             diskCapacity: 64 * 1024 * 1024)
+                             diskCapacity: 64 * 1024 * 1024,
+                             directory: Self.responseCacheDirectory)
         let configuration = URLSessionConfiguration.default
         configuration.urlCache = responses
         // Let the server's ETag decide freshness rather than a local guess.
@@ -46,6 +51,12 @@ final class ThumbnailCache {
 
     /// Empties both tiers. Called when Mold quits and by Settings ▸ Empty Now,
     /// the same two doors the media cache answers.
+    private static var responseCacheDirectory: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let bundle = Bundle.main.bundleIdentifier ?? "io.utensils.mold.native"
+        return caches.appending(path: bundle).appending(path: "thumbnails")
+    }
+
     func purge() {
         images.removeAllObjects()
         responses.removeAllCachedResponses()

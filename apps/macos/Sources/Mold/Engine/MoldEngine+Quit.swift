@@ -1,4 +1,5 @@
 import Foundation
+import MoldClient
 
 extension MoldEngine {
     /// Stops the engine by asking it to, which is the only way an embedder
@@ -13,7 +14,7 @@ extension MoldEngine {
         request.httpMethod = "POST"
         request.timeoutInterval = TimeInterval(EngineShutdownBudget.shutdownRequestSeconds)
         if let key = launch?.apiKey { request.setValue(key, forHTTPHeaderField: "X-Api-Key") }
-        _ = try? await URLSession.shared.data(for: request)
+        _ = try? await APISession.api.data(for: request)
         // Off the main thread: this blocks for the whole budget, and the
         // shutdown request above already yielded.
         let budget = EngineShutdownBudget.joinMilliseconds
