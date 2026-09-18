@@ -28,8 +28,18 @@ struct SourceFitTask: ViewModifier {
             height: draft.height, policy: draft.media.sourceFit)
     }
 
+    /// What was last actually applied. `.task(id:)` also fires on APPEAR --
+    /// collapsing and re-expanding the inspector destroys and recreates this
+    /// view -- so without it an idle re-render re-ran the fit, and the mask
+    /// composition below had nothing to do but would still have rewritten a
+    /// draft nobody touched.
+    @State private var applied: Key?
+
     func body(content: Content) -> some View {
-        content.task(id: key) { await refit() }
+        content.task(id: key) {
+            guard applied != key else { return }
+            await refit()
+        }
     }
 
     private func refit() async {
@@ -56,13 +66,16 @@ struct SourceFitTask: ViewModifier {
             draft.media.sourceImage = encoded
             draft.media.sourceImageName = draft.media.sourceImageOriginalName
         }
-        // A mask painted over the PREVIOUS fit describes pixels that have
-        // moved. What survives is only what this fit implies.
+        // What was painted, plus whatever bands this fit added -- never
+        // instead of it (`SourceFitRender+Mask`).
         guard let transform = SourceFitRender.transform(
             of: original, target: target, policy: policy) else { return }
-        let padding = await SourceFitRender.paddingMask(transform)
+        let composed = await SourceFitRender.mask(
+            existing: draft.media.maskImage.flatMap { Data(base64Encoded: $0) },
+            transform: transform)
         guard !Task.isCancelled, key.original == encoded, key.policy == policy else { return }
-        draft.media.maskImage = padding?.base64EncodedString()
+        if let composed { draft.media.maskImage = composed.base64EncodedString() }
+        applied = key
     }
 }
 
