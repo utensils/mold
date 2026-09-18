@@ -14,6 +14,10 @@ public enum MeshViewAction: Hashable, Sendable {
     case exportTurntable
     case save
     case showInLibrary
+    /// A mesh print is a print: the octree, the iso threshold and the source
+    /// picture that made it are ordinary provenance, and Use These Settings
+    /// means here exactly what it means on a tile.
+    case reuse
 }
 
 /// What to offer for the mesh on screen.
@@ -30,10 +34,14 @@ public struct MeshViewMenuPlan: Sendable {
     public let canSave: Bool
     /// Absent on the surface that IS the Library.
     public let canShowInLibrary: Bool
+    /// Absent where there is no print to read a recipe off -- a mesh still
+    /// being rendered has no provenance yet.
+    public let canReuse: Bool
 
     public init(exports: MeshExport.Split, hasEdges: Bool, isWireframe: Bool,
                 isAutoRotating: Bool, offersAutoRotate: Bool, canSave: Bool,
-                canShowInLibrary: Bool) {
+                canShowInLibrary: Bool, canReuse: Bool = false) {
+        self.canReuse = canReuse
         self.exports = exports
         self.hasEdges = hasEdges
         self.isWireframe = isWireframe
@@ -66,6 +74,9 @@ public struct MeshViewMenuPlan: Sendable {
         if !exports.animations.isEmpty {
             exportItems.append(Item(kind: .exportTurntable, title: "Turntable…"))
         }
+        // Before Export, and in the Library's own words -- one name for one
+        // thing, whichever surface it is read on.
+        if canReuse { items.append(Item(kind: .reuse, title: "Use These Settings")) }
         items.append(Item(title: "Export", children: exportItems))
         if canSave { items.append(Item(kind: .save, title: "Save a Copy…")) }
         if canShowInLibrary {

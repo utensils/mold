@@ -17,8 +17,11 @@ extension GenerateController {
     ///
     /// `routing` is the PANE's answer -- it needs the recipe. A render past
     /// the clip size is not a batch at all (`ChainSubmission`).
+    /// `retained` is the print this draft came from, resolved INSIDE the task
+    /// below against the requests going out (`RetainedMediaHydration`).
     func submit(on host: MoldHost, backend: any MoldBackend,
-                routing: ChainRouting.Decision = .single()) {
+                routing: ChainRouting.Decision = .single(),
+                retained: RetainedMediaHydration? = nil) {
         guard let modelName else { return }
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
@@ -50,7 +53,8 @@ extension GenerateController {
         }
         let task = Task { [weak self] in
             do {
-                let accepted = try await backend.submit(admission)
+                let accepted = try await backend.submit(
+                    RetainedMedia.hydrated(admission, with: retained, on: host, backend: backend))
                 guard let self else { return }
                 let active = ActiveBatch(
                     id: accepted.id, clientBatchId: admission.clientBatchId,

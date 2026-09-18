@@ -55,7 +55,7 @@ extension MeshCanvas {
             // Stopping is permanent for this mount, exactly as an interaction
             // is; starting again is what the control offers until then.
             wantsTour.toggle()
-        case .exportFile, .exportTurntable, .save, .showInLibrary:
+        case .exportFile, .exportTurntable, .save, .showInLibrary, .reuse:
             perform(action)
         }
     }

@@ -22,6 +22,8 @@ struct MeshCanvas: View {
     let exports: MeshExport.Split
     let canSave: Bool
     let canShowInLibrary: Bool
+    /// Only the Library's viewer knows the print behind the mesh.
+    var canReuse = false
     let perform: (MeshViewAction) -> Void
 
     /// Not `private`: the controls live in `+Controls` for size, and `private`
@@ -86,7 +88,8 @@ struct MeshCanvas: View {
         MeshViewMenuPlan(exports: exports, hasEdges: scene?.hasEdges ?? false,
                          isWireframe: wireframe, isAutoRotating: autoRotating,
                          offersAutoRotate: offersAutoRotate && scene != nil,
-                         canSave: canSave, canShowInLibrary: canShowInLibrary)
+                         canSave: canSave, canShowInLibrary: canShowInLibrary,
+                         canReuse: canReuse)
     }
 
     private func load() async {

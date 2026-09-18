@@ -12,6 +12,9 @@ struct LibraryPane: View {
     @Environment(LibraryNavigation.self) var navigation
     @Environment(GenerateController.self) var generate
     @Environment(ModelStore.self) var models
+    /// Which print the Generate pane's draft came from, and what its own
+    /// machine still holds for it. Written by `reuse(_:)` in `+Wiring`.
+    @Environment(ReuseStore.self) var reuseStore
     @Environment(PrintMaterializer.self) var materializer
     /// Make Bigger… and the clip jobs it starts.
     @Environment(UpscaleStore.self) var upscales

@@ -31,6 +31,7 @@ extension View {
             .environment(stores.engine)
             .environment(stores.upscales)
             .environment(stores.activity)
+            .environment(stores.reuse)
         // A NEW STORE'S `.environment()` GOES HERE.
     }
 

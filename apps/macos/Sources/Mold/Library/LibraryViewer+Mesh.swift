@@ -32,6 +32,9 @@ extension LibraryViewer {
             // This IS the Library; offering to show it here would be a door
             // back into the room you are standing in.
             canShowInLibrary: false,
+            // A mesh print reuses like any other -- geometry only, but the
+            // octree, the threshold and the source picture are all recorded.
+            canReuse: actions.reuse != nil,
             perform: perform)
         .padding(24)
     }
@@ -47,6 +50,8 @@ extension LibraryViewer {
             actions.requestTurntable(entry)
         case .save:
             actions.save([entry])
+        case .reuse:
+            actions.reuse?(entry)
         case .resetView, .toggleWireframe, .toggleAutoRotate, .showInLibrary:
             // The canvas performs its own view controls, and this IS the
             // Library -- neither reaches here.

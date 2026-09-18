@@ -17,6 +17,10 @@ struct GeneratePane: View {
     @Environment(ModelStore.self) var models
     /// Not `private`, same reason.
     @Environment(GenerateController.self) var controller
+    /// Which print this draft came from, and whether its own conditioning
+    /// media can be brought back. Not `private`: `startRun` is here, but the
+    /// notice is drawn by the body below.
+    @Environment(ReuseStore.self) var reuse
     /// Persisted, and deliberately not `private`: the toolbar button that
     /// flips it lives in an extension in another file. Its own key beside
     /// `libraryShowsInspector` -- ⌥⌘I is one shortcut whose STATE is per
@@ -43,6 +47,7 @@ struct GeneratePane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .reuseNotice(reuse)
         .trailingColumn(isShowing: showsInspector) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
@@ -139,7 +144,14 @@ struct GeneratePane: View {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
         }?.decision ?? .single()
-        controller.submit(on: host, backend: hosts.backend(for: host), routing: routing)
+        // The chain door redeems no reuse session, so a long clip says what
+        // it cannot bring back rather than rendering without it.
+        if case .chain = routing { reuse.warnIfTheRouteCannotCarryMedia(chained: true) }
+        controller.submit(
+            on: host, backend: hosts.backend(for: host), routing: routing,
+            retained: reuse.authority.map {
+                RetainedMediaHydration(authority: $0, hosts: hosts)
+            })
     }
 
     private func cancelRun() { controller.stop() }
