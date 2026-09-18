@@ -125,14 +125,23 @@ high-water marks and call the result a phase peak. Native allocation peak,
 process RSS, system headroom, calculated admission and retained post-call
 allocation answer different questions and must stay separate.
 
-**Instrumentation gap:** the retained allocator/watchdog modifications were
-unshipped, and are not reproducible from main alone. Recover and hash their
-exact sources/binary or prepare a separately reviewed qualification build.
-The existing `private_runtime_observer.rs` process attestation is Linux/CUDA
-shaped and `process_peak_resident_bytes` reads `/proc/self/status`; do not
-claim its observation schema is Metal evidence or fabricate CUDA fields.
-Use a clearly separate qualification report for macOS. This document adds
-no production accounting formula, new layout, or launcher.
+**Instrumentation status (2026-09-18):** the allocator/watchdog gap is closed
+on `h3-macos-final`. The shipped `minimax_h3::campaign_capture` writes the
+machine-readable rows this document requires (schema
+`minimax-h3-metal-campaign-capture.schema.json`) plus a `phase_budget.json`
+sidecar exporting `H3FactoryTargetBudgetInput::phase_budget_rows()` at
+prepare time; `MOLD_H3_METAL_CAMPAIGN=1` opts the shipped Metal memory guard
+into the 12 GiB / 256 MiB campaign invariants and requires
+`MOLD_H3_METAL_CAMPAIGN_CEILING_MB`; `MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY=1`
+makes the owned attempt refuse at device attach — after the sidecar exists,
+before any model tensor is allocated — which is the allocation-free
+pre-flight pass. The external supervisor is the `h3_metal_campaign_watch`
+dev-bin (`dev-bins` feature): it injects the campaign environment, enforces
+the host-level gates from outside the GPU process, kills the owned process
+group on violation, and verifies no descendant survives. The observer's
+process probes now have macOS arms (`proc_pidinfo`/`task_info`); the
+Linux-shaped capture remains the CUDA report and is never quoted as Metal
+evidence.
 
 ## Fail-closed launch and cleanup gates (after the hold is released)
 
@@ -157,7 +166,14 @@ no production accounting formula, new layout, or launcher.
    floor and 256 MiB maximum attempt swap growth, at the same 250 ms sample
    cadence. This is a safety-policy switch, not an output-semantics switch; it
    must never be used to relax the shipped 8 GiB / 2 GiB default. The
-   independent native-allocation ceiling remains a separate launch gate.
+   independent native-allocation ceiling is set with
+   `MOLD_H3_METAL_CAMPAIGN_CEILING_MB` and is a required launch input.
+   Before a case launches, its allocation-free budget pass runs the same
+   owned attempt with `MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY=1` and a
+   provisional ceiling: the attempt refuses at device attach with the
+   prepared phase budget exported, which is the measured phase plan gate 4
+   prices the real ceiling from. A budget-only refusal is not a case and
+   never counts as render evidence.
 5. Derive and record a separate native-allocation ceiling from current
    capacity/headroom and the measured phase plan, retaining the host floor.
    Reject a case whose safe ceiling cannot cover its planned device phase.
