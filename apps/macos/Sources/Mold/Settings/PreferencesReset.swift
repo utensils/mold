@@ -28,6 +28,7 @@ enum PreferencesReset {
         "libraryEdge",
         "inspectorShowsProvenance",
         "createShowsAdapters",
+        "createShowsSampler",
         "createShowsIdentity",
         "createShowsRefine",
         "createShowsClip",
@@ -44,9 +45,9 @@ enum PreferencesReset {
     /// The media-cache cap, the appearance and the two notification toggles
     /// each already have their own control on this very page, so a second,
     /// wholesale way to change them would only make the page harder to reason
-    /// about. The machine list is somebody's setup. `pendingBatches` is
-    /// in-flight recovery bookkeeping, not a preference -- clearing it strands
-    /// a batch the app is still waiting on. And the Keychain migration flag is
+    /// about. The machine list is somebody's setup. `pendingBatches` and
+    /// `pendingChainJobs` are in-flight recovery bookkeeping, not preferences --
+    /// clearing them strands a batch or a chain the app is still waiting on. And the Keychain migration flag is
     /// a fact about this install: clearing it would re-read the old Keychain
     /// items and could resurrect a key the person has since removed.
     static let kept: Set<String> = [
@@ -57,6 +58,7 @@ enum PreferencesReset {
         "hosts",
         "hosts.unreadable",
         "pendingBatches",
+        "pendingChainJobs",
         "keychainKeysMigrated",
     ]
 
