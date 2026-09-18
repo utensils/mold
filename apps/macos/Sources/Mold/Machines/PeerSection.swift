@@ -84,14 +84,10 @@ struct PeerSection: View {
         }
     }
 
-    /// What this peer offers, as the one menu model -- a peer already on the
-    /// list offers nothing, and so gets no menu at all.
+    /// What this peer offers -- `PeerAction`'s own answer, which the fleet
+    /// overview's Nearby list draws too (`PeerAction.offered(for:)`).
     private func menu(for peer: DiscoveryPeer) -> [RowAction<String>] {
-        switch action(for: peer) {
-        case .add: [RowAction(kind: peer.id, title: "Add")]
-        case .edit: [RowAction(kind: peer.id, title: "Add…")]
-        case .skip: []
-        }
+        action(for: peer).offered(for: peer)
     }
 
     private func accept(_ peer: DiscoveryPeer) {
