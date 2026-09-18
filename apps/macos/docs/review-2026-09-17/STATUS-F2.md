@@ -61,7 +61,7 @@ Worktree `.claude/worktrees/agent-a6ef69c6b04a01fea`, branch
 | F2#5 an `unknown` state erased a concrete answer | fixed | `c2a1aaac` | `aStateThisBuildCannotNameNeverErasesAConcreteAnswer` |
 | F2#6 only one of the two `Sha256S` keys was pinned | fixed | `08c0f727` | `theOtherSha256SKeyIsPinnedToo` |
 | F2#7 a third "Use These Settings" literal | fixed | `c2a1aaac` | `LibraryMenuPlanTests`, `MeshViewMenuTests` |
-| deferral (a) the chain carried nothing | fixed | `<chain>` | `aLongClipReusedFromAPrintGetsItsPictureInTheWell` (+2) |
+| deferral (a) the chain carried nothing | fixed | `82138ab9` | `aLongClipReusedFromAPrintGetsItsPictureInTheWell` (+2) |
 
 ### What the review got exactly right
 
@@ -128,7 +128,17 @@ Worktree `.claude/worktrees/agent-a6ef69c6b04a01fea`, branch
   refusal.
 - `MeshViewMenu.swift` / `MeshCanvas*.swift` / `LibraryViewer+Mesh.swift`:
   the `reuse` case, its `canReuse` gate (defaulted, so no other caller moves),
-  and the Library's handler.
+  and the Library's handler. `LibraryMenuPlan.reuseTitle` is the one
+  declaration all three surfaces read.
+- `MoldBackend.swift`'s composition line and `LibraryPane.swift`'s
+  `@Environment` block are the two the review names as certain conflicts with
+  main's upscale/Sparkle lanes; both merges keep every property.
+
+**Type budget.** `GenerateController` sits at 603 against the advisory 600.
+The three lines this lane added are a parameter and one call; the reviewer's
+suggested cut — moving `GenerateController+Expand.swift` (149 lines) into its
+own store — is left to the integrator, since it touches the expansion
+surfaces rather than anything here.
 
 ## Fixtures
 
@@ -174,5 +184,5 @@ and is labelled `Synthetic` at its one construction site.
 
 ## Gates
 
-`make lint` green (advisory size notes only). Package `swift test`: 852 in 46
-suites. App bundle `xcodebuild test` under the shared lock: 607 in 92 suites.
+`make lint` green (advisory size notes only). Package `swift test`: 857 in 46
+suites. App bundle `xcodebuild test` under the shared lock: 620 in 92 suites.
