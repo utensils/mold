@@ -151,7 +151,10 @@ describe("openLiveWorkWith", () => {
     expect(restore).not.toHaveBeenCalled();
     expect(go).toHaveBeenCalledWith(
       expect.objectContaining({
-        query: expect.objectContaining({ workflow: "wf-9", host: "workstation" }),
+        query: expect.objectContaining({
+          workflow: "wf-9",
+          host: "workstation",
+        }),
       }),
     );
   });
