@@ -41,6 +41,7 @@ final class AppStores {
     let upscales: UpscaleStore
     let activity: ActivityStore
     let reuse: ReuseStore
+    let expansions: ExpandStore
     let notifications: MoldNotifications
     let heartbeat: HostHeartbeat
 
@@ -69,6 +70,7 @@ final class AppStores {
         upscales = UpscaleStore(hosts: hosts, models: models, library: library)
         activity = ActivityStore(hosts: hosts)
         reuse = ReuseStore(hosts: hosts)
+        expansions = ExpandStore()
         // NEW STORES GO HERE -- after the stores they depend on, before the
         // two below, which are built FROM the others.
         notifications = MoldNotifications(

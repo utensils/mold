@@ -10,6 +10,7 @@ struct PromptWandPopover: View {
     @Binding var destination: Destination
 
     @Environment(GenerateController.self) private var controller
+    @Environment(ExpandStore.self) private var expansions
     @State private var selection: String?
     @FocusState private var listFocused: Bool
 
@@ -50,7 +51,7 @@ struct PromptWandPopover: View {
             .focused($listFocused)
             .onAppear { selection = offer.choices.first?.id; listFocused = true }
             .onKeyPress(.return) { acceptSelected(from: offer); return .handled }
-            .onExitCommand { controller.dismissExpansion() }
+            .onExitCommand { expansions.dismiss() }
             Divider()
             HStack {
                 Text("Escape leaves the prompt as it was.")
@@ -78,12 +79,12 @@ struct PromptWandPopover: View {
         // A plain `.onTapGesture(count: 2)` here ate the single click
         // `List(selection:)` needs to highlight a row at all (M8 decision 9)
         // -- `simultaneousGesture` lets both live on the same row.
-        .simultaneousGesture(TapGesture(count: 2).onEnded { controller.accept(choice) })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { expansions.accept(choice, into: controller) })
     }
 
     private func acceptSelected(from offer: Expansion.Offer) {
         guard let selection, let choice = offer.choices.first(where: { $0.id == selection }) else { return }
-        controller.accept(choice)
+        expansions.accept(choice, into: controller)
     }
 
     private func title(for offer: Expansion.Offer) -> String {
@@ -97,7 +98,7 @@ struct PromptWandPopover: View {
             ScrollView { Text(text).font(.callout) }.frame(maxHeight: 220)
             HStack {
                 Spacer()
-                Button("OK") { controller.dismissExpansion() }.keyboardShortcut(.defaultAction)
+                Button("OK") { expansions.dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
     }
@@ -107,7 +108,7 @@ struct PromptWandPopover: View {
             Text(message).font(.callout)
             HStack {
                 Spacer()
-                Button("OK") { controller.dismissExpansion() }.keyboardShortcut(.defaultAction)
+                Button("OK") { expansions.dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
     }
@@ -121,10 +122,10 @@ struct PromptWandPopover: View {
             HStack {
                 Spacer()
                 Button("Pull…") {
-                    controller.dismissExpansion()
+                    expansions.dismiss()
                     destination = .models
                 }
-                Button("OK") { controller.dismissExpansion() }.keyboardShortcut(.defaultAction)
+                Button("OK") { expansions.dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
     }

@@ -17,6 +17,7 @@ struct PromptWand: View {
     @Binding var destination: Destination
 
     @Environment(GenerateController.self) private var controller
+    @Environment(ExpandStore.self) private var expansions
     @Environment(HostStore.self) private var hosts
     @State private var optionHeld = false
 
@@ -41,12 +42,12 @@ struct PromptWand: View {
             optionHeld = new.contains(.option)
         }
         .popover(isPresented: showsPopover) {
-            PromptWandPopover(expansion: controller.expansion, host: host, destination: $destination)
+            PromptWandPopover(expansion: expansions.expansion, host: host, destination: $destination)
         }
     }
 
     private var isWorking: Bool {
-        if case .working = controller.expansion { return true }
+        if case .working = expansions.expansion { return true }
         return false
     }
 
@@ -83,12 +84,12 @@ struct PromptWand: View {
     private var showsPopover: Binding<Bool> {
         Binding(
             get: {
-                switch controller.expansion {
+                switch expansions.expansion {
                 case .offering, .advised, .refused, .needsModel: true
                 case .idle, .working: false
                 }
             },
-            set: { if !$0 { controller.dismissExpansion() } }
+            set: { if !$0 { expansions.dismiss() } }
         )
     }
 
@@ -121,10 +122,10 @@ struct PromptWand: View {
     }
 
     private func expand() {
-        Task { await controller.expand(on: host, backend: hosts.backend(for: host)) }
+        Task { await expansions.expand(controller, on: host, backend: hosts.backend(for: host)) }
     }
 
     private func remix() {
-        Task { await controller.remix(on: host, backend: hosts.backend(for: host)) }
+        Task { await expansions.remix(controller, on: host, backend: hosts.backend(for: host)) }
     }
 }

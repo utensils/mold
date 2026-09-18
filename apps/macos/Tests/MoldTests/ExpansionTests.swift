@@ -4,12 +4,15 @@ import Testing
 
 @testable import Mold
 
-/// The prompt wand, in the controller: whether it is offered at all, what
+/// The prompt wand, in `ExpandStore`: whether it is offered at all, what
 /// happens to the draft when a rewrite is accepted or reverted, and the one
 /// deliberate departure from the M1.5 failure funnel -- a failed rewrite is
 /// never a machine-banner failure.
 @MainActor
 struct ExpansionTests {
+    /// One per test -- swift-testing builds a fresh suite instance for each.
+    private let expansions = ExpandStore()
+
     private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
@@ -43,10 +46,10 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a brass gear"
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
 
-        guard case let .advised(text) = controller.expansion else {
-            Issue.record("expected .advised, got \(controller.expansion)")
+        guard case let .advised(text) = expansions.expansion else {
+            Issue.record("expected .advised, got \(expansions.expansion)")
             return
         }
         #expect(text.hasPrefix("hunyuan3d reads no prompt"))
@@ -66,12 +69,12 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
-        guard case let .offering(offer) = controller.expansion else {
-            Issue.record("expected .offering, got \(controller.expansion)")
+        await expansions.expand(controller, on: workstation, backend: backend)
+        guard case let .offering(offer) = expansions.expansion else {
+            Issue.record("expected .offering, got \(expansions.expansion)")
             return
         }
-        controller.accept(offer.choices[0])
+        expansions.accept(offer.choices[0], into: controller)
 
         #expect(controller.draft.prompt == "a fluffy orange cat asleep in a sunbeam")
         #expect(controller.draft.originalPrompt == "a cat")
@@ -91,21 +94,21 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
-        guard case let .offering(expandOffer) = controller.expansion else {
+        await expansions.expand(controller, on: workstation, backend: backend)
+        guard case let .offering(expandOffer) = expansions.expansion else {
             Issue.record("expected .offering after expand"); return
         }
-        controller.accept(expandOffer.choices[0])
+        expansions.accept(expandOffer.choices[0], into: controller)
 
         backend.remixAnswer = RemixResponse(
             sourcePrompt: "a fluffy orange cat asleep in a sunbeam", rootPrompt: "a cat",
             sourceKind: .current, task: .textToImage,
             variants: [RemixVariant(prompt: "a fluffy orange cat asleep in golden light", dimensions: [.lighting])])
-        await controller.remix(on: workstation, backend: backend)
-        guard case let .offering(remixOffer) = controller.expansion else {
+        await expansions.remix(controller, on: workstation, backend: backend)
+        guard case let .offering(remixOffer) = expansions.expansion else {
             Issue.record("expected .offering after remix"); return
         }
-        controller.accept(remixOffer.choices[0])
+        expansions.accept(remixOffer.choices[0], into: controller)
 
         #expect(controller.draft.prompt == "a fluffy orange cat asleep in golden light")
         // The root is the earliest idea, unchanged by the second rewrite.
@@ -127,19 +130,19 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
-        guard case let .offering(offer) = controller.expansion else {
+        await expansions.expand(controller, on: workstation, backend: backend)
+        guard case let .offering(offer) = expansions.expansion else {
             Issue.record("expected .offering"); return
         }
-        controller.accept(offer.choices[0])
-        #expect(controller.canRevertExpansion)
+        expansions.accept(offer.choices[0], into: controller)
+        #expect(expansions.canRevert(controller))
 
-        controller.revertExpansion()
+        expansions.revert(controller)
 
         #expect(controller.draft.prompt == "a cat")
         #expect(controller.draft.originalPrompt == nil)
         #expect(controller.draft.promptTransform == nil)
-        #expect(!controller.canRevertExpansion)
+        #expect(!expansions.canRevert(controller))
     }
 
     // MARK: - What the machine has and hasn't said
@@ -152,9 +155,9 @@ struct ExpansionTests {
             capabilities: FakeFixtures.expandCapabilities(modelPresent: false, model: "qwen3-expand:q8"))
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
 
-        #expect(controller.expansion == .needsModel("qwen3-expand:q8"))
+        #expect(expansions.expansion == .needsModel("qwen3-expand:q8"))
         // Decided from capabilities alone -- the route is never reached.
         #expect(backend.callCount("expand") == 0)
     }
@@ -173,7 +176,7 @@ struct ExpansionTests {
             return
         }
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
         #expect(backend.callCount("expand") == 1)
     }
 
@@ -195,10 +198,10 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
 
-        guard case let .refused(message) = controller.expansion else {
-            Issue.record("expected .refused, got \(controller.expansion)")
+        guard case let .refused(message) = expansions.expansion else {
+            Issue.record("expected .refused, got \(expansions.expansion)")
             return
         }
         #expect(!message.isEmpty)
@@ -220,11 +223,11 @@ struct ExpansionTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: workstation, backend: backend)
-        guard case let .offering(offer) = controller.expansion else {
+        await expansions.expand(controller, on: workstation, backend: backend)
+        guard case let .offering(offer) = expansions.expansion else {
             Issue.record("expected .offering"); return
         }
-        controller.accept(offer.choices[0])
+        expansions.accept(offer.choices[0], into: controller)
 
         let request = controller.draft.request(model: "flux-dev:q4")
         let encoded = try MoldJSON.encoder.encode(request)

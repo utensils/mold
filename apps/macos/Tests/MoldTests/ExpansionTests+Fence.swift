@@ -8,6 +8,9 @@ import Testing
 /// while it was in flight (findings 01#13, 02#12, 02#13).
 @MainActor
 struct ExpansionFenceTests {
+    /// One per test -- swift-testing builds a fresh suite instance for each.
+    private let expansions = ExpandStore()
+
     private func machine() -> MoldHost {
         MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
@@ -22,7 +25,7 @@ struct ExpansionFenceTests {
         return controller
     }
 
-    /// **Fails today**: `GenerateController+Expand` hard-codes
+    /// **Fails today**: the expansion path hard-codes
     /// `task: .textToImage` into every accepted offer, and sends no task at
     /// all, so a clip's print records that its prompt was written for a still.
     @Test func expandSendsAndRecordsTheRealTask() async {
@@ -33,16 +36,16 @@ struct ExpansionFenceTests {
         let controller = makeController(backend, host: workstation)
         controller.draft.media.sourceImage = "SRC"
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
 
         #expect(backend.expandRequests.last?.task == .imageToVideo)
-        guard case let .offering(offer) = controller.expansion else {
-            Issue.record("expected .offering, got \(controller.expansion)")
+        guard case let .offering(offer) = expansions.expansion else {
+            Issue.record("expected .offering, got \(expansions.expansion)")
             return
         }
         #expect(offer.task == .imageToVideo)
 
-        controller.accept(offer.choices[0])
+        expansions.accept(offer.choices[0], into: controller)
         #expect(controller.draft.promptTransform?.task == .imageToVideo)
     }
 
@@ -56,15 +59,15 @@ struct ExpansionFenceTests {
         let controller = makeController(backend, host: workstation)
 
         backend.holdsExpand = true
-        let rewrite = Task { await controller.expand(on: workstation, backend: backend) }
+        let rewrite = Task { await expansions.expand(controller, on: workstation, backend: backend) }
         await settle { backend.calls.contains("expand") }
         // Typed while the rewrite was in the air.
         controller.draft.prompt = "a tin robot in a field"
         backend.releaseExpand()
         await rewrite.value
 
-        guard case let .refused(sentence) = controller.expansion else {
-            Issue.record("expected .refused, got \(controller.expansion)")
+        guard case let .refused(sentence) = expansions.expansion else {
+            Issue.record("expected .refused, got \(expansions.expansion)")
             return
         }
         #expect(sentence.contains("prompt changed"))
@@ -78,10 +81,10 @@ struct ExpansionFenceTests {
             original: "a tin robot", expanded: ["a", "b", "c"])
         let controller = makeController(backend, host: workstation)
 
-        await controller.expand(on: workstation, backend: backend)
+        await expansions.expand(controller, on: workstation, backend: backend)
 
-        guard case .offering = controller.expansion else {
-            Issue.record("expected .offering, got \(controller.expansion)")
+        guard case .offering = expansions.expansion else {
+            Issue.record("expected .offering, got \(expansions.expansion)")
             return
         }
     }

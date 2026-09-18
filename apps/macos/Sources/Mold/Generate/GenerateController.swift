@@ -36,14 +36,6 @@ final class GenerateController {
     /// type (`PlacementProbe`); the views read it directly.
     let probe: PlacementProbe
 
-    /// Where a prompt rewrite stands. `GenerateController+Expand` reads and
-    /// writes this; it lives here because every other piece of the pane's
-    /// state does.
-    var expansion: Expansion = .idle
-    /// What `revertExpansion()` puts back, and until when -- see
-    /// `canRevertExpansion`.
-    var lastAcceptedPrompt: LastAcceptedPrompt?
-
     /// Whether the prompt capsule has slid off the bottom edge so the
     /// picture can be looked at. Visual only -- nothing about the draft or
     /// the run changes with it.

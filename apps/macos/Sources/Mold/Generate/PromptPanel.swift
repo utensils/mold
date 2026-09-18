@@ -26,6 +26,7 @@ struct PromptPanel: View {
     /// Not `private`: `PromptPanel+Actions`, an extension in another file,
     /// reads the run and the queue depth to build the trailing button group.
     @Environment(GenerateController.self) var controller
+    @Environment(ExpandStore.self) private var expansions
     @FocusState private var promptFocused: Bool
 
     var body: some View {
@@ -96,8 +97,8 @@ struct PromptPanel: View {
         if recipe.capabilities.promptRequirement != .ignored, let host {
             HStack(spacing: 10) {
                 PromptWand(recipe: recipe, host: host, draft: $draft, destination: $destination)
-                if controller.canRevertExpansion {
-                    Button("\(undoLabel) · Undo") { controller.revertExpansion() }
+                if expansions.canRevert(controller) {
+                    Button("\(undoLabel) · Undo") { expansions.revert(controller) }
                         .buttonStyle(.plain)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -120,7 +121,7 @@ struct PromptPanel: View {
     /// with the reference relation.
     static func showsSourceWell(for recipe: GenerationRecipe) -> Bool { recipe.capabilities.readsSourceImage }
 
-    /// What `canRevertExpansion`'s affordance says was just done to the
+    /// What `ExpandStore.canRevert`'s affordance says was just done to the
     /// prompt -- the operation the accepted choice actually carried out.
     private var undoLabel: String {
         draft.promptTransform?.operation == .remix ? "remixed" : "expanded"
