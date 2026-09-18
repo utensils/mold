@@ -50,20 +50,44 @@ Worktree `.claude/worktrees/agent-a6ef69c6b04a01fea`, branch
   the server's own sentence and code as the structural guard, pinned by
   `aBatchOfMoreThanOneIsRefusedInTheHostsOwnWords`.
 
+## Second round — the adversarial review's findings
+
+| id | status | commit | test |
+|---|---|---|---|
+| F2#1 the authority was never put down | fixed | `a4253d02` | `ReuseTests` (4 new) |
+| F2#2 every refusal killed the render with raw prose | fixed | `bd0ac43d` | `RetainedSourceMediaTests` (2), `ReuseTests` (3) |
+| F2#3 the long-clip warning told you to attach what you had | fixed | `a4253d02` | `aLongClipWithAPictureAlreadyAttachedIsToldNothing` |
+| F2#4 the ceiling was checked after the bytes were resident | fixed | `b4d468d7` | `refusesARelayThatCouldNeverBeSentBeforeFetchingAByte` |
+| F2#5 an `unknown` state erased a concrete answer | fixed | `c2a1aaac` | `aStateThisBuildCannotNameNeverErasesAConcreteAnswer` |
+| F2#6 only one of the two `Sha256S` keys was pinned | fixed | `08c0f727` | `theOtherSha256SKeyIsPinnedToo` |
+| F2#7 a third "Use These Settings" literal | fixed | `c2a1aaac` | `LibraryMenuPlanTests`, `MeshViewMenuTests` |
+| deferral (a) the chain carried nothing | fixed | `<chain>` | `aLongClipReusedFromAPrintGetsItsPictureInTheWell` (+2) |
+
+### What the review got exactly right
+
+- **`clear()` had zero callers.** Three seams close it: the draft the reuse
+  landed in is recorded after the adopt and ANY edit puts the authority down;
+  the submit TAKES it rather than reading it, so a print the machine can no
+  longer honour refuses exactly one render instead of every one after it; and
+  the pending attachment is now SAID (which print, which machine) with an ✕.
+  The available path used to be silent, which is the disclosure inverted.
+- **Only two refusal codes are worth asking twice** — `_INVALID` and
+  `_ARCHIVE_CHANGED` describe the handle, not the archive. One re-mint, then
+  the relay, then this app's own sentence with the way forward in it.
+- **The chain deferral was avoidable.** `POST /api/chain-jobs` still redeems no
+  session, but the chain WIRE carries the bytes per stage, so the relay needs
+  no server support: `ChainRetainedSource` fetches the picture into the
+  draft's own SOURCE WELL in `startRun`, before `controller.submit`, and the
+  render goes out as an ordinary long clip. `ChainSubmission.take`'s
+  synchronous ordering is untouched because the authority is taken BEFORE the
+  await, so a second press finds none and takes the ordinary path. The well is
+  a bonus: on that route the picture stops being invisible authority and
+  becomes an attachment a person can see and remove. The warning survives for
+  what a chain body genuinely cannot carry (a mask, a face), and only fires
+  when something would actually have been hydrated.
+
 ## Deferred, with the reason
 
-- **A long clip reused from a print does not carry its media.** `POST
-  /api/chain-jobs` is not one of the three doors that redeem a reuse session
-  (`routes.rs:3080`, `:3475`, `:4662`), so the chain route would need the
-  RELAY applied inside `ChainRun.start`'s and `ChainSubmission.admitAndQueue`'s
-  own tasks. Both are lane F4 files whose synchronous submission ordering
-  landed this hour, and hoisting an async step ahead of
-  `ChainSubmission.take` would move the `followingNow` decision that ordering
-  rests on. Instead the app SAYS it:
-  `ReuseStore.warnIfTheRouteCannotCarryMedia(chained:)` names what that route
-  cannot bring back, so a reused clip is never silently rendered without the
-  picture it was supposed to start from. Follow-up: relay inside the two chain
-  tasks once F4 has settled.
 - **`reference_weight` is not restored**: `mold_core::OutputMetadata` records
   no such field (`types.rs:3127-3407`), so there is nothing to restore from.
 - **`mesh`, `ic_lora_control`, `retake_range`, `spatial_upscale`,
@@ -87,7 +111,10 @@ Worktree `.claude/worktrees/agent-a6ef69c6b04a01fea`, branch
 
 - `MoldApp.swift`: `ReuseStore` state + `.environment(reuse)`. There is no
   `AppStores.swift` on this base, so there was no `// NEW STORES GO HERE`
-  marker to use — move both lines there when the Sparkle lane lands.
+  marker to use. At integration take MAIN's file wholesale and move the two
+  lines to `AppStores` (`let reuse: ReuseStore` in the let-list,
+  `reuse = ReuseStore(hosts: hosts)` at the marker after `hosts`) plus
+  `.environment(stores.reuse)` in `AppStores+Environment.swift`.
 - `GenerateController+Run.swift`: one `retained:` parameter and one line
   calling `RetainedMedia.hydrated`. The type is now 603 lines against the
   advisory 600 budget; every piece of behaviour is in two new files.
@@ -136,8 +163,14 @@ and is labelled `Synthetic` at its one construction site.
 6. A **batch of four** from a reused print: four renders, all with the source.
 7. A **sequence** print: the first stage's prompt in the composer, never the
    newline-joined wall.
-8. A **long clip** reused from a print: the "renders it in pieces" sentence
-   appears, and nothing pretends the source rode along.
+8. A **long clip** reused from a print: the picture appears in the source
+   well before it renders, and the clip starts from it.
+9. Reuse a print, then **retype the prompt**: the "Using the source media
+   from…" line goes away, and the render is not conditioned on it.
+10. Reuse a print, then **delete it on its machine** and press Develop: one
+    sentence naming what happened, and the NEXT press renders normally.
+11. Reuse a print and press Develop **twice**: only the first carries the
+    picture.
 
 ## Gates
 

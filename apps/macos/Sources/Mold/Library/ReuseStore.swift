@@ -167,9 +167,19 @@ extension ReuseStore {
     /// that takes this is the last one to have it -- which is also what makes
     /// a print the machine can no longer honour refuse exactly one render
     /// instead of every one after it.
+    /// An authority that is HELD is put down either way -- taken when the
+    /// draft is still the one it came with, dropped when it is not, because a
+    /// draft that has moved on is not that print any more and an authority
+    /// nobody can see must not sit waiting for the edit to be undone.
+    ///
+    /// When nothing is held this disturbs NOTHING: a press must not bump the
+    /// fence under a probe still in the air, nor wipe a sentence nobody has
+    /// read yet.
     func take(for draft: RenderDraft) -> Authority? {
-        defer { clear() }
-        return pending(for: draft)
+        guard authority != nil else { return nil }
+        let taken = pending(for: draft)
+        clear()
+        return taken
     }
 
     /// What the pane says while a print's media is waiting to ride along.

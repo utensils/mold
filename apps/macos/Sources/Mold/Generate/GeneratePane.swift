@@ -144,10 +144,20 @@ struct GeneratePane: View {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
         }?.decision ?? .single()
-        // The chain door redeems no reuse session, so a long clip says what it
-        // cannot bring back -- but ONLY when something would have been
-        // brought back. Asked of the request the draft would actually build,
-        // so a person who attached the picture themselves is not told to.
+        // The chain door redeems no reuse session, but the chain WIRE carries
+        // the bytes per stage -- so the print's picture is fetched into the
+        // draft's own well and the render goes out as an ordinary long clip
+        // that starts from it. The authority is TAKEN before the await, so a
+        // second press finds none and takes the ordinary synchronous path.
+        if case .chain = routing, let authority = reuse.pending(for: controller.draft),
+           let member = ChainRetainedSource.member(
+               of: authority, forHydrating: outgoingProbe(on: host)) {
+            reuse.clear()
+            Task { await attachThenRun(member, of: authority) }
+            return
+        }
+        // Whatever a chain still cannot carry -- a mask, an identity photo --
+        // is said, and only when something would actually have been hydrated.
         if case .chain = routing {
             reuse.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: outgoingProbe(on: host))
         }
@@ -161,6 +171,23 @@ struct GeneratePane: View {
             retained: reuse.take(for: controller.draft).map {
                 RetainedMediaHydration(authority: $0, hosts: hosts)
             })
+    }
+
+    /// Puts the print's picture in the source well, then runs -- or says why
+    /// it could not, and runs nothing. A press that quietly rendered a long
+    /// clip without the picture it was supposed to start from is the thing
+    /// this whole path exists to stop.
+    private func attachThenRun(
+        _ member: RetainedSourceMedia.Member, of authority: ReuseStore.Authority
+    ) async {
+        switch await ChainRetainedSource.fetch(member, of: authority, hosts: hosts) {
+        case let .refused(sentence):
+            reuse.notice = sentence
+        case let .picture(picture):
+            ChainRetainedSource.place(picture, named: authority.filename,
+                                      in: &controller.draft)
+            startRun()
+        }
     }
 
     /// The first request the draft would build, for asking whether a retained

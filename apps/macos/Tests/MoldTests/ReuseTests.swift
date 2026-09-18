@@ -220,6 +220,23 @@ struct ReuseTests {
         #expect(store.authority == nil)
     }
 
+    /// A press with nothing pending must not bump the fence under a probe
+    /// still in the air, nor wipe a sentence nobody has read yet.
+    @Test func aPressWithNothingPendingDisturbsNothing() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        backend.retainedInventories["a.png"] =
+            RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+                          fence: store.begin(), disclosing: conditioned())
+        #expect(store.notice != nil)
+
+        #expect(store.take(for: RenderDraft()) == nil)
+        #expect(store.notice != nil)
+    }
+
     /// **Fails today**: Sequence B. Reuse a print, delete it or let its Mac
     /// sleep, and EVERY later Develop fails identically -- forever, with no
     /// affordance to clear it and nothing calling `clear()`.
@@ -468,6 +485,51 @@ struct ReuseTests {
 
         store.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: request())
         #expect(store.notice?.contains("renders it in pieces") == true)
+    }
+
+    /// **Fails today**: a long clip reused from a print carries nothing, and
+    /// the app only says so. The chain door redeems no session, but the chain
+    /// WIRE carries the bytes per stage, so the picture belongs in the well.
+    @Test func aLongClipReusedFromAPrintGetsItsPictureInTheWell() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        backend.retainedMemberBytes["m1"] = Data([3, 1, 4])
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let authority = ReuseStore.Authority(
+            filename: "a.mp4", origin: plato.id, members: [member()])
+
+        var draft = RenderDraft()
+        let wanted = ChainRetainedSource.member(of: authority, forHydrating: request())
+        #expect(wanted?.memberId == "m1")
+        let fetched = await ChainRetainedSource.fetch(
+            try! #require(wanted), of: authority, hosts: hosts)
+        guard case let .picture(picture) = fetched else {
+            Issue.record("the picture should have been fetched")
+            return
+        }
+        ChainRetainedSource.place(picture, named: authority.filename, in: &draft)
+
+        #expect(draft.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
+        #expect(draft.media.sourceImageName == "a.mp4")
+        // The picked picture too, so a later re-fit cannot crop a crop.
+        #expect(draft.media.sourceImageOriginal == draft.media.sourceImage)
+    }
+
+    @Test func aChainCarriesOnlyThePictureAndNeverAMaskOrAFace() {
+        let authority = ReuseStore.Authority(
+            filename: "a.mp4", origin: UUID(),
+            members: [member("mask_image", "m1"), member("identity_image", "m2")])
+        // Nothing a chain body can carry: `AutoChainRequest` has one media
+        // field, and the warning path is what covers the rest.
+        #expect(ChainRetainedSource.member(of: authority, forHydrating: request()) == nil)
+    }
+
+    @Test func aChainNeverOverwritesAPictureAlreadyInTheWell() {
+        let authority = ReuseStore.Authority(
+            filename: "a.mp4", origin: UUID(), members: [member()])
+        var mine = request()
+        mine.sourceImage = "MINE"
+        #expect(ChainRetainedSource.member(of: authority, forHydrating: mine) == nil)
     }
 
     /// **Fails today**: the warning is gated on the authority alone, so a
