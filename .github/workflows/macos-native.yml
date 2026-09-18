@@ -70,3 +70,151 @@ jobs:
       # package suite, then the app-bundle suite.
       - name: Tests
         run: make test
+
+  # The nightly update channel. It rides the SAME rolling `latest` prerelease
+  # the Tauri app's nightly does (`desktop.yml:570-726`) rather than a release
+  # of its own, so the two Mac apps ship side by side from one place and
+  # nothing here ever touches the repository's `releases/latest` pointer.
+  # Stable is published by `release.yml` on a `v*` tag, beside the CLI and the
+  # Tauri DMG.
+  macos-native-nightly:
+    name: Build nightly distribution
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/macos-native-distribution.yml
+    with:
+      channel: nightly
+    secrets: inherit
+
+  publish-macos-native-nightly:
+    name: Publish nightly update
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, macos-native-nightly]
+    runs-on: ubuntu-latest
+    # The SAME group as `desktop.yml:584-586`, deliberately: both publishers
+    # clobber assets on the one `latest` release, and `cancel-in-progress:
+    # false` queues rather than drops.
+    concurrency:
+      group: desktop-nightly-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # `check-desktop-nightly-main-head.sh` fetches and rev-parses main.
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.macos-native-nightly.outputs.workflow_artifact_name }}
+          path: artifacts
+
+      # The order below is `desktop.yml:598-726`'s, step for step, because
+      # every step of it is there for a failure that happened: immutable
+      # version-unique assets FIRST, prove them anonymously, re-check that
+      # main has not moved, only THEN the channel pointer, prove that
+      # anonymously too, and prune last.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.macos-native-nightly.outputs.version }}
+          DMG_NAME: ${{ needs.macos-native-nightly.outputs.dmg_name }}
+          APPCAST_NAME: ${{ needs.macos-native-nightly.outputs.appcast_name }}
+        run: |
+          set -euo pipefail
+          dmg="artifacts/$DMG_NAME"
+          appcast="artifacts/updates/$APPCAST_NAME"
+          for path in "$dmg" "$appcast"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error::missing nightly artifact $path"
+              exit 1
+            fi
+          done
+
+          # The status must be read INSIDE the else branch: after a whole `if`
+          # with no else, `$?` is the `if`'s own 0 and every stale build sails
+          # through. `desktop.yml:618-627` spells it the same way.
+          head_guard() {
+            if scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"; then
+              :
+            else
+              local status=$?
+              if [[ "$status" -eq 10 ]]; then
+                echo "::notice::Skipping stale native nightly $VERSION; $1"
+                exit 0
+              fi
+              exit "$status"
+            fi
+          }
+          head_guard "main advanced during the build."
+
+          # release.yml normally owns this rolling prerelease, and desktop.yml
+          # handles the first run the same way. Never `--latest`: taking the
+          # repository's Latest pointer would break the CLI download links and
+          # the Tauri app's own stable updater.
+          if ! gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::No rolling 'latest' prerelease yet; desktop.yml or release.yml creates it."
+            exit 0
+          fi
+
+          # 1. The immutable, version-unique payload.
+          gh release upload latest "$dmg" --repo "$GITHUB_REPOSITORY" --clobber
+
+          # 2. Prove it is really there, anonymously, and byte-identical.
+          dmg_url="https://github.com/$GITHUB_REPOSITORY/releases/download/latest/$DMG_NAME"
+          expected_sha=$(sha256sum "$dmg" | awk '{print $1}')
+          ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$dmg_url" -o "$RUNNER_TEMP/$DMG_NAME"; then
+              if [[ "$(sha256sum "$RUNNER_TEMP/$DMG_NAME" | awk '{print $1}')" == "$expected_sha" ]]; then
+                ready=true
+                break
+              fi
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Native nightly DMG not anonymously available yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$ready" != true ]]; then
+            echo "::error::the native nightly DMG failed anonymous SHA-256 verification"
+            exit 1
+          fi
+
+          # 3. Ask again at the pointer boundary: main can advance while that
+          #    payload propagates.
+          head_guard "main advanced before the appcast flip."
+
+          # 4. THEN the pointer.
+          gh release upload latest "$appcast" --repo "$GITHUB_REPOSITORY" --clobber
+
+          # 5. Prove the pointer too, anonymously, and that it names the exact
+          #    payload just verified and is signed.
+          appcast_url="https://github.com/$GITHUB_REPOSITORY/releases/download/latest/$APPCAST_NAME"
+          ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$appcast_url" -o "$RUNNER_TEMP/$APPCAST_NAME" \
+              && grep -q "$DMG_NAME" "$RUNNER_TEMP/$APPCAST_NAME" \
+              && grep -q 'sparkle:edSignature' "$RUNNER_TEMP/$APPCAST_NAME"; then
+              ready=true
+              break
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Native appcast not anonymously available yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$ready" != true ]]; then
+            echo "::error::the native appcast failed anonymous verification"
+            exit 1
+          fi
+
+          # 6. Only now is it safe to remove older generations -- and only
+          #    THIS app's, never the Tauri app's assets on the same release.
+          apps/macos/scripts/prune-native-nightly-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag latest \
+            --current-asset "$DMG_NAME" \
+            --keep 10
+
+          echo "Published Mold for macOS (native) nightly $VERSION"
+          echo "Appcast: $appcast_url"

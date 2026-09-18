@@ -32,7 +32,8 @@ BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
             -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN) \
-            CURRENT_PROJECT_VERSION=$(BUILD_NUMBER)
+            CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) \
+            MARKETING_VERSION=$(MARKETING_VERSION)
 
 .PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size lint-a11y clean \
         engine engine-clean engine-config signed dmg notarize release appcast
@@ -122,6 +123,9 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/sparkle-key-gate.sh
 	@scripts/tests/sparkle-signing-order.sh
 	@scripts/tests/appcast-recipe.sh
+	@scripts/tests/release-names.sh
+	@scripts/tests/prune-native-nightly.sh
+	@scripts/tests/native-workflows-parse.sh
 	@cd Packages/MoldClient && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
@@ -194,7 +198,19 @@ lint-a11y: ## Every file with a systemName image must name or opt out of it
 # bundle actually reports. It was duplicated here as a second literal, so
 # `make release` could name a DMG after a version the app inside it did not
 # claim (review 05-L4).
-VERSION ?= $(shell awk -F'"' '/MARKETING_VERSION:/ { print $$2; exit }' project.yml)
+#
+# `?=`, so a nightly can override it -- and overriding it moves the BUNDLE's
+# version and the DMG's name together, which is the whole point: the
+# distribution workflow sets this one variable and nothing else. It reaches
+# xcodebuild through `XCB` below, so `CFBundleShortVersionString` is what the
+# artifact around it claims. `?=` also honours the environment, so exporting
+# it once covers `signed`, `dmg` and `notarize` in one go.
+MARKETING_VERSION ?= $(shell awk -F'"' '/MARKETING_VERSION:/ { print $$2; exit }' project.yml)
+VERSION ?= $(MARKETING_VERSION)
+# `native` in the name because this DMG shares a GitHub release with the Tauri
+# app's `Mold_<ver>_aarch64.dmg` and the CLI's `Mold-macos-arm64.dmg`. Three
+# Molds on one release page is only confusing if they are not saying which.
+DMG_NAME ?= Mold-native-$(VERSION).dmg
 DIST := $(CURDIR)/dist
 RELEASE_APP := $(BUILD)/Release/Mold.app
 
@@ -222,13 +238,13 @@ endif
 
 dmg: ## Package the signed app as a DMG
 	@mkdir -p $(DIST)
-	@scripts/create-dmg.sh "$(RELEASE_APP)" "$(DIST)/Mold-$(VERSION).dmg"
+	@scripts/create-dmg.sh "$(RELEASE_APP)" "$(DIST)/$(DMG_NAME)"
 
 notarize: ## Notarize and staple the DMG
-	@scripts/notarize-release.sh "$(DIST)/Mold-$(VERSION).dmg"
+	@scripts/notarize-release.sh "$(DIST)/$(DMG_NAME)"
 
 release: signed dmg notarize ## Sign, package and notarize in one go
-	@echo "released: $(DIST)/Mold-$(VERSION).dmg"
+	@echo "released: $(DIST)/$(DMG_NAME)"
 
 # One channel's feed. `APPCAST_DIR` holds the archives Sparkle should offer --
 # a DMG per version, plus whatever deltas `generate_appcast` decides to make.
@@ -236,6 +252,10 @@ release: signed dmg notarize ## Sign, package and notarize in one go
 # assets live under the rolling `latest` prerelease.
 APPCAST_CHANNEL ?= stable
 APPCAST_DIR ?= $(DIST)/updates
+# The release the ASSETS live on, which is not this app's to choose: stable
+# rides release.yml's `v*` release (the repository version, not this app's)
+# and nightly rides desktop.yml's rolling `latest` prerelease. CI always
+# passes this; the default below is only a sane local guess.
 APPCAST_TAG ?= $(if $(filter nightly,$(APPCAST_CHANNEL)),latest,v$(VERSION))
 
 appcast: ## Generate and sign a channel's appcast (needs MOLD_NATIVE_SPARKLE_KEY)

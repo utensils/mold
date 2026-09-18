@@ -634,6 +634,18 @@ jobs:
       channel: stable
     secrets: inherit
 
+  # The native macOS app ships ALONGSIDE the Tauri one, from this same release.
+  # Its Sparkle feed is `releases/latest/download/mold-native-appcast.xml`, so
+  # it is correct precisely because release-plz owns that pointer and this app
+  # never creates a release of its own. Nightlies ride desktop.yml's rolling
+  # `latest` prerelease.
+  build-macos-native-dmg:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/macos-native-distribution.yml
+    with:
+      channel: stable
+    secrets: inherit
+
   # Signed universal APK for direct installation. The same long-lived signing
   # key serves nightly and stable assets so Android can upgrade in place.
   build-android-apk:
@@ -1061,7 +1073,7 @@ jobs:
   # stages, so neither can hold back the desktop updater channel.
   release-version:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-macos, build-desktop-dmg]
+    needs: [build-macos, build-desktop-dmg, build-macos-native-dmg]
     runs-on: ubuntu-latest
     concurrency:
       group: stable-release-publication
@@ -1157,6 +1169,7 @@ jobs:
             artifacts/Mold_*_aarch64.app.tar.gz
             artifacts/Mold_*_aarch64.app.tar.gz.sig
             artifacts/mold-desktop-stable.json
+            artifacts/updates/mold-native-appcast.xml
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
@@ -1202,6 +1215,8 @@ jobs:
             ## Desktop apps
 
             `Mold-macos-arm64.dmg` (also attached with its versioned name) — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+
+            `Mold-native-*.dmg` — the native macOS app (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed.
 
             `Mold-windows-x64-self-signed.exe` — self-signed NSIS installer. Verify and explicitly trust the attached `mold-windows-self-signing.cert.cer` before installation. This certificate is not publicly trusted and does not suppress SmartScreen by itself.
 

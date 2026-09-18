@@ -29,8 +29,11 @@ on:
         description: Channel appcast (pointer) name
         value: ${{ jobs.distribution.outputs.appcast_name }}
       release_tag:
-        description: Release the assets belong to
+        description: Release the assets belong to (someone else's, always)
         value: ${{ jobs.distribution.outputs.release_tag }}
+      channel:
+        description: The channel this build is for
+        value: ${{ jobs.distribution.outputs.channel }}
       workflow_artifact_name:
         description: Name of the uploaded build artifact
         value: ${{ jobs.distribution.outputs.workflow_artifact_name }}
@@ -56,6 +59,7 @@ jobs:
       dmg_name: ${{ steps.release.outputs.dmg_name }}
       appcast_name: ${{ steps.release.outputs.appcast_name }}
       release_tag: ${{ steps.release.outputs.release_tag }}
+      channel: ${{ steps.release.outputs.channel }}
       workflow_artifact_name: ${{ steps.release.outputs.workflow_artifact_name }}
     defaults:
       run:
@@ -104,11 +108,24 @@ jobs:
 
           if [[ "$channel" == "stable" ]]; then
             version="$marketing"
-            release_tag="macos-native-v$marketing"
             appcast_name="mold-native-appcast.xml"
-            if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$release_tag" ]]; then
-              echo "::error::tag $GITHUB_REF_NAME does not match version $marketing"
-              exit 1
+            # The native DMG rides the SAME `v*` release release.yml already
+            # publishes the CLI and the Tauri app to, so `releases/latest/
+            # download/mold-native-appcast.xml` resolves through the pointer
+            # release-plz owns. This app never creates a release or touches
+            # that pointer -- doing so would take `releases/latest` away from
+            # the CLI download links and from the Tauri app's own stable
+            # updater (`desktop/src-tauri/tauri.conf.json`).
+            if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              release_tag="$GITHUB_REF_NAME"
+            else
+              repository_version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+                ../../Cargo.toml | head -1)
+              if [[ -z "$repository_version" ]]; then
+                echo "::error::could not read the workspace version"
+                exit 1
+              fi
+              release_tag="v$repository_version"
             fi
           else
             version="$marketing-nightly.$bundle_version"
@@ -116,12 +133,21 @@ jobs:
             appcast_name="mold-native-appcast-nightly.xml"
           fi
 
+          # `native` in the name because this DMG shares a release page with
+          # `Mold_<ver>_aarch64.dmg` (Tauri) and `Mold-macos-arm64.dmg` (the
+          # stable-named copy of it). The Makefile builds the same string from
+          # the one version variable below; `scripts/tests/release-names.sh`
+          # asserts the two agree, because they did not, and nightly could not
+          # build at all.
+          dmg_name="Mold-native-$version.dmg"
+
           {
             echo "version=$version"
             echo "bundle_version=$bundle_version"
             echo "release_tag=$release_tag"
-            echo "dmg_name=Mold-$version.dmg"
+            echo "dmg_name=$dmg_name"
             echo "appcast_name=$appcast_name"
+            echo "channel=$channel"
             echo "workflow_artifact_name=mold-native-macos-$channel"
           } >> "$GITHUB_OUTPUT"
           {
@@ -129,7 +155,7 @@ jobs:
             echo "MOLD_NATIVE_VERSION=$version"
             echo "MOLD_NATIVE_BUNDLE_VERSION=$bundle_version"
             echo "MOLD_NATIVE_RELEASE_TAG=$release_tag"
-            echo "MOLD_NATIVE_DMG_NAME=Mold-$version.dmg"
+            echo "MOLD_NATIVE_DMG_NAME=$dmg_name"
             echo "MOLD_NATIVE_APPCAST_NAME=$appcast_name"
           } >> "$GITHUB_ENV"
 
@@ -184,6 +210,14 @@ jobs:
       # bundle), then refuses a placeholder update key, then makes the linkage
       # portable, then signs innermost-first including Sparkle's helpers.
       - name: Build, sign, package and notarize
+        env:
+          # ONE variable, exported once, honoured by all four targets because
+          # the Makefile declares it `?=` (an environment value counts as
+          # defined). It moves `CFBundleShortVersionString` and the DMG's name
+          # TOGETHER: a nightly whose bundle still said "0.1.0" made Sparkle
+          # offer "Mold 0.1.0" to a user already on 0.1.0, and the workflow's
+          # own appcast assertion below could never match.
+          MARKETING_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           make gen
@@ -204,12 +238,18 @@ jobs:
             APPCAST_CHANNEL="$MOLD_NATIVE_CHANNEL" \
             APPCAST_DIR="$PWD/dist/updates" \
             APPCAST_TAG="$MOLD_NATIVE_RELEASE_TAG"
-          # The feed must name the version this run built, or the pointer and
-          # the asset are describing different things.
-          grep -q "sparkle:shortVersionString=\"$MOLD_NATIVE_VERSION\"" \
-            "dist/updates/$MOLD_NATIVE_APPCAST_NAME" \
-            || grep -q "$MOLD_NATIVE_DMG_NAME" "dist/updates/$MOLD_NATIVE_APPCAST_NAME" \
-            || { echo "::error::the appcast does not mention this build"; exit 1; }
+          # BOTH, with `&&` rather than `||`: the version the bundle reports
+          # and the payload the enclosure points at. Written as a fallback
+          # chain this looked like it pinned two things and pinned one, and
+          # the arm that never fired was the one that would have caught the
+          # nightly short-version bug.
+          feed="dist/updates/$MOLD_NATIVE_APPCAST_NAME"
+          grep -q "sparkle:shortVersionString=\"$MOLD_NATIVE_VERSION\"" "$feed" \
+            || { echo "::error::the appcast does not name version $MOLD_NATIVE_VERSION"; exit 1; }
+          grep -q "sparkle:version=\"$MOLD_NATIVE_BUNDLE_VERSION\"" "$feed" \
+            || { echo "::error::the appcast does not name build $MOLD_NATIVE_BUNDLE_VERSION"; exit 1; }
+          grep -q "$MOLD_NATIVE_DMG_NAME" "$feed" \
+            || { echo "::error::the appcast does not point at $MOLD_NATIVE_DMG_NAME"; exit 1; }
 
       - uses: actions/upload-artifact@v7
         with:
