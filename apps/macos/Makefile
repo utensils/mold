@@ -21,11 +21,21 @@ MOLD_DEV_SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/de
   | sort -t'"' -k2,2r | head -1 | tr -d '"')
 SIGN := CODE_SIGN_IDENTITY="$(or $(MOLD_DEV_SIGN_IDENTITY),-)"
 
+# Sparkle decides which build is newer by comparing CFBundleVersion, and it
+# compares across BOTH channels -- a nightly and a stable are the same app.
+# A hand-bumped number cannot be trusted to rise, so it is the commit count:
+# monotonic on main by construction, identical for a stable and a nightly cut
+# from the same commit, and never a decision anybody has to remember to make.
+# (A nightly ahead of the last release therefore reads as newer than it, which
+# is correct: moving back to Stable waits for a release newer than that count.)
+BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
+
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-            -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN)
+            -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN) \
+            CURRENT_PROJECT_VERSION=$(BUILD_NUMBER)
 
 .PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size lint-a11y clean \
-        engine engine-clean engine-config signed dmg notarize release
+        engine engine-clean engine-config signed dmg notarize release appcast
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -111,6 +121,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/linkage-fixup.sh
 	@scripts/tests/sparkle-key-gate.sh
 	@scripts/tests/sparkle-signing-order.sh
+	@scripts/tests/appcast-recipe.sh
 	@cd Packages/MoldClient && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
@@ -218,6 +229,20 @@ notarize: ## Notarize and staple the DMG
 
 release: signed dmg notarize ## Sign, package and notarize in one go
 	@echo "released: $(DIST)/Mold-$(VERSION).dmg"
+
+# One channel's feed. `APPCAST_DIR` holds the archives Sparkle should offer --
+# a DMG per version, plus whatever deltas `generate_appcast` decides to make.
+# Stable assets live under their own `vX.Y.Z` release (immutable); nightly
+# assets live under the rolling `latest` prerelease.
+APPCAST_CHANNEL ?= stable
+APPCAST_DIR ?= $(DIST)/updates
+APPCAST_TAG ?= $(if $(filter nightly,$(APPCAST_CHANNEL)),latest,v$(VERSION))
+
+appcast: ## Generate and sign a channel's appcast (needs MOLD_NATIVE_SPARKLE_KEY)
+	@scripts/make-appcast.sh \
+	  --channel $(APPCAST_CHANNEL) \
+	  --updates-dir "$(APPCAST_DIR)" \
+	  --download-url-prefix "https://github.com/utensils/mold/releases/download/$(APPCAST_TAG)/"
 
 clean: ## Remove build output and the generated project
 	@rm -rf $(BUILD) $(PROJECT) $(DIST) Packages/*/.build
