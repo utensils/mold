@@ -75,6 +75,19 @@ sparkle_code() {
   printf '%s\n' "$framework"
 }
 
+# Everything else. Sparkle is cut out of this sweep entirely -- the framework
+# AND its contents -- because `find -depth` would otherwise sign the wrapper
+# before the helpers inside it, which invalidates them. A function rather than
+# a `< <({ ... })` group: the runner's bash 3.2 reads that as an ambiguous
+# redirect.
+nested_code() {
+  find "$APP" -depth \
+    \( -name '*.framework' -o -name '*.dylib' -o -name '*.app' \
+       -o -name '*.bundle' -o -name '*.xpc' -o -name '*.appex' \) \
+    ! -path '*/Sparkle.framework' ! -path '*/Sparkle.framework/*'
+  sparkle_code
+}
+
 while IFS= read -r nested; do
   [ "$nested" = "$APP" ] && continue
   echo "  signing $(basename "$nested")"
@@ -82,16 +95,7 @@ while IFS= read -r nested; do
     */XPCServices/Downloader.xpc) sign_preserving_entitlements "$nested" ;;
     *) sign_nested "$nested" ;;
   esac
-done < <({
-  # Everything else. Sparkle is cut out of this sweep entirely -- the framework
-  # AND its contents -- because `find -depth` would otherwise sign the wrapper
-  # before the helpers inside it, which invalidates them.
-  find "$APP" -depth \
-    \( -name '*.framework' -o -name '*.dylib' -o -name '*.app' \
-       -o -name '*.bundle' -o -name '*.xpc' -o -name '*.appex' \) \
-    ! -path '*/Sparkle.framework' ! -path '*/Sparkle.framework/*'
-  sparkle_code
-})
+done < <(nested_code)
 
 echo "  signing $(basename "$APP")"
 sign_app "$APP"
