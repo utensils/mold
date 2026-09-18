@@ -24,20 +24,18 @@ struct RecentGroup: View {
     @State private var pendingDestruction: LibraryActions.Destruction?
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            content.padding(.top, 6)
-        } label: {
-            HStack {
-                Text(title)
-                Spacer()
-                Button { Task { await refresh() } } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh")
+        // The same section every other group is, so its rows lead from the
+        // title's edge too -- the Refresh rides the title as an accessory
+        // rather than as a second thing in the content.
+        InspectorSection(title, isExpanded: $isExpanded) {
+            Button { Task { await refresh() } } label: {
+                Image(systemName: "arrow.clockwise")
             }
+            .buttonStyle(.borderless)
+            .help("Refresh")
+        } content: {
+            content
         }
-        .font(.callout)
         .task(id: taskKey) { if isExpanded { await refreshIfNeeded() } }
         .onChange(of: isBusy) { wasBusy, nowBusy in
             guard wasBusy, !nowBusy else { return }

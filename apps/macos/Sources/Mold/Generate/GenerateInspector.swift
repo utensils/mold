@@ -49,56 +49,48 @@ struct GenerateInspector: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Every group is an `InspectorSection`, which owns the one alignment
+    /// rule: a section's content leads from its TITLE's edge, and a line
+    /// narrower than the column leads like every other row rather than
+    /// floating in the middle of it.
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let recipe, let stack = recipe.capabilities.loraStack, let model, let host {
-                DisclosureGroup("Adapters", isExpanded: $showsAdapters) {
+                InspectorSection("Adapters", isExpanded: $showsAdapters) {
                     AdaptersGroup(modelName: model.name, host: host, maxCount: stack.maxCount, draft: $draft)
-                        .padding(.top, 6)
                 }
-                .font(.callout)
             }
             if let recipe, IdentityGroup.isShown(recipe: recipe, host: capabilities) {
-                DisclosureGroup("Identity", isExpanded: $showsIdentity) {
+                InspectorSection("Identity", isExpanded: $showsIdentity) {
                     IdentityGroup(maxPhotos: capabilities?.maxIdentityPhotos ?? 0, draft: $draft)
-                        .padding(.top, 6)
                 }
-                .font(.callout)
             }
             if RefineGroup.isShown(recipe: recipe, models: hostModels, media: draft.media) {
-                DisclosureGroup("Refine", isExpanded: $showsRefine) {
+                InspectorSection("Refine", isExpanded: $showsRefine) {
                     RefineGroup(recipe: recipe, models: hostModels, draft: $draft, destination: $destination)
-                        .padding(.top, 6)
                 }
-                .font(.callout)
             }
             if let recipe, ClipGroup.isShown(capabilities: recipe.capabilities) {
-                DisclosureGroup("Clip", isExpanded: $showsClip) {
+                InspectorSection("Clip", isExpanded: $showsClip) {
                     ClipGroup(recipe: recipe, draft: $draft)
-                        .padding(.top, 6)
                 }
-                .font(.callout)
             }
             if SamplerGroup.isShown(sampler) {
-                DisclosureGroup("Sampler", isExpanded: $showsSampler) {
-                    SamplerGroup(offered: sampler, draft: $draft).padding(.top, 6)
+                InspectorSection("Sampler", isExpanded: $showsSampler) {
+                    SamplerGroup(offered: sampler, draft: $draft)
                 }
-                .font(.callout)
             }
-            DisclosureGroup("Output", isExpanded: $showsOutput) {
+            InspectorSection("Output", isExpanded: $showsOutput) {
                 OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
-                    .padding(.top, 6)
             }
-            .font(.callout)
             if FileUnderGroup.isShown(capabilities: capabilities) {
-                DisclosureGroup("File under", isExpanded: $showsFileUnder) {
+                InspectorSection("File under", isExpanded: $showsFileUnder) {
                     FileUnderGroup(shelves: library.shelves, draft: $draft)
-                        .padding(.top, 6)
                 }
-                .font(.callout)
             }
             RecentGroup(host: host, draft: $draft, isExpanded: $showsRecent, isBusy: controller.run.isBusy)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// What this recipe offers the Sampler group, resolved once so the rows
