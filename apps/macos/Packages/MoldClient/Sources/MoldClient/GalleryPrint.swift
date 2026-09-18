@@ -1,36 +1,5 @@
 import Foundation
 
-/// How a print was made. mold records far more than this; these are the fields
-/// the app shows or reuses.
-///
-/// Every field but `prompt` and `model` is optional on purpose: this metadata
-/// spans years of mold versions, and a print made before a field existed is a
-/// normal print, not a corrupt one.
-public struct OutputMetadata: Codable, Hashable, Sendable {
-    public let prompt: String?
-    public let negativePrompt: String?
-    public let model: String?
-    public let family: String?
-    public let seed: UInt64?
-    public let steps: Int?
-    public let guidance: Double?
-    public let width: Int?
-    public let height: Int?
-    /// What was actually rendered, when it differs from the delivered size --
-    /// an upscaled print's `width` is the final one, not the one to reuse.
-    public let generationWidth: Int?
-    public let generationHeight: Int?
-    public let frames: Int?
-    public let fps: Double?
-    public let generationTimeMs: Int?
-    public let jobId: String?
-    public let outputFormat: String?
-    /// `one-shot` or `sequence`. A sequence's `prompt` is every stage joined by
-    /// newlines, which is why reuse must never restore it wholesale.
-    public let outputMode: String?
-    public let chainJobId: String?
-}
-
 /// One finished piece of work on one host.
 public struct GalleryPrint: Codable, Hashable, Sendable {
     public let filename: String

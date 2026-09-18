@@ -1,0 +1,619 @@
+{
+ "_captured": {
+  "host": "hal9000",
+  "address": "http://100.123.198.98:7680 (keyless)",
+  "server_version": "0.29.0 (b015496e 2026-09-16)",
+  "route": "GET /api/gallery",
+  "date": "2026-09-17",
+  "note": "Real prints, chosen so that between them they carry every provenance field this app restores. Rows are verbatim; nothing is edited."
+ },
+ "prints": [
+  {
+   "filename": "mold-realistic-vision-v5-fp16-1784141403169.png",
+   "metadata": {
+    "prompt": "A deer on a mountain top at sunrise",
+    "model": "realistic-vision-v5:fp16",
+    "seed": 3266422733,
+    "steps": 25,
+    "guidance": 7.5,
+    "width": 512,
+    "height": 512,
+    "scheduler": "ddim",
+    "output_format": "png",
+    "version": "0.17.0"
+   },
+   "timestamp": 1784141403,
+   "format": "png",
+   "size_bytes": 436841,
+   "media_version": "1784141403169:436841"
+  },
+  {
+   "filename": "mold-ltx-2-19b-distilled-fp8-1786851614872.mp4",
+   "metadata": {
+    "prompt": "This woman is dancing and singing \u201cI love tits!\u201d",
+    "generation_time_ms": 193389,
+    "model": "ltx-2-19b-distilled:fp8",
+    "seed": 65306059,
+    "steps": 8,
+    "guidance": 1.0,
+    "width": 576,
+    "height": 1024,
+    "generation_width": 576,
+    "generation_height": 1024,
+    "strength": 0.75,
+    "source_image_name": "mold-cv-3063794-1786029607688.png",
+    "source_image_sha256": "1df66eddfa7250d805eb3c554b4ded1e7e870359d6ccebbfc153ee8cd817ca13",
+    "source_fit": {
+     "alignX": "center",
+     "alignY": "center",
+     "mode": "crop-fill"
+    },
+    "output_format": "mp4",
+    "lora": "ltx-2-19b-lora-camera-control-dolly-in.safetensors",
+    "lora_scale": 0.5,
+    "loras": [
+     {
+      "path": "/storage-fast/mold/models/ltx2-camera-control-dolly-in-19b/ltx-2-19b-lora-camera-control-dolly-in.safetensors",
+      "scale": 0.5
+     }
+    ],
+    "enable_audio": true,
+    "pipeline": "distilled",
+    "source_preprocessing": {
+     "profile": {
+      "generation": "v2",
+      "image_crf": 33
+     },
+     "codec": "openh264-cqp33",
+     "fit_policy": "fill-center-crop"
+    },
+    "frames": 97,
+    "fps": 24,
+    "version": "0.21.0 (b15833e 2026-08-15)"
+   },
+   "timestamp": 1786851614,
+   "format": "mp4",
+   "size_bytes": 4310408,
+   "media_version": "1786851614884:4310408",
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-hunyuan3d-mini-turbo-fp16-1788503140147.glb",
+   "metadata": {
+    "prompt": "",
+    "generation_time_ms": 23689,
+    "output_mode": "one-shot",
+    "job_id": "e6a3e0be-31c6-4e6a-9006-900be1f13744",
+    "model": "hunyuan3d-mini-turbo:fp16",
+    "seed": 4117871464,
+    "steps": 5,
+    "guidance": 5.0,
+    "width": 512,
+    "height": 512,
+    "generation_width": 0,
+    "generation_height": 0,
+    "mesh": {
+     "octree_resolution": 256,
+     "threshold": 0.76
+    },
+    "source_image_name": "mold-ultrareal-v4-q8-1788489660162.png",
+    "source_image_sha256": "a1a9e459df6d88f7bee72881af707732421f82c430c07b8325464a46111dbea9",
+    "output_format": "glb",
+    "pipeline_requested": false,
+    "version": "0.26.0 (0b18174 2026-09-03)"
+   },
+   "timestamp": 1788503140,
+   "format": "glb",
+   "size_bytes": 13978792,
+   "media_version": "1788503140151:13978792:p3"
+  },
+  {
+   "filename": "mold-jibmix-flux-fp8-1788383514251~nsfw.png",
+   "metadata": {
+    "prompt": "A beautiful woman in fishnet dress standing - transparent background",
+    "title": "NSFW",
+    "tags": [
+     "nsfw"
+    ],
+    "collection": "NSFW",
+    "generation_time_ms": 47309,
+    "output_mode": "one-shot",
+    "job_id": "8d7f0b3a-72fd-441e-99cc-b03c6b3ad59d",
+    "model": "jibmix-flux:fp8",
+    "seed": 1225208998,
+    "steps": 25,
+    "guidance": 3.0,
+    "width": 1024,
+    "height": 1024,
+    "generation_width": 1024,
+    "generation_height": 1024,
+    "id_image_name": "IMG_0730.png",
+    "id_image_sha256": "2b1c4bb132b3eb2c5b224c18277e726f741fe8569205d8f1af8db600f04c4c74",
+    "id_weight": 1.0,
+    "id_start_step": 0,
+    "output_format": "png",
+    "pipeline_requested": false,
+    "version": "0.26.0 (7447fd5 2026-09-02)"
+   },
+   "timestamp": 1788383514,
+   "format": "png",
+   "size_bytes": 1220286,
+   "media_version": "1788383514275:1220286",
+   "title": "NSFW",
+   "tags": [
+    "nsfw"
+   ],
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-real-esrgan-x4plus-fp16-1788488679298-upscaled.png",
+   "metadata": {
+    "prompt": "make this xenomorph alien dark  black",
+    "output_mode": "one-shot",
+    "model": "flux2-klein:q8",
+    "seed": 4088599249,
+    "steps": 4,
+    "guidance": 1.0,
+    "width": 4096,
+    "height": 4096,
+    "generation_width": 1024,
+    "generation_height": 1024,
+    "source_fit": {
+     "mode": "crop-fill"
+    },
+    "edit_image_sha256s": [
+     "fb827ce7d300e83a3c9785fb755088046a0908479cbe1660a18362af47ab1cec"
+    ],
+    "output_format": "png",
+    "upscale_model": "real-esrgan-x4plus:fp16",
+    "pipeline_requested": false,
+    "version": "0.26.0 (0b18174 2026-09-03)"
+   },
+   "timestamp": 1788488679,
+   "format": "png",
+   "size_bytes": 15560215,
+   "media_version": "1788488679302:15560215"
+  },
+  {
+   "filename": "mold-wan22-i2v-a14b-q5-1787718371258~nsfw.mp4",
+   "metadata": {
+    "prompt": "a woman slipping off her dress",
+    "title": "NSFW",
+    "tags": [
+     "nsfw"
+    ],
+    "collection": "NSFW",
+    "generation_time_ms": 340856,
+    "negative_prompt": "\u8272\u8c03\u8273\u4e3d\uff0c\u8fc7\u66dd\uff0c\u9759\u6001\uff0c\u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05\uff0c\u5b57\u5e55\uff0c\u98ce\u683c\uff0c\u4f5c\u54c1\uff0c\u753b\u4f5c\uff0c\u753b\u9762\uff0c\u9759\u6b62\uff0c\u6574\u4f53\u53d1\u7070\uff0c\u6700\u5dee\u8d28\u91cf\uff0c\u4f4e\u8d28\u91cf\uff0cJPEG\u538b\u7f29\u6b8b\u7559\uff0c\u4e11\u964b\u7684\uff0c\u6b8b\u7f3a\u7684\uff0c\u591a\u4f59\u7684\u624b\u6307\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u624b\u90e8\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u8138\u90e8\uff0c\u7578\u5f62\u7684\uff0c\u6bc1\u5bb9\u7684\uff0c\u5f62\u6001\u7578\u5f62\u7684\u80a2\u4f53\uff0c\u624b\u6307\u878d\u5408\uff0c\u9759\u6b62\u4e0d\u52a8\u7684\u753b\u9762\uff0c\u6742\u4e71\u7684\u80cc\u666f\uff0c\u4e09\u6761\u817f\uff0c\u80cc\u666f\u4eba\u5f88\u591a\uff0c\u5012\u7740\u8d70",
+    "output_mode": "one-shot",
+    "job_id": "a2fbc417-5761-40ef-be37-8334a639cb77",
+    "model": "wan22-i2v-a14b:q5",
+    "seed": 3297448403,
+    "steps": 4,
+    "guidance": 1.0,
+    "width": 480,
+    "height": 832,
+    "generation_width": 480,
+    "generation_height": 832,
+    "source_fit": {
+     "alignX": "center",
+     "alignY": "center",
+     "mode": "crop-fill"
+    },
+    "keyframes": [
+     {
+      "frame": 0,
+      "name": "IMG_0283.jpeg",
+      "sha256": "4926331732a927e8df43eb0da770ca4e0482d3c47166d830564d24c8b43c76c5"
+     },
+     {
+      "frame": 80,
+      "name": "IMG_0283.jpeg",
+      "sha256": "056f26cfc2d09f11c95cb24a9f10fb61f6c2ea1e8c255ad1cc09c6d0a0db3599"
+     }
+    ],
+    "output_format": "mp4",
+    "pipeline_requested": false,
+    "frames": 81,
+    "fps": 16,
+    "version": "0.25.0 (d42ab32 2026-08-25)"
+   },
+   "timestamp": 1787718371,
+   "format": "mp4",
+   "size_bytes": 4061910,
+   "media_version": "1787718371262:4061910",
+   "title": "NSFW",
+   "tags": [
+    "nsfw"
+   ],
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-minimax-h3-ref2va-comfy-pruned-int8-1788197310484~nsfw.mp4",
+   "metadata": {
+    "prompt": "The woman from image 1 smiles and poses, then slides off her dress, transitioning to image 2. The scene unfolds in a seamless chronological flow, preserving the woman\u2019s identity and the dress\u2019s motion. The camera follows her natural movement, capturing the transition with fluidity. The environment remains unchanged, and the sound of her slide is subtly echoed in image 2. No edits or alterations are made, maintaining the original references.",
+    "title": "NSFW",
+    "tags": [
+     "nsfw"
+    ],
+    "collection": "NSFW",
+    "generation_time_ms": 1544876,
+    "original_prompt": "The woman from image 1 smiles and poses then slides off her dress to image 2",
+    "output_mode": "one-shot",
+    "job_id": "95c69a68-d11c-4f89-a00d-c06c1ef8e664",
+    "model": "minimax-h3-ref2va:comfy-pruned-int8",
+    "seed": 3302128807,
+    "steps": 21,
+    "guidance": 0.0,
+    "width": 704,
+    "height": 1280,
+    "generation_width": 704,
+    "generation_height": 1280,
+    "references": [
+     {
+      "kind": "image",
+      "index": 1,
+      "name": "IMG_0283.jpeg",
+      "sha256": "59e07a5c6d3389764aea98f7957c4954d4e2270d11094868498b692ea546c1ad",
+      "mime_type": "image/jpeg",
+      "width": 582,
+      "height": 1200,
+      "prepared_shape": {
+       "version": 3,
+       "normalized_width": 576,
+       "normalized_height": 1216,
+       "visual_rows": 684,
+       "audio_rows": 0
+      }
+     },
+     {
+      "kind": "image",
+      "index": 2,
+      "name": "IMG_0283.jpeg",
+      "sha256": "056f26cfc2d09f11c95cb24a9f10fb61f6c2ea1e8c255ad1cc09c6d0a0db3599",
+      "mime_type": "image/jpeg",
+      "width": 595,
+      "height": 1200,
+      "prepared_shape": {
+       "version": 3,
+       "normalized_width": 608,
+       "normalized_height": 1216,
+       "visual_rows": 722,
+       "audio_rows": 0
+      }
+     }
+    ],
+    "output_format": "mp4",
+    "pipeline_requested": false,
+    "pipeline_provenance_sha256": "e0b2d1e42fc672277cd55be09eda417ef460d11c576ed9bbc1599ff03dbe2657",
+    "frames": 243,
+    "fps": 24,
+    "version": "0.26.0 (d4ad3e0 2026-08-31)"
+   },
+   "timestamp": 1788197310,
+   "format": "mp4",
+   "size_bytes": 11862687,
+   "media_version": "1788197310488:11862687",
+   "title": "NSFW",
+   "tags": [
+    "nsfw"
+   ],
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-chain-3cb05c3e9d8468260cb56042d6c579e243ae76ca7d6475ccaa1777c6ff49f581-take-1.mp4",
+   "metadata": {
+    "prompt": "Test",
+    "generation_time_ms": 222524,
+    "output_mode": "one-shot",
+    "model": "wan22-ti2v-5b:turbo",
+    "seed": 1881155381,
+    "steps": 6,
+    "guidance": 1.0,
+    "width": 1024,
+    "height": 1024,
+    "generation_width": 1024,
+    "generation_height": 1024,
+    "output_format": "mp4",
+    "enable_audio": false,
+    "pipeline_requested": false,
+    "frames": 257,
+    "fps": 24,
+    "chain": {
+     "stage_count": 3,
+     "motion_tail_frames": 1,
+     "stages": [
+      {
+       "prompt": "Test",
+       "frames": 121,
+       "transition": "smooth",
+       "seed": "1881155381"
+      },
+      {
+       "prompt": "Test",
+       "frames": 121,
+       "transition": "smooth",
+       "seed": "1881155381"
+      },
+      {
+       "prompt": "Test",
+       "frames": 17,
+       "transition": "smooth",
+       "seed": "1881155381"
+      }
+     ]
+    },
+    "version": "0.28.0 (cdb6fb9 2026-09-10)"
+   },
+   "timestamp": 1789015898,
+   "format": "mp4",
+   "size_bytes": 13359402,
+   "media_version": "1789015898633:13359402"
+  },
+  {
+   "filename": "mold-ltx-2-19b-distilled-fp8-1787860285996~uat-ltx2-extend.mp4",
+   "metadata": {
+    "prompt": "the paper boat reaches a storm drain and spins",
+    "title": "UAT ltx2 extend",
+    "tags": [
+     "uat",
+     "uat-ltx2-extend"
+    ],
+    "generation_time_ms": 125309,
+    "output_mode": "one-shot",
+    "job_id": "e0261de5-bf74-426a-bbcf-fb083ab87420",
+    "model": "ltx-2-19b-distilled:fp8",
+    "seed": 17,
+    "steps": 8,
+    "guidance": 1.0,
+    "width": 768,
+    "height": 512,
+    "generation_width": 768,
+    "generation_height": 512,
+    "output_format": "mp4",
+    "extend_overlap_frames": 17,
+    "pipeline": "distilled",
+    "pipeline_requested": false,
+    "frames": 41,
+    "fps": 24,
+    "version": "0.25.0 (948b258 2026-08-27)"
+   },
+   "timestamp": 1787860286,
+   "format": "mp4",
+   "size_bytes": 1572418,
+   "media_version": "1787860286683:1572418",
+   "title": "UAT ltx2 extend",
+   "tags": [
+    "uat",
+    "uat-ltx2-extend"
+   ]
+  },
+  {
+   "filename": "mold-hunyuan3d-mini-turbo-fp16-1788387693156~nsfw.glb",
+   "metadata": {
+    "prompt": "A beautiful woman in fishnet dress standing - transparent background",
+    "title": "NSFW",
+    "tags": [
+     "nsfw"
+    ],
+    "collection": "NSFW",
+    "generation_time_ms": 69241,
+    "output_mode": "one-shot",
+    "job_id": "6240a7f9-52ea-4641-94d2-15c961e2fb98",
+    "model": "hunyuan3d-mini-turbo:fp16",
+    "seed": 1351926689,
+    "steps": 5,
+    "guidance": 5.0,
+    "width": 512,
+    "height": 512,
+    "generation_width": 0,
+    "generation_height": 0,
+    "mesh": {
+     "octree_resolution": 384,
+     "threshold": 0.8
+    },
+    "source_image_name": "IMG_0730.png",
+    "source_image_sha256": "2b1c4bb132b3eb2c5b224c18277e726f741fe8569205d8f1af8db600f04c4c74",
+    "output_format": "glb",
+    "pipeline_requested": false,
+    "version": "0.26.0 (7447fd5 2026-09-02)"
+   },
+   "timestamp": 1788387693,
+   "format": "glb",
+   "size_bytes": 37230208,
+   "media_version": "1788387693160:37230208:p3",
+   "title": "NSFW",
+   "tags": [
+    "nsfw"
+   ],
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-ltx-2.5-22b-distilled-q8-1789532686738.mp4",
+   "metadata": {
+    "prompt": "A 360 view of this twin engine aircract in a hanger - the camera rotates fully around the airplane in a single clip",
+    "generation_time_ms": 238374,
+    "output_mode": "one-shot",
+    "job_id": "c5cbcccd-05fa-443a-a72a-8b08ecdee759",
+    "model": "ltx-2.5-22b-distilled:q8",
+    "family": "ltx2",
+    "seed": 903433285,
+    "steps": 8,
+    "guidance": 1.0,
+    "width": 768,
+    "height": 768,
+    "generation_width": 768,
+    "generation_height": 768,
+    "strength": 0.75,
+    "source_image_name": "mold-qwen-image-q8-1789531868557.png",
+    "source_image_sha256": "6a0f0ffb08d234944f7125512a3a714a0a5649e3dd6466574a3394198675dc1b",
+    "source_fit": {
+     "mode": "crop-fill"
+    },
+    "output_format": "mp4",
+    "enable_audio": true,
+    "pipeline": "distilled",
+    "pipeline_requested": false,
+    "duration_prediction_requested": true,
+    "source_preprocessing": {
+     "profile": {
+      "generation": "v2_5",
+      "image_crf": 18
+     },
+     "codec": "openh264-cqp18",
+     "fit_policy": "fill-center-crop"
+    },
+    "attention_path": "ltx2-bf16-flash",
+    "frames": 145,
+    "fps": 24,
+    "version": "0.28.0 (b2dbb45 2026-09-12)"
+   },
+   "timestamp": 1789532686,
+   "format": "mp4",
+   "size_bytes": 6947151,
+   "media_version": "1789532686816:6947151"
+  },
+  {
+   "filename": "mold-qwen-image-q8-1789529980561.png",
+   "metadata": {
+    "prompt": "A twin engine aircraft",
+    "generation_time_ms": 343399,
+    "output_mode": "one-shot",
+    "job_id": "0eb5b6a9-039b-4901-bcb2-8c22ce5258d4",
+    "model": "qwen-image:q8",
+    "family": "qwen-image",
+    "seed": 1789529636781972965,
+    "steps": 50,
+    "guidance": 4.0,
+    "width": 1328,
+    "height": 1328,
+    "generation_width": 1328,
+    "generation_height": 1328,
+    "output_format": "png",
+    "pipeline_requested": false,
+    "mesh_workflow": {
+     "job_id": "96cd794f-5287-4d3c-855b-a4a2bea84cdc",
+     "mode": "text_to_mesh",
+     "role": "generated_image",
+     "stage_index": 0
+    },
+    "version": "0.28.0 (b2dbb45 2026-09-12)"
+   },
+   "timestamp": 1789529980,
+   "format": "png",
+   "size_bytes": 1602467,
+   "media_version": "1789529980560:1602467"
+  },
+  {
+   "filename": "mold-jibmix-flux-fp8-1788207348881~nsfw.png",
+   "metadata": {
+    "prompt": "A beautiful woman in a fishnet dress walks through a misty forest path, her silhouette framed by the soft morning light. The composition emphasizes her graceful movement and the delicate fabric of her dress. The lighting is diffused through the trees, casting a soft, ethereal glow. The camera is positioned at a low angle, capturing the play of light and shadow on her skin. The color palette is muted with soft pastels, enhancing the tranquil mood of the scene.",
+    "title": "NSFW",
+    "tags": [
+     "nsfw"
+    ],
+    "collection": "NSFW",
+    "generation_time_ms": 58388,
+    "original_prompt": "A beautiful woman in fishnet dress",
+    "prompt_transform": {
+     "operation": "remix",
+     "root_prompt": "A beautiful woman in fishnet dress",
+     "source_prompt": "A beautiful woman in fishnet dress",
+     "source_kind": "original",
+     "task": "text-to-image",
+     "dimensions": [
+      "camera"
+     ]
+    },
+    "output_mode": "one-shot",
+    "job_id": "d7ef7e6b-5325-4146-acad-19da2a121c81",
+    "model": "jibmix-flux:fp8",
+    "seed": 313813201,
+    "steps": 25,
+    "guidance": 3.0,
+    "width": 576,
+    "height": 1024,
+    "generation_width": 576,
+    "generation_height": 1024,
+    "id_image_name": "IMG_0730.png",
+    "id_image_sha256": "2b1c4bb132b3eb2c5b224c18277e726f741fe8569205d8f1af8db600f04c4c74",
+    "id_weight": 1.0,
+    "id_start_step": 0,
+    "output_format": "png",
+    "pipeline_requested": false,
+    "version": "0.26.0 (6bf535d 2026-08-31)"
+   },
+   "timestamp": 1788207348,
+   "format": "png",
+   "size_bytes": 772109,
+   "media_version": "1788207348906:772109",
+   "title": "NSFW",
+   "tags": [
+    "nsfw"
+   ],
+   "collections": [
+    "75b66d3b-079c-45ac-8eba-ba9dcf215f21"
+   ]
+  },
+  {
+   "filename": "mold-chain-8c352a5a9ac5d5c23549e66d96f07c97f26331a7798de3fce244cdc4da754073-take-1.mp4",
+   "metadata": {
+    "prompt": "a slow cinematic dolly through a neon-lit rain-soaked alley at night, volumetric fog\nthe alley opens onto a wide neon plaza, crowds under umbrellas, reflections everywhere\nthe camera rises above the plaza, city lights stretching to the horizon",
+    "generation_time_ms": 229910,
+    "output_mode": "sequence",
+    "model": "wan22-t2v-a14b:q5",
+    "seed": 424242,
+    "steps": 4,
+    "guidance": 1.0,
+    "width": 832,
+    "height": 480,
+    "generation_width": 832,
+    "generation_height": 480,
+    "output_format": "mp4",
+    "pipeline_requested": false,
+    "frames": 159,
+    "fps": 16,
+    "chain_job_id": "bc0cf303-9d4e-41c0-8b5b-2cd790b2d5bb",
+    "chain": {
+     "stage_count": 3,
+     "motion_tail_frames": 0,
+     "stages": [
+      {
+       "prompt": "a slow cinematic dolly through a neon-lit rain-soaked alley at night, volumetric fog",
+       "frames": 53,
+       "transition": "smooth",
+       "seed": "424242"
+      },
+      {
+       "prompt": "the alley opens onto a wide neon plaza, crowds under umbrellas, reflections everywhere",
+       "frames": 53,
+       "transition": "smooth",
+       "seed": "424242"
+      },
+      {
+       "prompt": "the camera rises above the plaza, city lights stretching to the horizon",
+       "frames": 53,
+       "transition": "smooth",
+       "seed": "424242"
+      }
+     ]
+    },
+    "version": "0.26.0 (4ac6a16 2026-08-30)"
+   },
+   "timestamp": 1788131592,
+   "format": "mp4",
+   "size_bytes": 11910177,
+   "media_version": "1788131592875:11910177"
+  }
+ ]
+}

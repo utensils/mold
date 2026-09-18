@@ -1,0 +1,44 @@
+{
+ "_captured": {
+  "host": "hal9000",
+  "address": "http://100.123.198.98:7680 (keyless)",
+  "server_version": "0.29.0 (b015496e 2026-09-16)",
+  "route": "GET /api/gallery/source-media/{filename}",
+  "date": "2026-09-17",
+  "note": "Three answers, verbatim, one per shape the app has to read. `legacy` is the WHOLE body the host sent for a text-to-image print: `members` is omitted, not empty, so a client that made it required would fail on the commonest answer there is."
+ },
+ "source_image": {
+  "filename": "mold-ltx-2.5-22b-distilled-q8-1789532686738.mp4",
+  "body": {
+   "availability": "available",
+   "members": [
+    {
+     "member_id": "12d58781f95f9680e9e1a582f56b885e2768f46b56819ac69030f625b698c405",
+     "role": "source_image",
+     "display_name": "source_image-1",
+     "size_bytes": 771681
+    }
+   ]
+  }
+ },
+ "edit_images": {
+  "filename": "mold-flux2-klein-q8-1788487690530.png",
+  "body": {
+   "availability": "available",
+   "members": [
+    {
+     "member_id": "f668c80ce5c7adb688cac2ad062a613bc5f41fea13bf737e45bd63146bdb4695",
+     "role": "edit_images",
+     "display_name": "edit_images-2",
+     "size_bytes": 1201732
+    }
+   ]
+  }
+ },
+ "legacy": {
+  "filename": "mold-qwen-image-q8-1789529980561.png",
+  "body": {
+   "availability": "unavailable_legacy"
+  }
+ }
+}
