@@ -1,5 +1,6 @@
 import Foundation
 import MoldClient
+import Testing
 @testable import Mold
 
 /// A machine that records what it was asked and answers with what a test
@@ -372,16 +373,27 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// first and hang the test.
     nonisolated(unsafe) var holdsChainCreate = false
     nonisolated(unsafe) private var chainGates: [@Sendable () -> Void] = []
-    nonisolated(unsafe) private var chainReleases = 0
+    /// How many creates are ACTUALLY parked on the gate right now.
+    ///
+    /// `record(_:)` appends the route name before the create suspends, so a
+    /// `settle` on the call count returns while nothing is waiting yet -- and
+    /// a release issued there used to be BANKED and then consumed by whichever
+    /// create reached the gate first, which on a slower machine was the second
+    /// one. It followed a chain the test had withdrawn. Settle on THIS instead:
+    /// it is the state a release actually acts on.
+    var chainCreatesWaiting: Int { submitLock.withLock { chainGates.count } }
 
     /// Lets the OLDEST held-open `createChainJob` answer, whether or not it
     /// has suspended yet. Its own verb, not `releaseSubmit`'s: two creates can
     /// be outstanding at once and a batch may be in the air beside them.
+    /// There is deliberately NO banking of a release that arrives before a
+    /// create has parked: that is what made the order a coin toss. A caller
+    /// settles on `chainCreatesWaiting` first, which is exact.
     func releaseChainCreate() {
         submitLock.lock()
-        if chainGates.isEmpty {
-            chainReleases += 1
+        guard !chainGates.isEmpty else {
             submitLock.unlock()
+            Issue.record("releaseChainCreate() with no create waiting; settle on chainCreatesWaiting")
             return
         }
         let gate = chainGates.removeFirst()
@@ -393,14 +405,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     private func chainGate() async {
         await withCheckedContinuation { continuation in
             submitLock.lock()
-            if chainReleases > 0 {
-                chainReleases -= 1
-                submitLock.unlock()
-                continuation.resume()
-            } else {
-                chainGates.append { continuation.resume() }
-                submitLock.unlock()
-            }
+            chainGates.append { continuation.resume() }
+            submitLock.unlock()
         }
     }
 

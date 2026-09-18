@@ -134,15 +134,16 @@ struct ChainQueueTests {
         backend.chainEventsHeldOpen.insert("chain-b1")
 
         controller.submit(on: plato, backend: backend, routing: routing)
-        await settle { backend.chainJobRequests.count == 3 }
+        // One on the canvas and the rest waiting is the STATE all four
+        // assertions are about; the request count alone is satisfied before
+        // the last create has landed anywhere.
+        await settle { controller.queuedCount == 2 && controller.run.stage == "Clip 1 of 3" }
 
         let bodies = backend.chainJobRequests
+        #expect(bodies.count == 3)
         #expect(Set(bodies.compactMap(\.seed)).count == 3, "the copies share a seed")
         #expect(Set(bodies.compactMap(\.batchId)).count == 1, "the copies are not one batch")
         #expect(bodies.compactMap(\.batchCount).allSatisfy { $0 == 3 })
-        // One on the canvas, the rest waiting -- never all three at once.
-        await settle { controller.queuedCount == 2 }
-        #expect(controller.run.stage == "Clip 1 of 3")
     }
 
     /// Stop All withdraws the waiting chain on its own machine too -- a queued
