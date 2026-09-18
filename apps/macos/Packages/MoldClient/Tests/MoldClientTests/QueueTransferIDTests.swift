@@ -16,17 +16,17 @@ import Testing
 ///
 /// ```
 /// const digest = createHash("sha256").update(Buffer.from(JSON.stringify([
-///   "mold.queue-transfer.v1", "plato-instance-0001", "job-abc-123",
+///   "mold.queue-transfer.v1", "workstation-instance-0001", "job-abc-123",
 ///   "hal9000-instance-0002",
 /// ]), "utf8")).digest();
 /// digest[6] = (digest[6] & 15) | 80;
 /// digest[8] = (digest[8] & 63) | 128;
-/// // => "db83f081-c42a-5cad-a003-7aa89b86b5c4"
+/// // => "3e1e45ce-5235-5047-b5a8-366cc6b94353"
 /// ```
 @Test func aTransferIdMatchesTheOneTheWebAppDerives() {
     let id = QueueTransferID.derive(
-        source: "plato-instance-0001", jobId: "job-abc-123", destination: "hal9000-instance-0002")
-    #expect(id == "db83f081-c42a-5cad-a003-7aa89b86b5c4")
+        source: "workstation-instance-0001", jobId: "job-abc-123", destination: "hal9000-instance-0002")
+    #expect(id == "3e1e45ce-5235-5047-b5a8-366cc6b94353")
 }
 
 /// Two different jobs between the same pair of machines must derive two
