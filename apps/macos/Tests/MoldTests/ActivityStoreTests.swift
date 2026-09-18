@@ -81,9 +81,13 @@ struct ActivityStoreTests {
 
         centre.post(name: resignedActive, object: nil)
         await settle { !store.isTicking }
+        // The read that was already in flight when the app resigned still
+        // lands -- cancelling a loop does not un-send a request. What must
+        // not happen is another one AFTER it, so the count is sampled once
+        // the dust has settled and then again thirty ticks later.
+        try? await Task.sleep(for: .milliseconds(20))
         let asks = backend.callCount("activity")
-        // Twenty-five chances to ask again at a 2 ms interval.
-        try? await Task.sleep(for: .milliseconds(50))
+        try? await Task.sleep(for: .milliseconds(60))
         #expect(backend.callCount("activity") == asks)
 
         centre.post(name: becameActive, object: nil)

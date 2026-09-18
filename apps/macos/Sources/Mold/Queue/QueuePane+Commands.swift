@@ -17,13 +17,11 @@ extension QueuePane {
     /// The whole-queue gate, per machine that advertises it. The pane's own
     /// toolbar control reads this same value, so the two cannot disagree
     /// about the word on them.
-    var queueGate: QueueGateOffer {
-        QueueGateOffer(
-            machines: QueueStore.gateTargets(hosts.hosts, capabilities: hosts.capabilities)
-                .map { QueueGateOffer.Machine(id: $0.id, name: $0.name,
-                                              isPaused: queue.isQueuePaused(on: $0.id)) },
-            toggle: { host in Task { await queue.toggleQueuePaused(on: host) } })
-    }
+    var queueGate: QueueGateOffer { gate.offer }
+
+    /// The gate itself. A value, built where it is needed -- it holds no
+    /// state of its own, only the rule.
+    var gate: QueueGateControl { QueueGateControl(hosts: hosts, queue: queue) }
 
     /// `selection` is one id across every host's flat rows AND every batch
     /// child -- `List`'s own automatic `Identifiable`-based tagging, since

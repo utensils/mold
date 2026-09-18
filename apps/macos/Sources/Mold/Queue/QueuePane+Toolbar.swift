@@ -39,7 +39,7 @@ extension QueuePane {
     /// The machines whose queue is paused right now, so the pane can say so
     /// whether or not they have rows.
     var pausedMachines: [MoldHost] {
-        hosts.hosts.filter { queue.canPauseQueue(on: $0.id) && queue.isQueuePaused(on: $0.id) }
+        hosts.hosts.filter { gate.canPause(on: $0.id) && gate.isPaused(on: $0.id) }
     }
 
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item reads

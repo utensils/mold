@@ -54,8 +54,7 @@ struct MoldApp: App {
         _models = State(initialValue: models)
         let queue = QueueStore(hosts: hosts)
         _queue = State(initialValue: queue)
-        _upscales = State(initialValue: UpscaleStore(
-            hosts: hosts, models: models, library: library))
+        _upscales = State(initialValue: UpscaleStore(hosts: hosts, models: models, library: library))
         _activity = State(initialValue: ActivityStore(hosts: hosts))
         _transfers = State(initialValue: TransferStore(hosts: hosts, queue: queue))
         let licenses = LicenseStore(hosts: hosts)
@@ -97,11 +96,9 @@ struct MoldApp: App {
                     // here rather than there; `start()` is idempotent, so the
                     // next activation costs nothing.
                     delegate.heartbeat = heartbeat
-                    if NSApp.isActive { heartbeat.start() }
-                    // The same signal: `ActivityStore` watches for the two
-                    // activation notifications itself, and this is the launch
-                    // start that has already fired by the time this runs.
-                    if NSApp.isActive { activity.start() }
+                    // `ActivityStore` watches the two activation
+                    // notifications itself; this is the launch start.
+                    if NSApp.isActive { heartbeat.start(); activity.start() }
                     // A notification click reaches the delegate, not a view
                     // -- this is where it meets the destination binding and
                     // the Library's own navigation.

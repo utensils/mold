@@ -25,10 +25,12 @@ struct QueueGateTests {
         return fake
     }
 
-    private func bench(_ backend: FakeBackend, host: MoldHost) async -> (QueueStore, HostStore) {
+    private func bench(_ backend: FakeBackend, host: MoldHost)
+        async -> (QueueGateControl, QueueStore, HostStore) {
         let hosts = HostStore(hosts: [host]) { _ in backend }
         await hosts.refresh(host)
-        return (QueueStore(hosts: hosts, coalesceDelay: .milliseconds(1)), hosts)
+        let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(1))
+        return (QueueGateControl(hosts: hosts, queue: queue), queue, hosts)
     }
 
     /// The gate is READ before it is decided. Desktop's own bug: the first
@@ -36,20 +38,20 @@ struct QueueGateTests {
     /// fetched it, and the second press paused again.
     @Test func theGateIsReadFromTheMachineBeforeItIsDecided() async {
         let plato = machine()
-        let (store, _) = await bench(fake(for: plato, paused: true), host: plato)
-        #expect(store.isQueuePaused(on: plato.id), "the status poll already carried the answer")
+        let (gate, _, _) = await bench(fake(for: plato, paused: true), host: plato)
+        #expect(gate.isPaused(on: plato.id), "the status poll already carried the answer")
     }
 
     @Test func togglingAPausedMachineResumesIt() async {
         let plato = machine()
         let backend = fake(for: plato, paused: true)
-        let (store, _) = await bench(backend, host: plato)
+        let (gate, _, _) = await bench(backend, host: plato)
 
-        await store.toggleQueuePaused(on: plato.id)
+        await gate.toggle(on: plato.id)
 
         #expect(backend.extras.gateCalls == [false])
         #expect(backend.callCount("resumeQueue") == 1)
-        #expect(!store.isQueuePaused(on: plato.id))
+        #expect(!gate.isPaused(on: plato.id))
     }
 
     /// The VERB is the writer. What is written is the MACHINE's answer, never
@@ -59,12 +61,12 @@ struct QueueGateTests {
         let plato = machine()
         let backend = fake(for: plato)
         backend.extras.gateAnswer = false
-        let (store, _) = await bench(backend, host: plato)
+        let (gate, _, _) = await bench(backend, host: plato)
 
-        await store.setQueuePaused(true, on: plato.id)
+        await gate.set(true, on: plato.id)
 
         #expect(backend.extras.gateCalls == [true], "it asked to pause")
-        #expect(!store.isQueuePaused(on: plato.id), "and the machine said it did not")
+        #expect(!gate.isPaused(on: plato.id), "and the machine said it did not")
     }
 
     /// The frame is the CONFIRMATION. It carries a value rather than a
@@ -73,23 +75,23 @@ struct QueueGateTests {
     @Test func theFrameConfirmsRatherThanTogglingAgain() async {
         let plato = machine()
         let backend = fake(for: plato)
-        let (store, hosts) = await bench(backend, host: plato)
+        let (gate, store, hosts) = await bench(backend, host: plato)
         await hosts.refresh(plato)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
 
-        await store.setQueuePaused(true, on: plato.id)
-        #expect(store.isQueuePaused(on: plato.id))
+        await gate.set(true, on: plato.id)
+        #expect(gate.isPaused(on: plato.id))
 
         backend.emit(.queue(.paused))
         await settle { store.queuePaused[plato.id] == true }
-        #expect(store.isQueuePaused(on: plato.id), "still paused, not toggled back")
+        #expect(gate.isPaused(on: plato.id), "still paused, not toggled back")
 
         // And a frame nobody's verb caused still moves it -- another client
         // pausing this machine is a real thing to hear about.
         backend.emit(.queue(.resumed))
         await settle { store.queuePaused[plato.id] == false }
-        #expect(!store.isQueuePaused(on: plato.id))
+        #expect(!gate.isPaused(on: plato.id))
     }
 
     /// Absent means an older machine with no gate. The control is then ABSENT
@@ -97,12 +99,12 @@ struct QueueGateTests {
     @Test func aMachineThatDoesNotAdvertiseItIsNeverAsked() async {
         let plato = machine()
         let backend = fake(for: plato, canPause: false)
-        let (store, hosts) = await bench(backend, host: plato)
+        let (gate, store, hosts) = await bench(backend, host: plato)
 
-        await store.setQueuePaused(true, on: plato.id)
+        await gate.set(true, on: plato.id)
 
         #expect(backend.callCount("pauseQueue") == 0)
-        #expect(QueueStore.gateTargets(hosts.hosts, capabilities: hosts.capabilities).isEmpty)
+        #expect(QueueGateControl.targets(hosts.hosts, capabilities: hosts.capabilities).isEmpty)
     }
 
     /// A failure is a sentence about the machine, not a silently unchanged
@@ -112,11 +114,11 @@ struct QueueGateTests {
         let backend = fake(for: plato)
         backend.plantedErrors["pauseQueue"] = MoldClientError.http(
             status: 409, code: nil, message: "Another client holds the gate.")
-        let (store, hosts) = await bench(backend, host: plato)
+        let (gate, store, hosts) = await bench(backend, host: plato)
 
-        await store.setQueuePaused(true, on: plato.id)
+        await gate.set(true, on: plato.id)
 
-        #expect(!store.isQueuePaused(on: plato.id))
+        #expect(!gate.isPaused(on: plato.id))
         // `HostStore.report` makes the machine the sentence's subject, so the
         // refusal follows it in lower case.
         #expect(hosts.failures.first?.sentence.contains("another client holds the gate") == true)
