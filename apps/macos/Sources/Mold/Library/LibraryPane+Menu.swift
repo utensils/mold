@@ -11,7 +11,9 @@ extension LibraryPane {
     /// from a menu: the selection, the shelves, and the one door every item is
     /// performed through.
     func menuSelection(_ showing: LibraryShowing) -> LibrarySelection {
-        let entries = showing.selected
+        // The OPEN print when the viewer is showing one, so Favourite, Export…
+        // and Trash act on the picture in the window (`LibraryShowing.inspected`).
+        let entries = showing.inspected(viewing: viewing)
         let actions = self.actions
         return LibrarySelection(
             count: entries.count,
@@ -48,7 +50,7 @@ extension LibraryPane {
     /// `LibraryMenu.swift`'s own "Save a Copy…" and "Export…" make, off the
     /// same selection (design S6).
     func menuFile(_ showing: LibraryShowing) -> LibraryFile {
-        let entries = showing.selected
+        let entries = showing.inspected(viewing: viewing)
         let actions = self.actions
         return LibraryFile(
             count: entries.count,

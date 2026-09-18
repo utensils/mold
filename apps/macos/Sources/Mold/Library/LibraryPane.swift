@@ -118,11 +118,10 @@ struct LibraryPane: View {
         return content(showing)
             .failureBanner(hosts)
             .mediaCacheNote(materializer)
+            // The OPEN print while the viewer is showing one, and the grid's
+            // selection otherwise: see `LibraryInspector+Pane`.
             .trailingColumn(isShowing: showsInspector) {
-                LibraryInspector(entries: showing.selected,
-                                 host: showing.selected.first.flatMap(host(of:)),
-                                 scope: navigation.scope, actions: actions,
-                                 filterByTag: { navigation.query.tokens.append(.tag($0)) })
+                inspector(showing.inspected(viewing: viewing))
             }
             .navigationTitle(navigation.scope.title(in: library.shelves))
             .navigationSubtitle(fullSubtitle(showing))
