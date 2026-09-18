@@ -873,71 +873,7 @@ fn check_private_h3_target_budget_fits(
 /// independent aggregate peaks would miss the smaller simultaneous charge.
 #[cfg(feature = "mp4")]
 fn private_h3_unified_target_peak_bytes(budget: &H3FactoryTargetBudgetInput) -> Result<u64> {
-    let phases = [
-        (
-            budget.reference_decode_phase_device_bytes,
-            budget.reference_decode_phase_host_bytes,
-        ),
-        (
-            budget.reference_preprocess_phase_device_bytes,
-            budget.reference_preprocess_phase_host_bytes,
-        ),
-        (
-            budget.reference_visual_encode_phase_device_bytes,
-            budget.reference_visual_encode_phase_host_bytes,
-        ),
-        (
-            budget.reference_audio_encode_phase_device_bytes,
-            budget.reference_audio_encode_phase_host_bytes,
-        ),
-        (
-            budget.vae_load_phase_device_bytes,
-            budget.vae_load_phase_host_bytes,
-        ),
-        (
-            budget.qwen_encode_phase_device_bytes,
-            budget.qwen_encode_phase_host_bytes,
-        ),
-        (
-            budget.qwen_transfer_phase_device_bytes,
-            budget.qwen_transfer_phase_host_bytes,
-        ),
-        (
-            budget.condition_encode_phase_device_bytes,
-            budget.condition_encode_phase_host_bytes,
-        ),
-        (
-            budget.noise_allocation_phase_device_bytes,
-            budget.noise_allocation_phase_host_bytes,
-        ),
-        (
-            budget.transformer_load_phase_device_bytes,
-            budget.transformer_load_phase_host_bytes,
-        ),
-        (
-            budget.denoise_phase_device_bytes,
-            budget.denoise_phase_host_bytes,
-        ),
-        (
-            budget.visual_decode_phase_device_bytes,
-            budget.visual_decode_phase_host_bytes,
-        ),
-        (
-            budget.audio_decode_phase_device_bytes,
-            budget.audio_decode_phase_host_bytes,
-        ),
-        (
-            budget.waveform_transfer_phase_device_bytes,
-            budget.waveform_transfer_phase_host_bytes,
-        ),
-        (budget.mux_phase_device_bytes, budget.mux_phase_host_bytes),
-    ];
-    phases.into_iter().try_fold(0, |peak, (device, host)| {
-        device
-            .checked_add(host)
-            .map(|phase| peak.max(phase))
-            .ok_or_else(|| anyhow!("private H3 unified-memory target phase overflow"))
-    })
+    budget.unified_peak_bytes()
 }
 
 /// The device bytes the Qwen encode phase would hold on a CUDA route, and
