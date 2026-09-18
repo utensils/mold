@@ -7,7 +7,7 @@ import Testing
 /// `GenerateController.submit` sent one request no matter how many copies
 /// were asked for, and the server refuses any `batch_size != 1` per child --
 /// so "Batch 4" was a 422, never four pictures. These pin the fan-out
-/// (`RenderDraft.requests(model:copies:randomBase:)`, wired in at S6) all the
+/// (`RenderRequest.batch(_:model:copies:randomBase:)`, wired in at S6) all the
 /// way through settling every child, not just one.
 @MainActor
 struct BatchOutcomeTests {
@@ -27,7 +27,7 @@ struct BatchOutcomeTests {
 
     // MARK: - The fan-out
 
-    /// **Fails today**: `submit` builds `[draft.request(model:)]`, always one
+    /// **Fails today**: `submit` builds `[RenderRequest.one(draft, model:)]`, always one
     /// request regardless of `batchSize`.
     @Test func aBatchOfFourIsSubmittedAsFourChildren() async {
         let workstation = machine()

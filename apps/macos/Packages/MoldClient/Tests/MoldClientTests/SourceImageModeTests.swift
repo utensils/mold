@@ -83,17 +83,17 @@ private func references(
     draft.media.lastExclusiveWrite = .references
     #expect(draft.media.requestConditioning == .references)
 
-    var request = draft.request(model: "flux2-klein")
+    var request = RenderRequest.one(draft, model: "flux2-klein")
     #expect(request.sourceImage == nil)
     #expect(request.editImages == ["REF"])
     // Strength and the mask travel with a source image that ships.
     draft.media.maskImage = "MASK"
-    request = draft.request(model: "flux2-klein")
+    request = RenderRequest.one(draft, model: "flux2-klein")
     #expect(request.strength == nil)
     #expect(request.maskImage == nil)
 
     draft.media.lastExclusiveWrite = .source
-    request = draft.request(model: "flux2-klein")
+    request = RenderRequest.one(draft, model: "flux2-klein")
     #expect(request.sourceImage == "SRC")
     #expect(request.editImages == nil)
     #expect(request.maskImage == "MASK")
@@ -109,7 +109,7 @@ private func references(
     draft.media.referenceWeight = 0.8
     #expect(draft.media.requestConditioning == .both)
 
-    let request = draft.request(model: "sd15")
+    let request = RenderRequest.one(draft, model: "sd15")
     #expect(request.sourceImage == "SRC")
     #expect(request.editImages == ["REF"])
     #expect(request.referenceWeight == 0.8)
@@ -122,7 +122,7 @@ private func references(
     draft.media.editImages = ["REF"]
     draft.media.sourceMode = .references
     #expect(draft.media.requestConditioning == .references)
-    #expect(draft.request(model: "flux2-dev").sourceImage == nil)
+    #expect(RenderRequest.one(draft, model: "flux2-dev").sourceImage == nil)
     // Nothing parks for an exclusive-style layout question here: `replaces`
     // has no source path at all, so `exclusiveWells` answers nil.
     #expect(draft.media.exclusiveWells == nil)

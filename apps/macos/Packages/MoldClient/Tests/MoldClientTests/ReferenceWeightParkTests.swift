@@ -75,6 +75,6 @@ struct ReferenceWeightParkTests {
         draft.media.editImages = ["REF"]
         draft.media.referenceWeight = 1.6
         let parked = draft.adopting(recipe(references: unweighted), isNewModel: false)
-        #expect(parked.request(model: "m").referenceWeight == nil)
+        #expect(RenderRequest.one(parked, model: "m").referenceWeight == nil)
     }
 }

@@ -229,7 +229,7 @@ struct ExpansionTests {
         }
         expansions.accept(offer.choices[0], into: controller)
 
-        let request = controller.draft.request(model: "flux-dev:q4")
+        let request = RenderRequest.one(controller.draft, model: "flux-dev:q4")
         let encoded = try MoldJSON.encoder.encode(request)
         let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         #expect(!object.keys.contains { $0.contains("expand") })

@@ -46,7 +46,7 @@ struct SourceFitAdoptTests {
         let maskless = draft.adopting(recipe(mask: false), isNewModel: false)
         #expect(maskless.media.sourceFit == .default)
         // And the request carries the coerced policy, not the original.
-        #expect(maskless.request(model: "m").sourceFit == .default)
+        #expect(RenderRequest.one(maskless, model: "m").sourceFit == .default)
 
         // A mask-capable recipe keeps whatever is set -- the coercion is one
         // way, exactly as `coerceSourceFitForMaskless` is.

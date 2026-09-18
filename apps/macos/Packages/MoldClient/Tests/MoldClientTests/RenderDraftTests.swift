@@ -81,9 +81,9 @@ private let guidance = FloatControl(default: 3.5, min: 0, max: 10, step: 0.1,
     var draft = RenderDraft()
     draft.seed = 42
     draft.locksSeed = false
-    #expect(draft.request(model: "m").seed == nil)
+    #expect(RenderRequest.one(draft, model: "m").seed == nil)
     draft.locksSeed = true
-    #expect(draft.request(model: "m").seed == 42)
+    #expect(RenderRequest.one(draft, model: "m").seed == 42)
 }
 
 private let wanTemporal = try! MoldJSON.decoder.decode(TemporalProfile.self, from: Data("""
@@ -130,7 +130,7 @@ private func clipRecipe(source: SourceImageCapability? = nil,
     draft = draft.adopting(recipe(steps: wide, guidance: guidance), isNewModel: true)
     #expect(draft.frames == nil)
     #expect(draft.fps == nil)
-    #expect(draft.request(model: "m").frames == nil)
+    #expect(RenderRequest.one(draft, model: "m").frames == nil)
 }
 
 @Test func aSourceImageIsDroppedWhenTheRecipeCannotReadOne() {
@@ -150,10 +150,10 @@ private func clipRecipe(source: SourceImageCapability? = nil,
 @Test func strengthRidesOnlyWithSomethingToApplyItTo() {
     var draft = RenderDraft()
     draft.strength = 0.4
-    #expect(draft.request(model: "m").strength == nil)
+    #expect(RenderRequest.one(draft, model: "m").strength == nil)
 
     draft.media.sourceImage = "AAAA"
-    #expect(draft.request(model: "m").strength == 0.4)
+    #expect(RenderRequest.one(draft, model: "m").strength == 0.4)
 }
 
 @Test func aHiddenNegativePromptIsClearedRatherThanSent() {
@@ -190,7 +190,7 @@ private func metadata(_ json: String) -> OutputMetadata {
     // nothing.
     #expect(draft.seed == 42)
     #expect(draft.locksSeed == true)
-    #expect(draft.request(model: "m").seed == 42)
+    #expect(RenderRequest.one(draft, model: "m").seed == 42)
     #expect(RenderDraft(reusing: metadata("""
     {"prompt":"p","model":"m","steps":4,"guidance":0,"width":512,"height":512}
     """)).locksSeed == false)
@@ -245,7 +245,7 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
     let adopted = draft.adopting(referenceRecipe(.hidden, relation: .replaces),
                                  isNewModel: false)
     #expect(adopted.media.editImages.isEmpty)
-    #expect(adopted.request(model: "m").editImages == nil)
+    #expect(RenderRequest.one(adopted, model: "m").editImages == nil)
 }
 
 @Test func referencesAreTrimmedToWhatTheRecipeAccepts() {
@@ -267,7 +267,7 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
     // the REQUEST is where that is decided (finding 02#1).
     #expect(adopted.media.editImages == ["A"])
     #expect(adopted.media.sourceImage == "SRC")
-    let request = adopted.request(model: "m")
+    let request = RenderRequest.one(adopted, model: "m")
     #expect(!(request.sourceImage != nil && request.editImages != nil))
 }
 
@@ -284,7 +284,7 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
     let draft = RenderDraft().adopting(referenceRecipe(.adjustable, relation: .replaces),
                                        isNewModel: true)
     // An empty array and an absent field are different instructions.
-    #expect(draft.request(model: "m").editImages == nil)
+    #expect(RenderRequest.one(draft, model: "m").editImages == nil)
 }
 
 private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
@@ -475,7 +475,7 @@ private func wanResolution() throws -> ResolutionProfile {
     draft.title = "Robots"
     draft.tags = ["metal"]
     draft.collectionName = "Robots"
-    let requests = draft.requests(model: "m", copies: 4, randomBase: 100)
+    let requests = RenderRequest.batch(draft, model: "m", copies: 4, randomBase: 100)
 
     #expect(requests.count == 4)
     #expect(requests.allSatisfy { $0.batchSize == 1 })
@@ -497,7 +497,7 @@ private func wanResolution() throws -> ResolutionProfile {
 /// unlocked, no seed either -- the host picks.
 @Test func aSingleRenderCarriesNoBatchProvenance() {
     let draft = RenderDraft()
-    let requests = draft.requests(model: "m", copies: 1, randomBase: 100)
+    let requests = RenderRequest.batch(draft, model: "m", copies: 1, randomBase: 100)
     #expect(requests.count == 1)
     #expect(requests[0].batchSize == 1)
     #expect(requests[0].batchId == nil)
@@ -511,7 +511,7 @@ private func wanResolution() throws -> ResolutionProfile {
     var draft = RenderDraft()
     draft.seed = .max
     draft.locksSeed = true
-    let requests = draft.requests(model: "m", copies: 2, randomBase: 999)
+    let requests = RenderRequest.batch(draft, model: "m", copies: 2, randomBase: 999)
     #expect(requests.map(\.seed) == [UInt64.max, 0])
 }
 
@@ -520,14 +520,14 @@ private func wanResolution() throws -> ResolutionProfile {
 @Test func aPlacementRequestIsAlwaysOneOutput() {
     var draft = RenderDraft()
     draft.batchSize = 4
-    #expect(draft.placementRequest(model: "m").batchSize == 1)
+    #expect(RenderRequest.placement(draft, model: "m").batchSize == 1)
 }
 
 /// Whitespace is not a title.
 @Test func aTitleOfOnlyWhitespaceIsNoTitle() {
     var draft = RenderDraft()
     draft.title = "   "
-    #expect(draft.request(model: "m").title == nil)
+    #expect(RenderRequest.one(draft, model: "m").title == nil)
 }
 
 /// A filed request names its collection by NAME, never by id -- an id is
@@ -535,8 +535,8 @@ private func wanResolution() throws -> ResolutionProfile {
 @Test func aFiledRequestNamesItsCollectionNeverAnId() {
     var draft = RenderDraft()
     draft.collectionName = "Smurf Village"
-    #expect(draft.request(model: "m").collection == .named("Smurf Village"))
-    #expect(RenderDraft().request(model: "m").collection == nil)
+    #expect(RenderRequest.one(draft, model: "m").collection == .named("Smurf Village"))
+    #expect(RenderRequest.one(RenderDraft(), model: "m").collection == nil)
 }
 
 // MARK: - S6c: the draft's media inputs are one value

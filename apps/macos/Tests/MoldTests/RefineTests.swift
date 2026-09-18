@@ -49,7 +49,7 @@ struct RefineTests {
         draft.media.sourceImage = "SRC"
         draft.media.maskImage = "MASK"
         draft.media.sourceImage = nil // what `SourceImageWell`'s clear button does
-        let request = draft.request(model: "sd15:fp16")
+        let request = RenderRequest.one(draft, model: "sd15:fp16")
         #expect(request.sourceImage == nil)
         #expect(request.maskImage == nil)
     }
@@ -91,7 +91,7 @@ struct RefineTests {
     @Test func aControlModelWithoutAPictureSendsNeither() {
         var draft = RenderDraft()
         draft.media.control = ControlConditioning(model: "controlnet-canny-sd15:fp16")
-        let request = draft.request(model: "sd15:fp16")
+        let request = RenderRequest.one(draft, model: "sd15:fp16")
         #expect(request.controlModel == nil)
         #expect(request.controlImage == nil)
     }
@@ -99,7 +99,7 @@ struct RefineTests {
     @Test func aControlPictureWithoutAModelSendsNeither() {
         var draft = RenderDraft()
         draft.media.control = ControlConditioning(image: "CTRL")
-        let request = draft.request(model: "sd15:fp16")
+        let request = RenderRequest.one(draft, model: "sd15:fp16")
         #expect(request.controlModel == nil)
         #expect(request.controlImage == nil)
     }
@@ -107,7 +107,7 @@ struct RefineTests {
     @Test func aCompleteControlConditioningSendsBoth() {
         var draft = RenderDraft()
         draft.media.control = ControlConditioning(image: "CTRL", model: "controlnet-canny-sd15:fp16")
-        let request = draft.request(model: "sd15:fp16")
+        let request = RenderRequest.one(draft, model: "sd15:fp16")
         #expect(request.controlImage == "CTRL")
         #expect(request.controlModel == "controlnet-canny-sd15:fp16")
     }
@@ -117,7 +117,7 @@ struct RefineTests {
     @Test func controlScaleBelowZeroIsClampedBeforeItIsSent() {
         var draft = RenderDraft()
         draft.media.control = ControlConditioning(image: "CTRL", model: "m", scale: -1)
-        let request = draft.request(model: "sd15:fp16")
+        let request = RenderRequest.one(draft, model: "sd15:fp16")
         #expect(request.controlScale == 0)
     }
 

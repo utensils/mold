@@ -172,21 +172,21 @@ private func recipe(_ capabilities: RecipeCapabilities) -> GenerationRecipe {
     #expect(adopted.media.exclusiveWells?.active == .source)
     #expect(adopted.media.exclusiveWells?.parked == .references)
     // One render still carries one or the other; sending both is a refusal.
-    #expect(adopted.request(model: "m").sourceImage == "SRC")
-    #expect(adopted.request(model: "m").editImages == nil)
+    #expect(RenderRequest.one(adopted, model: "m").sourceImage == "SRC")
+    #expect(RenderRequest.one(adopted, model: "m").editImages == nil)
 
     // Writing the strip parks the source for as long as it holds media, and
     // the picture is still there when it is emptied again.
     var rewritten = adopted
     rewritten.media.lastExclusiveWrite = .references
-    #expect(rewritten.request(model: "m").editImages == ["A"])
-    #expect(rewritten.request(model: "m").sourceImage == nil)
+    #expect(RenderRequest.one(rewritten, model: "m").editImages == ["A"])
+    #expect(RenderRequest.one(rewritten, model: "m").sourceImage == nil)
     rewritten.media.editImages = []
-    #expect(rewritten.request(model: "m").sourceImage == "SRC")
+    #expect(RenderRequest.one(rewritten, model: "m").sourceImage == "SRC")
 
     // Back on a plain img2img recipe (no references block), the source is
     // what it always was.
     let restored = adopted.adopting(recipe(capabilities(sourceImage: .optional)), isNewModel: false)
     #expect(restored.media.sourceImage == "SRC")
-    #expect(restored.request(model: "m").sourceImage == "SRC")
+    #expect(RenderRequest.one(restored, model: "m").sourceImage == "SRC")
 }

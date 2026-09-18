@@ -83,7 +83,7 @@ struct AdvancedControlsParkTests {
     /// ("must set at least one field; omit it to keep pipeline defaults"), so
     /// the absent case has to be ABSENCE and not `{}`.
     @Test func anUntouchedDraftPutsNoSamplerFieldOnTheWire() {
-        let request = RenderDraft().request(model: "m")
+        let request = RenderRequest.one(RenderDraft(), model: "m")
         #expect(request.guidanceOverrides == nil)
         #expect(request.scheduler == nil)
         #expect(request.cfgPlus == nil)
@@ -95,9 +95,9 @@ struct AdvancedControlsParkTests {
     @Test func cfgPlusReachesTheWireOnlyWhenItIsOn() {
         var draft = RenderDraft()
         draft.advanced.cfgPlus = true
-        #expect(draft.request(model: "m").cfgPlus == true)
+        #expect(RenderRequest.one(draft, model: "m").cfgPlus == true)
         draft.advanced.cfgPlus = false
-        #expect(draft.request(model: "m").cfgPlus == nil)
+        #expect(RenderRequest.one(draft, model: "m").cfgPlus == nil)
     }
 
     /// A value the wire cannot carry contributes nothing, and does not take
@@ -106,7 +106,7 @@ struct AdvancedControlsParkTests {
         var draft = RenderDraft()
         draft.advanced.stgBlocks = "3, banana"
         draft.advanced.stgScale = 1.5
-        let overrides = draft.request(model: "m").guidanceOverrides
+        let overrides = RenderRequest.one(draft, model: "m").guidanceOverrides
         #expect(overrides?.stgBlocks == nil)
         #expect(overrides?.stgScale == 1.5)
         #expect(draft.advanced.refusal == "STG blocks: \"banana\" is not a block index.")

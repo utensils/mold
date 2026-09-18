@@ -29,8 +29,8 @@ final class PlacementProbe {
     func refresh(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) {
         task?.cancel()
         guard let model else { return }
-        let request = draft.placementRequest(
-            model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
+        let request = RenderRequest.placement(
+            draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         )
         let copies = draft.batchSize
         let client = hosts.backend(for: host)

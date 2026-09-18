@@ -85,8 +85,8 @@ enum RetainedSourcePicture {
     static func outgoing(_ controller: GenerateController, on host: MoldHost,
                          hosts: HostStore) -> GenerateRequest? {
         guard let model = controller.modelName else { return nil }
-        return controller.draft.requests(
-            model: model, copies: 1, randomBase: 0,
+        return RenderRequest.batch(
+            controller.draft, model: model, copies: 1, randomBase: 0,
             maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         ).first
     }

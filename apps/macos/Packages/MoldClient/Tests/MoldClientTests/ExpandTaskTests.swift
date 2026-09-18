@@ -9,7 +9,7 @@ private func request(_ build: (inout RenderDraft) -> Void = { _ in }) -> Generat
     var draft = RenderDraft()
     draft.prompt = "a tin robot"
     build(&draft)
-    return draft.request(model: "m")
+    return RenderRequest.one(draft, model: "m")
 }
 
 /// **Fails today**: every accepted expand offer hard-coded `.textToImage`,
@@ -101,9 +101,9 @@ private func request(_ build: (inout RenderDraft) -> Void = { _ in }) -> Generat
     draft.media.editImages = ["REF"]
     draft.media.lastExclusiveWrite = .references
     #expect(ExpandTask.forRequest(
-        family: "ltx2", request: draft.request(model: "m")) == .textToVideo)
+        family: "ltx2", request: RenderRequest.one(draft, model: "m")) == .textToVideo)
 
     draft.media.lastExclusiveWrite = .source
     #expect(ExpandTask.forRequest(
-        family: "ltx2", request: draft.request(model: "m")) == .imageToVideo)
+        family: "ltx2", request: RenderRequest.one(draft, model: "m")) == .imageToVideo)
 }

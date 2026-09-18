@@ -1,18 +1,19 @@
 import Foundation
 
 // The numeric and adapter controls a request carries. Split from
-// `RenderDraft+Request.swift`, which was already at the 150-line lint.
-public extension RenderDraft {
+// `RenderRequest.swift`, which was already at the 150-line lint.
+extension RenderRequest {
     /// `control_image` and `control_model` are a symmetric pair
     /// (`validation.rs:3079-3090`): either alone is refused. The Refine
     /// group's picker and picture well can each be filled in before the
     /// other, so a draft with only one half sends NEITHER rather than a
     /// request the server would 422.
-    internal func applyControl(to request: inout GenerateRequest) {
-        guard let image = media.control?.image, let model = media.control?.model else { return }
+    static func applyControl(_ draft: RenderDraft, to request: inout GenerateRequest) {
+        guard let image = draft.media.control?.image,
+              let model = draft.media.control?.model else { return }
         request.controlImage = image
         request.controlModel = model
-        request.controlScale = Swift.max(media.control?.scale ?? Control.defaultScale, 0)
+        request.controlScale = Swift.max(draft.media.control?.scale ?? Control.defaultScale, 0)
     }
 
     /// The sampler controls, every one of them absent unless it was moved.
@@ -29,7 +30,8 @@ public extension RenderDraft {
     /// `guidanceOverridesToWire` drops one (`guidanceOverrides.ts:164-185`);
     /// `AdvancedControls.refusal` is what the pane shows first, so this is
     /// never the user's only feedback.
-    internal func applyAdvanced(to request: inout GenerateRequest) {
+    static func applyAdvanced(_ draft: RenderDraft, to request: inout GenerateRequest) {
+        let advanced = draft.advanced
         request.scheduler = advanced.scheduler
         // `true` or nothing. Absence IS false to the server, so an explicit
         // `false` would record a choice nobody made.
@@ -43,25 +45,29 @@ public extension RenderDraft {
         if AdvancedControls.distillRefusal(advanced.distillStrengthLow, "Low-noise") == nil {
             request.distillStrengthLow = advanced.distillStrengthLow
         }
-        request.guidanceOverrides = guidanceOverrides
+        request.guidanceOverrides = guidanceOverrides(advanced)
     }
 
     /// The crop policy, as PROVENANCE. Only alongside a source image that
     /// really ships: the value describes what was done to those bytes, and on
     /// a render carrying none it would describe nothing.
-    internal func applySourceFit(to request: inout GenerateRequest, carriesSource: Bool) {
+    static func applySourceFit(
+        _ draft: RenderDraft, to request: inout GenerateRequest, carriesSource: Bool
+    ) {
         guard carriesSource else { request.sourceFit = nil; return }
         // The defensive half. The adopt above has already coerced it, so
         // this can only ever agree -- which is the point of a belt.
-        request.sourceFit = media.acceptsMask
-            ? media.sourceFit : media.sourceFit.coercedForMaskless()
+        request.sourceFit = draft.media.acceptsMask
+            ? draft.media.sourceFit : draft.media.sourceFit.coercedForMaskless()
     }
 
     /// LTX-2's overrides, or NOTHING. An empty object is refused outright
     /// ("guidance_overrides must set at least one field; omit it to keep
     /// pipeline defaults", `validation.rs:1728-1733`), so the absent case has
     /// to be absence and not `{}`.
-    private var guidanceOverrides: Ltx2GuidanceOverrides? {
+    private static func guidanceOverrides(
+        _ advanced: AdvancedControls
+    ) -> Ltx2GuidanceOverrides? {
         var overrides = Ltx2GuidanceOverrides()
         if AdvancedControls.scaleRefusal(
             advanced.stgScale, "STG scale", AdvancedControls.maxGuidanceScale) == nil {

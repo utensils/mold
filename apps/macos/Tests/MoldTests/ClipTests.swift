@@ -64,13 +64,13 @@ struct ClipTests {
         let auto = try #require(set.recipe(named: "auto"))
         let draft = RenderDraft().adopting(auto, isNewModel: true)
         #expect(draft.pipeline == nil)
-        #expect(draft.request(model: "ltx-2.5-22b-dev:bf16").pipeline == nil)
+        #expect(RenderRequest.one(draft, model: "ltx-2.5-22b-dev:bf16").pipeline == nil)
 
         for id in ["t2a", "ic-lora"] {
             let recipe = try #require(set.recipe(named: id))
             let switched = draft.adopting(recipe, isNewModel: false)
             #expect(switched.pipeline == id)
-            #expect(switched.request(model: "ltx-2.5-22b-dev:bf16").pipeline == id)
+            #expect(RenderRequest.one(switched, model: "ltx-2.5-22b-dev:bf16").pipeline == id)
         }
     }
 
@@ -91,7 +91,7 @@ struct ClipTests {
         // recipe -- its `formats` is `["wav"]` alone, so the stale "gif"
         // must not survive to be sent.
         #expect(switched.outputFormat == nil)
-        #expect(switched.request(model: "ltx-2.5-22b-dev:bf16").outputFormat == nil)
+        #expect(RenderRequest.one(switched, model: "ltx-2.5-22b-dev:bf16").outputFormat == nil)
     }
 
     // MARK: - Recipe picker

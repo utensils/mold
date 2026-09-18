@@ -111,8 +111,8 @@ struct SourceFitTests {
     @Test func thePolicyRidesOnlyWithASourceThatShips() {
         var draft = RenderDraft()
         draft.media.sourceFit = .padFit
-        #expect(draft.request(model: "m").sourceFit == nil)
+        #expect(RenderRequest.one(draft, model: "m").sourceFit == nil)
         draft.media.sourceImage = "SRC"
-        #expect(draft.request(model: "m").sourceFit == .padFit)
+        #expect(RenderRequest.one(draft, model: "m").sourceFit == .padFit)
     }
 }

@@ -31,7 +31,7 @@ private func fullDraft() -> RenderDraft {
 /// keystroke re-uploaded the whole conditioning set -- and the filing text --
 /// to price a render nobody had asked for yet.
 @Test func aPlacementPreviewCarriesNoBytesAndNoUserText() {
-    let request = fullDraft().placementRequest(model: "sd15:fp16", maxIdentityPhotos: 4)
+    let request = RenderRequest.placement(fullDraft(), model: "sd15:fp16", maxIdentityPhotos: 4)
 
     #expect(request.prompt.isEmpty)
     #expect(request.negativePrompt == "")
@@ -63,7 +63,7 @@ private func fullDraft() -> RenderDraft {
     draft.guidance = 4.5
     draft.frames = 97
     draft.fps = 24
-    let request = draft.placementRequest(model: "sd15:fp16", maxIdentityPhotos: 4)
+    let request = RenderRequest.placement(draft, model: "sd15:fp16", maxIdentityPhotos: 4)
 
     #expect(request.model == "sd15:fp16")
     #expect(request.width == 1344)
@@ -84,7 +84,7 @@ private func fullDraft() -> RenderDraft {
 @Test func aRequestWithNoMediaGrowsNoEmptyFields() {
     var draft = RenderDraft()
     draft.prompt = "a cat"
-    let request = draft.placementRequest(model: "m")
+    let request = RenderRequest.placement(draft, model: "m")
     #expect(request.sourceImage == nil)
     #expect(request.editImages == nil)
     #expect(request.idImage == nil)
@@ -93,7 +93,7 @@ private func fullDraft() -> RenderDraft {
 
 /// The submitted request is untouched -- redaction belongs to the preview.
 @Test func theSubmittedRequestStillCarriesEverything() {
-    let request = fullDraft().request(model: "sd15:fp16", maxIdentityPhotos: 4)
+    let request = RenderRequest.one(fullDraft(), model: "sd15:fp16", maxIdentityPhotos: 4)
     #expect(request.prompt == "a tin robot in a field")
     #expect(request.sourceImage == "SOURCEBYTES")
     #expect(request.editImages == ["REF1", "REF2"])

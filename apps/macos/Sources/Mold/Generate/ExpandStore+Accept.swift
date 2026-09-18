@@ -62,7 +62,7 @@ extension ExpandStore {
             family: controller.modelFamily,
             task: ExpandTask.forRequest(
                 family: controller.modelFamily,
-                request: controller.draft.request(model: controller.modelName ?? "")),
+                request: RenderRequest.one(controller.draft, model: controller.modelName ?? "")),
             host: controller.machineChoice ?? controller.hostID)
     }
 }

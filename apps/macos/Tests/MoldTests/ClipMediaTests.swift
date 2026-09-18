@@ -16,8 +16,8 @@ struct ClipMediaTests {
         var draft = RenderDraft().adopting(auto, isNewModel: true)
         draft.media.settingExtend(video: "AAAA", name: "clip.mp4")
         #expect(draft.media.extendOverlapFrames == nil)
-        #expect(draft.request(model: "ltx-2.5-22b-dev:bf16").extendVideo == "AAAA")
-        #expect(draft.request(model: "ltx-2.5-22b-dev:bf16").extendOverlapFrames == nil)
+        #expect(RenderRequest.one(draft, model: "ltx-2.5-22b-dev:bf16").extendVideo == "AAAA")
+        #expect(RenderRequest.one(draft, model: "ltx-2.5-22b-dev:bf16").extendOverlapFrames == nil)
     }
 
     /// 8k+1 on LTX-2's fixture, 4k+1 on wan's -- read generically off each
@@ -77,8 +77,8 @@ struct ClipMediaTests {
         // The request-time belt refuses to send both even if the source
         // well was used again afterward with no knowledge of the extend.
         draft.media.sourceImage = "STALE"
-        #expect(draft.request(model: "m").sourceImage == nil)
-        #expect(draft.request(model: "m").extendVideo == "BBBB")
+        #expect(RenderRequest.one(draft, model: "m").sourceImage == nil)
+        #expect(RenderRequest.one(draft, model: "m").extendVideo == "BBBB")
     }
 
     // MARK: - A keyframe past the clip's length is refused

@@ -58,14 +58,14 @@ struct GenerateInspectorTests {
     @Test func aCollectionIsAlwaysNamedNeverIdentified() {
         var draft = RenderDraft()
         draft.collectionName = "Smurf Village"
-        let request = draft.request(model: "m")
+        let request = RenderRequest.one(draft, model: "m")
         #expect(request.collection == .named("Smurf Village"))
     }
 
     @Test func aWhitespaceOnlyTitleIsNoTitle() {
         var draft = RenderDraft()
         draft.title = "   "
-        #expect(draft.request(model: "m").title == nil)
+        #expect(RenderRequest.one(draft, model: "m").title == nil)
     }
 
     /// Fact 1 in the M4 design: an absent `source_image` block means the

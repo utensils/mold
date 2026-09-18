@@ -26,8 +26,8 @@ extension GenerateController {
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
-        let built = draft.requests(
-            model: modelName, copies: copies,
+        let built = RenderRequest.batch(
+            draft, model: modelName, copies: copies,
             randomBase: .random(in: 0 ... UInt64(UInt32.max)),
             maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0)
         if ChainSubmission.take(routing, requests: built,

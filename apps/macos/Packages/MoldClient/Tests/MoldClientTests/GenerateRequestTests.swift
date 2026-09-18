@@ -90,18 +90,18 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
 @Test func aMaskWithoutASourceNeverReachesTheWire() throws {
     var draft = RenderDraft()
     draft.media.maskImage = "MASK"
-    let noSource = try encoded(draft.request(model: "m"))
+    let noSource = try encoded(RenderRequest.one(draft, model: "m"))
     #expect(noSource["mask_image"] == nil)
 
     draft.media.sourceImage = "SRC"
-    let withSource = try encoded(draft.request(model: "m"))
+    let withSource = try encoded(RenderRequest.one(draft, model: "m"))
     #expect(withSource["mask_image"] as? String == "MASK")
 }
 
 @Test func onePhotographEncodesAsIdImageAndFourAsIdImages() throws {
     var draft = RenderDraft()
     draft.media.identity = IdentityConditioning(photos: [IdentityPhoto(encoded: "AAAA", name: "face.png")])
-    let single = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    let single = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect(single["id_image"] as? String == "AAAA")
     #expect(single["id_image_name"] as? String == "face.png")
     #expect(single["id_images"] == nil)
@@ -109,7 +109,7 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
     draft.media.identity = IdentityConditioning(photos: (0 ..< 4).map {
         IdentityPhoto(encoded: "P\($0)", name: "p\($0).png")
     })
-    let several = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    let several = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect((several["id_images"] as? [String])?.count == 4)
     #expect((several["id_image_names"] as? [String])?.count == 4)
     #expect(several["id_image"] == nil)
@@ -118,13 +118,13 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
 @Test func neitherFormEverAppearsBesideTheOther() throws {
     var draft = RenderDraft()
     draft.media.identity = IdentityConditioning(photos: [IdentityPhoto(encoded: "A", name: "a.png")])
-    var json = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    var json = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect(!(json.keys.contains("id_image") && json.keys.contains("id_images")))
 
     draft.media.identity = IdentityConditioning(photos: [
         IdentityPhoto(encoded: "A", name: "a.png"), IdentityPhoto(encoded: "B", name: "b.png"),
     ])
-    json = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    json = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect(!(json.keys.contains("id_image") && json.keys.contains("id_images")))
     #expect(json.keys.contains("id_images"))
 }
@@ -138,7 +138,7 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
     ])
     // The host understands only `id_image` -- the rest is dropped rather
     // than silently truncated into the plural form.
-    let json = try encoded(draft.request(model: "m", maxIdentityPhotos: 1))
+    let json = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 1))
     #expect(json["id_image"] as? String == "A")
     #expect(json["id_images"] == nil)
 }
@@ -149,14 +149,14 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
     draft.media.identity = IdentityConditioning(
         photos: [IdentityPhoto(encoded: "A", name: "a.png")], weight: 1, startStep: 20
     )
-    let json = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    let json = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect(json["id_start_step"] as? Int == 3)
 }
 
 @Test func anAdapterStackNeverWritesTheLegacyLoraField() throws {
     var draft = RenderDraft()
     draft.media.loras = [LoraChoice(path: "/x.safetensors", scale: 0.8, name: "X")]
-    let json = try encoded(draft.request(model: "m"))
+    let json = try encoded(RenderRequest.one(draft, model: "m"))
     #expect(json["lora"] == nil)
     let loras = try #require(json["loras"] as? [[String: Any]])
     #expect(loras.count == 1)
@@ -167,7 +167,7 @@ private func encoded(_ request: GenerateRequest) throws -> [String: Any] {
 
 @Test func identityWeightAndStartStepRideOnlyWithAPhotograph() throws {
     let draft = RenderDraft()
-    let json = try encoded(draft.request(model: "m", maxIdentityPhotos: 4))
+    let json = try encoded(RenderRequest.one(draft, model: "m", maxIdentityPhotos: 4))
     #expect(json["id_weight"] == nil)
     #expect(json["id_start_step"] == nil)
 }
