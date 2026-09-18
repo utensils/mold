@@ -61,6 +61,23 @@ extension UpscaleStore {
     private func startClip(
         _ key: Key, on backend: any MoldBackend, model: String, epoch: Int
     ) async throws {
+        // The HOST is asked first. A job started from the web UI, from a
+        // second Mac, or from this one before a relaunch is still this
+        // print's job, and local state cannot know about any of them --
+        // desktop asks the same question before it offers Start
+        // (`videoUpscale.ts:72-80`). Without it, Make Bigger... on a print
+        // already being upscaled starts a SECOND pass over every frame.
+        //
+        // A machine too old to answer the listing at all simply does not get
+        // the check: that is the same absence `recover` already tolerates.
+        if let existing = try? await UpscalePlan.recoverable(
+            in: backend.framewiseUpscales(), filename: key.filename) {
+            guard epochs[key] == epoch else { return }
+            jobs[key] = existing
+            poll(key)
+            return
+        }
+        guard epochs[key] == epoch else { return }
         let job = try await backend.startFramewiseUpscale(
             filename: key.filename, model: model, tileSize: nil)
         guard epochs[key] == epoch else { return }

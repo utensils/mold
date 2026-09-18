@@ -27,7 +27,6 @@ struct UpscaleStoreTests {
         fake.exportBlock = FakeFixtures.exportOptions()
         fake.modelRows = [FakeFixtures.upscaler("real-esrgan-x4plus:fp16", downloaded: true)]
         fake.extras.startedFramewiseAnswer = running
-        fake.extras.framewiseJobs = [running]
         fake.extras.stillUpscaleAnswer = FakeFixtures.stillUpscale("still-4x.png")
         return fake
     }

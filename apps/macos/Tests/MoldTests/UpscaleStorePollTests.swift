@@ -23,7 +23,6 @@ struct UpscaleStorePollTests {
         fake.modelRows = [FakeFixtures.upscaler("real-esrgan-x4plus:fp16", downloaded: true)]
         fake.extras.startedFramewiseAnswer = FakeFixtures.framewiseJob(
             "vup-1", state: "running", total: 124)
-        fake.extras.framewiseJobs = [FakeFixtures.framewiseJob("vup-1", state: "running", total: 124)]
         return fake
     }
 
@@ -212,6 +211,56 @@ struct UpscaleStorePollTests {
         #expect(store.jobs[key(plato)]?.id == "vup-live")
         // A settled job is history, not work in flight.
         #expect(store.jobs[UpscaleStore.Key(host: plato.id, filename: "done.mp4")] == nil)
+    }
+
+    /// A job somebody else started is still this print's job. Desktop asks
+    /// the host before it offers Start (`videoUpscale.ts:72-80`); local state
+    /// cannot know about a job begun from the web UI, from a second Mac, or
+    /// from this one before a relaunch.
+    ///
+    /// **Fails today**: `start`'s guard is local state only, so this makes a
+    /// SECOND 124-frame job against the same print.
+    @Test func aJobSomebodyElseStartedIsAdoptedRatherThanDuplicated() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.extras.framewiseJobs = [
+            FakeFixtures.framewiseJob("vup-elsewhere", state: "running", done: 7, total: 97),
+        ]
+        let (store, _) = await bench(backend, host: plato)
+
+        await store.start(clip(on: plato))
+
+        #expect(backend.callCount("startFramewiseUpscale") == 0)
+        #expect(store.jobs[key(plato)]?.id == "vup-elsewhere")
+        await settle { backend.callCount("framewiseUpscale") >= 1 }
+    }
+
+    /// The check is about a job that is still MOVING. A settled one is
+    /// history, and asking again is a new job.
+    @Test func aSettledJobOnTheHostDoesNotBlockANewOne() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.extras.framewiseJobs = [
+            FakeFixtures.framewiseJob("vup-old", state: "completed", done: 97, total: 97),
+        ]
+        let (store, _) = await bench(backend, host: plato)
+
+        await store.start(clip(on: plato))
+
+        #expect(backend.callCount("startFramewiseUpscale") == 1)
+    }
+
+    /// A still has no durable job to find, so it never pays for the listing.
+    @Test func aStillIsNotCheckedAgainstTheHostsJobList() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        backend.extras.stillUpscaleAnswer = FakeFixtures.stillUpscale("still-4x.png")
+        let (store, _) = await bench(backend, host: plato)
+
+        await store.start(LibraryEntry(host: plato, print: FakeFixtures.print("still.png")))
+
+        #expect(backend.callCount("framewiseUpscales") == 0)
+        #expect(backend.callCount("upscaleLibraryImage") == 1)
     }
 
     /// A machine that says nothing about upscaling is never asked -- an older

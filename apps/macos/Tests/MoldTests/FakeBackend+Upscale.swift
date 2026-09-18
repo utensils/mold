@@ -71,6 +71,12 @@ extension FakeBackend {
         extras.startedFramewise.append((filename: filename, model: model))
         await pause("startFramewiseUpscale")
         guard let answer = extras.startedFramewiseAnswer else { throw notPlanted() }
+        // A created job is IN the listing afterwards, the way a real host's
+        // is. A fixture that pre-seeds the job a test is about to create is
+        // a machine that already had it, which is a different sequence.
+        if !extras.framewiseJobs.contains(where: { $0.id == answer.id }) {
+            extras.framewiseJobs.append(answer)
+        }
         return answer
     }
 

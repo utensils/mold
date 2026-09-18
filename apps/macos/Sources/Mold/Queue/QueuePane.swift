@@ -60,6 +60,11 @@ struct QueuePane: View {
         .toolbar { toolbar }
         .destructionDialog($pendingDestruction)
         .task { await load() }
+        // The clip upscales already running on each machine. Not the
+        // Library's alone: this pane is where they are DRAWN, and it must
+        // not depend on somebody having opened the Library first. One
+        // listing per machine, and idempotent.
+        .task { await upscales.recover() }
         .focusedSceneValue(\.refreshAction) { Task { await load() } }
         .focusedSceneValue(\.queueSelection, queueSelection)
     }
