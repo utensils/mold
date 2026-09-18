@@ -40,6 +40,10 @@ struct QueuePane: View {
                               systemImage: "pause.circle")
                             .foregroundStyle(.secondary)
                     }
+                    // A status line is not a row to select: this `List` is
+                    // selection-bound, so without this each sentence is
+                    // click-highlightable and arrow-key reachable.
+                    .selectionDisabled(true)
                     ForEach(hosts.hosts) { host in
                         let entries = queue.entries(on: host.id)
                         if !entries.isEmpty {

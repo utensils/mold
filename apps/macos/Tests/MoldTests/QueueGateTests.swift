@@ -94,6 +94,28 @@ struct QueueGateTests {
         #expect(!gate.isPaused(on: plato.id))
     }
 
+    /// A resync says deltas were DROPPED -- a `queue_resumed` may be among
+    /// them. A cached `true` is preferred over the status poll for as long as
+    /// it stands, so without clearing it the pane keeps saying a running
+    /// machine is paused.
+    ///
+    /// **Fails today**: the cached value outlives the gap.
+    @Test func aDroppedFrameHandsTheQuestionBackToTheMachine() async {
+        let plato = machine()
+        let backend = fake(for: plato, paused: false)
+        let (gate, store, hosts) = await bench(backend, host: plato)
+        hosts.reconcileEventStreams()
+        await settle { backend.callCount("events") == 1 }
+
+        backend.emit(.queue(.paused))
+        await settle { store.queuePaused[plato.id] == true }
+        #expect(gate.isPaused(on: plato.id))
+
+        backend.emit(.resyncRequired)
+        await settle { store.queuePaused[plato.id] == nil }
+        #expect(!gate.isPaused(on: plato.id), "the machine's own status answers again")
+    }
+
     /// Absent means an older machine with no gate. The control is then ABSENT
     /// -- nothing is sent, and nothing is offered.
     @Test func aMachineThatDoesNotAdvertiseItIsNeverAsked() async {

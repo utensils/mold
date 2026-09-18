@@ -40,6 +40,13 @@ extension QueueStore {
             // `aResyncReReadsWithoutWaiting` flake under a loaded machine).
             coalescers[host]?.cancel()
             coalescers[host] = Task { await refresh(on: host) }
+            // Including the whole-queue gate. The stream admitted it dropped
+            // deltas, so a `queue_resumed` may be among them -- and a cached
+            // `true` is preferred over the status poll for as long as it
+            // stands, which would leave the pane saying a running machine is
+            // paused. Clearing it hands the question back to
+            // `/api/status.queue_paused`, which is the newer fact.
+            queuePaused[host] = nil
         // Gallery, machine identity and device lifecycle are the other
         // stores' concerns -- see `LibraryStore+Live` and `MachineStore`.
         case .gallery, .authority, .deviceStateChanged:
