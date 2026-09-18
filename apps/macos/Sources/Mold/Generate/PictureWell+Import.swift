@@ -36,8 +36,12 @@ extension PictureWell {
 
     /// The Library sheet hands a picture straight to the well, already
     /// conformed to what this well accepts and already base64'd off the main
-    /// actor -- so it needs no import task of its own.
+    /// actor -- so it needs no import task of its own. It still cancels the one
+    /// in flight: "a newer pick always wins" has to hold for every door, and a
+    /// drop's import can still be running when the sheet answers.
     func deliver(_ picked: ImportedPicture) {
+        importTask?.cancel()
+        importTask = nil
         pick(picked)
         importFailure = nil
     }
