@@ -14,7 +14,7 @@ import Testing
 /// parameters exactly so.
 @MainActor
 struct HeartbeatTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -46,17 +46,17 @@ struct HeartbeatTests {
     /// the Mac sleeping through three renders and `mold serve` restarting are
     /// both reconnects at the SAME identity, and neither reconciled anything.
     @Test func aReconnectAsksEveryListenerToResyncEvenOnTheSameIdentity() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         var resyncs = 0
         hosts.onEvent { _, event in if case .resyncRequired = event { resyncs += 1 } }
 
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
         backend.emit(.authority(instanceID: "run-1"))
-        await settle { hosts.instanceIDs[plato.id] != nil }
+        await settle { hosts.instanceIDs[workstation.id] != nil }
         // The FIRST connection's opening frame is not news: there is no gap
         // behind it.
         #expect(resyncs == 0)
@@ -67,23 +67,23 @@ struct HeartbeatTests {
 
         await settle { resyncs == 1 }
         #expect(resyncs == 1)
-        #expect(hosts.instanceIDs[plato.id] == "run-1")
+        #expect(hosts.instanceIDs[workstation.id] == "run-1")
     }
 
     /// The gap is repaired the way the server prescribes -- a fresh
     /// `GET /api/queue` (`routes.rs:11751-11755`) -- not merely announced.
     @Test func aReconnectMakesTheQueueReadTheMachineAgain() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts, coalesceDelay: .seconds(60))
 
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
         backend.emit(.authority(instanceID: "run-1"))
-        await settle { hosts.instanceIDs[plato.id] != nil }
+        await settle { hosts.instanceIDs[workstation.id] != nil }
 
         hosts.reconnectEventStreams()
         await settle { backend.callCount("events") == 2 }
@@ -91,10 +91,10 @@ struct HeartbeatTests {
 
         // `.resyncRequired` skips the coalescing delay by design, so this
         // awaits the exact task the frame started rather than a budget.
-        await settle { queue.coalescers[plato.id] != nil }
-        await queue.coalescers[plato.id]?.value
+        await settle { queue.coalescers[workstation.id] != nil }
+        await queue.coalescers[workstation.id]?.value
         #expect(backend.callCount("queue") == 1)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 
     // MARK: - The tick
@@ -103,12 +103,12 @@ struct HeartbeatTests {
     /// no production caller, so a machine with no event route is read once and
     /// never again.
     @Test func aMachineWithNoEventRouteIsPolledOnItsOwn() async {
-        let plato = machine()
-        let backend = fake(for: plato, events: false)
+        let workstation = machine()
+        let backend = fake(for: workstation, events: false)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         let beat = heartbeat(hosts, queue)
 
         beat.start()
@@ -116,17 +116,17 @@ struct HeartbeatTests {
         beat.stop()
 
         #expect(backend.callCount("queue") >= 2)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 
     /// A machine whose stream is live already hears everything. Polling it
     /// too would be a second authority arguing with the first.
     @Test func aMachineWithALiveStreamIsNeverPolled() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         let beat = heartbeat(hosts, queue)
 
         for _ in 0 ..< 3 { await beat.tick() }
@@ -139,14 +139,14 @@ struct HeartbeatTests {
     /// when Mold launched stays dead for the whole session -- `wantsEvents`
     /// never returns true for it and no pane ever asks again.
     @Test func aMachineThatWasDownAtLaunchJoinsWithoutAnybodyPressingRefresh() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
         // Nothing planted: `status()` throws, which is a machine that is off.
-        await hosts.refresh(plato)
-        #expect(!hosts.isUp(plato))
+        await hosts.refresh(workstation)
+        #expect(!hosts.isUp(workstation))
 
         // It comes back up while Mold is running.
         backend.serverStatus = FakeFixtures.serverStatus()
@@ -154,9 +154,9 @@ struct HeartbeatTests {
         backend.exportBlock = FakeFixtures.exportOptions()
         await heartbeat(hosts, queue).tick()
 
-        #expect(hosts.isUp(plato))
+        #expect(hosts.isUp(workstation))
         await settle { backend.callCount("events") == 1 }
-        #expect(hosts.watchers[plato.id] != nil)
+        #expect(hosts.watchers[workstation.id] != nil)
     }
 
     /// **Fails today**: `tick()` asks for capabilities only through
@@ -168,36 +168,36 @@ struct HeartbeatTests {
     /// it is polled at full rate instead. The one state where ⌘R is still
     /// the only way out -- hidden behind a poll that looks like it works.
     @Test func anUpMachineThatNeverSaidWhatItCanDoIsAskedAgain() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.serverStatus = FakeFixtures.serverStatus()
         backend.exportBlock = FakeFixtures.exportOptions()
         // Answers `/api/status` and refuses `/api/capabilities`.
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await hosts.refresh(plato)
-        #expect(hosts.isUp(plato))
-        #expect(hosts.capabilities[plato.id] == nil)
+        await hosts.refresh(workstation)
+        #expect(hosts.isUp(workstation))
+        #expect(hosts.capabilities[workstation.id] == nil)
         let beat = heartbeat(hosts, queue)
 
         backend.capabilityBlock = FakeFixtures.capabilities(events: true)
         await beat.tick()
 
-        #expect(hosts.capabilities[plato.id] != nil)
+        #expect(hosts.capabilities[workstation.id] != nil)
         await settle { backend.callCount("events") == 1 }
-        #expect(hosts.watchers[plato.id] != nil)
+        #expect(hosts.watchers[workstation.id] != nil)
     }
 
     /// And it is not asked on every tick forever. A machine that answers
     /// `/api/status` and keeps failing `/api/capabilities` backs off, rather
     /// than costing a request every ten seconds for the life of the app.
     @Test func aMachineThatKeepsRefusingItsCapabilitiesIsAskedLessOften() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.serverStatus = FakeFixtures.serverStatus()
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         let asked = backend.callCount("capabilities")
         let beat = heartbeat(hosts, queue)
 
@@ -218,7 +218,7 @@ struct HeartbeatTests {
     /// every machine behind it waits. `HostStore.refreshAll` already uses a
     /// task group for exactly this reason.
     @Test func oneSlowMachineDoesNotHoldUpTheRest() async {
-        let slow = machine("plato"), quick = machine("hal9000")
+        let slow = machine("workstation"), quick = machine("hal9000")
         let slowBackend = FakeBackend(host: slow)
         slowBackend.statusHeldOpen = true
         let quickBackend = fake(for: quick, events: false)
@@ -243,12 +243,12 @@ struct HeartbeatTests {
     /// A tick that was cancelled -- `stop()` while one is in flight -- asks
     /// nothing.
     @Test func aCancelledTickAsksNothing() async {
-        let plato = machine()
-        let backend = fake(for: plato, events: false)
+        let workstation = machine()
+        let backend = fake(for: workstation, events: false)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         let before = backend.calls.count
         let beat = heartbeat(hosts, queue)
 
@@ -265,9 +265,9 @@ struct HeartbeatTests {
     /// after a sleep the watcher is holding a dead socket or waiting out a
     /// backoff of up to 32 s and the pane shows what was true yesterday.
     @Test func wakingTheMacReconnectsEveryStreamAndAsksForAResync() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
         var resyncs = 0
         hosts.onEvent { _, event in if case .resyncRequired = event { resyncs += 1 } }
@@ -275,11 +275,11 @@ struct HeartbeatTests {
         // Held, or the observer it registered goes away with it.
         let beat = heartbeat(hosts, queue, wakeCenter: center)
 
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
         backend.emit(.authority(instanceID: "run-1"))
-        await settle { hosts.instanceIDs[plato.id] != nil }
+        await settle { hosts.instanceIDs[workstation.id] != nil }
 
         center.post(name: wakeName, object: nil)
 

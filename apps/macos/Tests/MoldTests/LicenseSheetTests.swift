@@ -14,7 +14,7 @@ import Testing
 /// later "Show Licence…" surface reading the full listing, out of scope here.
 @MainActor
 struct LicenseSheetTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -39,13 +39,13 @@ struct LicenseSheetTests {
     }
 
     @Test func aTermsMismatchSaysSoAndAcceptsTheSameWay() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.plantedErrors["startDownload"] = MoldClientError.licenseRequired(refusal(), mismatch: true)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-1")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
-        await downloads.install("hunyuan3d-2.1:fp16", on: plato)
+        await downloads.install("hunyuan3d-2.1:fp16", on: workstation)
         guard let pending = downloads.pendingLicense else {
             Issue.record("expected a pending licence")
             return
@@ -74,13 +74,13 @@ struct LicenseSheetTests {
     /// `(id, url, sha256)` the sheet displayed is what `acceptance` sends,
     /// with no separate copy for the button to drift from.
     @Test func acceptingSendsTheTermsThatWereShown() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.plantedErrors["startDownload"] = MoldClientError.licenseRequired(refusal(), mismatch: false)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-1")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
-        await downloads.install("hunyuan3d-2.1:fp16", on: plato)
+        await downloads.install("hunyuan3d-2.1:fp16", on: workstation)
         guard let pending = downloads.pendingLicense else {
             Issue.record("expected a pending licence")
             return
@@ -106,12 +106,12 @@ struct LicenseSheetTests {
     /// `pendingLicense` is `internal(set)`, so the sheet's Cancel button can
     /// clear it directly -- no method needed on the store for this alone.
     @Test func cancelClearsThePendingLicenceWithoutCallingTheStore() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.plantedErrors["startDownload"] = MoldClientError.licenseRequired(refusal(), mismatch: false)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
-        await downloads.install("hunyuan3d-2.1:fp16", on: plato)
+        await downloads.install("hunyuan3d-2.1:fp16", on: workstation)
         #expect(downloads.pendingLicense != nil)
 
         downloads.pendingLicense = nil

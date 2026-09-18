@@ -3,7 +3,7 @@ import MoldClient
 
 /// What each machine's catalog browser is showing right now.
 ///
-/// Per host, and never merged: a search against plato says nothing about
+/// Per host, and never merged: a search against workstation says nothing about
 /// hal9000's own catalog reach. The upstream proxy already caches a search
 /// for five minutes in-process (`mold-catalog`'s live layer), so this store
 /// re-asks freely on every filter change rather than building a second cache

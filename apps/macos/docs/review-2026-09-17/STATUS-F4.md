@@ -158,12 +158,12 @@ round-trips it as `[Int]` (`guidanceOverridesFromWire`'s `join(", ")`).
 
 Nothing here has been exercised against a real machine. What needs a human:
 
-1. **plato (`100.105.134.43:7680`), an LTX-2 tier**: drag the Length slider past
+1. **workstation (`100.105.134.43:7680`), an LTX-2 tier**: drag the Length slider past
    97 frames — the note under it should read "Rendered as N clips and stitched
    into one video" — press Generate, and watch the capsule count "Clip 2 of 3".
-   One print lands, and `mold jobs list` on plato should NOT show it as an
+   One print lands, and `mold jobs list` on workstation should NOT show it as an
    authored sequence.
-2. **Stop, twice**: once mid-clip (the job must disappear from plato's queue),
+2. **Stop, twice**: once mid-clip (the job must disappear from workstation's queue),
    and once in the instant after pressing Generate, before the job id comes
    back. The second is the sequence the unit test simulates; it is worth seeing
    the GPU actually stop.

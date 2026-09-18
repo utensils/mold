@@ -37,7 +37,7 @@ private func loadModels() throws -> [Model] {
 
 @Test func partialInstallsReadAsRepairNotAsMissing() throws {
     let schnell = try #require(loadModels().first { $0.name == "flux-schnell:bf16" })
-    // Not downloaded on plato, with bytes outstanding.
+    // Not downloaded on workstation, with bytes outstanding.
     #expect(schnell.isReady == false)
     #expect(schnell.repairBytes != nil)
 }

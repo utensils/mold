@@ -22,7 +22,7 @@ extension QueueStore {
     /// `children[host]` before its first `await` and writes it back only at
     /// the end. Two overlapping runs therefore both computed `before` from
     /// the same snapshot, both saw the same `held → failed` transition, and
-    /// both called `onOutcome`: two "Failed on plato" banners for one job,
+    /// both called `onOutcome`: two "Failed on workstation" banners for one job,
     /// because a failure notification is deliberately never coalesced
     /// (`MoldNotifications.swift:123-127`). Pressing ⌘R while a
     /// `job_state_committed` frame was in flight was enough.

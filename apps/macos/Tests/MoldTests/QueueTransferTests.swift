@@ -20,7 +20,7 @@ struct QueueTransferTests {
         -> (hosts: HostStore, transfers: TransferStore, source: MoldHost, destination: MoldHost,
             sourceFake: FakeBackend, destFake: FakeBackend)
     {
-        let source = machine("plato")
+        let source = machine("workstation")
         let destination = machine("hal9000")
         let sourceFake = FakeBackend(host: source)
         let destFake = FakeBackend(host: destination)
@@ -73,7 +73,7 @@ struct QueueTransferTests {
 
         let outcome = await transfers.transfer(entry, from: source.id, to: destination.id)
 
-        #expect(outcome == .sent(sourceRemoved: true, message: "Sent to hal9000. The original was removed from plato's queue."))
+        #expect(outcome == .sent(sourceRemoved: true, message: "Sent to hal9000. The original was removed from workstation's queue."))
         #expect(sourceFake.calls.filter { ["exportHeldJob", "completeTransfer"].contains($0) }
             == ["exportHeldJob", "completeTransfer"])
         #expect(destFake.calls.contains("admitTransfer"))
@@ -108,7 +108,7 @@ struct QueueTransferTests {
 
         let outcome = await transfers.transfer(entry, from: source.id, to: destination.id)
 
-        #expect(outcome == .sent(sourceRemoved: true, message: "Sent to hal9000. The original was removed from plato's queue."))
+        #expect(outcome == .sent(sourceRemoved: true, message: "Sent to hal9000. The original was removed from workstation's queue."))
         #expect(!sourceFake.calls.contains("exportHeldJob"))
         #expect(!destFake.calls.contains("admitTransfer"))
         #expect(sourceFake.calls.contains("completeTransfer"))
@@ -148,7 +148,7 @@ struct QueueTransferTests {
 
         #expect(outcome == .sent(
             sourceRemoved: false,
-            message: "Sent to hal9000. The original could not be removed; check plato before retrying it."))
+            message: "Sent to hal9000. The original could not be removed; check workstation before retrying it."))
     }
 
     /// **Fails today**: a child already `failed` is never checked at all.
@@ -218,31 +218,31 @@ struct QueueTransferTests {
 
     /// The positive control: a reachable, generating machine IS offered.
     @Test func aMachineThatIsUpAndGeneratesIsOfferedAsADestination() async {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal = machine("hal9000")
-        let sourceFake = FakeBackend(host: plato)
+        let sourceFake = FakeBackend(host: workstation)
         let destFake = FakeBackend(host: hal)
         sourceFake.serverStatus = FakeFixtures.serverStatus(instanceId: "src-1")
         destFake.serverStatus = FakeFixtures.serverStatus(instanceId: "dst-1")
         sourceFake.capabilityBlock = FakeFixtures.capabilities(events: false)
         destFake.capabilityBlock = generatingCapabilities()
-        let hosts = HostStore(hosts: [plato, hal]) { $0.name == plato.name ? sourceFake : destFake }
-        await hosts.refresh(plato)
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.name == workstation.name ? sourceFake : destFake }
+        await hosts.refresh(workstation)
         await hosts.refresh(hal)
         let transfers = TransferStore(hosts: hosts, queue: QueueStore(hosts: hosts))
 
-        #expect(transfers.transferDestinations(from: plato.id).map(\.name) == ["hal9000"])
+        #expect(transfers.transferDestinations(from: workstation.id).map(\.name) == ["hal9000"])
     }
 
     /// A single machine (itself) offers nowhere to send a held job.
     @Test func aSingleUpMachineMeansNoMenu() async {
-        let plato = machine("plato")
-        let fake = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let fake = FakeBackend(host: workstation)
         fake.serverStatus = FakeFixtures.serverStatus(instanceId: "src-1")
         fake.capabilityBlock = FakeFixtures.capabilities(events: false)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
-        await hosts.refresh(plato)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        await hosts.refresh(workstation)
         let transfers = TransferStore(hosts: hosts, queue: QueueStore(hosts: hosts))
-        #expect(transfers.transferDestinations(from: plato.id).isEmpty)
+        #expect(transfers.transferDestinations(from: workstation.id).isEmpty)
     }
 }

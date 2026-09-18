@@ -27,7 +27,7 @@ never ships through release-plz); `apps/macos/README.md` is the doc that must st
   swift-testing only; store tests use `FakeBackend` + `FakeFixtures` + `settle(until:)`
   (`Tests/MoldTests/FakeBackend.swift`, `FakeFixtures.swift`); fixtures are built by decoding JSON,
   new capability axes get a new `FakeFixtures.capabilities(…)` overload; timing constants are
-  constructor parameters, never sleeps. New wire fixtures are captured read-only from plato/hal9000
+  constructor parameters, never sleeps. New wire fixtures are captured read-only from workstation/hal9000
   with host + version + date + route in the header comment.
 - **Lints stay green**: `make lint` (no `JSONDecoder()` outside `MoldJSON`, no `bytes.lines`, no UI
   imports in MoldClient, no literal colours, files ≤150 lines, a11y names). The three types already
@@ -248,7 +248,7 @@ float POSITION/NORMAL/TEXCOORD_0/COLOR_0(VEC3), buffer 0, embedded PNGs, no exte
   no `/nix/store`; `curl` to the loopback port without the key is 401; a cross-origin `fetch`
   gets no ACAO; kill -TERM quits cleanly; a forced engine panic surfaces as `.failed`.
 - UAT via `macos-uat` (throwaway prefs + home), driven by AX menu presses (never osascript
-  keystrokes, never closing Ghostty), against hal9000 (keyless, 100.123.198.98) and plato (keyed):
+  keystrokes, never closing Ghostty), against hal9000 (keyless, 100.123.198.98) and workstation (keyed):
   SD1.5 img2img with a reference; an LTX-2 clip that plays on the canvas; a clip past the clip size
   that chains as one print; drag a 2-child batch downward; sleep/wake then watch the queue resync;
   pairing sheet counts down; a hostile-filename fixture is refused; open a GLB — home view matches

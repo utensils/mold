@@ -9,7 +9,7 @@ import Foundation
 ///
 /// The rules, in the order they apply:
 ///
-/// - A bare name or IP gets `http://` and mold's port, so `plato` is enough.
+/// - A bare name or IP gets `http://` and mold's port, so `workstation` is enough.
 /// - An explicit scheme or port is never overridden.
 /// - A scheme's own default port is dropped, so `https://box:443` and
 ///   `https://box` are the same machine.
@@ -31,11 +31,11 @@ public enum HostAddress {
         public var message: String {
             switch self {
             case .empty:
-                "Enter an address, like plato or 10.0.0.5:7680."
+                "Enter an address, like workstation or 10.0.0.5:7680."
             case .unsupportedScheme:
                 "Mold speaks HTTP. Use http:// or https://, or leave the scheme off."
             case .unparseable:
-                "That doesn't look like an address. Try plato, 10.0.0.5:7680, or https://box.ts.net."
+                "That doesn't look like an address. Try workstation, 10.0.0.5:7680, or https://box.ts.net."
             }
         }
     }
@@ -51,7 +51,7 @@ public enum HostAddress {
         guard !trimmed.isEmpty else { throw .empty }
 
         let hasScheme = trimmed.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) != nil
-        // `ftp://plato` would otherwise be prefixed into `http://ftp://plato`,
+        // `ftp://workstation` would otherwise be prefixed into `http://ftp://workstation`,
         // parse as the host `ftp`, and silently point at the wrong machine.
         if !hasScheme, trimmed.contains("://") { throw .unsupportedScheme }
 
@@ -62,7 +62,7 @@ public enum HostAddress {
         else { throw .unparseable }
 
         // A schemeless entry is someone naming a machine, not an origin, so it
-        // gets mold's port. An explicit `http://plato` is a complete URL and
+        // gets mold's port. An explicit `http://workstation` is a complete URL and
         // keeps port 80, exactly as a browser would read it.
         var port = parts.port
         if !hasScheme, port == nil { port = defaultPort }
@@ -105,7 +105,7 @@ public enum HostAddress {
         }
     }
 
-    /// `::1` is an address; `plato:7680` is a host and a port. More than one
+    /// `::1` is an address; `workstation:7680` is a host and a port. More than one
     /// colon with no brackets is the only thing that tells them apart.
     private static func bracketingBareIPv6(_ text: String) -> String {
         guard !text.hasPrefix("["), text.filter({ $0 == ":" }).count > 1 else { return text }

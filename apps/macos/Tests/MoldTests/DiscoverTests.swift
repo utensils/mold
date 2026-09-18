@@ -9,7 +9,7 @@ import Testing
 /// `CatalogDetailSheet` render from (design M5 S6).
 @MainActor
 struct DiscoverTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -34,25 +34,25 @@ struct DiscoverTests {
 
     /// **Fails today**: `CatalogStore` does not exist.
     @Test func aSearchAsksTheFakeWithTheExactQueryString() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         var query = CatalogQuery(includeNSFW: false)
         query.text = "dreamshaper"
         fake.catalogPages[query.queryString] = FakeFixtures.catalogListing([FakeFixtures.catalogEntry(id: "cv:1")])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        catalog.setText("dreamshaper", on: plato.id)
+        catalog.setText("dreamshaper", on: workstation.id)
         try? await Task.sleep(for: .milliseconds(400))
-        await settle { catalog.entries(on: plato.id).count == 1 }
+        await settle { catalog.entries(on: workstation.id).count == 1 }
 
-        #expect(catalog.entries(on: plato.id).map(\.id) == ["cv:1"])
+        #expect(catalog.entries(on: workstation.id).map(\.id) == ["cv:1"])
         #expect(fake.calls.filter { $0 == "searchCatalog" }.count == 1)
     }
 
     @Test func aSecondPageAppends() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         let page1 = CatalogQuery(includeNSFW: false)
         fake.catalogPages[page1.queryString] = FakeFixtures.catalogListing(
             [FakeFixtures.catalogEntry(id: "cv:1")], page: 1, total: 2)
@@ -60,37 +60,37 @@ struct DiscoverTests {
         page2.page = 2
         fake.catalogPages[page2.queryString] = FakeFixtures.catalogListing(
             [FakeFixtures.catalogEntry(id: "cv:2")], page: 2, total: 2)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        catalog.search(on: plato.id)
+        catalog.search(on: workstation.id)
         try? await Task.sleep(for: .milliseconds(400))
-        await settle { catalog.entries(on: plato.id).count == 1 }
-        await catalog.more(on: plato.id)
+        await settle { catalog.entries(on: workstation.id).count == 1 }
+        await catalog.more(on: workstation.id)
 
-        #expect(catalog.entries(on: plato.id).map(\.id) == ["cv:1", "cv:2"])
-        #expect(catalog.hasMore(on: plato.id) == false)
+        #expect(catalog.entries(on: workstation.id).map(\.id) == ["cv:1", "cv:2"])
+        #expect(catalog.hasMore(on: workstation.id) == false)
     }
 
     /// One provider being down beside rows the other returned is a PARTIAL
     /// SUCCESS -- a note the pane shows, never a `HostFailure`.
     @Test func oneProviderFailingIsANoteAboveTheRowsItDidGet() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         let query = CatalogQuery(includeNSFW: false)
         fake.catalogPages[query.queryString] = FakeFixtures.catalogListing(
             [FakeFixtures.catalogEntry(id: "cv:1")],
             providerErrors: [(source: "civitai", message: "timed out")])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        catalog.search(on: plato.id)
+        catalog.search(on: workstation.id)
         try? await Task.sleep(for: .milliseconds(400))
-        await settle { !catalog.entries(on: plato.id).isEmpty }
+        await settle { !catalog.entries(on: workstation.id).isEmpty }
 
-        #expect(catalog.providerErrors(on: plato.id).map(\.source) == ["civitai"])
+        #expect(catalog.providerErrors(on: workstation.id).map(\.source) == ["civitai"])
         #expect(hosts.failures.isEmpty)
-        #expect(DiscoverTable.providerNote(catalog.providerErrors(on: plato.id)) == "Civitai didn't answer.")
+        #expect(DiscoverTable.providerNote(catalog.providerErrors(on: workstation.id)) == "Civitai didn't answer.")
     }
 
     @Test func noProviderErrorsMeansNoNote() {
@@ -145,7 +145,7 @@ struct DiscoverTests {
 
     // MARK: - Licence metadata
 
-    /// All-null is the ORDINARY case (measured on plato) and means no
+    /// All-null is the ORDINARY case (measured on workstation) and means no
     /// information -- never a fabricated "no" (decision 18, M5).
     @Test func anAllNullLicenceBlockRendersNothing() {
         let entry = FakeFixtures.catalogEntry(id: "cv:1")
@@ -168,7 +168,7 @@ struct DiscoverTests {
 
     // MARK: - Family and sort menus
 
-    /// The machine's own lists, never a client guess -- plato's measured
+    /// The machine's own lists, never a client guess -- workstation's measured
     /// fourteen families and three sorts (design fact, M5).
     @Test func theFamilyAndSortMenusComeFromTheMachine() {
         let families = [
@@ -191,19 +191,19 @@ struct DiscoverTests {
     // search field held text that matched none of the INSTALLED rows.
 
     @Test func theInstalledSubtitleUsesTheMachinesUnfilteredTotal() {
-        #expect(ModelsPane.subtitle(scope: .installed, hostName: "plato", installedCount: 82, discoverTotal: nil)
-            == "82 installed on plato")
+        #expect(ModelsPane.subtitle(scope: .installed, hostName: "workstation", installedCount: 82, discoverTotal: nil)
+            == "82 installed on workstation")
     }
 
     @Test func theDiscoverSubtitleSaysNothingBeforeASearchAnswers() {
-        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: nil) == "")
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "workstation", installedCount: 82, discoverTotal: nil) == "")
     }
 
     @Test func theDiscoverSubtitleReportsTheSearchsOwnTotalNeverTheInstalledCount() {
-        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: 32)
-            == "32 results on plato")
-        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: 1)
-            == "1 result on plato")
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "workstation", installedCount: 82, discoverTotal: 32)
+            == "32 results on workstation")
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "workstation", installedCount: 82, discoverTotal: 1)
+            == "1 result on workstation")
     }
 
     @Test func noMachineIsSaidRegardlessOfScope() {
@@ -212,55 +212,55 @@ struct DiscoverTests {
     }
 
     @Test func aHostHasNotAnsweredUntilItsFirstSearchLands() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.catalogPages[CatalogQuery(includeNSFW: false).queryString] = FakeFixtures.catalogListing([])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        #expect(catalog.hasAnswered(on: plato.id) == false)
+        #expect(catalog.hasAnswered(on: workstation.id) == false)
 
-        catalog.search(on: plato.id)
+        catalog.search(on: workstation.id)
         try? await Task.sleep(for: .milliseconds(400))
-        await settle { catalog.hasAnswered(on: plato.id) }
+        await settle { catalog.hasAnswered(on: workstation.id) }
 
-        #expect(catalog.hasAnswered(on: plato.id))
+        #expect(catalog.hasAnswered(on: workstation.id))
     }
 
     // MARK: - S6b: the Sort picker drew with nothing selected.
 
     @Test func adoptingAHostSeedsSortFromItsFirstAdvertisedOption() {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        catalog.adopt(plato.id, sortOptions: ["downloads", "recent", "rating"])
+        catalog.adopt(workstation.id, sortOptions: ["downloads", "recent", "rating"])
 
-        #expect(catalog.query(on: plato.id).sort == "downloads")
+        #expect(catalog.query(on: workstation.id).sort == "downloads")
     }
 
     @Test func adoptingAHostWithNoAdvertisedSortsLeavesTheQueryUnsorted() {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        catalog.adopt(plato.id, sortOptions: [])
+        catalog.adopt(workstation.id, sortOptions: [])
 
-        #expect(catalog.query(on: plato.id).sort == nil)
+        #expect(catalog.query(on: workstation.id).sort == nil)
     }
 
     @Test func adoptingAHostNeverOverwritesASortAlreadyChosen() {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
-        catalog.setSort("rating", on: plato.id)
+        catalog.setSort("rating", on: workstation.id)
 
-        catalog.adopt(plato.id, sortOptions: ["downloads", "recent", "rating"])
+        catalog.adopt(workstation.id, sortOptions: ["downloads", "recent", "rating"])
 
-        #expect(catalog.query(on: plato.id).sort == "rating")
+        #expect(catalog.query(on: workstation.id).sort == "rating")
     }
 
     // MARK: - S6b: two blank rows appeared above Load more on a live capture.

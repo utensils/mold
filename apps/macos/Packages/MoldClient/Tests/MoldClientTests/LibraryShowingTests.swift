@@ -7,11 +7,11 @@ import Testing
 // pool and a query, so a pane asking for all three in one body pass gets one
 // filter-and-sort rather than three.
 
-private let plato = UUID()
+private let workstation = UUID()
 
 private func entry(_ name: String, at seconds: UInt64 = 1_000,
                    favorite: Bool = false) -> LibraryEntry {
-    PrintFixtures.entry(name, host: plato, timestamp: seconds, favorite: favorite)
+    PrintFixtures.entry(name, host: workstation, timestamp: seconds, favorite: favorite)
 }
 
 @Test func theThreeListsAgreeWithApplyingTheQueryByHand() {
@@ -42,10 +42,10 @@ private func entry(_ name: String, at seconds: UInt64 = 1_000,
 @Test(arguments: [LibrarySort.newest, .oldest, .largest, .name])
 func theGridDrawsTheOrderTheQueryAskedFor(_ sort: LibrarySort) {
     let pool = [
-        PrintFixtures.entry("robot.png", host: plato, timestamp: 300, bytes: 10),
-        PrintFixtures.entry("turtle.png", host: plato, timestamp: 200, bytes: 900),
-        PrintFixtures.entry("chair.png", host: plato, timestamp: 100_000, bytes: 50),
-        PrintFixtures.entry("anvil.png", host: plato, timestamp: 100, bytes: 1),
+        PrintFixtures.entry("robot.png", host: workstation, timestamp: 300, bytes: 10),
+        PrintFixtures.entry("turtle.png", host: workstation, timestamp: 200, bytes: 900),
+        PrintFixtures.entry("chair.png", host: workstation, timestamp: 100_000, bytes: 50),
+        PrintFixtures.entry("anvil.png", host: workstation, timestamp: 100, bytes: 1),
     ]
     var query = LibraryQuery()
     query.sort = sort

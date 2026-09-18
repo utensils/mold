@@ -21,7 +21,7 @@ private func batch(
 private func next(
     _ step: TransferPlan.Step, _ outcome: TransferPlan.Outcome,
     clientBatchId: String = "transfer-1", destinationInstance: String = "dest-1",
-    destinationLabel: String = "hal9000", sourceLabel: String = "plato"
+    destinationLabel: String = "hal9000", sourceLabel: String = "workstation"
 ) -> TransferPlan.Result {
     TransferPlan.next(
         after: step, outcome: outcome, clientBatchId: clientBatchId,
@@ -60,7 +60,7 @@ private func next(
     let result = next(.checkPriorAttempt, .priorAttempt(landed, sourceHeld: false))
     #expect(result == .outcome(.sent(
         sourceRemoved: true,
-        message: "Sent to hal9000. The original was already removed from plato's queue.")))
+        message: "Sent to hal9000. The original was already removed from workstation's queue.")))
 }
 
 @Test func aBatchWithTwoChildrenIsRefusedAsAnUnexpectedIdentity() {
@@ -143,14 +143,14 @@ private func next(
 @Test func theHappyPathCompleteReportsTheSourceRemoved() {
     let result = next(.complete, .completed(removed: true))
     #expect(result == .outcome(.sent(
-        sourceRemoved: true, message: "Sent to hal9000. The original was removed from plato's queue.")))
+        sourceRemoved: true, message: "Sent to hal9000. The original was removed from workstation's queue.")))
 }
 
 @Test func aCompleteThatFailsIsStillASend() {
     let result = next(.complete, .completed(removed: false))
     #expect(result == .outcome(.sent(
         sourceRemoved: false,
-        message: "Sent to hal9000. The original could not be removed; check plato before retrying it.")))
+        message: "Sent to hal9000. The original could not be removed; check workstation before retrying it.")))
 }
 
 // MARK: - classifyAdmitFailure / isNotFound

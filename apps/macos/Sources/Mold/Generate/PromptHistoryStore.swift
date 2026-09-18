@@ -4,7 +4,7 @@ import MoldClient
 /// What each machine remembers being asked for.
 ///
 /// Per host and never merged: `mold.db` is per server, so a prompt typed
-/// against plato is plato's -- the same rule models follow.
+/// against workstation is workstation's -- the same rule models follow.
 @MainActor
 @Observable
 final class PromptHistoryStore {

@@ -4,7 +4,7 @@ import Testing
 @testable import MoldClient
 
 // `Fixtures/recipe-outputs.json` is the five deduplicated `output` blocks
-// sampled across every recipe plato advertises: `delivery_reason` is real and
+// sampled across every recipe workstation advertises: `delivery_reason` is real and
 // is the only thing that explains a one-entry `formats` list.
 
 private func outputs() throws -> [String: OutputCapabilities] {

@@ -10,7 +10,7 @@ import Testing
 /// never a machine-banner failure.
 @MainActor
 struct ExpansionTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -35,15 +35,15 @@ struct ExpansionTests {
     /// test bundle cannot load MoldClient's fixture file directly, so the
     /// prefix its own test pins is reproduced here rather than the whole body.
     @Test func aFamilyThatReadsNoPromptIsAdvisedNotRefused() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a brass gear",
             expanded: ["hunyuan3d reads no prompt: the image is the whole conditioning."])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a brass gear"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
 
         guard case let .advised(text) = controller.expansion else {
             Issue.record("expected .advised, got \(controller.expansion)")
@@ -56,17 +56,17 @@ struct ExpansionTests {
     // MARK: - Accepting and reverting
 
     @Test func acceptingARewriteKeepsTheOriginalAsTheRoot() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a cat", expanded: [
                 "a fluffy orange cat asleep in a sunbeam",
                 "a cat curled by the fire", "a cat on a windowsill",
             ])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
         guard case let .offering(offer) = controller.expansion else {
             Issue.record("expected .offering, got \(controller.expansion)")
             return
@@ -81,17 +81,17 @@ struct ExpansionTests {
     }
 
     @Test func aSecondRewriteKeepsTheFirstOriginalAsTheRoot() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a cat", expanded: [
                 "a fluffy orange cat asleep in a sunbeam",
                 "a cat curled by the fire", "a cat on a windowsill",
             ])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
         guard case let .offering(expandOffer) = controller.expansion else {
             Issue.record("expected .offering after expand"); return
         }
@@ -101,7 +101,7 @@ struct ExpansionTests {
             sourcePrompt: "a fluffy orange cat asleep in a sunbeam", rootPrompt: "a cat",
             sourceKind: .current, task: .textToImage,
             variants: [RemixVariant(prompt: "a fluffy orange cat asleep in golden light", dimensions: [.lighting])])
-        await controller.remix(on: plato, backend: backend)
+        await controller.remix(on: workstation, backend: backend)
         guard case let .offering(remixOffer) = controller.expansion else {
             Issue.record("expected .offering after remix"); return
         }
@@ -117,17 +117,17 @@ struct ExpansionTests {
     }
 
     @Test func revertingPutsBackWhatWasTyped() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a cat", expanded: [
                 "a fluffy orange cat asleep in a sunbeam",
                 "a cat curled by the fire", "a cat on a windowsill",
             ])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
         guard case let .offering(offer) = controller.expansion else {
             Issue.record("expected .offering"); return
         }
@@ -145,14 +145,14 @@ struct ExpansionTests {
     // MARK: - What the machine has and hasn't said
 
     @Test func aMachineWithoutTheExpanderNamesTheModelToPull() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         let controller = makeController(
-            backend, host: plato,
+            backend, host: workstation,
             capabilities: FakeFixtures.expandCapabilities(modelPresent: false, model: "qwen3-expand:q8"))
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
 
         #expect(controller.expansion == .needsModel("qwen3-expand:q8"))
         // Decided from capabilities alone -- the route is never reached.
@@ -160,42 +160,42 @@ struct ExpansionTests {
     }
 
     @Test func aMachineThatHasNotSaidWhetherItExpandsIsStillAsked() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(original: "a cat", expanded: ["a cat, expanded"])
         // No `expand` key at all -- an older host, not one that said no.
-        let controller = makeController(backend, host: plato, capabilities: FakeFixtures.capabilities(events: false))
+        let controller = makeController(backend, host: workstation, capabilities: FakeFixtures.capabilities(events: false))
         controller.draft.prompt = "a cat"
 
-        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: plato))
+        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: workstation))
         guard case .wand = offer else {
             Issue.record("expected .wand, got \(offer)")
             return
         }
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
         #expect(backend.callCount("expand") == 1)
     }
 
     @Test func aMachineThatDoesNotRemixOffersNoRemix() {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato, capabilities: FakeFixtures.expandCapabilities(remix: false))
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation, capabilities: FakeFixtures.expandCapabilities(remix: false))
 
-        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: plato))
+        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: workstation))
         #expect(offer == .wand(canRemix: false))
     }
 
     // MARK: - A refusal is about the prompt, not the machine
 
     @Test func aRefusalIsShownWhereTheWandWasNotInTheMachineBanner() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.refuses = ["expand"]
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
 
         guard case let .refused(message) = controller.expansion else {
             Issue.record("expected .refused, got \(controller.expansion)")
@@ -210,17 +210,17 @@ struct ExpansionTests {
     // MARK: - The studio invariant
 
     @Test func neverArmsServerSideExpansion() async throws {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a cat", expanded: [
                 "a fluffy orange cat asleep in a sunbeam",
                 "a cat curled by the fire", "a cat on a windowsill",
             ])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a cat"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
         guard case let .offering(offer) = controller.expansion else {
             Issue.record("expected .offering"); return
         }

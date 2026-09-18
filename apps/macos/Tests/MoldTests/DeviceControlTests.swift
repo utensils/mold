@@ -139,14 +139,14 @@ struct DeviceControlTests {
     }
 
     @Test func theSelectedMachineSurvivesBeingRemoved() {
-        let plato = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let workstation = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
         let hal = MoldHost(name: "hal9000", baseURL: URL(string: "http://hal9000")!)
-        let hosts = HostStore(hosts: [plato, hal])
+        let hosts = HostStore(hosts: [workstation, hal])
 
         #expect(hosts.machine(selected: hal.id.uuidString)?.id == hal.id)
         // The id of a machine that was removed, and a key never written at all.
         #expect(hosts.machine(selected: UUID().uuidString)?.id == hosts.preferredHost?.id)
         #expect(hosts.machine(selected: "")?.id == hosts.preferredHost?.id)
-        #expect(hosts.machine(selected: nil)?.id == plato.id)
+        #expect(hosts.machine(selected: nil)?.id == workstation.id)
     }
 }

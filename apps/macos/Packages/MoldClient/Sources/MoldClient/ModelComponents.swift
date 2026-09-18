@@ -14,7 +14,7 @@ public struct ModelComponentStatus: Codable, Hashable, Sendable, Identifiable {
     public let repairModel: String?
     /// Every file of this coarse KIND the machine holds anywhere
     /// (`model_manager.rs:1423` -> `component_options_for_kind`). Measured on
-    /// plato: 103 entries on one `transformer` slot, led by an unrelated
+    /// workstation: 103 entries on one `transformer` slot, led by an unrelated
     /// OpenCLIP checkpoint. This is the candidate list for a
     /// `models.<name>.<component>_path` override, NOT a list of things that
     /// serve this component -- decoded here so the type round-trips, and

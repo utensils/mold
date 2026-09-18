@@ -54,7 +54,7 @@ struct LibraryUndoTests {
     /// registration this store made -- so a rename the machine refuses also
     /// disarms the favourite that succeeded a moment earlier, and its redo.
     @Test func aRefusedEditTakesBackItsOwnInverseAndNoOthers() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("star.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }
@@ -84,7 +84,7 @@ struct LibraryUndoTests {
     }
 
     @Test func aRefusedEditLeavesNoUndoEntryBehind() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("star.png")]
         fake.refuses = ["mutate"]

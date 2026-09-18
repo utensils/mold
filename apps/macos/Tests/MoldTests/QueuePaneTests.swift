@@ -10,7 +10,7 @@ import Testing
 /// of the view so none of this needs a rendered `List` (design M6 S3).
 @MainActor
 struct QueuePaneTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -60,14 +60,14 @@ struct QueuePaneTests {
     /// **Fails today**: `QueueStore.act(_:onLiveChildrenOf:host:)` does not
     /// exist yet.
     @Test func aGroupButtonReachesEveryLiveChildAndNoSettledOne() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
-        hosts.capabilities[plato.id] = FakeFixtures.capabilities(cooperativeCancellation: true)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        hosts.capabilities[workstation.id] = FakeFixtures.capabilities(cooperativeCancellation: true)
         let queue = QueueStore(hosts: hosts)
         let group = QueueGroup.build(mixedBatch, children: [:])[0]
 
-        await queue.act(.cancel, onLiveChildrenOf: group, host: plato.id)
+        await queue.act(.cancel, onLiveChildrenOf: group, host: workstation.id)
 
         #expect(fake.callCount("cancelJob") == 2)
     }
@@ -77,14 +77,14 @@ struct QueuePaneTests {
     /// waiting child and leaves the running one alone -- rather than sending
     /// a call the machine would refuse (`types.rs:11475-11479`).
     @Test func aGroupCancelSkipsARunningChildTheMachineCannotStop() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
-        hosts.capabilities[plato.id] = FakeFixtures.capabilities()
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        hosts.capabilities[workstation.id] = FakeFixtures.capabilities()
         let queue = QueueStore(hosts: hosts)
         let group = QueueGroup.build(mixedBatch, children: [:])[0]
 
-        await queue.act(.cancel, onLiveChildrenOf: group, host: plato.id)
+        await queue.act(.cancel, onLiveChildrenOf: group, host: workstation.id)
 
         #expect(fake.callCount("cancelJob") == 1)
     }
@@ -122,13 +122,13 @@ struct QueuePaneTests {
 
     /// **Fails today**: `QueueStore.reorder(_:on:)` does not exist yet.
     @Test func aBatchMoveIssuesAscendingPatchesThenOnePoll() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let queue = QueueStore(hosts: hosts)
 
-        await queue.reorder([("c1", 0), ("c2", 1)], on: plato.id)
+        await queue.reorder([("c1", 0), ("c2", 1)], on: workstation.id)
 
         #expect(fake.reorders.map(\.id) == ["c1", "c2"])
         #expect(fake.reorders.map(\.position) == [0, 1])
@@ -139,19 +139,19 @@ struct QueuePaneTests {
 
     /// **Fails today**: `QueuePane.emptyQueueTargets` does not exist yet.
     @Test func emptyQueueIsAbsentOnAMachineThatDoesNotAdvertiseIt() {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal = machine("hal9000")
         let capabilities: [MoldHost.ID: Capabilities] = [
-            plato.id: FakeFixtures.capabilities(canCancelAll: false),
+            workstation.id: FakeFixtures.capabilities(canCancelAll: false),
             hal.id: FakeFixtures.capabilities(canCancelAll: true),
         ]
-        let targets = QueuePane.emptyQueueTargets([plato, hal], capabilities: capabilities)
+        let targets = QueuePane.emptyQueueTargets([workstation, hal], capabilities: capabilities)
         #expect(targets.map(\.id) == [hal.id])
     }
 
     @Test func emptyQueueIsAbsentWhenNoCapabilitiesHaveArrivedAtAll() {
-        let plato = machine()
-        #expect(QueuePane.emptyQueueTargets([plato], capabilities: [:]).isEmpty)
+        let workstation = machine()
+        #expect(QueuePane.emptyQueueTargets([workstation], capabilities: [:]).isEmpty)
     }
 
     /// Pins fact 12's whole point: running work is untouched, and the
@@ -173,14 +173,14 @@ struct QueuePaneTests {
 
     /// **Fails today**: `QueueStore.cancelAll(on:)` does not exist yet.
     @Test func cancelAllCallsCancelAllQueuedOnceThenPolls() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.queueListing = FakeFixtures.queueListing(["job-1"])
         fake.cancelAllAnswer = FakeFixtures.queueCancelResult(3)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let queue = QueueStore(hosts: hosts)
 
-        await queue.cancelAll(on: plato.id)
+        await queue.cancelAll(on: workstation.id)
 
         #expect(fake.cancelledAll)
         #expect(fake.callCount("cancelAllQueued") == 1)
@@ -271,31 +271,31 @@ struct QueuePaneTests {
     /// mutation on a seeded store sends nothing to the fake and reports
     /// through the same funnel a real refusal would (design M6 decision 27).
     @Test func aFixtureQueueRefusesEveryMutation() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let queue = QueueStore(hosts: hosts)
         let entry = FakeFixtures.queueEntry("job-1", state: "queued")
         let fixture = QueueStore.Fixture(hosts: [
-            "plato": .init(queue: FakeFixtures.queueListing(entries: [entry]), batches: nil)
+            "workstation": .init(queue: FakeFixtures.queueListing(entries: [entry]), batches: nil)
         ])
 
         queue.seed(from: fixture)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
         #expect(queue.isSeeded)
 
-        await queue.cancel(entry, on: plato.id)
-        await queue.pause(entry, on: plato.id)
-        await queue.resume(entry, on: plato.id)
-        await queue.retry(entry, on: plato.id)
-        await queue.reorder([("job-1", 0)], on: plato.id)
-        await queue.cancelAll(on: plato.id)
+        await queue.cancel(entry, on: workstation.id)
+        await queue.pause(entry, on: workstation.id)
+        await queue.resume(entry, on: workstation.id)
+        await queue.retry(entry, on: workstation.id)
+        await queue.reorder([("job-1", 0)], on: workstation.id)
+        await queue.cancelAll(on: workstation.id)
         await queue.refresh()
 
         #expect(fake.calls.isEmpty)
         #expect(hosts.failures.contains { $0.sentence.contains("fixture") })
         // The refresh above never touched the network either -- the seeded
         // row is exactly what was planted, not overwritten with nothing.
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 }

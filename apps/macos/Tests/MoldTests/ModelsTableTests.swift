@@ -9,25 +9,25 @@ import Testing
 /// tested without a view (design S3, M5).
 @MainActor
 struct ModelsTableTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
     // MARK: - The Installed scope
 
     @Test func theInstalledScopeListsEveryFamilyTheMachineHolds() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.modelRows = [
             FakeFixtures.model("flux-dev:q4", family: "flux", downloaded: true),
             FakeFixtures.model("real-esrgan-x4plus:fp16", family: "upscaler", downloaded: true),
             FakeFixtures.model("qwen3-4b:q4", family: "qwen3-expand", downloaded: true),
         ]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
-        await models.refresh(on: plato.id)
+        await models.refresh(on: workstation.id)
 
-        let sections = ModelSort.grouped(models.installed(on: plato.id), by: ModelSort())
+        let sections = ModelSort.grouped(models.installed(on: workstation.id), by: ModelSort())
 
         #expect(Set(sections.map(\.family)) == ["flux", "upscaler", "qwen3-expand"])
     }
@@ -36,16 +36,16 @@ struct ModelsTableTests {
     /// reach the table through the same door as any other installed model,
     /// grouped and sorted like everything else.
     @Test func aHalfInstalledModelIsInTheInstalledScope() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.modelRows = [
             FakeFixtures.model("flux-dev:bf16", family: "flux", downloaded: true, remainingDownloadBytes: 500),
         ]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
-        await models.refresh(on: plato.id)
+        await models.refresh(on: workstation.id)
 
-        let sections = ModelSort.grouped(models.installed(on: plato.id), by: ModelSort())
+        let sections = ModelSort.grouped(models.installed(on: workstation.id), by: ModelSort())
 
         #expect(sections.flatMap(\.rows).map(\.name) == ["flux-dev:bf16"])
     }
@@ -121,11 +121,11 @@ struct ModelsTableTests {
     @Test func theFooterNeverAddsTheSizeColumnUp() {
         let status = FakeFixtures.serverStatus(modelsDiskTotal: 30_000_000_000, modelsDiskFree: 10_000_000_000)
 
-        let sentence = ModelsFooter.sentence(count: 2, hostName: "plato", disk: status.modelsDisk)
+        let sentence = ModelsFooter.sentence(count: 2, hostName: "workstation", disk: status.modelsDisk)
 
         let expectedUsed = Int64(20_000_000_000).formatted(.byteCount(style: .file))
         let expectedTotal = Int64(30_000_000_000).formatted(.byteCount(style: .file))
-        #expect(sentence == "2 installed on plato · \(expectedUsed) of \(expectedTotal) used")
+        #expect(sentence == "2 installed on workstation · \(expectedUsed) of \(expectedTotal) used")
     }
 
     /// An older host that predates `models_disk` gets the count alone -- never

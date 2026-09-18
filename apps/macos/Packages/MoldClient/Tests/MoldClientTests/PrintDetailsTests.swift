@@ -17,12 +17,12 @@ import Testing
 // picture, a mesh, an authored sequence, an auto-chained one-shot, an upscale,
 // a face and a 3-D workflow stage.
 
-private let plato = UUID()
+private let workstation = UUID()
 
 private func entry(_ filename: String) throws -> LibraryEntry {
     let print = try #require(try Provenance.prints().first { $0.filename == filename })
     return LibraryEntry(
-        host: MoldHost(id: plato, name: "hal9000", baseURL: URL(string: "http://h")!),
+        host: MoldHost(id: workstation, name: "hal9000", baseURL: URL(string: "http://h")!),
         print: print)
 }
 

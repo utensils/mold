@@ -87,7 +87,7 @@ import Testing
 
 /// The live payload, so a gate that is meant to open actually opens.
 @Suite struct EventsCapabilitySuite {
-    @Test func theCapturedPlatoPayloadAdvertisesEvents() throws {
+    @Test func theCapturedWorkstationPayloadAdvertisesEvents() throws {
         let capabilities = try MoldJSON.decoder.decode(
             Capabilities.self, from: RepoFixtures.fixture("capabilities.json"))
         #expect(capabilities.events?.available == true)

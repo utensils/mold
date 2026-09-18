@@ -9,7 +9,7 @@ import Testing
 /// (design M6 S3, decision 12).
 @MainActor
 struct QueueHoldTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -77,11 +77,11 @@ struct QueueHoldTests {
     /// **Fails today**: `DownloadStore.awaitSettlement` and
     /// `QueueHoldRow.pullThenRetry` do not exist.
     @Test func pullThenRetryRetriesOnlyAfterTheDownloadSettles() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
-        hosts.reachability[plato.id] = .up(FakeFixtures.serverStatus(instanceId: "run-1"))
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
+        hosts.reachability[workstation.id] = .up(FakeFixtures.serverStatus(instanceId: "run-1"))
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
         let queue = QueueStore(hosts: hosts)
         let entry = FakeFixtures.queueEntry(
@@ -89,7 +89,7 @@ struct QueueHoldTests {
 
         let orchestration = Task {
             await QueueHoldRow.pullThenRetry(
-                "z-image-turbo", entry: entry, host: plato, downloads: downloads, queue: queue)
+                "z-image-turbo", entry: entry, host: workstation, downloads: downloads, queue: queue)
         }
         await settle { fake.callCount("downloadEvents") == 1 }
         #expect(fake.callCount("retryJob") == 0)
@@ -106,10 +106,10 @@ struct QueueHoldTests {
     /// stays as it was, and the download's own error is what the popover
     /// shows.
     @Test func aFailedPullLeavesTheRowHeld() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
         let queue = QueueStore(hosts: hosts)
         let entry = FakeFixtures.queueEntry(
@@ -117,7 +117,7 @@ struct QueueHoldTests {
 
         let orchestration = Task {
             await QueueHoldRow.pullThenRetry(
-                "z-image-turbo", entry: entry, host: plato, downloads: downloads, queue: queue)
+                "z-image-turbo", entry: entry, host: workstation, downloads: downloads, queue: queue)
         }
         await settle { fake.callCount("downloadEvents") == 1 }
 
@@ -126,7 +126,7 @@ struct QueueHoldTests {
         await orchestration.value
 
         #expect(fake.callCount("retryJob") == 0)
-        #expect(downloads.finished[plato.id]?.first?.error == "disk full")
+        #expect(downloads.finished[workstation.id]?.first?.error == "disk full")
     }
 
     /// **Fails today**: the wait is `while isBusy { try? await Task.sleep }`,
@@ -135,35 +135,35 @@ struct QueueHoldTests {
     /// throws -- and a download that never reaches a terminal frame parks it
     /// forever, there being no timeout either.
     @Test func aWaitForADownloadThatNeverSettlesIsBoundedAndCancellable() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
-        await downloads.install("z-image-turbo", on: plato)
+        await downloads.install("z-image-turbo", on: workstation)
         await settle { fake.callCount("downloadEvents") == 1 }
 
         // Nothing is ever yielded on that stream: the job stays in flight.
         let settled = await downloads.awaitSettlement(
-            of: "z-image-turbo", on: plato.id,
+            of: "z-image-turbo", on: workstation.id,
             within: .milliseconds(30), polling: .milliseconds(5))
 
         #expect(!settled)
-        #expect(downloads.isBusy("z-image-turbo", on: plato.id))
+        #expect(downloads.isBusy("z-image-turbo", on: workstation.id))
     }
 
     @Test func aCancelledWaitEndsRatherThanSpinning() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
-        await downloads.install("z-image-turbo", on: plato)
+        await downloads.install("z-image-turbo", on: workstation)
         await settle { fake.callCount("downloadEvents") == 1 }
 
         let waiting = Task {
             await downloads.awaitSettlement(
-                of: "z-image-turbo", on: plato.id, polling: .milliseconds(5))
+                of: "z-image-turbo", on: workstation.id, polling: .milliseconds(5))
         }
         // Let it reach the sleep, then change our mind.
         await Task.yield()

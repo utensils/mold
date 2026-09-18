@@ -19,7 +19,7 @@ final class MachineStore {
     /// `watchResources`, so `private(set)` does not cross that file boundary.
     var resources: [MoldHost.ID: ResourceSnapshot] = [:]
     /// Per host, because a peer list is what THAT machine can see on ITS
-    /// network -- plato and this Mac are on different ones.
+    /// network -- workstation and this Mac are on different ones.
     private(set) var peers: [MoldHost.ID: [DiscoveryPeer]] = [:]
     /// Devices with a lifecycle change in flight. Their switch is inert until
     /// the machine answers, because the answer is the state.

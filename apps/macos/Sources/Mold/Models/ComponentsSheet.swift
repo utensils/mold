@@ -6,7 +6,7 @@ import SwiftUI
 /// `Text` (the Library inspector's provenance rows set this precedent).
 ///
 /// Never draws `options` (design fact 4, M5): a widely-shared kind carries
-/// dozens of unrelated candidate paths -- measured 103 on plato's
+/// dozens of unrelated candidate paths -- measured 103 on workstation's
 /// `transformer` slot -- and that list is a `models.<name>.<component>_path`
 /// override's candidates, not provenance for this row.
 struct ComponentsSheet: View {

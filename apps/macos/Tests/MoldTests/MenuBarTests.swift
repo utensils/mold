@@ -14,27 +14,27 @@ struct MenuBarTests {
     }
 
     @Test func everyMachineAppearsInTheMachineMenuWithTheDefaultTicked() {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal9000 = machine("hal9000")
         let selection = MachineSelection(
-            machines: [plato, hal9000], selected: plato.id, defaultID: hal9000.id,
+            machines: [workstation, hal9000], selected: workstation.id, defaultID: hal9000.id,
             offered: MachineCardActions.offered(isThisMac: false, isDefault: false),
             choose: { _ in }, perform: { _ in })
 
         #expect(selection.rows == [
-            .init(name: "plato", isDefault: false),
+            .init(name: "workstation", isDefault: false),
             .init(name: "hal9000", isDefault: true),
         ])
     }
 
     @Test func noMachineIsTickedWhenNothingHasBeenChosenYet() {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let selection = MachineSelection(
-            machines: [plato], selected: plato.id, defaultID: nil,
+            machines: [workstation], selected: workstation.id, defaultID: nil,
             offered: MachineCardActions.offered(isThisMac: false, isDefault: false),
             choose: { _ in }, perform: { _ in })
 
-        #expect(selection.rows == [.init(name: "plato", isDefault: false)])
+        #expect(selection.rows == [.init(name: "workstation", isDefault: false)])
     }
 
     @Test func theThumbnailStepsStopAtTheSlidersOwnEnds() {

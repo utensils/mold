@@ -15,7 +15,7 @@ struct UpscaleStoreTests {
 
     // MARK: - The bench
 
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -58,22 +58,22 @@ struct UpscaleStoreTests {
     /// Two answers out of one block: a clip needs `video_upscale`, a still
     /// needs `gallery_image` as well (`types.rs:12430-12433`).
     @Test func aStillNeedsTheGalleryRouteAndAClipDoesNot() async {
-        let plato = machine()
-        let backend = fake(for: plato, stills: false)
-        let (store, _) = await bench(backend, host: plato)
-        #expect(store.canUpscale(entry("clip.mp4", on: plato)))
-        #expect(!store.canUpscale(entry("still.png", on: plato)))
+        let workstation = machine()
+        let backend = fake(for: workstation, stills: false)
+        let (store, _) = await bench(backend, host: workstation)
+        #expect(store.canUpscale(entry("clip.mp4", on: workstation)))
+        #expect(!store.canUpscale(entry("still.png", on: workstation)))
     }
 
     /// Absence of the whole block is a definitive no -- the action is then
     /// absent from the menu, never present and inert.
     @Test func aMachineThatSaysNothingOffersNothing() async {
-        let plato = machine()
-        let backend = fake(for: plato, stills: false, clips: false)
-        let (store, _) = await bench(backend, host: plato)
-        #expect(!store.canUpscale(entry("clip.mp4", on: plato)))
-        #expect(!store.canUpscale(entry("still.png", on: plato)))
-        #expect(!store.canUpscale(entry("shape.glb", on: plato)))
+        let workstation = machine()
+        let backend = fake(for: workstation, stills: false, clips: false)
+        let (store, _) = await bench(backend, host: workstation)
+        #expect(!store.canUpscale(entry("clip.mp4", on: workstation)))
+        #expect(!store.canUpscale(entry("still.png", on: workstation)))
+        #expect(!store.canUpscale(entry("shape.glb", on: workstation)))
     }
 
     /// Nothing reads `/api/models` on the way to the Library, so the model
@@ -88,16 +88,16 @@ struct UpscaleStoreTests {
     /// **Fails today**: the `isDownloaded` guard makes that fallback
     /// unreachable and reports `NoUpscalerInstalled` instead.
     @Test func aMachineWhoseModelsWereNeverListedIsStillAsked() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
-        await hosts.refresh(plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        await hosts.refresh(workstation)
         // Deliberately NO `models.refresh()` -- this is the Library path.
         let store = UpscaleStore(hosts: hosts, models: ModelStore(hosts: hosts),
                                  library: LibraryStore(hosts: hosts),
                                  interval: .seconds(9))
 
-        await store.start(entry("clip.mp4", on: plato))
+        await store.start(entry("clip.mp4", on: workstation))
 
         #expect(backend.extras.startedFramewise.map(\.model) == ["real-esrgan-x4plus:fp16"])
         #expect(hosts.failures.isEmpty, "nothing failed, so nothing is said about the machine")
@@ -106,13 +106,13 @@ struct UpscaleStoreTests {
     /// And a machine that really has none refuses in ITS OWN words, which
     /// name the model it could not find -- not this app's guess at why.
     @Test func aRefusalIsTheMachinesOwnSentence() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.plantedErrors["startFramewiseUpscale"] = MoldClientError.http(
             status: 404, code: nil, message: "Unknown upscaler model real-esrgan-x4plus:fp16")
-        let (store, hosts) = await bench(backend, host: plato)
+        let (store, hosts) = await bench(backend, host: workstation)
 
-        await store.start(entry("clip.mp4", on: plato))
+        await store.start(entry("clip.mp4", on: workstation))
 
         // `HostStore.report` makes the machine the subject, so the host's
         // own clause follows it in lower case.
@@ -124,12 +124,12 @@ struct UpscaleStoreTests {
     /// A still is synchronous: one call, and the machine's gallery is re-read
     /// because the bigger picture is a new row in it.
     @Test func aStillIsOneCallAndARelist() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.prints = []
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(entry("still.png", on: plato))
+        await store.start(entry("still.png", on: workstation))
 
         #expect(backend.extras.upscaledStills.map(\.filename) == ["still.png"])
         #expect(backend.extras.upscaledStills.first?.model == "real-esrgan-x4plus:fp16")
@@ -143,12 +143,12 @@ struct UpscaleStoreTests {
     ///
     /// **Fails today**: the store records nothing about a still.
     @Test func aStillSaysItIsWorkingAndThenSaysWhatItMade() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.delays["upscaleLibraryImage"] = .milliseconds(30)
-        let (store, _) = await bench(backend, host: plato)
-        let still = entry("still.png", on: plato)
-        let key = UpscaleStore.Key(host: plato.id, filename: "still.png")
+        let (store, _) = await bench(backend, host: workstation)
+        let still = entry("still.png", on: workstation)
+        let key = UpscaleStore.Key(host: workstation.id, filename: "still.png")
 
         async let run: Void = store.start(still)
         await settle { store.stills[key] == .working }
@@ -163,15 +163,15 @@ struct UpscaleStoreTests {
     /// A failure lands beside the print it is about, not only in a banner
     /// that names the machine.
     @Test func aFailedStillKeepsTheMachinesSentenceOnTheRow() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.plantedErrors["upscaleLibraryImage"] = MoldClientError.http(
             status: 507, code: nil, message: "No room left on the disk.")
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(entry("still.png", on: plato))
+        await store.start(entry("still.png", on: workstation))
 
-        let key = UpscaleStore.Key(host: plato.id, filename: "still.png")
+        let key = UpscaleStore.Key(host: workstation.id, filename: "still.png")
         guard case let .failed(sentence) = store.stills[key] else {
             Issue.record("the still recorded no failure")
             return
@@ -184,19 +184,19 @@ struct UpscaleStoreTests {
     ///
     /// **Fails today**: `start` takes no model and always sends the default.
     @Test func theChosenUpscalerIsWhatIsSent() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.modelRows = [
             FakeFixtures.upscaler("real-esrgan-x4plus:fp16", downloaded: true),
             FakeFixtures.upscaler("swinir:fp16", downloaded: true),
         ]
-        let (store, _) = await bench(backend, host: plato, interval: .seconds(9))
+        let (store, _) = await bench(backend, host: workstation, interval: .seconds(9))
 
         // Two installed, so the menu offers a choice -- default first.
-        #expect(store.upscalerOptions(on: plato.id).map(\.title)
+        #expect(store.upscalerOptions(on: workstation.id).map(\.title)
             == ["real-esrgan-x4plus:fp16 (default)", "swinir:fp16"])
 
-        await store.start(entry("clip.mp4", on: plato), model: "swinir:fp16")
+        await store.start(entry("clip.mp4", on: workstation), model: "swinir:fp16")
 
         #expect(backend.extras.startedFramewise.map(\.model) == ["swinir:fp16"])
     }
@@ -205,17 +205,17 @@ struct UpscaleStoreTests {
     /// on the wire -- the cache is warmed once per machine by `recover()`,
     /// which both panes run on appear.
     @Test func buildingTheMenuNeverAsksTheMachineAnything() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
-        await hosts.refresh(plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        await hosts.refresh(workstation)
         let store = UpscaleStore(hosts: hosts, models: ModelStore(hosts: hosts),
                                  library: LibraryStore(hosts: hosts), interval: .seconds(9))
 
-        for _ in 0 ..< 5 { _ = store.upscalerOptions(on: plato.id) }
+        for _ in 0 ..< 5 { _ = store.upscalerOptions(on: workstation.id) }
 
         #expect(backend.callCount("models") == 0)
-        #expect(store.upscalerOptions(on: plato.id).isEmpty,
+        #expect(store.upscalerOptions(on: workstation.id).isEmpty,
                 "and with nothing read, the plain item is what the plan offers")
     }
 
@@ -223,11 +223,11 @@ struct UpscaleStoreTests {
     /// second 124-frame job against the same print, and the first job's id
     /// was lost the moment the second answered.
     @Test func asecondRequestWhileOneIsRunningIsNotASecondJob() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.delays["startFramewiseUpscale"] = .milliseconds(30)
-        let (store, _) = await bench(backend, host: plato, interval: .milliseconds(50))
-        let clip = entry("clip.mp4", on: plato)
+        let (store, _) = await bench(backend, host: workstation, interval: .milliseconds(50))
+        let clip = entry("clip.mp4", on: workstation)
 
         async let first: Void = store.start(clip)
         await settle { store.isBusy(with: clip) }

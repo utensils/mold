@@ -29,38 +29,38 @@ struct HostSecretsTests {
     /// adding, editing or removing ANY machine -- destroyed every stored key.
     @Test func savingTheMachineListNeverTouchesAStoredKey() throws {
         let (defaults, secrets) = try scratch()
-        let plato = host("plato")
-        try HostPersistence.setAPIKey("k-plato", for: plato.id, in: secrets)
+        let workstation = host("workstation")
+        try HostPersistence.setAPIKey("k-workstation", for: workstation.id, in: secrets)
 
         // The in-memory copy has no key -- exactly the state a failed read
         // leaves behind -- and is saved alongside a machine being added.
-        HostPersistence.save([plato, host("hal9000")], to: defaults)
+        HostPersistence.save([workstation, host("hal9000")], to: defaults)
 
-        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == "k-plato")
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: workstation.id)) == "k-workstation")
     }
 
     @Test func aSavedMachineComesBackWithItsKey() throws {
         let (defaults, secrets) = try scratch()
-        let plato = host("plato")
-        HostPersistence.save([plato], to: defaults)
-        try HostPersistence.setAPIKey("k-plato", for: plato.id, in: secrets)
+        let workstation = host("workstation")
+        HostPersistence.save([workstation], to: defaults)
+        try HostPersistence.setAPIKey("k-workstation", for: workstation.id, in: secrets)
 
         let loaded = try #require(HostPersistence.load(from: defaults, secrets: secrets))
-        #expect(loaded.map(\.apiKey) == ["k-plato"])
+        #expect(loaded.map(\.apiKey) == ["k-workstation"])
     }
 
     /// Clearing is its own call, and removing a machine takes its key with it.
     @Test func aKeyIsClearedOnlyWhenSomebodyAsks() throws {
         let (_, secrets) = try scratch()
-        let plato = host("plato")
-        let name = SecretStore.remoteAPIKeyName(for: plato.id)
-        try HostPersistence.setAPIKey("k-plato", for: plato.id, in: secrets)
+        let workstation = host("workstation")
+        let name = SecretStore.remoteAPIKeyName(for: workstation.id)
+        try HostPersistence.setAPIKey("k-workstation", for: workstation.id, in: secrets)
 
-        try HostPersistence.setAPIKey("", for: plato.id, in: secrets)
+        try HostPersistence.setAPIKey("", for: workstation.id, in: secrets)
         #expect(try secrets.value(for: name) == nil)
 
-        try HostPersistence.setAPIKey("k-again", for: plato.id, in: secrets)
-        try HostPersistence.forget(plato, in: secrets)
+        try HostPersistence.setAPIKey("k-again", for: workstation.id, in: secrets)
+        try HostPersistence.forget(workstation, in: secrets)
         #expect(try secrets.value(for: name) == nil)
     }
 
@@ -91,16 +91,16 @@ struct HostSecretsTests {
 
     @Test func everyKeychainKeyMovesToTheFileAndTheItemGoes() throws {
         let (defaults, secrets) = try scratch()
-        let plato = StoredHost(host("plato"))
+        let workstation = StoredHost(host("workstation"))
         let hal = StoredHost(host("hal9000"))
         let deleted = Deletions()
-        let source = source([plato.id: .found("k-plato"), hal.id: .found("k-hal")], into: deleted)
+        let source = source([workstation.id: .found("k-workstation"), hal.id: .found("k-hal")], into: deleted)
 
-        migrate([plato, hal], into: secrets, defaults: defaults, from: source)
+        migrate([workstation, hal], into: secrets, defaults: defaults, from: source)
 
-        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == "k-plato")
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: workstation.id)) == "k-workstation")
         #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: hal.id)) == "k-hal")
-        #expect(deleted.ids == [plato.id, hal.id])
+        #expect(deleted.ids == [workstation.id, hal.id])
         #expect(defaults.bool(forKey: LegacyKeychain.migratedKey))
     }
 
@@ -108,19 +108,19 @@ struct HostSecretsTests {
     /// the person later cleared can never come back.
     @Test func theMoveHappensOnce() throws {
         let (defaults, secrets) = try scratch()
-        let plato = StoredHost(host("plato"))
-        migrate([plato], into: secrets, defaults: defaults,
-                                       from: source([plato.id: .found("k-plato")]))
-        try secrets.clear(SecretStore.remoteAPIKeyName(for: plato.id))
+        let workstation = StoredHost(host("workstation"))
+        migrate([workstation], into: secrets, defaults: defaults,
+                                       from: source([workstation.id: .found("k-workstation")]))
+        try secrets.clear(SecretStore.remoteAPIKeyName(for: workstation.id))
 
-        migrate([plato], into: secrets, defaults: defaults,
-                                       from: source([plato.id: .found("k-plato")]))
-        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == nil)
+        migrate([workstation], into: secrets, defaults: defaults,
+                                       from: source([workstation.id: .found("k-workstation")]))
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: workstation.id)) == nil)
     }
 
     /// **Fails today**: `.found` wrote the Keychain value unconditionally, and
     /// one `.unreadable` host leaves the done-flag off so the WHOLE migration
-    /// re-runs next launch. So: launch 1 the keychain is locked and `plato`
+    /// re-runs next launch. So: launch 1 the keychain is locked and `workstation`
     /// loads keyless; the user opens Edit Machine and types the current key;
     /// launch 2 the item reads and the OLD, rotated value silently replaces
     /// what they just typed, and the item is deleted. The file is newer by
@@ -128,24 +128,24 @@ struct HostSecretsTests {
     /// a value already in it wins, and the stale item still goes.
     @Test func aRetriedMigrationKeepsTheKeyTheUserJustTyped() throws {
         let (defaults, secrets) = try scratch()
-        let plato = StoredHost(host("plato"))
-        let name = SecretStore.remoteAPIKeyName(for: plato.id)
+        let workstation = StoredHost(host("workstation"))
+        let name = SecretStore.remoteAPIKeyName(for: workstation.id)
 
         // Launch 1: the item will not read, so the move stays unfinished.
-        migrate([plato], into: secrets, defaults: defaults,
-                                       from: source([plato.id: .unreadable]))
+        migrate([workstation], into: secrets, defaults: defaults,
+                                       from: source([workstation.id: .unreadable]))
         #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey))
 
         // The user retypes the current key while the old one sits in the item.
-        try HostPersistence.setAPIKey("k-typed", for: plato.id, in: secrets)
+        try HostPersistence.setAPIKey("k-typed", for: workstation.id, in: secrets)
 
         // Launch 2: the item reads at last -- and holds the rotated key.
         let deleted = Deletions()
-        migrate([plato], into: secrets, defaults: defaults,
-                                       from: source([plato.id: .found("k-rotated")], into: deleted))
+        migrate([workstation], into: secrets, defaults: defaults,
+                                       from: source([workstation.id: .found("k-rotated")], into: deleted))
 
         #expect(try secrets.value(for: name) == "k-typed")
-        #expect(deleted.ids == [plato.id], "the stale item still goes")
+        #expect(deleted.ids == [workstation.id], "the stale item still goes")
         #expect(defaults.bool(forKey: LegacyKeychain.migratedKey))
     }
 
@@ -158,14 +158,14 @@ struct HostSecretsTests {
     /// practice -- but a comment about credentials should not be an overclaim.
     @Test func aFreshRunNeverTouchesTheRealKeychain() throws {
         let (defaults, secrets) = try scratch()
-        let plato = StoredHost(host("plato"))
+        let workstation = StoredHost(host("workstation"))
         let deleted = Deletions()
 
         LegacyKeychain.migrateIfNeeded(
-            [plato], into: secrets, defaults: defaults,
-            from: source([plato.id: .found("k-real")], into: deleted), isFresh: true)
+            [workstation], into: secrets, defaults: defaults,
+            from: source([workstation.id: .found("k-real")], into: deleted), isFresh: true)
 
-        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: plato.id)) == nil)
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: workstation.id)) == nil)
         #expect(deleted.ids.isEmpty)
         #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey),
                 "and it is not recorded as done, so a real launch still moves them")
@@ -176,11 +176,11 @@ struct HostSecretsTests {
     /// cache that would answer with what we meant to write.
     @Test func anItemGoesOnlyAfterTheFileProvesItHasTheKey() throws {
         let (_, secrets) = try scratch()
-        let plato = StoredHost(host("plato"))
-        let name = SecretStore.remoteAPIKeyName(for: plato.id)
+        let workstation = StoredHost(host("workstation"))
+        let name = SecretStore.remoteAPIKeyName(for: workstation.id)
 
-        try secrets.set("k-plato", for: name)
-        #expect(try secrets.persistedValue(for: name) == "k-plato")
+        try secrets.set("k-workstation", for: name)
+        #expect(try secrets.persistedValue(for: name) == "k-workstation")
 
         // A write another instance made behind this one's warm cache is what
         // `persistedValue` has to see.
@@ -193,7 +193,7 @@ struct HostSecretsTests {
     /// launch tries again.
     @Test func oneUnreadableItemLosesNeitherTheOthersNorItself() throws {
         let (defaults, secrets) = try scratch()
-        let locked = StoredHost(host("plato"))
+        let locked = StoredHost(host("workstation"))
         let readable = StoredHost(host("hal9000"))
 
         migrate([locked, readable], into: secrets, defaults: defaults,
@@ -204,9 +204,9 @@ struct HostSecretsTests {
         #expect(!defaults.bool(forKey: LegacyKeychain.migratedKey))
 
         migrate([locked, readable], into: secrets, defaults: defaults,
-                                       from: source([locked.id: .found("k-plato"),
+                                       from: source([locked.id: .found("k-workstation"),
                                                      readable.id: .absent]))
-        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: locked.id)) == "k-plato")
+        #expect(try secrets.value(for: SecretStore.remoteAPIKeyName(for: locked.id)) == "k-workstation")
         #expect(defaults.bool(forKey: LegacyKeychain.migratedKey))
     }
 }

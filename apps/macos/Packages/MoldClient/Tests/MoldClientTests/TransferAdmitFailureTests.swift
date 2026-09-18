@@ -44,7 +44,7 @@ import Testing
         after: .admit,
         outcome: .admitResult(TransferPlan.classifyAdmitFailure(MoldClientError.unauthorized)),
         clientBatchId: "c", destinationInstance: "i",
-        destinationLabel: "hal9000", sourceLabel: "plato")
+        destinationLabel: "hal9000", sourceLabel: "workstation")
     guard case let .outcome(.refused(sentence)) = result else {
         Issue.record("expected a refusal, got \(result)")
         return
@@ -72,7 +72,7 @@ import Testing
     let result = TransferPlan.next(
         after: .admit, outcome: .admitResult(TransferPlan.classifyAdmitFailure(raw)),
         clientBatchId: "c", destinationInstance: "i",
-        destinationLabel: "hal9000", sourceLabel: "plato")
+        destinationLabel: "hal9000", sourceLabel: "workstation")
     #expect(result == .outcome(.refused(
         "hal9000 wouldn't take it: the job's media is larger than a machine will accept in one "
             + "request (\(RequestBodyLimit.sentence)). The original is still here.")))

@@ -52,12 +52,12 @@ private let statusWithNoHostname = """
     #expect(host.apiKey == nil)
 }
 
-// Captured verbatim from plato (`GET /api/status`, mold 0.29.0). `models_disk`
+// Captured verbatim from workstation (`GET /api/status`, mold 0.29.0). `models_disk`
 // is the machine's own figure -- the footer reads THIS, never a sum of
 // installed rows' `disk_usage_bytes` (design fact 3, M5).
 @Test func decodesTheMachinesOwnModelsDiskFigure() throws {
     let status = try MoldJSON.decoder.decode(
-        ServerStatus.self, from: RepoFixtures.fixture("status-plato.json"))
+        ServerStatus.self, from: RepoFixtures.fixture("status-workstation.json"))
 
     #expect(status.modelsDisk?.totalBytes == 2_495_367_610_368)
     #expect(status.modelsDisk?.freeBytes == 787_001_376_768)

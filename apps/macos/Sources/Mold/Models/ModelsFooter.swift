@@ -1,7 +1,7 @@
 import MoldClient
 import SwiftUI
 
-/// "82 installed on plato · 1.71 TB of 2.5 TB used".
+/// "82 installed on workstation · 1.71 TB of 2.5 TB used".
 ///
 /// The second clause is the MACHINE's own `status.modelsDisk` figure and
 /// NEVER a sum of the Size column: a shared VAE or encoder is counted once

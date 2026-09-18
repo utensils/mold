@@ -18,9 +18,9 @@ struct MachinesSettingsTests {
     /// `Destruction` for it at all.
     @Test func removingAMachineAsksFirstAndOnlyThenRemovesIt() {
         var removed = false
-        let destruction = MachineRemoval.destruction(of: host("plato")) { removed = true }
+        let destruction = MachineRemoval.destruction(of: host("workstation")) { removed = true }
 
-        #expect(destruction.title == "Remove “plato”?")
+        #expect(destruction.title == "Remove “workstation”?")
         #expect(destruction.verb == "Remove")
         #expect(!removed, "building the question must not be the answer")
 
@@ -32,9 +32,9 @@ struct MachinesSettingsTests {
     /// (`web/src/pages/MachinesPage.vue:203-217`), stated only where it is
     /// true: a keyless machine has no credential to lose.
     @Test func theQuestionNamesTheKeyItDestroys() {
-        let keyed = MachineRemoval.message(for: host("plato", apiKey: "k"))
+        let keyed = MachineRemoval.message(for: host("workstation", apiKey: "k"))
         #expect(keyed.contains("API key"))
-        #expect(keyed.contains("plato:7680"))
+        #expect(keyed.contains("workstation:7680"))
 
         let keyless = MachineRemoval.message(for: host("hal9000"))
         #expect(!keyless.contains("API key"))

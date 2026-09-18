@@ -8,10 +8,10 @@ import Testing
 // this is the only place the question "which prints am I looking at" is
 // answered, and it runs on every keystroke over thousands of rows.
 
-private let plato = UUID()
+private let workstation = UUID()
 private let hal = UUID()
 
-private func entry(_ name: String, host: UUID = plato, hostName: String = "plato",
+private func entry(_ name: String, host: UUID = workstation, hostName: String = "workstation",
                    at seconds: UInt64 = 1_000, tags: [String] = [], favorite: Bool = false,
                    format: String = "png", collections: [String] = [],
                    prompt: String = "a tin robot", bytes: Int = 100) -> LibraryEntry {
@@ -47,7 +47,7 @@ private let library = [
     query.tokens = [.kind(.clip), .kind(.mesh)]
     #expect(query.apply(to: library).map(\.print.filename) == ["clip.mp4", "chair.glb"])
 
-    query.tokens = [.machine(id: plato, name: "plato"), .machine(id: hal, name: "hal9000")]
+    query.tokens = [.machine(id: workstation, name: "workstation"), .machine(id: hal, name: "hal9000")]
     #expect(query.apply(to: library).count == 4)
 }
 
@@ -76,13 +76,13 @@ private let library = [
 /// silently shows nothing, which reads as an empty collection.
 @Test func aShelfIsFilteredByTheIdOnEachPrintsOwnMachine() {
     let mine = [
-        entry("a.png", host: plato, at: 3, collections: ["p-1"]),
+        entry("a.png", host: workstation, at: 3, collections: ["p-1"]),
         entry("b.png", host: hal, hostName: "hal9000", at: 2, collections: ["h-9"]),
         entry("c.png", host: hal, hostName: "hal9000", at: 1, collections: ["h-other"]),
     ]
     var query = LibraryQuery()
     query.tokens = [.collection(slug: "hangar", name: "Hangar",
-                                ids: [plato: "p-1", hal: "h-9"])]
+                                ids: [workstation: "p-1", hal: "h-9"])]
     #expect(query.apply(to: mine).map(\.print.filename) == ["a.png", "b.png"])
 }
 
@@ -94,10 +94,10 @@ private let library = [
         entry("b.png", at: 2),
     ]
     var query = LibraryQuery()
-    query.hiddenCollectionIDs = [plato: ["secret"]]
+    query.hiddenCollectionIDs = [workstation: ["secret"]]
     #expect(query.apply(to: mine).map(\.print.filename) == ["b.png"])
 
-    query.tokens = [.collection(slug: "s", name: "Secret", ids: [plato: "secret"])]
+    query.tokens = [.collection(slug: "s", name: "Secret", ids: [workstation: "secret"])]
     #expect(query.apply(to: mine).map(\.print.filename) == ["a.png"])
 }
 

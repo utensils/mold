@@ -11,11 +11,11 @@ import Testing
 /// cache to count.
 @MainActor
 struct LibraryShowingCacheTests {
-    private let plato = UUID()
+    private let workstation = UUID()
 
     private func pool(_ count: Int) -> [LibraryEntry] {
         (0 ..< count).map {
-            PrintFixtures.entry("print-\($0).png", host: plato, timestamp: UInt64(1_000 + $0))
+            PrintFixtures.entry("print-\($0).png", host: workstation, timestamp: UInt64(1_000 + $0))
         }
     }
 
@@ -83,7 +83,7 @@ struct LibraryShowingCacheTests {
         let cache = LibraryShowingCache()
         let timeline = pool(3)
         let trash = (0 ..< 3).map {
-            PrintFixtures.entry("trashed-\($0).png", host: plato, timestamp: UInt64(9_000 + $0))
+            PrintFixtures.entry("trashed-\($0).png", host: workstation, timestamp: UInt64(9_000 + $0))
         }
 
         _ = cache.showing(pool: timeline, revision: 1, query: LibraryQuery(), selection: [])

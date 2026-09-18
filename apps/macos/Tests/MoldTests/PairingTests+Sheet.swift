@@ -60,15 +60,15 @@ extension PairingTests {
     /// or an expired one, is no reason to skip the request.
     @Test func theSheetReusesAnUnexpiredSessionForTheSameMachine() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let plato = machine(), other = machine("hal9000")
+        let workstation = machine(), other = machine("hal9000")
         let live = PairingSession(
-            token: "t", expiresAt: 1_700_000_030, authRequired: true, instanceId: "i", hostname: "plato")
+            token: "t", expiresAt: 1_700_000_030, authRequired: true, instanceId: "i", hostname: "workstation")
         let dead = PairingSession(
-            token: "t", expiresAt: 1_699_999_990, authRequired: true, instanceId: "i", hostname: "plato")
+            token: "t", expiresAt: 1_699_999_990, authRequired: true, instanceId: "i", hostname: "workstation")
 
-        #expect(!PairingSheet.needsFreshCode(session: live, sessionHost: plato.id, host: plato.id, now: now))
-        #expect(PairingSheet.needsFreshCode(session: live, sessionHost: other.id, host: plato.id, now: now))
-        #expect(PairingSheet.needsFreshCode(session: dead, sessionHost: plato.id, host: plato.id, now: now))
-        #expect(PairingSheet.needsFreshCode(session: nil, sessionHost: nil, host: plato.id, now: now))
+        #expect(!PairingSheet.needsFreshCode(session: live, sessionHost: workstation.id, host: workstation.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: live, sessionHost: other.id, host: workstation.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: dead, sessionHost: workstation.id, host: workstation.id, now: now))
+        #expect(PairingSheet.needsFreshCode(session: nil, sessionHost: nil, host: workstation.id, now: now))
     }
 }

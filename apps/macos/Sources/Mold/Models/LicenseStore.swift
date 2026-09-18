@@ -6,7 +6,7 @@ import MoldClient
 ///
 /// Acceptance is per Mold data root (`types.rs:12517-12521`), so a fleet
 /// holds one of these rows per machine and they never merge: a licence
-/// accepted on plato is not accepted on hal9000.
+/// accepted on workstation is not accepted on hal9000.
 @MainActor
 @Observable
 final class LicenseStore {

@@ -8,7 +8,7 @@ import Foundation
 // and pairing are a Settings concern, not this one.
 public extension HTTPBackend {
     /// A rewrite is one LLM completion, but the first one on an idle machine
-    /// loads the expander before it can answer. Measured cold on plato:
+    /// loads the expander before it can answer. Measured cold on workstation:
     /// past the transport's 10 s. Three minutes is the same order as a
     /// clip download, and a machine that cannot answer in that time has
     /// something else wrong with it.

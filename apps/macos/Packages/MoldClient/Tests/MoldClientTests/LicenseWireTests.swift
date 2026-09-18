@@ -8,7 +8,7 @@ import Testing
 // app can resolve rather than a dead "answered with an error" sentence.
 
 private func listing() throws -> LicenseListing {
-    try MoldJSON.decoder.decode(LicenseListing.self, from: RepoFixtures.fixture("licenses-plato.json"))
+    try MoldJSON.decoder.decode(LicenseListing.self, from: RepoFixtures.fixture("licenses-workstation.json"))
 }
 
 @Test func aLicenceListingDecodesEveryFieldIncludingTheFriendlyStyles() throws {

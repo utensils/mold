@@ -20,7 +20,7 @@ extension PromptPanel {
 
     func actions(_ recipe: GenerationRecipe) -> some View {
         HStack(spacing: 10) {
-            // plato's own "infeasible" answer names every GPU and runs to
+            // workstation's own "infeasible" answer names every GPU and runs to
             // hundreds of characters: flexible and truncating, so it takes
             // whatever the buttons leave and never widens the capsule (the
             // buttons are `fixedSize`, so they are never the ones squeezed).

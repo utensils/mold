@@ -8,30 +8,30 @@ import Testing
 /// pin the funnel itself rather than any one caller of it.
 @MainActor
 struct HostFailureTests {
-    private func host(_ name: String = "plato") -> MoldHost {
+    private func host(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
     /// Pins the one format string: the machine as subject, what it couldn't
     /// do, in the machine's own words.
     @Test func aFailureNamesTheMachine() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(MoldClientError.http(status: 409, code: nil, message: "Already running."),
                      on: machine.id, doing: "list its queue")
 
         #expect(hosts.failures.count == 1)
-        #expect(hosts.failures.first?.sentence == "plato couldn't list its queue — already running.")
+        #expect(hosts.failures.first?.sentence == "workstation couldn't list its queue — already running.")
     }
 
     /// The machine leads the sentence, not the verb.
     @Test func theSentenceNamesTheMachineFirst() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(MoldClientError.http(status: 422, code: nil, message: "No such device."),
                      on: machine.id, doing: "change that GPU")
 
-        #expect(hosts.failures.first?.sentence == "plato couldn't change that GPU — no such device.")
+        #expect(hosts.failures.first?.sentence == "workstation couldn't change that GPU — no such device.")
     }
 
     /// A drain that retries four times must leave one line, not four.
@@ -109,7 +109,7 @@ struct HostFailureTests {
     /// line, because the machine answering at all is a different fact than
     /// whatever it just refused.
     @Test func aRefusalKeepsItsVerb() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let refusalFirst = HostStore(hosts: [machine])
         refusalFirst.report(MoldClientError.http(status: 409, code: nil, message: "Busy."),
                              on: machine.id, doing: "list its queue")
@@ -130,7 +130,7 @@ struct HostFailureTests {
     /// its reach line is gone -- while an unrelated refusal on the same
     /// machine survives, because that has nothing to do with reachability.
     @Test func aMachineThatAnswersAgainClearsItsReachLine() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(MoldClientError.unreachable("down"), on: machine.id, doing: "list its queue")
         hosts.report(MoldClientError.http(status: 409, code: nil, message: "Busy."),
@@ -146,7 +146,7 @@ struct HostFailureTests {
     /// The same clearing, through the real door: a refresh that finds the
     /// machine up.
     @Test func aRefreshThatFindsTheMachineUpClearsItsReachLine() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let backend = FakeBackend(host: machine)
         backend.serverStatus = FakeFixtures.serverStatus()
         backend.capabilityBlock = FakeFixtures.capabilities(events: false)
@@ -163,7 +163,7 @@ struct HostFailureTests {
     /// mid-flight on -- that is the app changing its mind, not the machine
     /// failing, and must never read as "can't be reached".
     @Test func aCancelledRequestIsNotAFailure() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(CancellationError(), on: machine.id, doing: "read its memory use")
 
@@ -173,7 +173,7 @@ struct HostFailureTests {
     /// Cancellation never erases an unrelated failure already on record --
     /// it is a non-event, not a success.
     @Test func aCancelledRequestLeavesAnExistingFailureAlone() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(MoldClientError.http(status: 409, code: nil, message: "Busy."),
                      on: machine.id, doing: "list its queue")
@@ -181,15 +181,15 @@ struct HostFailureTests {
         hosts.report(CancellationError(), on: machine.id, doing: "list its queue")
 
         #expect(hosts.failures.count == 1)
-        #expect(hosts.failures.first?.sentence == "plato couldn't list its queue — busy.")
+        #expect(hosts.failures.first?.sentence == "workstation couldn't list its queue — busy.")
     }
 
     @Test func anUnauthorizedMachineSaysItNeedsAKey() {
-        let machine = host("plato")
+        let machine = host("workstation")
         let hosts = HostStore(hosts: [machine])
         hosts.report(MoldClientError.unauthorized, on: machine.id, doing: "list its queue")
 
         #expect(hosts.failures.first?.sentence
-            == "plato couldn't list its queue — it needs an API key. Add one in Settings.")
+            == "workstation couldn't list its queue — it needs an API key. Add one in Settings.")
     }
 }

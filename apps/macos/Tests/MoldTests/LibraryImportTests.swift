@@ -7,7 +7,7 @@ import Testing
 /// Importing files from this Mac into a machine's library.
 @MainActor
 struct LibraryImportTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -34,15 +34,15 @@ struct LibraryImportTests {
     /// "nine imported, no message"; this is one imported and a toast that
     /// looks like the whole import is accounted for.
     @Test func oneUnreadableFileDoesNotAbandonTheBatch() async throws {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
         let actions = LibraryActions(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls, to: plato)
+        await actions.send(urls, to: workstation)
 
         // Every file that could be read was sent, in order, and the one that
         // could not is the only thing reported -- AFTER the batch, because
@@ -57,15 +57,15 @@ struct LibraryImportTests {
     /// says how many, because naming only the first would under-report what
     /// did not arrive.
     @Test func severalUnreadableFilesAreOneLineThatSaysHowMany() async throws {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
         let actions = LibraryActions(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls + [folder.appending(path: "also-gone.png")], to: plato)
+        await actions.send(urls + [folder.appending(path: "also-gone.png")], to: workstation)
 
         #expect(fake.importedNames == ["one.png", "two.png", "three.png"])
         #expect(hosts.failures.count == 1)
@@ -75,16 +75,16 @@ struct LibraryImportTests {
     /// A failure to UPLOAD is about the MACHINE, not about that one file, so
     /// it stops -- the distinction the read's `continue` rests on.
     @Test func aRefusedUploadStopsTheBatch() async throws {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.refuses = ["importPrint"]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
         let actions = LibraryActions(hosts: hosts, library: library)
         let (urls, folder) = try batch()
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        await actions.send(urls, to: plato)
+        await actions.send(urls, to: workstation)
 
         #expect(fake.callCount("importPrint") == 1)
         #expect(hosts.failures.count == 1)

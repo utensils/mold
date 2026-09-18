@@ -8,13 +8,13 @@ import Testing
 // NOT inverses -- so every launch came up with no machines at all.
 
 @Test func aSavedMachineComesBackAfterARelaunch() throws {
-    let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!,
+    let host = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!,
                         apiKey: "secret")
     let data = try MoldJSON.localEncoder.encode([StoredHost(host)])
     let read = try MoldJSON.localDecoder.decode([StoredHost].self, from: data)
     #expect(read.count == 1)
     #expect(read.first?.id == host.id)
-    #expect(read.first?.name == "plato")
+    #expect(read.first?.name == "workstation")
     #expect(read.first?.baseURL == host.baseURL)
 }
 
@@ -23,16 +23,16 @@ import Testing
 /// quietly losing them one last time.
 @Test func readsTheShapeAlreadyOnDisk() throws {
     let json = Data("""
-    [{"name":"plato","id":"8A4F7E42-2D3F-4749-8BBA-413A39902C2F",\
-    "base_url":"http://plato:7680"}]
+    [{"name":"workstation","id":"8A4F7E42-2D3F-4749-8BBA-413A39902C2F",\
+    "base_url":"http://workstation:7680"}]
     """.utf8)
     let read = try MoldJSON.localDecoder.decode([StoredHost].self, from: json)
-    #expect(read.first?.name == "plato")
-    #expect(read.first?.baseURL.absoluteString == "http://plato:7680")
+    #expect(read.first?.name == "workstation")
+    #expect(read.first?.baseURL.absoluteString == "http://workstation:7680")
 }
 
 @Test func writesTheShapeAlreadyOnDisk() throws {
-    let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!)
+    let host = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
     let text = String(decoding: try MoldJSON.localEncoder.encode(StoredHost(host)), as: UTF8.self)
     #expect(text.contains("\"base_url\""))
 }
@@ -40,7 +40,7 @@ import Testing
 /// The key is a credential and goes to `SecretStore`. Preferences are copied
 /// into backups and into any sync that takes the domain.
 @Test func aSavedMachineNeverCarriesItsKey() throws {
-    let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!,
+    let host = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!,
                         apiKey: "secret")
     let text = String(decoding: try MoldJSON.localEncoder.encode(StoredHost(host)), as: UTF8.self)
     #expect(!text.contains("secret"))
@@ -56,7 +56,7 @@ import Testing
 /// this app writes and reads itself must not go near them.
 @Test func theWireCodersAreNotInversesOfEachOther() throws {
     struct Naive: Codable { var baseURL: URL }
-    let data = try MoldJSON.encoder.encode(Naive(baseURL: URL(string: "http://plato:7680")!))
+    let data = try MoldJSON.encoder.encode(Naive(baseURL: URL(string: "http://workstation:7680")!))
     #expect(String(decoding: data, as: UTF8.self).contains("base_url"))
     #expect(throws: DecodingError.self) {
         try MoldJSON.decoder.decode(Naive.self, from: data)

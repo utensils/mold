@@ -11,7 +11,7 @@ import Testing
 /// way through settling every child, not just one.
 @MainActor
 struct BatchOutcomeTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -30,12 +30,12 @@ struct BatchOutcomeTests {
     /// **Fails today**: `submit` builds `[draft.request(model:)]`, always one
     /// request regardless of `batchSize`.
     @Test func aBatchOfFourIsSubmittedAsFourChildren() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         // `submit` fires an unstructured `Task` and returns immediately --
         // awaiting that same task (rather than polling a call count) is what
         // actually waits for `backend.submit` to have run.
@@ -50,12 +50,12 @@ struct BatchOutcomeTests {
     }
 
     @Test func aBatchOfOneIsUnchanged() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 1
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await controller.runTask?.value
 
         let requests = backend.submittedAdmissions.last?.requests ?? []
@@ -82,9 +82,9 @@ struct BatchOutcomeTests {
     }
 
     @Test func aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
         let final = FakeFixtures.batchStatus([
@@ -96,7 +96,7 @@ struct BatchOutcomeTests {
         backend.submitAnswer = final
         backend.batchStatusAnswers[final.id] = final
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await controller.runTask?.value
 
         guard case let .finished(outcome, _) = controller.run else {
@@ -108,9 +108,9 @@ struct BatchOutcomeTests {
     }
 
     @Test func aBatchWhereNothingFinishedIsAFailure() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
         let final = FakeFixtures.batchStatus([
@@ -122,7 +122,7 @@ struct BatchOutcomeTests {
         backend.submitAnswer = final
         backend.batchStatusAnswers[final.id] = final
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await controller.runTask?.value
 
         guard case let .failed(message) = controller.run else {
@@ -136,9 +136,9 @@ struct BatchOutcomeTests {
     /// child settles, which with four children drops the idempotency fence
     /// while three are still running.
     @Test func theFenceIsHeldUntilTheWholeBatchSettles() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
         // Never settles in this test -- only the fence is being pinned.
@@ -149,7 +149,7 @@ struct BatchOutcomeTests {
         backend.submitAnswer = midway
         backend.batchStatusAnswers[midway.id] = midway
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await controller.runTask?.value
 
         let clientBatchId = backend.submittedAdmissions.last?.clientBatchId
@@ -163,9 +163,9 @@ struct BatchOutcomeTests {
     }
 
     @Test func thePreviewFollowsAChildThatIsStillRunning() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
         // Never settles in this test -- only the preview poll is being pinned.
@@ -178,7 +178,7 @@ struct BatchOutcomeTests {
         backend.submitAnswer = midway
         backend.batchStatusAnswers[midway.id] = midway
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         // Waits for `follow` to fully return, by which point its `defer`
         // has already cancelled the preview poll -- so what it recorded
         // before that cancellation is exactly what it will ever record.
@@ -194,12 +194,12 @@ struct BatchOutcomeTests {
     // MARK: - Placement
 
     @Test func aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 4
 
-        controller.refreshPlacement(on: plato)
+        controller.refreshPlacement(on: workstation)
         // `PlacementProbe` debounces before it calls out -- a constructor
         // parameter, so this waits on the call rather than on a clock.
         await settle { backend.callCount("placementPreview") == 1 }
@@ -210,14 +210,14 @@ struct BatchOutcomeTests {
     /// The probe is a planning READ: it prices a render, so it carries no
     /// prompt, no media bytes and no filing (finding 02#5).
     @Test func aPlacementPreviewSendsARedactedRequest() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.prompt = "a tin robot"
         controller.draft.tags = ["unannounced"]
         controller.draft.media.sourceImage = "SOURCEBYTES"
 
-        controller.refreshPlacement(on: plato)
+        controller.refreshPlacement(on: workstation)
         await settle { backend.callCount("placementPreview") == 1 }
 
         let sent = backend.placementRequests.last

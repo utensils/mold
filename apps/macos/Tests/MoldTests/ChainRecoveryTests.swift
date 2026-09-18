@@ -11,7 +11,7 @@ import Testing
 @MainActor
 struct ChainRecoveryTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     private func detail(_ json: String) -> ChainJobDetail {
@@ -30,15 +30,15 @@ struct ChainRecoveryTests {
 
     @Test func aliveJobIsFollowedAgainAfterARelaunch() async {
         clearPending()
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobDetails["chain-r1"] = detail(#"""
         {"id": "chain-r1", "state": "running", "model": "m", "stage_count": 4,
          "current_stage": 2, "error": null, "finalizes": []}
         """#)
         backend.chainEventsHeldOpen.insert("chain-r1")
-        PendingChain.remember("chain-r1", host: plato.id)
+        PendingChain.remember("chain-r1", host: workstation.id)
 
         await controller.recoverPending()
         await settle { backend.calls.contains("chainJobEvents") }
@@ -46,21 +46,21 @@ struct ChainRecoveryTests {
         // The stage count comes from the JOB, never from a routing decision
         // this launch does not have.
         #expect(controller.run.stage == "Clip 3 of 4")
-        #expect(PendingChain.all()["chain-r1"] == plato.id.uuidString)
+        #expect(PendingChain.all()["chain-r1"] == workstation.id.uuidString)
     }
 
     /// A job PARKED by a host restart is not over, and says so.
     @Test func aparkedJobIsShownAsPausedAndCanBeResumed() async {
         clearPending()
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobDetails["chain-r2"] = detail(#"""
         {"id": "chain-r2", "state": "paused", "model": "m", "stage_count": 3,
          "current_stage": 1, "error": null, "finalizes": []}
         """#)
         backend.chainEventsHeldOpen.insert("chain-r2")
-        PendingChain.remember("chain-r2", host: plato.id)
+        PendingChain.remember("chain-r2", host: workstation.id)
 
         await controller.recoverPending()
         await settle { controller.chain.active?.isPaused == true }
@@ -75,15 +75,15 @@ struct ChainRecoveryTests {
     /// SHOWN -- the render happened.
     @Test func ajobThatFinishedWhileClosedIsShownAndForgotten() async {
         clearPending()
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobDetails["chain-r3"] = detail(#"""
         {"id": "chain-r3", "state": "completed", "model": "m", "stage_count": 3,
          "current_stage": 3, "error": null,
          "finalizes": [{"gallery_filename": "long.mp4"}]}
         """#)
-        PendingChain.remember("chain-r3", host: plato.id)
+        PendingChain.remember("chain-r3", host: workstation.id)
 
         await controller.recoverPending()
         #expect(PendingChain.all()["chain-r3"] == nil)
@@ -99,12 +99,12 @@ struct ChainRecoveryTests {
     /// in preferences for the life of the install.
     @Test func ajobTheHostDoesNotKnowIsDropped() async {
         clearPending()
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.plantedErrors["chainJob"] = MoldClientError.http(
             status: 404, code: nil, message: "no such job")
-        PendingChain.remember("chain-r4", host: plato.id)
+        PendingChain.remember("chain-r4", host: workstation.id)
 
         await controller.recoverPending()
         #expect(PendingChain.all()["chain-r4"] == nil)
@@ -115,14 +115,14 @@ struct ChainRecoveryTests {
     /// guessed to be gone -- `PendingRecovery`'s own rule.
     @Test func atransientFailureKeepsTheRecordForNextTime() async {
         clearPending()
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.plantedErrors["chainJob"] = MoldClientError.unreachable("down")
-        PendingChain.remember("chain-r5", host: plato.id)
+        PendingChain.remember("chain-r5", host: workstation.id)
 
         await controller.recoverPending()
-        #expect(PendingChain.all()["chain-r5"] == plato.id.uuidString)
+        #expect(PendingChain.all()["chain-r5"] == workstation.id.uuidString)
         clearPending()
     }
 }

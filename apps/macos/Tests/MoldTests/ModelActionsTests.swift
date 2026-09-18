@@ -9,7 +9,7 @@ import Testing
 /// from (M5 S5).
 @MainActor
 struct ModelActionsTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -68,10 +68,10 @@ struct ModelActionsTests {
     }
 
     @Test func deleteAsksFirstAndTheFakeRecordsNothingUntilPerform() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.removalAnswers["flux-dev:q4"] = FakeFixtures.modelRemoval(removed: ["flux-dev:q4"], freedBytes: 500_000_000)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
         let licenses = LicenseStore(hosts: hosts)
         let downloads = DownloadStore(hosts: hosts, licenses: licenses)
@@ -80,7 +80,7 @@ struct ModelActionsTests {
                             confirmDestruction: { captured = $0 })
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
 
-        acts.delete(model, on: plato.id)
+        acts.delete(model, on: workstation.id)
 
         #expect(captured != nil)
         #expect(captured?.title.contains(model.headline) == true)
@@ -128,16 +128,16 @@ struct ModelActionsTests {
     /// **Fails today**: `modelComponents(_:statuses:)` and
     /// `modelComponentRow` don't exist yet.
     @Test func theComponentsRowsNeverExpandOptions() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         let heavy = FakeFixtures.modelComponentRow(
             kind: "transformer", name: "model.safetensors", present: true, optionsCount: 103)
         fake.componentRows["flux-schnell:q8"] = FakeFixtures.modelComponents("flux-schnell:q8", statuses: [heavy])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
         let model = FakeFixtures.model("flux-schnell:q8", downloaded: true)
 
-        let response = await models.components(of: model, on: plato.id)
+        let response = await models.components(of: model, on: workstation.id)
 
         // The sheet draws one row per `response.components` entry -- this is
         // that exact count, which options never inflate (design fact 4).
@@ -146,11 +146,11 @@ struct ModelActionsTests {
     }
 
     @Test func theMenuAndTheContextualMenuCallTheSameThing() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         let model = FakeFixtures.model("flux-dev:q4", downloaded: true)
         fake.modelRows = [model]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
         let licenses = LicenseStore(hosts: hosts)
         let downloads = DownloadStore(hosts: hosts, licenses: licenses)
@@ -159,9 +159,9 @@ struct ModelActionsTests {
         // The row's contextual menu and the Model menu both call
         // `ModelActions.perform` with the picked item's kind -- there is no
         // second copy of "what Load means" for either surface to drift from.
-        acts.perform(.load, on: model, host: plato)
+        acts.perform(.load, on: model, host: workstation)
         await settle(until: { fake.callCount("loadModel") == 1 })
-        acts.perform(.load, on: model, host: plato)
+        acts.perform(.load, on: model, host: workstation)
         await settle(until: { fake.callCount("loadModel") == 2 })
 
         #expect(fake.loadedModels.map(\.model) == ["flux-dev:q4", "flux-dev:q4"])

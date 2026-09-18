@@ -14,7 +14,7 @@ import Testing
 /// `DefaultMachineTests`, every test here clears the key first.
 @MainActor
 struct GenerateMachineTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -34,30 +34,30 @@ struct GenerateMachineTests {
 
     @Test func adoptingWithKeepingDraftPinsTheMachine() {
         reset()
-        let plato = machine()
+        let workstation = machine()
         let model = FakeFixtures.model("flux-dev:q8")
         let c = controller()
 
-        c.adopt(model: model, on: plato.id, keepingDraft: true)
+        c.adopt(model: model, on: workstation.id, keepingDraft: true)
 
-        #expect(c.machineChoice == plato.id)
+        #expect(c.machineChoice == workstation.id)
     }
 
     @Test func settingItThenBuildingASecondControllerReadsItBack() {
         reset()
-        let plato = machine()
+        let workstation = machine()
         let first = controller()
 
-        first.machineChoice = plato.id
+        first.machineChoice = workstation.id
 
-        #expect(controller().machineChoice == plato.id)
+        #expect(controller().machineChoice == workstation.id)
     }
 
     @Test func settingNilClearsIt() {
         reset()
-        let plato = machine()
+        let workstation = machine()
         let c = controller()
-        c.machineChoice = plato.id
+        c.machineChoice = workstation.id
 
         c.machineChoice = nil
 

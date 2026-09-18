@@ -5,7 +5,7 @@ import SwiftUI
 ///
 /// The same answer a machine's own page gives (`PeerSection.swift`), asked of
 /// every machine that can browse at all and merged: a peer is a machine on
-/// THAT machine's local network, so plato sees a different room from this Mac,
+/// THAT machine's local network, so workstation sees a different room from this Mac,
 /// and the overview is where both rooms belong. `PeerAction` is the one
 /// decision about what a found machine is worth offering -- asked here too
 /// rather than re-derived, so a peer already in the list is silent on both

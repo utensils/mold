@@ -117,11 +117,11 @@ struct ClipTests {
     // MARK: - Fixture loading
 
     /// `recipe-ltx2.json` (trimmed to `auto`, `ic-lora`, `t2a`) and
-    /// `recipe-wan.json`, both captured read-only from plato -- same files
+    /// `recipe-wan.json`, both captured read-only from workstation -- same files
     /// `RecipeCapabilityTests` reads in MoldClientTests. This bundle cannot
     /// see MoldClient's own `RepoFixtures` (`@testable import Mold`, not
     /// MoldClient), so this loads by a path relative to this file, the same
-    /// way `RefineTests.loadPlatoModels()` does.
+    /// way `RefineTests.loadWorkstationModels()` does.
     private static func profile(_ name: String) throws -> GenerationProfileSet {
         let fixtures = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests/MoldTests

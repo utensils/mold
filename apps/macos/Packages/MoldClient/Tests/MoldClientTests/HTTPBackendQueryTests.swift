@@ -8,7 +8,7 @@ import Testing
 // the person typed and answers it without complaint.
 
 private let backend = HTTPBackend(
-    host: MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!)
+    host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
 )
 
 /// Reads a query string back the way `serde_urlencoded` does -- split on `&`,

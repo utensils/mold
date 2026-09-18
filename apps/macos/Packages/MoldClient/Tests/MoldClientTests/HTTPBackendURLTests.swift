@@ -11,23 +11,23 @@ import Testing
 // looks the same as "nothing changed".
 
 private let backend = HTTPBackend(
-    host: MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!)
+    host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
 )
 
 @Test func aQueryStringSurvivesBeingTurnedIntoARequest() {
     let url = backend.request("/api/gallery?view=trash").url
-    #expect(url?.absoluteString == "http://plato:7680/api/gallery?view=trash")
+    #expect(url?.absoluteString == "http://workstation:7680/api/gallery?view=trash")
     #expect(url?.query() == "view=trash")
 }
 
 @Test func severalParametersAllSurvive() {
     let url = backend.request("/api/gallery/thumbnail/a.png?size=512&fmt=jpeg").url
     #expect(url?.absoluteString
-            == "http://plato:7680/api/gallery/thumbnail/a.png?size=512&fmt=jpeg")
+            == "http://workstation:7680/api/gallery/thumbnail/a.png?size=512&fmt=jpeg")
 }
 
 @Test func aPlainPathIsUntouched() {
-    #expect(backend.request("/api/status").url?.absoluteString == "http://plato:7680/api/status")
+    #expect(backend.request("/api/status").url?.absoluteString == "http://workstation:7680/api/status")
 }
 
 /// A base URL with a path of its own — a host behind a reverse proxy at
@@ -67,7 +67,7 @@ private let backend = HTTPBackend(
 /// under test is whether it COMPILES.
 @Test func aBackendHeldAsTheProtocolReachesEveryRouteTheAppUses() {
     let backend: any MoldBackend = HTTPBackend(
-        host: MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!)
+        host: MoldHost(name: "workstation", baseURL: URL(string: "http://workstation:7680")!)
     )
     let _: () async throws -> Void = {
         _ = backend.events()
@@ -104,7 +104,7 @@ private let backend = HTTPBackend(
         _ = try await backend.setCatalogCredential("hf", token: "t")
         _ = try await backend.clearCatalogCredential("hf")
     }
-    #expect(backend.host.name == "plato")
+    #expect(backend.host.name == "workstation")
 }
 
 /// A device id is OPAQUE (`cuda:<32 hex>`) and must ride as ONE path
@@ -139,7 +139,7 @@ private let backend = HTTPBackend(
 /// so the model name is the only thing this URL carries.
 @Test func anAdapterListIsAskedForOneModel() {
     let url = backend.request(backend.loraPath(model: "z-image-turbo:q8")).url
-    #expect(url?.absoluteString == "http://plato:7680/api/loras?model=z-image-turbo:q8")
+    #expect(url?.absoluteString == "http://workstation:7680/api/loras?model=z-image-turbo:q8")
 }
 
 /// A print in the trash lives behind `?view=trash`, exactly as the listing

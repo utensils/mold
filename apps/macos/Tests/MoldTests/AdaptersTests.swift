@@ -10,7 +10,7 @@ import Testing
 /// `OutputGroup` and `FileUnderGroup`.
 @MainActor
 struct AdaptersTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -29,33 +29,33 @@ struct AdaptersTests {
     // MARK: - LoraStore
 
     @Test func anAdapterListIsAskedPerModelNotPerMachine() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.loraRows = ["flux-dev:q8": [lora("a")], "z-image-turbo:q8": [lora("b")]]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = LoraStore(hosts: hosts)
 
-        await store.refresh(model: "flux-dev:q8", on: plato.id)
-        await store.refresh(model: "z-image-turbo:q8", on: plato.id)
+        await store.refresh(model: "flux-dev:q8", on: workstation.id)
+        await store.refresh(model: "z-image-turbo:q8", on: workstation.id)
 
         #expect(backend.loraModelsRequested == ["flux-dev:q8", "z-image-turbo:q8"])
-        #expect(store.rows(for: "flux-dev:q8", on: plato.id)?.map(\.id) == ["a"])
-        #expect(store.rows(for: "z-image-turbo:q8", on: plato.id)?.map(\.id) == ["b"])
+        #expect(store.rows(for: "flux-dev:q8", on: workstation.id)?.map(\.id) == ["a"])
+        #expect(store.rows(for: "z-image-turbo:q8", on: workstation.id)?.map(\.id) == ["b"])
     }
 
     @Test func anUnknownModelReportsOnceAndDoesNotRetry() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.loraErrors["not-a-real-model"] =
             MoldClientError.http(status: 400, code: "UNKNOWN_MODEL", message: "unknown model")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = LoraStore(hosts: hosts)
 
-        await store.refresh(model: "not-a-real-model", on: plato.id)
-        await store.refresh(model: "not-a-real-model", on: plato.id)
+        await store.refresh(model: "not-a-real-model", on: workstation.id)
+        await store.refresh(model: "not-a-real-model", on: workstation.id)
 
         #expect(backend.callCount("loras") == 1)
-        #expect(store.rows(for: "not-a-real-model", on: plato.id) == nil)
+        #expect(store.rows(for: "not-a-real-model", on: workstation.id) == nil)
         #expect(hosts.failures.isEmpty)
     }
 

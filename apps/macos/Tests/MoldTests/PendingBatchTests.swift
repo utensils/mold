@@ -19,14 +19,14 @@ struct PendingBatchTests {
 
     @Test func aRememberedBatchIsReadBackByAll() {
         let defaults = scratch()
-        let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let host = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
         PendingBatch.remember("batch-1", host: host.id, in: defaults)
         #expect(PendingBatch.all(in: defaults)["batch-1"] == host.id.uuidString)
     }
 
     @Test func forgettingRemovesOnlyThatBatch() {
         let defaults = scratch()
-        let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let host = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
         PendingBatch.remember("batch-1", host: host.id, in: defaults)
         PendingBatch.remember("batch-2", host: host.id, in: defaults)
         PendingBatch.forget("batch-1", in: defaults)

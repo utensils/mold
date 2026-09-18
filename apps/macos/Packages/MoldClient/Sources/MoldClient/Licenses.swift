@@ -4,7 +4,7 @@ import Foundation
 ///
 /// `GET /api/licenses` (`types.rs:12517-12541`). Acceptance is per Mold data
 /// root, so a fleet holds one of these per machine and they never merge: a
-/// licence accepted on plato is not accepted on hal9000.
+/// licence accepted on workstation is not accepted on hal9000.
 public struct ThirdPartyLicense: Codable, Hashable, Sendable, Identifiable {
     public let id: String
     public let name: String

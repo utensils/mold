@@ -40,16 +40,16 @@ struct DefaultMachineTests {
     /// explicit choice, so it lands on `hal9000` instead.
     @Test func aChosenDefaultIsWhereWorkGoesEvenWhenItIsDown() async {
         reset()
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal9000 = machine("hal9000")
-        let hosts = HostStore(hosts: [plato, hal9000]) { host in
-            host.id == plato.id ? self.fake(plato, up: false) : self.fake(hal9000, up: true)
+        let hosts = HostStore(hosts: [workstation, hal9000]) { host in
+            host.id == workstation.id ? self.fake(workstation, up: false) : self.fake(hal9000, up: true)
         }
         await hosts.refreshAll()
 
-        hosts.setDefault(plato)
+        hosts.setDefault(workstation)
 
-        #expect(hosts.preferredHost?.id == plato.id)
+        #expect(hosts.preferredHost?.id == workstation.id)
     }
 
     /// **Fails today**: nothing is stored to fall back from, so this only
@@ -63,7 +63,7 @@ struct DefaultMachineTests {
 
         // Named, but never added -- as good as a default whose machine was
         // since removed.
-        hosts.setDefault(machine("plato"))
+        hosts.setDefault(machine("workstation"))
 
         #expect(hosts.preferredHost?.id == hal9000.id)
     }
@@ -74,21 +74,21 @@ struct DefaultMachineTests {
     /// `defaultMachine` merely because it was asked to resolve one.
     @Test func lookingAtAMachineDoesNotMakeItTheDefault() {
         reset()
-        let plato = machine("plato")
-        let hosts = HostStore(hosts: [plato]) { self.fake($0, up: true) }
+        let workstation = machine("workstation")
+        let hosts = HostStore(hosts: [workstation]) { self.fake($0, up: true) }
 
-        _ = hosts.machine(selected: plato.id.uuidString)
+        _ = hosts.machine(selected: workstation.id.uuidString)
 
         #expect(hosts.defaultMachine == nil)
     }
 
     @Test func forgettingAMachineForgetsThatItWasTheDefault() {
         reset()
-        let plato = machine("plato")
-        let hosts = HostStore(hosts: [plato]) { self.fake($0, up: true) }
-        hosts.setDefault(plato)
+        let workstation = machine("workstation")
+        let hosts = HostStore(hosts: [workstation]) { self.fake($0, up: true) }
+        hosts.setDefault(workstation)
 
-        hosts.remove(plato)
+        hosts.remove(workstation)
 
         #expect(hosts.defaultMachine == nil)
     }

@@ -9,7 +9,7 @@ import Testing
 /// can't browse a catalog, and `CatalogStore`'s save/clear round trip.
 @MainActor
 struct AccountsTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -66,7 +66,7 @@ struct AccountsTests {
     // MARK: - CatalogStore round trip
 
     /// The masked value is the only form of the token this app ever reads
-    /// back, from the same fixture plato itself answers with.
+    /// back, from the same fixture workstation itself answers with.
     @Test func theMaskedValueIsTheOnlyTokenFormEverRead() {
         let status = FakeFixtures.credentialsFixture()
         #expect(status.hf.masked == "hf_••••hhml")
@@ -77,14 +77,14 @@ struct AccountsTests {
     }
 
     @Test func savingWritesTheProviderAndTokenOnceAndRereadsTheAnswer() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.credentialStatus = FakeFixtures.credentialStatus(
             hfConfigured: true, hfSource: "server", hfMasked: "hf_••••9999")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        let ok = await catalog.saveCredential("hf", token: "hf_supersecret9999", on: plato.id)
+        let ok = await catalog.saveCredential("hf", token: "hf_supersecret9999", on: workstation.id)
 
         #expect(ok)
         #expect(fake.credentialWrites.count == 1)
@@ -92,50 +92,50 @@ struct AccountsTests {
         #expect(fake.credentialWrites.first?.token == "hf_supersecret9999")
         // Re-read from the answer, never a second fetch.
         #expect(fake.calls.filter { $0 == "catalogCredentials" }.isEmpty)
-        #expect(catalog.credentials(on: plato.id)?.hf.masked == "hf_••••9999")
+        #expect(catalog.credentials(on: workstation.id)?.hf.masked == "hf_••••9999")
     }
 
     /// Two machines, one write -- the picker names the target, not a global.
     @Test func savingOnOneMachineDoesNotTouchAnother() async {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal = machine("hal9000")
-        let fakePlato = FakeBackend(host: plato)
-        fakePlato.credentialStatus = FakeFixtures.credentialStatus(
+        let fakeWorkstation = FakeBackend(host: workstation)
+        fakeWorkstation.credentialStatus = FakeFixtures.credentialStatus(
             hfConfigured: true, hfSource: "server", hfMasked: "hf_••••1111")
         let fakeHal = FakeBackend(host: hal)
-        let hosts = HostStore(hosts: [plato, hal]) { host in host.id == plato.id ? fakePlato : fakeHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { host in host.id == workstation.id ? fakeWorkstation : fakeHal }
         let catalog = CatalogStore(hosts: hosts)
 
-        await catalog.saveCredential("hf", token: "hf_1111", on: plato.id)
+        await catalog.saveCredential("hf", token: "hf_1111", on: workstation.id)
 
-        #expect(fakePlato.credentialWrites.count == 1)
+        #expect(fakeWorkstation.credentialWrites.count == 1)
         #expect(fakeHal.credentialWrites.isEmpty)
     }
 
     @Test func clearingDeletesAndRereadsTheFallback() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.credentialStatus = FakeFixtures.credentialsFixture() // falls back to the environment
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        await catalog.clearCredential("hf", on: plato.id)
+        await catalog.clearCredential("hf", on: workstation.id)
 
         #expect(fake.credentialClears == ["hf"])
-        #expect(catalog.credentials(on: plato.id)?.hf.isFromEnvironment == true)
+        #expect(catalog.credentials(on: workstation.id)?.hf.isFromEnvironment == true)
     }
 
     @Test func aFailedSaveReportsAndLeavesTheStoredStateAlone() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.refuses = ["setCatalogCredential"]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let catalog = CatalogStore(hosts: hosts)
 
-        let ok = await catalog.saveCredential("hf", token: "hf_x", on: plato.id)
+        let ok = await catalog.saveCredential("hf", token: "hf_x", on: workstation.id)
 
         #expect(ok == false)
-        #expect(catalog.credentials(on: plato.id) == nil)
-        #expect(hosts.failures.contains { $0.host == plato.id && $0.verb == "save the Hugging Face token" })
+        #expect(catalog.credentials(on: workstation.id) == nil)
+        #expect(hosts.failures.contains { $0.host == workstation.id && $0.verb == "save the Hugging Face token" })
     }
 }

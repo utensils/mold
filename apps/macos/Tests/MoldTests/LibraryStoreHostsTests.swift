@@ -63,7 +63,7 @@ struct LibraryStoreHostsTests {
     /// re-list the machine AND replay whatever edit was still queued for it,
     /// onto the freshly-read rows.
     @Test func aResyncReplaysWhatIsStillQueued() async throws {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("a.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }

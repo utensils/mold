@@ -14,7 +14,7 @@ struct NotificationTests {
     private let insideBundle = "/Applications/Mold.app/Contents/MacOS/Mold"
     private let outsideBundle = "/Users/dev/.build/debug/mold"
 
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -43,9 +43,9 @@ struct NotificationTests {
 
     /// **Fails today**: there is no `MoldNotifications` type.
     @Test func fourPrintsOnOneMachineWithinTwoSecondsAreOneNotification() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
@@ -54,23 +54,23 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(20), executablePath: insideBundle)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         for i in 0 ..< 4 { backend.emit(.gallery(.added(filename: "\(i).png", row: nil))) }
 
         await settle { !center.posted.isEmpty }
         #expect(center.posted.count == 1)
-        #expect(center.posted.first?.title == "4 prints finished on plato")
+        #expect(center.posted.first?.title == "4 prints finished on workstation")
         #expect(notifications.enabled)
     }
 
     @Test func printsOnTwoMachinesAreTwoNotifications() async {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let bender = machine("bender")
-        let platoBackend = fake(for: plato)
+        let workstationBackend = fake(for: workstation)
         let benderBackend = fake(for: bender)
-        let hosts = HostStore(hosts: [plato, bender]) { host in
-            host.id == plato.id ? platoBackend : benderBackend
+        let hosts = HostStore(hosts: [workstation, bender]) { host in
+            host.id == workstation.id ? workstationBackend : benderBackend
         }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
@@ -85,14 +85,14 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(20), executablePath: insideBundle)
-        await connect(plato, hosts: hosts, backend: platoBackend)
+        await connect(workstation, hosts: hosts, backend: workstationBackend)
         await connect(bender, hosts: hosts, backend: benderBackend)
 
-        platoBackend.emit(.gallery(.added(filename: "a.png", row: nil)))
+        workstationBackend.emit(.gallery(.added(filename: "a.png", row: nil)))
         benderBackend.emit(.gallery(.added(filename: "b.png", row: nil)))
 
         await settle { center.posted.count == 2 }
-        #expect(Set(center.posted.map(\.title)) == ["Finished on plato", "Finished on bender"])
+        #expect(Set(center.posted.map(\.title)) == ["Finished on workstation", "Finished on bender"])
         #expect(notifications.enabled)
     }
 
@@ -100,17 +100,17 @@ struct NotificationTests {
 
     /// **Fails today**: `QueueStore.onOutcome` does not exist.
     @Test func aFailedChildNotifiesOnce() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(entries: [
             FakeFixtures.queueEntry("job-1", state: "running", batchId: "batch-1", clientBatchId: "client-1"),
         ])
         backend.batchListings = [FakeFixtures.batchStatusListing([
             FakeFixtures.batchStatus(id: "batch-1", children: [FakeFixtures.batchChild("job-1", state: "running")]),
         ])]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
         let defaults = scratchDefaults()
         let center = FakeNotificationCenter()
@@ -128,15 +128,15 @@ struct NotificationTests {
             ]),
         ])
         backend.batchListings = [failed, failed]
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
         // A second reconcile of the same settled state -- must not fire again.
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
         // Delivery waits for authorization to be ANSWERED, so this awaits
         // the chain rather than polling for its side effect.
         await notifications.deliveries?.value
 
         #expect(center.posted.count == 1)
-        #expect(center.posted.first?.title == "Failed on plato")
+        #expect(center.posted.first?.title == "Failed on workstation")
         #expect(center.posted.first?.body == "GPU crashed")
         #expect(notifications.enabled)
     }
@@ -150,8 +150,8 @@ struct NotificationTests {
     /// failure notification is deliberately never coalesced. Pressing ⌘R
     /// while a `job_state_committed` frame is in flight is enough.
     @Test func twoOverlappingHydrationsNotifyAboutOneFailureOnce() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         // The only route here that actually suspends, so two callers can
         // genuinely interleave rather than each running straight through.
         backend.batchStatusesYields = true
@@ -161,9 +161,9 @@ struct NotificationTests {
         backend.batchListings = [FakeFixtures.batchStatusListing([
             FakeFixtures.batchStatus(id: "batch-1", children: [FakeFixtures.batchChild("job-1", state: "running")]),
         ])]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
         let defaults = scratchDefaults()
         let center = FakeNotificationCenter()
@@ -175,7 +175,7 @@ struct NotificationTests {
         backend.queueListing = FakeFixtures.queueListing(entries: [
             FakeFixtures.queueEntry("job-1", state: "failed", batchId: "batch-1", clientBatchId: "client-1"),
         ])
-        await queue.poll(plato.id)
+        await queue.poll(workstation.id)
         let failed = FakeFixtures.batchStatusListing([
             FakeFixtures.batchStatus(id: "batch-1", children: [
                 FakeFixtures.batchChild("job-1", state: "failed", error: "GPU crashed"),
@@ -183,8 +183,8 @@ struct NotificationTests {
         ])
         backend.batchListings = [failed, failed]
 
-        async let first: Void = queue.hydrate(on: plato.id)
-        async let second: Void = queue.hydrate(on: plato.id)
+        async let first: Void = queue.hydrate(on: workstation.id)
+        async let second: Void = queue.hydrate(on: workstation.id)
         _ = await (first, second)
         await notifications.deliveries?.value
 
@@ -192,22 +192,22 @@ struct NotificationTests {
         // Three in all: the one the setup's `refresh` made, plus these two.
         #expect(backend.callCount("batchStatuses") == 3)
         #expect(center.posted.count == 1)
-        #expect(center.posted.first?.title == "Failed on plato")
+        #expect(center.posted.first?.title == "Failed on workstation")
         #expect(notifications.enabled)
     }
 
     @Test func aRetryableHoldDoesNotNotify() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(entries: [
             FakeFixtures.queueEntry("job-1", state: "running", batchId: "batch-1", clientBatchId: "client-1"),
         ])
         backend.batchListings = [FakeFixtures.batchStatusListing([
             FakeFixtures.batchStatus(id: "batch-1", children: [FakeFixtures.batchChild("job-1", state: "running")]),
         ])]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
         let defaults = scratchDefaults()
         let center = FakeNotificationCenter()
@@ -228,7 +228,7 @@ struct NotificationTests {
                 FakeFixtures.batchChild("job-1", state: "held", retryable: true),
             ]),
         ])]
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
         #expect(center.posted.isEmpty)
         #expect(notifications.enabled)
@@ -237,9 +237,9 @@ struct NotificationTests {
     // MARK: - The guard and the preference
 
     @Test func notificationsOffPostNothing() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         defaults.set(false, forKey: "notifyRenders")
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
@@ -249,7 +249,7 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(20), executablePath: insideBundle)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count > 0 }
@@ -260,9 +260,9 @@ struct NotificationTests {
 
     /// **Fails today**: nothing guards against a bare `swift run` binary.
     @Test func outsideABundleNothingIsPosted() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
@@ -274,7 +274,7 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(20), executablePath: outsideBundle)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count > 0 }
@@ -295,9 +295,9 @@ struct NotificationTests {
     /// Asking on FIRST NEED is right and stays; what changes is waiting for
     /// the ANSWER.
     @Test func theFirstNotificationWaitsForTheAnswerInsteadOfBeingDropped() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
@@ -309,7 +309,7 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(20), executablePath: insideBundle)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { center.authorizationRequests == 1 }
@@ -319,14 +319,14 @@ struct NotificationTests {
         await notifications.deliveries?.value
 
         #expect(center.dropped == 0)
-        #expect(center.posted.map(\.title) == ["Finished on plato"])
+        #expect(center.posted.map(\.title) == ["Finished on workstation"])
     }
 
     /// One alert, however many notifications follow it.
     @Test func authorizationIsAskedForOnceAndTheRestJustArrive() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
@@ -335,7 +335,7 @@ struct NotificationTests {
             landedPrints: landed, queue: QueueStore(hosts: hosts), hosts: hosts,
             library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
             coalesceDelay: .milliseconds(5), executablePath: insideBundle)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { center.posted.count == 1 }
@@ -368,13 +368,13 @@ struct NotificationTests {
 
     /// **Fails today**: turning the preference off does not touch `recent`.
     @Test func turningTheBadgeOffClearsIt() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count == 1 }
 

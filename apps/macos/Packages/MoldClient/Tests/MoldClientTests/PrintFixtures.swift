@@ -31,7 +31,7 @@ enum PrintFixtures {
             favorite: favorite, collections: collections, trashedAt: trashedAt, purgeAt: purgeAt)
     }
 
-    static func entry(_ filename: String, host: UUID, hostName: String = "plato",
+    static func entry(_ filename: String, host: UUID, hostName: String = "workstation",
                       timestamp: UInt64 = 1_000, format: String = "png", tags: [String]? = nil,
                       favorite: Bool? = nil, title: String? = nil, collections: [String]? = nil,
                       prompt: String? = nil, bytes: Int? = 100) -> LibraryEntry {

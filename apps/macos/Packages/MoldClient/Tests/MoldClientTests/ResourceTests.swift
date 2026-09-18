@@ -6,11 +6,11 @@ import Testing
 /// `GET /api/resources`, the 1 Hz sample behind the GPU and RAM bars.
 @Suite struct ResourceSuite {
 
-    @Test func decodesPlatosFourGpusAndTheZfsCredit() throws {
+    @Test func decodesWorkstationsFourGpusAndTheZfsCredit() throws {
         let snapshot = try MoldJSON.decoder.decode(
-            ResourceSnapshot.self, from: RepoFixtures.fixture("resources-plato.json"))
+            ResourceSnapshot.self, from: RepoFixtures.fixture("resources-workstation.json"))
 
-        #expect(snapshot.hostname == "plato")
+        #expect(snapshot.hostname == "workstation")
         #expect(snapshot.gpus.count == 4)
         #expect(snapshot.gpus[0].vramTotal == 48_305_799_168)
         #expect(snapshot.systemRam.total == 1_623_070_584_832)

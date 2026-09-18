@@ -3,15 +3,15 @@ import Testing
 
 @testable import MoldClient
 
-// `Fixtures/config-plato.json` is a live `GET /api/config` from plato: 63
+// `Fixtures/config-workstation.json` is a live `GET /api/config` from workstation: 63
 // entries, every wire shape a real row can take -- a bool (`embed_metadata`),
 // a number (`server_port`), a string (`default_model`), and a null
-// (`output_dir`, env-owned). `Fixtures/config-profiles-plato.json` is
+// (`output_dir`, env-owned). `Fixtures/config-profiles-workstation.json` is
 // `GET /api/config/profiles` from the same machine.
 
 private func live() throws -> ConfigListing {
     try MoldJSON.decoder.decode(
-        ConfigListing.self, from: RepoFixtures.fixture("config-plato.json"))
+        ConfigListing.self, from: RepoFixtures.fixture("config-workstation.json"))
 }
 
 private func row(_ key: String) throws -> ConfigEntry {
@@ -21,7 +21,7 @@ private func row(_ key: String) throws -> ConfigEntry {
 
 @Test func aProfileListingDecodesTheActiveNameAndTheList() throws {
     let profiles = try MoldJSON.decoder.decode(
-        ConfigProfiles.self, from: RepoFixtures.fixture("config-profiles-plato.json"))
+        ConfigProfiles.self, from: RepoFixtures.fixture("config-profiles-workstation.json"))
     #expect(profiles.active == "default")
     #expect(profiles.profiles == ["default"])
 }

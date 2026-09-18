@@ -117,28 +117,28 @@ struct MachineFleetTests {
     /// The overview and a machine's page are the same destination, one push
     /// apart, and the sidebar's own preference is the whole path.
     @Test func openingACardIsTheSameSelectionTheSidebarWrites() {
-        let plato = host("plato")
-        let hosts = [plato, host("hal9000")]
+        let workstation = host("workstation")
+        let hosts = [workstation, host("hal9000")]
 
         #expect(MachineNavigation.path(selected: "", in: hosts) == [])
-        #expect(MachineNavigation.path(selected: plato.id.uuidString, in: hosts) == [plato.id])
+        #expect(MachineNavigation.path(selected: workstation.id.uuidString, in: hosts) == [workstation.id])
         // A machine that has been removed cannot be open.
         #expect(MachineNavigation.path(selected: UUID().uuidString, in: hosts) == [])
         #expect(MachineNavigation.path(selected: "not-a-uuid", in: hosts) == [])
 
-        #expect(MachineNavigation.stored(path: [plato.id]) == plato.id.uuidString)
+        #expect(MachineNavigation.stored(path: [workstation.id]) == workstation.id.uuidString)
         // Back empties it, which is what deselects the sidebar's machine row.
         #expect(MachineNavigation.stored(path: []) == "")
     }
 
     @Test func theUATHookLandsOnTheOverviewOrOnOneMachinesPage() {
-        let plato = host("plato")
-        let hosts = [plato, host("hal9000")]
+        let workstation = host("workstation")
+        let hosts = [workstation, host("hal9000")]
 
         #expect(MachineLaunch.resolve(destination: "machines", machine: nil, in: hosts)
             == .overview)
-        #expect(MachineLaunch.resolve(destination: "machines", machine: "PLATO", in: hosts)
-            == .machine(plato.id))
+        #expect(MachineLaunch.resolve(destination: "machines", machine: "WORKSTATION", in: hosts)
+            == .machine(workstation.id))
         // A name matching nothing is the overview, never some other machine.
         #expect(MachineLaunch.resolve(destination: "machines", machine: "zeus", in: hosts)
             == .overview)
@@ -146,7 +146,7 @@ struct MachineFleetTests {
             == .overview)
         // Another destination -- or none -- says nothing about this one, so
         // what was open stays open.
-        #expect(MachineLaunch.resolve(destination: "library", machine: "plato", in: hosts)
+        #expect(MachineLaunch.resolve(destination: "library", machine: "workstation", in: hosts)
             == .unchanged)
         #expect(MachineLaunch.resolve(destination: nil, machine: nil, in: hosts) == .unchanged)
     }

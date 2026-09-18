@@ -3,7 +3,7 @@ import Testing
 
 @testable import MoldClient
 
-// Fixtures captured read-only from plato (100.105.134.43:7680, mold 0.29.0)
+// Fixtures captured read-only from workstation (100.105.134.43:7680, mold 0.29.0)
 // on 2026-09-16, `GET /api/models` -> each model's `generation_profile`.
 // `recipe-ltx2.json` is trimmed to the `auto`, `t2a` and `ic-lora` recipes,
 // the three that differ; `recipe-wan.json` is `wan22-t2v-a14b:q8`, a

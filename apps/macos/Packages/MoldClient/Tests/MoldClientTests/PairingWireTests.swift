@@ -34,7 +34,7 @@ import Testing
 /// so it is NOT the gate -- the gate trap this app must not fall into.
 @Test func aKeylessMachineHasNothingToPair() throws {
     let clients = try MoldJSON.decoder.decode(
-        PairedClients.self, from: RepoFixtures.fixture("pairing-clients-plato.json"))
+        PairedClients.self, from: RepoFixtures.fixture("pairing-clients-workstation.json"))
     #expect(!clients.authRequired)
     #expect(clients.pairingAvailable)
     #expect(!clients.canPair)

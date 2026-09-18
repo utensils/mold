@@ -120,7 +120,7 @@ struct MachineCardTests {
         #expect(card.work == nil)
         // The address stands whatever the machine is doing: it is how you
         // recognise the card, not a reading taken from it.
-        #expect(card.address.contains("plato"))
+        #expect(card.address.contains("workstation"))
     }
 
     /// Checking is a machine we already know being asked again. Blanking its
@@ -185,7 +185,7 @@ struct MachineCardTests {
     /// The address is derived from the name so a card's own address line can
     /// be recognised -- spaces squeezed out, because a machine may be called
     /// "GPU 10" and that is not a hostname.
-    private func host(_ name: String = "plato") -> MoldHost {
+    private func host(_ name: String = "workstation") -> MoldHost {
         let address = name.replacingOccurrences(of: " ", with: "-").lowercased()
         return MoldHost(name: name, baseURL: URL(string: "http://\(address).local:7680")!)
     }
@@ -204,7 +204,7 @@ struct MachineCardTests {
             .map { #"{"ordinal": \#($0.offset), "name": "\#($0.element)"}"# }
             .joined(separator: ",")
         let json = """
-        {"version": "0.29.0", "hostname": "plato", "busy": false, "uptime_secs": 10,
+        {"version": "0.29.0", "hostname": "workstation", "busy": false, "uptime_secs": 10,
          "gpus": [\(rows)]}
         """
         return try! MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))
@@ -232,7 +232,7 @@ struct MachineCardTests {
             """#
         }.joined(separator: ",")
         let json = #"""
-        {"hostname": "plato", "gpus": [\#(rows)],
+        {"hostname": "workstation", "gpus": [\#(rows)],
          "system_ram": {"total": \#(ramTotal), "used": \#(ramUsed), "used_by_mold": 0}}
         """#
         return try! MoldJSON.decoder.decode(ResourceSnapshot.self, from: Data(json.utf8))

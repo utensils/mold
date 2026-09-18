@@ -12,7 +12,7 @@ import Testing
 /// never disturbs what is already on screen.
 @MainActor
 struct RunQueueTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -28,21 +28,21 @@ struct RunQueueTests {
     // MARK: - Admitting a second batch while one runs
 
     @Test func aSecondGenerateWhileOneRunsIsAdmittedAndQueued() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         let first = FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         let second = FakeFixtures.batchStatus(id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])
         backend.submitAnswers = [first, second]
         // Stays unsettled once `follow()`'s one-shot fallback read lands.
         backend.batchStatusAnswers["batch-1"] = first
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         // `run = .submitting` is set synchronously, before either `Task`
         // has run -- so this holds true no matter how the two `Task`s
         // launched below later interleave.
         #expect(controller.run.isBusy)
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
 
         // Settled on the STATE the assertions read, not on a call count: the
         // fake records `submit` before the controller has adopted its answer,
@@ -58,9 +58,9 @@ struct RunQueueTests {
     // MARK: - Advancing the queue
 
     @Test func theNextQueuedBatchIsFollowedWhenTheFirstSettles() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         let first = FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         let second = FakeFixtures.batchStatus(id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])
         backend.submitAnswers = [first, second]
@@ -69,9 +69,9 @@ struct RunQueueTests {
         // `submit` below has had a chance to land in `queued`.
         backend.batchEventsHeldOpen.insert("batch-1")
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchEvents") }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
 
         let settled = FakeFixtures.batchStatus(
@@ -90,17 +90,17 @@ struct RunQueueTests {
     }
 
     @Test func stopMovesOnToTheNextQueuedBatch() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         let first = FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         let second = FakeFixtures.batchStatus(id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])
         backend.submitAnswers = [first, second]
         backend.batchStatusAnswers["batch-1"] = first
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchStatus") }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
 
         controller.stop()
@@ -111,20 +111,20 @@ struct RunQueueTests {
     }
 
     @Test func stopAllCancelsEverythingThisPaneAdmitted() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         let first = FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         let second = FakeFixtures.batchStatus(id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])
         let third = FakeFixtures.batchStatus(id: "batch-3", clientBatchId: "client-3", [.init(1, state: "running")])
         backend.submitAnswers = [first, second, third]
         backend.batchStatusAnswers["batch-1"] = first
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchStatus") }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 2 }
 
         controller.stopAll()

@@ -8,7 +8,7 @@ import Testing
 /// asked for, offered back as a starting point and never as a full restore.
 @MainActor
 struct RecentTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -45,18 +45,18 @@ struct RecentTests {
     // MARK: - Clearing asks first
 
     @Test func clearingAsksFirst() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.historyRows = [HistoryEntry(prompt: "a cat", model: "flux-dev:q8", usedAt: 1)]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let history = PromptHistoryStore(hosts: hosts)
-        await history.refresh(on: plato.id)
+        await history.refresh(on: workstation.id)
 
-        let destruction = RecentGroup.clearDestruction(machine: plato.name) {
-            Task { await history.clear(on: plato.id) }
+        let destruction = RecentGroup.clearDestruction(machine: workstation.name) {
+            Task { await history.clear(on: workstation.id) }
         }
 
-        #expect(destruction.title == "Clear the prompt history on plato?")
+        #expect(destruction.title == "Clear the prompt history on workstation?")
         #expect(destruction.verb == "Clear")
         #expect(backend.callCount("clearHistory") == 0)
 
@@ -68,21 +68,21 @@ struct RecentTests {
     // MARK: - Per machine
 
     @Test func aRecentRowFromAnotherMachineIsNotOfferedForThisOne() async {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let hal = machine("hal9000")
-        let platoBackend = FakeBackend(host: plato)
-        platoBackend.historyRows = [HistoryEntry(prompt: "a brass gear", model: "flux-dev:q8", usedAt: 1)]
+        let workstationBackend = FakeBackend(host: workstation)
+        workstationBackend.historyRows = [HistoryEntry(prompt: "a brass gear", model: "flux-dev:q8", usedAt: 1)]
         let halBackend = FakeBackend(host: hal)
         halBackend.historyRows = [HistoryEntry(prompt: "a glowing orb", model: "flux2-dev:q8", usedAt: 2)]
-        let hosts = HostStore(hosts: [plato, hal]) { host in
-            host.id == plato.id ? platoBackend : halBackend
+        let hosts = HostStore(hosts: [workstation, hal]) { host in
+            host.id == workstation.id ? workstationBackend : halBackend
         }
         let history = PromptHistoryStore(hosts: hosts)
 
-        await history.refresh(on: plato.id)
+        await history.refresh(on: workstation.id)
         await history.refresh(on: hal.id)
 
-        #expect(history.entries(on: plato.id).map(\.prompt) == ["a brass gear"])
+        #expect(history.entries(on: workstation.id).map(\.prompt) == ["a brass gear"])
         #expect(history.entries(on: hal.id).map(\.prompt) == ["a glowing orb"])
     }
 

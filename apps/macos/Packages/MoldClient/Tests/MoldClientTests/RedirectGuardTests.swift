@@ -13,7 +13,7 @@ import MoldClient
 // misconfigured proxy in front of a host can therefore harvest the operator
 // key with a single 302.
 
-private let origin = URL(string: "http://plato:7680")!
+private let origin = URL(string: "http://workstation:7680")!
 
 private func redirected(to target: String) -> URLRequest? {
     var request = URLRequest(url: URL(string: target)!)
@@ -34,10 +34,10 @@ private func redirected(to target: String) -> URLRequest? {
 }
 
 /// A different SCHEME or PORT is a different origin, whatever the hostname
-/// says -- `https://plato` is not `http://plato:7680`.
+/// says -- `https://workstation` is not `http://workstation:7680`.
 @Test func aDifferentSchemeOrPortIsADifferentOrigin() throws {
-    for target in ["https://plato:7680/api/status", "http://plato:9999/api/status",
-                   "http://plato/api/status"] {
+    for target in ["https://workstation:7680/api/status", "http://workstation:9999/api/status",
+                   "http://workstation/api/status"] {
         let request = try #require(redirected(to: target))
         #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil, "\(target)")
     }
@@ -47,7 +47,7 @@ private func redirected(to target: String) -> URLRequest? {
 /// a trailing slash, a host redirecting `/api/x` to `/api/x/` -- and dropping
 /// the key there would break every keyed host behind one.
 @Test func aRedirectWithinTheMachineKeepsTheKey() throws {
-    for target in ["http://plato:7680/api/status/", "http://PLATO:7680/api/status"] {
+    for target in ["http://workstation:7680/api/status/", "http://WORKSTATION:7680/api/status"] {
         let request = try #require(redirected(to: target))
         #expect(request.value(forHTTPHeaderField: "X-Api-Key") == "secret", "\(target)")
     }
@@ -77,7 +77,7 @@ private func redirected(to target: String) -> URLRequest? {
 /// is the whole call-site form, compiled from outside the module: one
 /// argument on the request the caller already makes.
 @Test func anyCallerThatSetsTheKeyCanAttachTheGuard() async throws {
-    let host = MoldHost(name: "plato", baseURL: origin, apiKey: "secret")
+    let host = MoldHost(name: "workstation", baseURL: origin, apiKey: "secret")
     var request = URLRequest(url: origin.appending(path: "/api/gallery/thumbnail/a.png"))
     request.setValue(host.apiKey, forHTTPHeaderField: RedirectGuard.keyHeader)
 

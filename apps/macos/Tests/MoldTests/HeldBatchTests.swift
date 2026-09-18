@@ -13,7 +13,7 @@ import Testing
 @MainActor
 struct HeldBatchTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
@@ -29,10 +29,10 @@ struct HeldBatchTests {
 
     /// **Fails today**: recovery follows anything unsettled, a hold included.
     @Test func aHeldBatchIsNotReattachedAtLaunch() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
-        PendingBatch.remember("client-held", host: plato.id)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
+        PendingBatch.remember("client-held", host: workstation.id)
         backend.batchStatusByClientId["client-held"] = FakeFixtures.batchStatus(
             id: "batch-held", clientBatchId: "client-held", [.init(1, state: "held", error: reason)])
 
@@ -46,14 +46,14 @@ struct HeldBatchTests {
 
     /// **Fails today**: the follow loop only ends on a settled frame.
     @Test func aFollowedBatchThatGoesOnHoldStopsSpinningAndPointsAtTheQueue() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [FakeFixtures.batchStatus(
             id: "batch-1", clientBatchId: "client-1", [.init(1, state: "accepted")])]
         backend.batchEventsHeldOpen = ["batch-1"]
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.batchEventsContinuations["batch-1"] != nil }
         backend.emitBatchEvent(FakeFixtures.batchStatus(
             id: "batch-1", clientBatchId: "client-1", [.init(1, state: "held", error: reason)]), for: "batch-1")

@@ -14,13 +14,13 @@ struct PeerActionTests {
     private let noInstanceKnown: (String) -> Bool = { _ in false }
 
     @Test func aPeerWeAlreadyTalkToAtAnotherAddressIsNotOffered() {
-        let peer = FakeFixtures.discoveryPeer("plato", url: "http://10.0.0.9:7680", instanceId: "abc-123")
+        let peer = FakeFixtures.discoveryPeer("workstation", url: "http://10.0.0.9:7680", instanceId: "abc-123")
         let action = PeerAction.resolve(peer, known: noneKnown, knownInstance: { $0 == "abc-123" })
         #expect(action == .skip)
     }
 
     @Test func aPeerAtAnOriginWeAlreadyHaveIsNotOffered() {
-        let peer = FakeFixtures.discoveryPeer("plato", url: "http://plato:7680")
+        let peer = FakeFixtures.discoveryPeer("workstation", url: "http://workstation:7680")
         let action = PeerAction.resolve(peer, known: { _ in true }, knownInstance: noInstanceKnown)
         #expect(action == .skip)
     }
@@ -32,7 +32,7 @@ struct PeerActionTests {
     }
 
     @Test func aPeerThatWantsAKeyOpensTheEditorRatherThanBeingAddedSilently() {
-        let locked = FakeFixtures.discoveryPeer("plato", url: "http://plato:7680", authRequired: true)
+        let locked = FakeFixtures.discoveryPeer("workstation", url: "http://workstation:7680", authRequired: true)
         let open = FakeFixtures.discoveryPeer("bender", url: "http://bender:7680", authRequired: false)
 
         guard case let .edit(name, address) = PeerAction.resolve(locked, known: noneKnown, knownInstance: noInstanceKnown)
@@ -40,8 +40,8 @@ struct PeerActionTests {
             Issue.record("expected .edit for a peer that requires a key")
             return
         }
-        #expect(name == "plato")
-        #expect(address == "plato:7680")
+        #expect(name == "workstation")
+        #expect(address == "workstation:7680")
 
         guard case let .add(name2, url2) = PeerAction.resolve(open, known: noneKnown, knownInstance: noInstanceKnown)
         else {

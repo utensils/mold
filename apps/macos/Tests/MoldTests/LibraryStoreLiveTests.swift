@@ -16,7 +16,7 @@ struct LibraryStoreLiveTests {
     }
 
     @Test func aPrintLandingDuringOneOfOurEditsStillAppears() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         let hosts = HostStore(hosts: [machine]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
@@ -38,7 +38,7 @@ struct LibraryStoreLiveTests {
     /// The echo itself is still skipped: the star is already on screen, and
     /// re-applying it would be a wasted round trip.
     @Test func theMachineEchoingOurOwnEditBackIsStillSkipped() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         let hosts = HostStore(hosts: [machine]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
@@ -62,7 +62,7 @@ struct LibraryStoreLiveTests {
     /// returns, and the running task never looks at the outbox again: the star
     /// sits on screen forever and never reaches the machine.
     @Test func anEditMadeDuringTheTrailingRelistStillReachesTheMachine() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("star.png"), FakeFixtures.print("second.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }
@@ -91,7 +91,7 @@ struct LibraryStoreLiveTests {
     /// composed before -- is discarded, and nothing re-lists again. Only ⌘R
     /// brings it back.
     @Test func aPrintLandingDuringARelistSurvivesIt() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("old.png")]
         fake.delays["gallery"] = .milliseconds(150)
@@ -118,7 +118,7 @@ struct LibraryStoreLiveTests {
     /// The other half of the same rule: a row the machine says is GONE stays
     /// gone. Only a row that arrived after we asked is carried over.
     @Test func aRelistStillDropsWhatTheMachineNoLongerLists() async {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("kept.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }
@@ -137,7 +137,7 @@ struct LibraryStoreLiveTests {
     /// editing that row. Once our chain is settled, that is the only thing it
     /// could still have been saying, so the machine is read again.
     @Test func aMachineWhoseFrameWasSkippedIsReadAgainOnceTheChainDrains() async throws {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("star.png")]
         let hosts = HostStore(hosts: [machine]) { _ in fake }

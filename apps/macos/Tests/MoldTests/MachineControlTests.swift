@@ -15,40 +15,40 @@ struct MachineControlTests {
     }
 
     @Test func aDownMachineIsLeftOut() {
-        let plato = host("plato")
+        let workstation = host("workstation")
         let rows = MachineControl.rows(
-            hosts: [plato], chosen: nil, preferred: nil,
+            hosts: [workstation], chosen: nil, preferred: nil,
             isUp: { _ in false }, generates: { _ in true }
         )
         #expect(rows.machines.isEmpty)
     }
 
     @Test func aMachineThatIsUpButDoesNotGenerateIsLeftOut() {
-        let plato = host("plato")
+        let workstation = host("workstation")
         let rows = MachineControl.rows(
-            hosts: [plato], chosen: nil, preferred: nil,
+            hosts: [workstation], chosen: nil, preferred: nil,
             isUp: { _ in true }, generates: { _ in false }
         )
         #expect(rows.machines.isEmpty)
     }
 
     @Test func theChosenMachineIsListedEvenWhenDown() {
-        let plato = host("plato")
+        let workstation = host("workstation")
         let rows = MachineControl.rows(
-            hosts: [plato], chosen: plato.id, preferred: nil,
+            hosts: [workstation], chosen: workstation.id, preferred: nil,
             isUp: { _ in false }, generates: { _ in false }
         )
-        #expect(rows.machines.map(\.id) == [plato.id])
-        #expect(rows.machines.first?.caption == "plato — can't be reached")
+        #expect(rows.machines.map(\.id) == [workstation.id])
+        #expect(rows.machines.first?.caption == "workstation — can't be reached")
     }
 
     @Test func labelNamesAutosPreferredMachine() {
-        let plato = host("plato")
+        let workstation = host("workstation")
         let rows = MachineControl.rows(
-            hosts: [plato], chosen: nil, preferred: plato,
+            hosts: [workstation], chosen: nil, preferred: workstation,
             isUp: { _ in true }, generates: { _ in true }
         )
-        #expect(rows.label == "Auto · plato")
+        #expect(rows.label == "Auto · workstation")
     }
 
     @Test func labelIsPlainAutoWithNoPreferredMachine() {
@@ -59,10 +59,10 @@ struct MachineControlTests {
     }
 
     @Test func labelNamesTheChosenMachine() {
-        let plato = host("plato")
+        let workstation = host("workstation")
         let hal9000 = host("hal9000")
         let rows = MachineControl.rows(
-            hosts: [plato, hal9000], chosen: hal9000.id, preferred: plato,
+            hosts: [workstation, hal9000], chosen: hal9000.id, preferred: workstation,
             isUp: { _ in true }, generates: { _ in true }
         )
         #expect(rows.label == "hal9000")

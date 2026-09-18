@@ -22,7 +22,7 @@ struct SidebarRowsTests {
     }
 
     private func machineID() -> MoldHost.ID {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!).id
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!).id
     }
 
     /// **Fails today**: the first section is `Destination.allCases`, so

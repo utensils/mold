@@ -50,18 +50,18 @@ struct ReuseTests {
     // MARK: - Asking every machine
 
     @Test func asksEveryKnownCopyAndKeepsTheOneThatCanActuallyHandItOver() async {
-        let plato = machine("plato"), hal = machine("hal")
-        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
+        let workstation = machine("workstation"), hal = machine("hal")
+        let onWorkstation = FakeBackend(host: workstation), onHal = FakeBackend(host: hal)
         // The mirror lists the print but holds no private archive for it.
-        onPlato.retainedInventories["a.png"] =
+        onWorkstation.retainedInventories["a.png"] =
             RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
         onHal.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
             availability: .available, members: [member()])
-        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? onWorkstation : onHal }
         let store = ReuseStore(hosts: hosts)
 
         let fence = store.begin()
-        await store.probe([PrintID(host: plato.id, filename: "a.png"),
+        await store.probe([PrintID(host: workstation.id, filename: "a.png"),
                            PrintID(host: hal.id, filename: "a.png")],
                           fence: fence, disclosing: conditioned())
 
@@ -69,22 +69,22 @@ struct ReuseTests {
         #expect(store.authority?.members.count == 1)
         // Both were asked: stopping at the first blank is how a mirror hides
         // the machine that actually made the print.
-        #expect(onPlato.retainedInventoryRequests == ["a.png"])
+        #expect(onWorkstation.retainedInventoryRequests == ["a.png"])
         #expect(onHal.retainedInventoryRequests == ["a.png"])
         #expect(store.notice == nil)
     }
 
     @Test func prefersAConcreteFailureOverAMirrorsBlank() async {
-        let plato = machine("plato"), hal = machine("hal")
-        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
-        onPlato.retainedInventories["a.png"] =
+        let workstation = machine("workstation"), hal = machine("hal")
+        let onWorkstation = FakeBackend(host: workstation), onHal = FakeBackend(host: hal)
+        onWorkstation.retainedInventories["a.png"] =
             RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
         onHal.retainedInventories["a.png"] =
             RetainedSourceMedia.Inventory(availability: .unavailableAuth)
-        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? onWorkstation : onHal }
         let store = ReuseStore(hosts: hosts)
 
-        await store.probe([PrintID(host: plato.id, filename: "a.png"),
+        await store.probe([PrintID(host: workstation.id, filename: "a.png"),
                            PrintID(host: hal.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
 
@@ -98,17 +98,17 @@ struct ReuseTests {
     /// nil -- so a newer machine on the fleet silences the sentence a machine
     /// that answered plainly had already earned.
     @Test func aStateThisBuildCannotNameNeverErasesAConcreteAnswer() async {
-        let plato = machine("plato"), hal = machine("hal")
-        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
-        onPlato.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
+        let workstation = machine("workstation"), hal = machine("hal")
+        let onWorkstation = FakeBackend(host: workstation), onHal = FakeBackend(host: hal)
+        onWorkstation.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
             availability: .unavailableMissingOrCorrupt)
         onHal.retainedInventories["a.png"] = try! MoldJSON.decoder.decode(
             RetainedSourceMedia.Inventory.self,
             from: Data(#"{"availability":"unavailable_quarantined"}"#.utf8))
-        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? onWorkstation : onHal }
         let store = ReuseStore(hosts: hosts)
 
-        await store.probe([PrintID(host: plato.id, filename: "a.png"),
+        await store.probe([PrintID(host: workstation.id, filename: "a.png"),
                            PrintID(host: hal.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
 
@@ -118,16 +118,16 @@ struct ReuseTests {
     }
 
     @Test func oneUnreachableCopyNeverHidesAReachableArchive() async {
-        let plato = machine("plato"), hal = machine("hal")
-        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
+        let workstation = machine("workstation"), hal = machine("hal")
+        let onWorkstation = FakeBackend(host: workstation), onHal = FakeBackend(host: hal)
         // Nothing planted: the fake throws, exactly as an unreachable machine
         // would.
         onHal.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
             availability: .available, members: [member()])
-        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? onWorkstation : onHal }
         let store = ReuseStore(hosts: hosts)
 
-        await store.probe([PrintID(host: plato.id, filename: "a.png"),
+        await store.probe([PrintID(host: workstation.id, filename: "a.png"),
                            PrintID(host: hal.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
 
@@ -137,14 +137,14 @@ struct ReuseTests {
 
     /// The rule that keeps a picture that never had a source quiet.
     @Test func aTextToImagePrintIsToldNothingAtAll() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedInventories["a.png"] =
             RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
 
-        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+        await store.probe([PrintID(host: workstation.id, filename: "a.png")],
                           fence: store.begin(), disclosing: plain())
 
         // Asked anyway -- the server is the only authority on what it kept.
@@ -156,16 +156,16 @@ struct ReuseTests {
     /// answer describes a print nobody is looking at, and installing it would
     /// hydrate the new render from the old print's archive.
     @Test func aSecondReuseWinsOverAProbeStillInFlight() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedInventories["old.png"] = RetainedSourceMedia.Inventory(
             availability: .available, members: [member()])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
 
         let stale = store.begin()
         _ = store.begin()  // a second Use These Settings
-        await store.probe([PrintID(host: plato.id, filename: "old.png")],
+        await store.probe([PrintID(host: workstation.id, filename: "old.png")],
                           fence: stale, disclosing: conditioned())
 
         #expect(store.authority == nil)
@@ -189,13 +189,13 @@ struct ReuseTests {
     /// hydrates A's picture into a render that has nothing to do with it,
     /// with nothing on screen having said so.
     @Test func aDraftThatHasMovedOnNoLongerCarriesThePrintsPicture() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
         var draft = RenderDraft()
         draft.prompt = "the print's own prompt"
-        await armed(store, backend: backend, host: plato, draft: draft)
+        await armed(store, backend: backend, host: workstation, draft: draft)
         #expect(store.pending(for: draft) != nil)
 
         draft.prompt = "something else entirely"
@@ -208,12 +208,12 @@ struct ReuseTests {
     /// **Fails today**: the authority outlives the render that used it, so
     /// every later Develop silently conditions on the same print.
     @Test func theSubmitThatTakesTheAuthorityIsTheLastOneToHaveIt() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
         let draft = RenderDraft()
-        await armed(store, backend: backend, host: plato, draft: draft)
+        await armed(store, backend: backend, host: workstation, draft: draft)
 
         #expect(store.take(for: draft) != nil)
         #expect(store.take(for: draft) == nil)
@@ -223,13 +223,13 @@ struct ReuseTests {
     /// A press with nothing pending must not bump the fence under a probe
     /// still in the air, nor wipe a sentence nobody has read yet.
     @Test func aPressWithNothingPendingDisturbsNothing() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedInventories["a.png"] =
             RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
-        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+        await store.probe([PrintID(host: workstation.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
         #expect(store.notice != nil)
 
@@ -241,12 +241,12 @@ struct ReuseTests {
     /// sleep, and EVERY later Develop fails identically -- forever, with no
     /// affordance to clear it and nothing calling `clear()`.
     @Test func aPrintTheMachineCanNoLongerHonourNeverRefusesASecondRender() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
         let draft = RenderDraft()
-        await armed(store, backend: backend, host: plato, draft: draft)
+        await armed(store, backend: backend, host: workstation, draft: draft)
 
         // The render that took it fails: nothing was planted, so the mint
         // throws exactly as a purged print's 409 would.
@@ -255,7 +255,7 @@ struct ReuseTests {
             _ = try await RetainedMedia.hydrated(
                 BatchAdmission(requests: [self.request()]),
                 with: RetainedMediaHydration(authority: taken!, hosts: hosts),
-                on: plato, backend: backend)
+                on: workstation, backend: backend)
         }
         // The next press has nothing to fail on.
         #expect(store.take(for: draft) == nil)
@@ -264,16 +264,16 @@ struct ReuseTests {
 
     /// The person can put it down themselves, from the sentence that names it.
     @Test func theAttachmentSaysWhatItIsAndCanBeRemoved() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
         let draft = RenderDraft()
-        await armed(store, backend: backend, host: plato, draft: draft)
+        await armed(store, backend: backend, host: workstation, draft: draft)
 
         let sentence = try? #require(store.attachmentSentence(for: draft))
         #expect(sentence?.contains("a.png") == true)
-        #expect(sentence?.contains("plato") == true)
+        #expect(sentence?.contains("workstation") == true)
         store.clear()
         #expect(store.attachmentSentence(for: draft) == nil)
         #expect(store.take(for: draft) == nil)
@@ -293,18 +293,18 @@ struct ReuseTests {
     /// Same machine, one child: a HANDLE. Nothing moves -- the host already
     /// holds the bytes -- and the handle is bound to the request going out.
     @Test func onTheMachineThatMadeItTheHostHydratesItself() async throws {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedSession = try MoldJSON.decoder.decode(
             RetainedSourceMedia.ReuseSession.self,
             from: Data(#"{"instance_id":"i","expires_at":9,"request_sha256":"s","session_handle":"handle-1"}"#.utf8))
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let admission = BatchAdmission(clientBatchId: "batch-1", requests: [request()])
 
         let sending = try await RetainedMedia.hydrated(
             admission,
-            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-            on: plato, backend: backend)
+            with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+            on: workstation, backend: backend)
 
         #expect(sending.retainedMediaSession == "handle-1")
         // Not a byte was downloaded.
@@ -319,22 +319,22 @@ struct ReuseTests {
 
     /// Another machine: a RELAY. A session cannot travel, so the bytes do.
     @Test func onAnotherMachineTheBytesTravelAndTheHandleDoesNot() async throws {
-        let plato = machine("plato"), hal = machine("hal")
-        let onPlato = FakeBackend(host: plato), onHal = FakeBackend(host: hal)
+        let workstation = machine("workstation"), hal = machine("hal")
+        let onWorkstation = FakeBackend(host: workstation), onHal = FakeBackend(host: hal)
         onHal.retainedMemberBytes["m1"] = Data([9, 9, 9])
-        let hosts = HostStore(hosts: [plato, hal]) { $0.id == plato.id ? onPlato : onHal }
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? onWorkstation : onHal }
 
         let sending = try await RetainedMedia.hydrated(
             BatchAdmission(clientBatchId: "batch-1", requests: [request()]),
             with: hydration(origin: hal.id, hosts: hosts, members: [member()]),
-            on: plato, backend: onPlato)
+            on: workstation, backend: onWorkstation)
 
         #expect(sending.retainedMediaSession == nil)
         #expect(sending.requests[0].sourceImage == Data([9, 9, 9]).base64EncodedString())
         // Read from the machine that HOLDS it, never from the one it is going to.
         #expect(onHal.retainedMemberRequests == ["m1"])
-        #expect(onPlato.retainedMemberRequests.isEmpty)
-        #expect(onPlato.retainedSessionRequests.isEmpty)
+        #expect(onWorkstation.retainedMemberRequests.isEmpty)
+        #expect(onWorkstation.retainedSessionRequests.isEmpty)
         #expect(sending.clientBatchId == "batch-1")
     }
 
@@ -344,15 +344,15 @@ struct ReuseTests {
     /// thing to ask for.
     @Test func aBatchOfFourTakesTheRelayEvenAtHomeAndFetchesTheBytesOnce()
         async throws {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedMemberBytes["m1"] = Data([7])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
 
         let sending = try await RetainedMedia.hydrated(
             BatchAdmission(requests: Array(repeating: request(), count: 4)),
-            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-            on: plato, backend: backend)
+            with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+            on: workstation, backend: backend)
 
         #expect(sending.retainedMediaSession == nil)
         #expect(sending.requests.count == 4)
@@ -368,8 +368,8 @@ struct ReuseTests {
     /// re-published between the probe and the submit, which is exactly the
     /// transient the 120 s TTL exists for -- kills the render outright.
     @Test func aHandleThatWentStaleIsMintedOnceMore() async throws {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedSessionFailures = [
             MoldClientError.http(status: 409,
                                  code: "RETAINED_MEDIA_REUSE_ARCHIVE_CHANGED",
@@ -378,12 +378,12 @@ struct ReuseTests {
         backend.retainedSession = try MoldJSON.decoder.decode(
             RetainedSourceMedia.ReuseSession.self,
             from: Data(#"{"instance_id":"i","expires_at":9,"request_sha256":"s","session_handle":"second"}"#.utf8))
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
 
         let sending = try await RetainedMedia.hydrated(
             BatchAdmission(requests: [request()]),
-            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-            on: plato, backend: backend)
+            with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+            on: workstation, backend: backend)
 
         #expect(sending.retainedMediaSession == "second")
         #expect(backend.retainedSessionRequests.count == 2)
@@ -392,18 +392,18 @@ struct ReuseTests {
     /// And when the second mint fails too, the bytes are on this very machine
     /// -- so carry them rather than refuse a render it can obviously make.
     @Test func aSessionThatKeepsFailingFallsBackToTheBytes() async throws {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         let stale = MoldClientError.http(
             status: 409, code: "RETAINED_MEDIA_REUSE_ARCHIVE_CHANGED", message: nil)
         backend.retainedSessionFailures = [stale, stale]
         backend.retainedMemberBytes["m1"] = Data([5])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
 
         let sending = try await RetainedMedia.hydrated(
             BatchAdmission(requests: [request()]),
-            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-            on: plato, backend: backend)
+            with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+            on: workstation, backend: backend)
 
         #expect(sending.retainedMediaSession == nil)
         #expect(sending.requests[0].sourceImage == Data([5]).base64EncodedString())
@@ -413,21 +413,21 @@ struct ReuseTests {
     /// reaches the pane as this app's sentence with the way forward in it --
     /// never the host's own API prose.
     @Test func aSettledRefusalIsSaidOnceInThisAppsWords() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedSessionFailures = [
             MoldClientError.http(
                 status: 409, code: "RETAINED_SOURCE_MEDIA_UNAVAILABLE",
                 message: "retained source media is unavailable"),
         ]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
 
         var said: String?
         do {
             _ = try await RetainedMedia.hydrated(
                 BatchAdmission(requests: [request()]),
-                with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-                on: plato, backend: backend)
+                with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+                on: workstation, backend: backend)
         } catch {
             said = error.sentence
         }
@@ -443,16 +443,16 @@ struct ReuseTests {
     /// asked for at all -- so the host's own target-conflict refusal can never
     /// fire for something this client chose to send.
     @Test func aPictureSomebodyAttachedThemselvesIsNeverOverwritten() async throws {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         var mine = request()
         mine.sourceImage = "MINE"
 
         let sending = try await RetainedMedia.hydrated(
             BatchAdmission(requests: [mine]),
-            with: hydration(origin: plato.id, hosts: hosts, members: [member()]),
-            on: plato, backend: backend)
+            with: hydration(origin: workstation.id, hosts: hosts, members: [member()]),
+            on: workstation, backend: backend)
 
         #expect(sending.requests[0].sourceImage == "MINE")
         #expect(sending.retainedMediaSession == nil)
@@ -465,18 +465,18 @@ struct ReuseTests {
     /// hydrated from the archive. That is SAID rather than rendered without
     /// the picture it was supposed to start from.
     @Test func aLongClipSaysWhatThatRouteCannotBringBack() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
             availability: .available, members: [member()])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
 
         // Nothing held yet: a chain with no retained print says nothing.
         store.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: request())
         #expect(store.notice == nil)
 
-        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+        await store.probe([PrintID(host: workstation.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
         #expect(store.authority != nil)
         // An ordinary render still says nothing -- it CAN carry the media.
@@ -491,12 +491,12 @@ struct ReuseTests {
     /// the app only says so. The chain door redeems no session, but the chain
     /// WIRE carries the bytes per stage, so the picture belongs in the well.
     @Test func aLongClipReusedFromAPrintGetsItsPictureInTheWell() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedMemberBytes["m1"] = Data([3, 1, 4])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let authority = ReuseStore.Authority(
-            filename: "a.mp4", origin: plato.id, members: [member()])
+            filename: "a.mp4", origin: workstation.id, members: [member()])
 
         var draft = RenderDraft()
         let wanted = ChainRetainedSource.member(of: authority, forHydrating: request())
@@ -536,13 +536,13 @@ struct ReuseTests {
     /// long clip whose source you attached BY HAND is still told to attach
     /// one. Nothing would have been hydrated -- there is nothing to say.
     @Test func aLongClipWithAPictureAlreadyAttachedIsToldNothing() async {
-        let plato = machine("plato")
-        let backend = FakeBackend(host: plato)
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
         backend.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
             availability: .available, members: [member()])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ReuseStore(hosts: hosts)
-        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+        await store.probe([PrintID(host: workstation.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
 
         var mine = request()

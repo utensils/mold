@@ -3,7 +3,7 @@ import MoldClient
 
 /// What each machine can render with.
 ///
-/// Models are per host, not merged: a model installed on plato is not
+/// Models are per host, not merged: a model installed on workstation is not
 /// available on hal9000, and offering it would produce a request that host
 /// must refuse.
 @MainActor

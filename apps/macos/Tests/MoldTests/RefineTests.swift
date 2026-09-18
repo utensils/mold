@@ -121,29 +121,29 @@ struct RefineTests {
         #expect(request.controlScale == 0)
     }
 
-    /// The family filter, against a real capture from plato (fact 3 in the
+    /// The family filter, against a real capture from workstation (fact 3 in the
     /// M4 design): three ControlNet manifests, none installed, and one
     /// installed upscaler that must never show up in the adapter picker.
     @Test func anInstalledUpscalerIsNotOfferedAsAControlModel() throws {
-        let models = try Self.loadPlatoModels()
+        let models = try Self.loadWorkstationModels()
         let control = adapterControl(#"{"mode": "adjustable", "max_count": 1, "reason": null}"#)
         guard case .needsAdapter = ControlNetRow.resolve(control: control, models: models) else {
-            Issue.record("expected .needsAdapter -- every controlnet manifest on plato is downloaded:false")
+            Issue.record("expected .needsAdapter -- every controlnet manifest on workstation is downloaded:false")
             return
         }
     }
 
-    /// `models-plato.json` is trimmed from a live `GET /api/models` capture
+    /// `models-workstation.json` is trimmed from a live `GET /api/models` capture
     /// (fact 3 in the M4 design). The app test bundle cannot see MoldClient's
     /// own `RepoFixtures`/resource bundle, so this loads the same file
     /// `FakeFixtures.configListing` does -- by a path relative to this file.
-    private static func loadPlatoModels() throws -> [Model] {
+    private static func loadWorkstationModels() throws -> [Model] {
         let fixtures = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
             .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
-        let data = try Data(contentsOf: fixtures.appending(path: "models-plato.json"))
+        let data = try Data(contentsOf: fixtures.appending(path: "models-workstation.json"))
         return try MoldJSON.decoder.decode([Model].self, from: data)
     }
 }

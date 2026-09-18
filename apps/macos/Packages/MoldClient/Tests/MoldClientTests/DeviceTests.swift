@@ -3,13 +3,13 @@ import Testing
 
 @testable import MoldClient
 
-/// `GET /api/devices`, decoded from real payloads -- plato's four L40S cards,
+/// `GET /api/devices`, decoded from real payloads -- workstation's four L40S cards,
 /// hal9000's single 4090, and this Mac's own embedded Metal engine.
 @Suite struct DeviceSuite {
 
-    @Test func decodesPlatosFourCardsWithTheirOpaqueIdentitiesIntact() throws {
+    @Test func decodesWorkstationsFourCardsWithTheirOpaqueIdentitiesIntact() throws {
         let state = try MoldJSON.decoder.decode(
-            DeviceState.self, from: RepoFixtures.fixture("devices-plato.json"))
+            DeviceState.self, from: RepoFixtures.fixture("devices-workstation.json"))
 
         #expect(state.devices.count == 4)
         for device in state.devices { #expect(device.id.hasPrefix("cuda:")) }

@@ -9,7 +9,7 @@ import Testing
 /// a query -- pure, so the sheet's grid needs no store to test.
 @MainActor
 struct LibraryPickerTests {
-    private func host(_ name: String = "plato") -> MoldHost {
+    private func host(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 

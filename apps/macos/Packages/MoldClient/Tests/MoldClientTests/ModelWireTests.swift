@@ -4,11 +4,11 @@ import Testing
 @testable import MoldClient
 
 // M5 S1b: the models/catalog/downloads wire. Fixtures captured by GET
-// against plato (`100.105.134.43:7680`) on 2026-09-17, plus one synthetic
-// listing for the one state plato itself cannot show.
+// against workstation (`100.105.134.43:7680`) on 2026-09-17, plus one synthetic
+// listing for the one state workstation itself cannot show.
 
-private func platoModels() throws -> [Model] {
-    try MoldJSON.decoder.decode([Model].self, from: RepoFixtures.fixture("models-plato.json"))
+private func workstationModels() throws -> [Model] {
+    try MoldJSON.decoder.decode([Model].self, from: RepoFixtures.fixture("models-workstation.json"))
 }
 
 private func repairModels() throws -> [Model] {
@@ -29,8 +29,8 @@ private func repairModels() throws -> [Model] {
 }
 
 @Test func aModelNobodyHasStartedIsAvailableNotBroken() throws {
-    // Not downloaded on plato, with its whole size outstanding.
-    let schnell = try #require(platoModels().first { $0.name == "flux-schnell:bf16" })
+    // Not downloaded on workstation, with its whole size outstanding.
+    let schnell = try #require(workstationModels().first { $0.name == "flux-schnell:bf16" })
     guard case let .available(bytes) = schnell.installState else {
         Issue.record("expected .available, got \(schnell.installState)")
         return
@@ -39,7 +39,7 @@ private func repairModels() throws -> [Model] {
 }
 
 @Test func anInstalledRowReportsItsOwnBytesAndAnAvailableOneReportsNone() throws {
-    let models = try platoModels()
+    let models = try workstationModels()
     let installed = try #require(models.first { $0.name == "flux-schnell:q8" })
     #expect(installed.diskUsageBytes == 23_061_759_552)
     #expect(installed.installState == .installed)
@@ -54,7 +54,7 @@ private func repairModels() throws -> [Model] {
 /// must decode and keep every row regardless (design fact 5, M5): the
 /// Installed table is a management surface, not a generator picker.
 @Test func everyInstalledFamilySurvivesTheListing() throws {
-    let models = try platoModels()
+    let models = try workstationModels()
     let upscaler = try #require(models.first { $0.name == "real-esrgan-x4plus:fp16" })
     #expect(upscaler.installState == .installed)
     #expect(upscaler.isUpscaler)
@@ -153,7 +153,7 @@ private func repairModels() throws -> [Model] {
 /// masked form is the only version of it that ever leaves the machine.
 @Test func aMaskedTokenIsTheOnlyFormThatEverArrives() throws {
     let status = try MoldJSON.decoder.decode(
-        CatalogCredentialStatus.self, from: RepoFixtures.fixture("credentials-plato.json"))
+        CatalogCredentialStatus.self, from: RepoFixtures.fixture("credentials-workstation.json"))
     #expect(status.hf.configured)
     #expect(status.hf.isFromEnvironment)
     #expect(status.hf.masked == "hf_\u{2022}\u{2022}\u{2022}\u{2022}hhml")

@@ -124,7 +124,7 @@ Each is the smallest line that could be written; none reorganises the file.
 
 ## UAT — what only a human can check
 
-I cannot drive the UI. On a host with a mesh print (plato holds several):
+I cannot drive the UI. On a host with a mesh print (workstation holds several):
 
 1. **Home view == the tile.** Open a mesh in the Library. Its first frame must be
    pixel-for-pixel the gallery tile's poster — same angle, same size in frame. This

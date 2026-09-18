@@ -12,7 +12,7 @@ import Testing
 @MainActor
 struct AlsoRunningTests {
 
-    private let plato = UUID()
+    private let workstation = UUID()
 
     private func item(_ id: String, kind: String, phase: String = "running",
                       current: Int? = nil, total: Int? = nil,
@@ -28,13 +28,13 @@ struct AlsoRunningTests {
     }
 
     private func reported(_ items: [ActiveWorkItem], stale: Bool = false) -> [FleetActiveWork] {
-        items.map { FleetActiveWork(host: plato, item: $0, stale: stale, unavailableKind: false) }
+        items.map { FleetActiveWork(host: workstation, item: $0, stale: stale, unavailableKind: false) }
     }
 
     private func rows(_ items: [ActiveWorkItem], queued: Set<String> = [],
                       upscales: [(key: UpscaleStore.Key, job: VideoUpscaleJob)] = [])
         -> [AlsoRunningRow] {
-        AlsoRunning.rows(reported: reported(items), queuedIDs: [plato: queued],
+        AlsoRunning.rows(reported: reported(items), queuedIDs: [workstation: queued],
                          upscales: upscales)
     }
 
@@ -69,7 +69,7 @@ struct AlsoRunningTests {
     /// A clip upscale is in NO snapshot -- the host runs it outside the
     /// scheduler -- so this app's own following is the only place it appears.
     @Test func aClipUpscaleThisAppStartedIsARowOfItsOwn() {
-        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let key = UpscaleStore.Key(host: workstation, filename: "clip.mp4")
         let job = FakeFixtures.framewiseJob("vup-1", state: "running", done: 31, total: 124)
         let drawn = rows([], upscales: [(key: key, job: job)])
         #expect(drawn.count == 1)
@@ -91,7 +91,7 @@ struct AlsoRunningTests {
     ///
     /// **Fails today**: `AlsoRunning.rows` draws both.
     @Test func aClipUpscaleDrawsOneRowNotTwo() {
-        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let key = UpscaleStore.Key(host: workstation, filename: "clip.mp4")
         let job = FakeFixtures.framewiseJob("vup-1", state: "running", done: 31, total: 124)
         let drawn = rows([item("standalone-upscale-\(UUID())", kind: "standalone_upscale")],
                          upscales: [(key: key, job: job)])
@@ -110,7 +110,7 @@ struct AlsoRunningTests {
     /// A settled job of ours stops suppressing: the machine's row is then
     /// about something else.
     @Test func aSettledJobStopsHidingTheMachinesOwnRow() {
-        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let key = UpscaleStore.Key(host: workstation, filename: "clip.mp4")
         let done = FakeFixtures.framewiseJob("vup-1", state: "completed", done: 9, total: 9)
         let drawn = rows([item("standalone-upscale-1", kind: "standalone_upscale")],
                          upscales: [(key: key, job: done)])
@@ -126,7 +126,7 @@ struct AlsoRunningTests {
         let drawn = AlsoRunning.rows(
             reported: reported([item("standalone-upscale-1", kind: "standalone_upscale")]),
             queuedIDs: [:], upscales: [(key: key, job: job)])
-        #expect(drawn.contains { $0.host == plato && $0.title == "Upscale" })
+        #expect(drawn.contains { $0.host == workstation && $0.title == "Upscale" })
     }
 
     /// Cancel is offered only where this app can actually act. A reported row
@@ -142,7 +142,7 @@ struct AlsoRunningTests {
     /// A settled upscale keeps its row until it is dismissed: somebody who
     /// started it is owed the answer.
     @Test func aSettledUpscaleStaysUntilDismissed() {
-        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let key = UpscaleStore.Key(host: workstation, filename: "clip.mp4")
         let failed = FakeFixtures.framewiseJob(
             "vup-1", state: "failed", error: "ffprobe is required for Framewise upscale")
         let drawn = rows([], upscales: [(key: key, job: failed)])
@@ -155,7 +155,7 @@ struct AlsoRunningTests {
 
     /// A paused clip job offers Resume and not Pause.
     @Test func aPausedUpscaleOffersResume() {
-        let key = UpscaleStore.Key(host: plato, filename: "clip.mp4")
+        let key = UpscaleStore.Key(host: workstation, filename: "clip.mp4")
         let paused = FakeFixtures.framewiseJob("vup-1", state: "paused", done: 60, total: 124)
         let drawn = rows([], upscales: [(key: key, job: paused)])
         let offered = AlsoRunningActions(drawn[0]).offered().map(\.title)
@@ -169,7 +169,7 @@ struct AlsoRunningTests {
     ///
     /// **Fails today**: there is no still row.
     @Test func aStillBeingUpscaledIsARowToo() {
-        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let key = UpscaleStore.Key(host: workstation, filename: "still.png")
         let drawn = AlsoRunning.rows(reported: [], queuedIDs: [:], upscales: [],
                                      stills: [(key: key, state: .working)])
         #expect(drawn.count == 1)
@@ -184,7 +184,7 @@ struct AlsoRunningTests {
     /// And it says what it made, which is the confirmation the whole action
     /// used to lack. Then it can be dismissed.
     @Test func aFinishedStillNamesWhatItMade() {
-        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let key = UpscaleStore.Key(host: workstation, filename: "still.png")
         let drawn = AlsoRunning.rows(reported: [], queuedIDs: [:], upscales: [],
                                      stills: [(key: key, state: .done(filename: "still-4x.png"))])
         #expect(drawn[0].detail == "Complete — still-4x.png")
@@ -195,7 +195,7 @@ struct AlsoRunningTests {
     /// A working still suppresses the machine's own upscale row for the same
     /// reason a clip job does -- it is the same work, said better.
     @Test func aWorkingStillAlsoHidesTheMachinesUpscaleRow() {
-        let key = UpscaleStore.Key(host: plato, filename: "still.png")
+        let key = UpscaleStore.Key(host: workstation, filename: "still.png")
         let drawn = AlsoRunning.rows(
             reported: reported([item("standalone-upscale-1", kind: "standalone_upscale")]),
             queuedIDs: [:], upscales: [], stills: [(key: key, state: .working)])
@@ -217,8 +217,8 @@ struct AlsoRunningTests {
     @Test func upscaleRowsKeepAStableOrder() {
         let job = FakeFixtures.framewiseJob("vup", state: "running", total: 9)
         let drawn = rows([], upscales: [
-            (key: UpscaleStore.Key(host: plato, filename: "zeta.mp4"), job: job),
-            (key: UpscaleStore.Key(host: plato, filename: "alpha.mp4"), job: job),
+            (key: UpscaleStore.Key(host: workstation, filename: "zeta.mp4"), job: job),
+            (key: UpscaleStore.Key(host: workstation, filename: "alpha.mp4"), job: job),
         ])
         #expect(drawn.map(\.subject) == ["alpha.mp4", "zeta.mp4"])
     }

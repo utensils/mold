@@ -20,7 +20,7 @@ struct GenerateInspectorTests {
         #expect(FileUnderGroup.isShown(capabilities: FakeFixtures.capabilities(organize: true)) == true)
     }
 
-    /// The mesh block from the five deduplicated `output` shapes plato
+    /// The mesh block from the five deduplicated `output` shapes workstation
     /// advertises (`recipe-outputs.json`): one format and a real reason.
     @Test func aRecipeWithOneFormatShowsItsReasonInsteadOfAPicker() {
         let mesh = output("""
@@ -69,7 +69,7 @@ struct GenerateInspectorTests {
     }
 
     /// Fact 1 in the M4 design: an absent `source_image` block means the
-    /// recipe reads a still (every installed still model on plato), not "no
+    /// recipe reads a still (every installed still model on workstation), not "no
     /// source path at all" -- `PromptPanel` used to read the raw optional
     /// backwards and hid the well on every one of them.
     @Test func theSourceWellAppearsOnAStillModelWhoseRecipeOmitsTheBlock() {

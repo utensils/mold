@@ -8,7 +8,7 @@ import Testing
 /// **Fails today**: the app admitted a batch whatever the length was.
 @MainActor
 struct ChainRunTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -36,14 +36,14 @@ struct ChainRunTests {
     /// The whole sequence: created as an EPHEMERAL chain job, followed on its
     /// own stream, settling into ONE print -- never a batch.
     @Test func aLongClipBecomesOneEphemeralChainJobAndOnePrint() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-1"}"#.utf8))
         backend.chainEventsHeldOpen.insert("chain-1")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.stage == "Clip 1 of 3" }
 
         // No batch was admitted -- the two doors are different routes and a
@@ -57,7 +57,7 @@ struct ChainRunTests {
         #expect(body.motionTailFrames == 17)
         // A stitched long video is still ONE print: the id it is recovered by
         // is the CHAIN's, and it is remembered before anything is followed.
-        #expect(PendingChain.all()["chain-1"] == plato.id.uuidString)
+        #expect(PendingChain.all()["chain-1"] == workstation.id.uuidString)
 
         backend.emitChainEvent(event(#"{"type":"stage_start","stage_idx":1}"#), for: "chain-1")
         backend.emitChainEvent(
@@ -76,7 +76,7 @@ struct ChainRunTests {
             return
         }
         #expect(outcome.results.map(\.filename) == ["long.mp4"])
-        #expect(host == plato.id)
+        #expect(host == workstation.id)
         // Settled, so there is nothing left to recover on the next launch.
         #expect(PendingChain.all()["chain-1"] == nil)
     }
@@ -84,14 +84,14 @@ struct ChainRunTests {
     /// A new clip RESETS the step counter. The old one belonged to the clip
     /// before it and would read as progress that had already happened.
     @Test func aNewClipStartsItsStepCounterOver() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-2"}"#.utf8))
         backend.chainEventsHeldOpen.insert("chain-2")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.stage == "Clip 1 of 3" }
         backend.emitChainEvent(
             event(#"{"type":"denoise_step","stage_idx":0,"step":7,"total":8}"#), for: "chain-2")
@@ -105,14 +105,14 @@ struct ChainRunTests {
     /// and `DELETE /api/generation-batches/chain-1` would have 404'd while the
     /// GPU kept going.
     @Test func stopCancelsTheChainThroughItsOwnRouteAndNotTheQueue() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-3"}"#.utf8))
         backend.chainEventsHeldOpen.insert("chain-3")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.isBusy && backend.calls.contains("chainJobEvents") }
 
         controller.stop()
@@ -129,14 +129,14 @@ struct ChainRunTests {
     /// create answered, the follow started, and a render the user had stopped
     /// took the canvas and ran to completion.
     @Test func stopDuringAnUnansweredCreateWithdrawsTheJobTheHostMints() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-4"}"#.utf8))
         backend.holdsChainCreate = true
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { backend.chainCreatesWaiting == 1 }
         #expect(controller.run.isBusy)
 
@@ -157,9 +157,9 @@ struct ChainRunTests {
     /// stop, fell through to the batch path, and the chain the user had just
     /// withdrawn rendered to completion.
     @Test func aStaleStartNeverClobbersTheOneAfterIt() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-5"}"#.utf8))
         backend.holdsChainCreate = true
@@ -167,14 +167,14 @@ struct ChainRunTests {
         // Settled on what a release ACTS ON, never on the call count: the
         // route is recorded before the create suspends, so a count of one can
         // be satisfied with nothing parked on the gate yet.
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { backend.chainCreatesWaiting == 1 }
         controller.stop()
 
         // A second press while the FIRST create is still in the air. Both are
         // now parked, in order, so `releaseChainCreate` is exact.
         backend.holdsChainCreate = true
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { backend.chainCreatesWaiting == 2 }
         // The first create lands now, and must touch nothing of the second's.
         backend.releaseChainCreate()
@@ -194,9 +194,9 @@ struct ChainRunTests {
     /// the middle of a twelve-clip render discarded the app's only record of a
     /// job that kept burning GPU, and there was no reconnect to replace it.
     @Test func adroppedStreamReconnectsAndKeepsTheJob() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = try! MoldJSON.decoder.decode(
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-6"}"#.utf8))
         backend.chainEventsHeldOpen.insert("chain-6")
@@ -206,7 +206,7 @@ struct ChainRunTests {
              "current_stage": 1, "error": null, "finalizes": []}
             """#.utf8))
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { backend.calls.contains("chainJobEvents") }
 
         backend.failChainEvents(for: "chain-6")
@@ -222,17 +222,17 @@ struct ChainRunTests {
         // Still on the canvas, still recoverable, and the stage counter was
         // re-read from the host rather than invented.
         #expect(controller.run.isBusy)
-        #expect(PendingChain.all()["chain-6"] == plato.id.uuidString)
+        #expect(PendingChain.all()["chain-6"] == workstation.id.uuidString)
         #expect(backend.calls.contains("chainJob"))
     }
 
     /// A refusal is the SERVER's sentence and nothing is submitted at all.
     @Test func aRefusedLengthNeverReachesEitherDoor() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
 
-        controller.submit(on: plato, backend: backend, routing: .reject("Nope, too long."))
+        controller.submit(on: workstation, backend: backend, routing: .reject("Nope, too long."))
         await settle { if case .failed = controller.run { return true } else { return false } }
         #expect(controller.run == RunState.failed("Nope, too long."))
         #expect(backend.calls.contains("createChainJob") == false)

@@ -112,7 +112,7 @@ public struct CatalogLicenseFlags: Codable, Hashable, Sendable {
 
     /// Whether this row says anything about its licence at all.
     ///
-    /// Measured on plato: every row of a three-row search had `license: null`
+    /// Measured on workstation: every row of a three-row search had `license: null`
     /// and all three flags null. All-null is the ORDINARY case and means NO
     /// INFORMATION -- rendering it as "commercial: no" would be a refusal
     /// nobody made (design fact 18/decision 18, M5).

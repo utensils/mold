@@ -6,7 +6,7 @@ import Testing
 
 /// `ShapeControl.resolve` reads the same `ResolutionProfile` the size menu
 /// already decodes; these fixtures are the real flux-schnell answer captured
-/// from plato (M8 design, decision 3).
+/// from workstation (M8 design, decision 3).
 @MainActor
 struct ShapeControlTests {
     private static let fluxSchnell = """

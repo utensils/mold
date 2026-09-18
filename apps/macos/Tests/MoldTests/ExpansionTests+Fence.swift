@@ -9,7 +9,7 @@ import Testing
 @MainActor
 struct ExpansionFenceTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
@@ -26,14 +26,14 @@ struct ExpansionFenceTests {
     /// `task: .textToImage` into every accepted offer, and sends no task at
     /// all, so a clip's print records that its prompt was written for a still.
     @Test func expandSendsAndRecordsTheRealTask() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a tin robot", expanded: ["a", "b", "c"])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
         controller.draft.media.sourceImage = "SRC"
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
 
         #expect(backend.expandRequests.last?.task == .imageToVideo)
         guard case let .offering(offer) = controller.expansion else {
@@ -49,14 +49,14 @@ struct ExpansionFenceTests {
     /// **Fails today**: whatever comes back is installed, even if the model,
     /// the family, the prompt or the machine moved while it was in flight.
     @Test func aRewriteWhoseBoxMovedIsRefusedByName() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a tin robot", expanded: ["a", "b", "c"])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
 
         backend.holdsExpand = true
-        let rewrite = Task { await controller.expand(on: plato, backend: backend) }
+        let rewrite = Task { await controller.expand(on: workstation, backend: backend) }
         await settle { backend.calls.contains("expand") }
         // Typed while the rewrite was in the air.
         controller.draft.prompt = "a tin robot in a field"
@@ -72,13 +72,13 @@ struct ExpansionFenceTests {
     }
 
     @Test func aRewriteThatStillBelongsToTheBoxIsInstalled() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.expandAnswer = ExpandResponse(
             original: "a tin robot", expanded: ["a", "b", "c"])
-        let controller = makeController(backend, host: plato)
+        let controller = makeController(backend, host: workstation)
 
-        await controller.expand(on: plato, backend: backend)
+        await controller.expand(on: workstation, backend: backend)
 
         guard case .offering = controller.expansion else {
             Issue.record("expected .offering, got \(controller.expansion)")

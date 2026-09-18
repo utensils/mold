@@ -396,7 +396,7 @@ and re-run `make gen`.
 
 The app ships with no machines. Add one in Settings: a name or an IP is enough,
 because `HostAddress` fills in `http://` and port 7680 the way the Tauri app and
-the browser build do — `plato`, `10.0.0.5:7680`, `https://box.ts.net` and a
+the browser build do — `workstation`, `10.0.0.5:7680`, `https://box.ts.net` and a
 pasted `http://box:7680/api/status` all resolve to the same one origin. The
 sheet checks the address while you type and names the machine after the hostname
 the server reports, so a box reached by IP still lists under its own name. A
@@ -416,7 +416,7 @@ To seed machines for a dev run without putting their addresses in the repo, set
 shorthand the sheet accepts:
 
 ```bash
-MOLD_NATIVE_HOSTS='plato=plato,hal9000=10.0.0.6' macos-dev
+MOLD_NATIVE_HOSTS='workstation=workstation,hal9000=10.0.0.6' macos-dev
 ```
 
 `macos-dev` and `macos-uat` exec the binary rather than `open`ing it, so the

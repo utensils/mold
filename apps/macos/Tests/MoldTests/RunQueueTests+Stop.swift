@@ -9,7 +9,7 @@ import Testing
 @MainActor
 struct RunStopFenceTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     private func makeController(
@@ -41,13 +41,13 @@ struct RunStopFenceTests {
     /// already on its way was admitted, rendered to completion and was never
     /// cancelled.
     @Test func stopOnAFirstEverRenderCancelsTheBatchTheHostAdmits() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [status("batch-1", "client-1")]
         backend.holdsSubmit = true
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("submit") }
         controller.stop()
         // The button stops being a Stop the moment it is pressed, even though
@@ -66,19 +66,19 @@ struct RunStopFenceTests {
     /// already-settled batch and forgot ITS recovery record, while the new
     /// admission rendered on unwatched.
     @Test func stopDuringASecondSubmissionNeverCancelsTheBatchBefore() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchStatusAnswers["batch-1"] = FakeFixtures.batchStatus(
             id: "batch-1", clientBatchId: "client-1", [.init(1, state: "complete", seed: 7)])
 
         // One render, settled, so `run` is `.finished` and nothing is live.
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { !controller.run.isBusy }
 
         backend.holdsSubmit = true
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
         controller.stop()
         backend.releaseSubmit()
@@ -96,18 +96,18 @@ struct RunStopFenceTests {
     /// an ordinary queued one, was never cancelled, and took the canvas later.
     /// A user who presses Stop has withdrawn that render.
     @Test func aStoppedSubmissionIsStillCancelledWhenAnotherTakesTheCanvas() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchEventsHeldOpen.insert("batch-2")
         backend.holdsSubmit = true
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("submit") }
         controller.stop()
         // Stop cleared the canvas, so this second press follows at once.
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
         backend.releaseSubmit()
 
@@ -123,17 +123,17 @@ struct RunStopFenceTests {
     /// whole submit-and-follow task, and cancelling it would leave the host
     /// running a batch nobody holds the id of.
     @Test func aSecondPressNeverAbortsAnUnansweredPost() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchEventsHeldOpen.insert("batch-2")
         backend.holdsSubmit = true
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("submit") }
         controller.stop()
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
         backend.releaseSubmit()
 
@@ -148,13 +148,13 @@ struct RunStopFenceTests {
     /// A POST that is refused after a Stop reports nothing and replaces
     /// nothing: the user already withdrew it.
     @Test func aStoppedSubmissionThatFailsIsSilent() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.refuses = ["submit"]
         backend.holdsSubmit = true
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("submit") }
         controller.stop()
         backend.releaseSubmit()
@@ -171,20 +171,20 @@ struct RunStopFenceTests {
 
     /// Two withdrawn submissions are two cancels, in whatever order they land.
     @Test func twoStoppedSubmissionsAreBothCancelled() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
 
         backend.holdsSubmit = true
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("submit") }
         controller.stop()
         backend.releaseSubmit()
         await settle { backend.cancelledBatchIds.count == 1 }
 
         backend.holdsSubmit = true
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
         controller.stop()
         backend.releaseSubmit()
@@ -234,18 +234,18 @@ struct RunStopFenceTests {
     /// the first batch's picture, result bar and failure summary could be
     /// replaced before any of it was ever drawn.
     @Test func theNextBatchWaitsUntilTheCanvasHasTheResult() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         // A grace long enough that only an explicit acknowledgement can
         // release the queue inside this test.
         let handoff = ResultHandoff(grace: .seconds(30))
-        let controller = makeController(backend, host: plato, handoff: handoff)
+        let controller = makeController(backend, host: workstation, handoff: handoff)
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchEventsHeldOpen.insert("batch-1")
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchEvents") }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
 
         backend.emitBatchEvent(FakeFixtures.batchStatus(
@@ -268,15 +268,15 @@ struct RunStopFenceTests {
     /// The pane can be off screen entirely, so the grace period is the belt:
     /// a queue must never wait for a view nobody is looking at.
     @Test func theQueueMovesOnAnywayWhenNobodyIsLooking() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato, handoff: ResultHandoff(grace: .zero))
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation, handoff: ResultHandoff(grace: .zero))
         backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchEventsHeldOpen.insert("batch-1")
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchEvents") }
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
 
         backend.emitBatchEvent(FakeFixtures.batchStatus(

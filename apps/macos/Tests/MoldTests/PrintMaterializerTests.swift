@@ -31,7 +31,7 @@ struct PrintMaterializerTests {
         """
         let print = try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(json.utf8))
         return LibraryEntry(
-            host: MoldHost(id: host, name: "plato", baseURL: URL(string: "http://p")!),
+            host: MoldHost(id: host, name: "workstation", baseURL: URL(string: "http://p")!),
             print: print)
     }
 
@@ -189,9 +189,9 @@ struct PrintMaterializerTests {
         let materializer = PrintMaterializer(root: root)
         // Same host, same version -- one folder, the collision the materializer
         // documents and the flight key already guards against.
-        let plato = UUID()
+        let workstation = UUID()
         for name in ["a.png", "b.png", "c.png"] {
-            _ = await materializer.url(for: entry(name, mediaVersion: "shared", host: plato)) {
+            _ = await materializer.url(for: entry(name, mediaVersion: "shared", host: workstation)) {
                 Data(repeating: 1, count: 1_000)
             }
         }

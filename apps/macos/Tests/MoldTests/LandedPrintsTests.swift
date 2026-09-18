@@ -9,7 +9,7 @@ import Testing
 /// forgets, the way `HostStoreLifecycleTests` pins `HostStore+Events`.
 @MainActor
 struct LandedPrintsTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -41,12 +41,12 @@ struct LandedPrintsTests {
 
     /// **Fails today**: there is no `LandedPrints` type.
     @Test func aPrintThatLandsWhileInactiveCountsOnce() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
 
@@ -55,12 +55,12 @@ struct LandedPrintsTests {
     }
 
     @Test func theSameFilenameTwiceCountsOnce() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count == 1 }
@@ -73,19 +73,19 @@ struct LandedPrintsTests {
     /// Two DIFFERENT prints on two DIFFERENT machines are two arrivals --
     /// dedup is by filename, not by how many machines mentioned it.
     @Test func printsOnTwoMachinesBothCount() async {
-        let plato = machine("plato")
+        let workstation = machine("workstation")
         let bender = machine("bender")
-        let platoBackend = fake(for: plato)
+        let workstationBackend = fake(for: workstation)
         let benderBackend = fake(for: bender)
-        let hosts = HostStore(hosts: [plato, bender]) { host in
-            host.id == plato.id ? platoBackend : benderBackend
+        let hosts = HostStore(hosts: [workstation, bender]) { host in
+            host.id == workstation.id ? workstationBackend : benderBackend
         }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: platoBackend)
+        await connect(workstation, hosts: hosts, backend: workstationBackend)
         await connect(bender, hosts: hosts, backend: benderBackend)
 
-        platoBackend.emit(.gallery(.added(filename: "a.png", row: nil)))
+        workstationBackend.emit(.gallery(.added(filename: "a.png", row: nil)))
         benderBackend.emit(.gallery(.added(filename: "b.png", row: nil)))
 
         await settle { landed.count == 2 }
@@ -93,12 +93,12 @@ struct LandedPrintsTests {
     }
 
     @Test func aPrintThatLandsWhileActiveDoesNotCount() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = true
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         // Waits out `settle`'s full budget -- there is no event to catch, so
@@ -110,12 +110,12 @@ struct LandedPrintsTests {
     }
 
     @Test func activatingClears() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count == 1 }
 
@@ -125,14 +125,14 @@ struct LandedPrintsTests {
     }
 
     @Test func aDisabledBadgeCountsNothing() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let defaults = scratchDefaults()
         defaults.set(false, forKey: "badgeLandedPrints")
         let landed = LandedPrints(hosts: hosts, defaults: defaults)
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.gallery(.added(filename: "a.png", row: nil)))
         await settle { landed.count > 0 }
@@ -144,12 +144,12 @@ struct LandedPrintsTests {
     /// moved -- not that anything landed. `gallery_added` is the only signal
     /// that means a print arrived (design M6 decision 21).
     @Test func thisAppsOwnQueueIsNotABadge() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.job(.ended(id: "job-1")))
         backend.emit(.job(.stateCommitted(id: "job-1")))
@@ -173,9 +173,9 @@ struct LandedPrintsTests {
     /// closes. `LandedPrints` goes on counting either way, which is what
     /// makes the two disagree.
     @Test func theBadgeFollowsTheCountWithNoViewInvolved() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
         landed.isActive = false
         // A sentinel for "no badge", so `.last` is a plain `String?` rather
@@ -183,7 +183,7 @@ struct LandedPrintsTests {
         var painted: [String] = []
         let badge = DockBadge { painted.append($0 ?? "none") }
         badge.follow(landed)
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         // Painted once on adoption: whatever is true now, not only what
         // changes later.

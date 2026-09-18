@@ -101,7 +101,7 @@ struct LibraryInspectedTests {
         let print = try MoldJSON.decoder.decode(
             GalleryPrint.self, from: JSONSerialization.data(withJSONObject: row))
         return LibraryEntry(
-            host: MoldHost(id: UUID(), name: "plato", baseURL: URL(string: "http://h")!),
+            host: MoldHost(id: UUID(), name: "workstation", baseURL: URL(string: "http://h")!),
             print: print)
     }
 }

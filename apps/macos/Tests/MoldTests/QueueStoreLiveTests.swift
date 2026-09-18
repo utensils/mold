@@ -10,7 +10,7 @@ import Testing
 /// `HostStoreLifecycleTests` pins `HostStore+Events`.
 @MainActor
 struct QueueStoreLiveTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -35,10 +35,10 @@ struct QueueStoreLiveTests {
     /// **Fails today**: no frame reaches the store at all, so 64 `job_queued`
     /// frames never re-read the machine even once.
     @Test func aJobFrameReReadsThatMachineOnceForABurst() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         // Long enough to outlast the burst. At 5 ms the window could elapse
         // while frames were still arriving, so `markDirty` started a SECOND
         // coalescer and a second read genuinely happened -- and nothing
@@ -46,15 +46,15 @@ struct QueueStoreLiveTests {
         // wrong repair: the contract is one read, so the delay has to be one
         // that actually covers the burst.
         let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(500))
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         for i in 0 ..< 64 { backend.emit(.job(.queued(id: "job-\(i)", model: "flux-dev"))) }
 
         // Settled on the ROWS, not on `callCount`: the fake records the call
         // before the store has applied its answer, so a count can be
         // satisfied by a read whose result is not in `byHost` yet.
-        await settle { !queue.entries(on: plato.id).isEmpty }
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        await settle { !queue.entries(on: workstation.id).isEmpty }
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
         #expect(backend.callCount("queue") == 1)
     }
 
@@ -62,17 +62,17 @@ struct QueueStoreLiveTests {
     /// commit reconciles once (`types.rs:13163-13167`) -- the coalescer
     /// treats it the same as any other job frame.
     @Test func aBulkCommitFrameReconcilesTheMachineOnce() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(5))
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.job(.statesCommitted))
 
-        await settle { !queue.entries(on: plato.id).isEmpty }
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        await settle { !queue.entries(on: workstation.id).isEmpty }
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
         // ONE frame, so one coalescer, so one read. There is no path to two.
         #expect(backend.callCount("queue") == 1)
     }
@@ -82,12 +82,12 @@ struct QueueStoreLiveTests {
     /// outrunning a short one -- the stream admitted it dropped deltas, and a
     /// delay would only widen the hole.
     @Test func aResyncReReadsWithoutWaiting() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts, coalesceDelay: .seconds(60))
-        await connect(plato, hosts: hosts, backend: backend)
+        await connect(workstation, hosts: hosts, backend: backend)
 
         backend.emit(.resyncRequired)
 
@@ -98,31 +98,31 @@ struct QueueStoreLiveTests {
         // this AWAITS that exact task rather than polling for its side
         // effect -- a race against a simulated network call under a loaded
         // machine, which is what flaked before.
-        await settle { queue.coalescers[plato.id] != nil }
-        await queue.coalescers[plato.id]?.value
+        await settle { queue.coalescers[workstation.id] != nil }
+        await queue.coalescers[workstation.id]?.value
         #expect(backend.callCount("queue") == 1)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 
     /// A host whose capabilities never advertised `/api/events` gets no
     /// watcher at all -- `wantsPoll` says so -- but the ordinary listing read
     /// still works regardless, which is the fallback this pins.
     @Test func aMachineThatDoesNotAdvertiseEventsIsStillPolled() async {
-        let plato = machine()
-        let backend = fake(for: plato, events: false)
+        let workstation = machine()
+        let backend = fake(for: workstation, events: false)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         hosts.reconcileEventStreams()
 
-        #expect(hosts.watchers[plato.id] == nil)
-        #expect(queue.wantsPoll(plato.id) == true)
+        #expect(hosts.watchers[workstation.id] == nil)
+        #expect(queue.wantsPoll(workstation.id) == true)
 
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 
     // MARK: - A storm of repairs
@@ -142,17 +142,17 @@ struct QueueStoreLiveTests {
     /// after this one" -- never "read N more". One in flight, at most one
     /// queued behind it, however many callers ask.
     @Test func aStormOfRefreshesReadsTheMachineTwiceNotOncePerCaller() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
         // The read has to SUSPEND, or no second caller can arrive during it.
         backend.queueYields = true
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
         // Twelve callers, all created before any of them can run -- exactly
         // the shape a burst of markers takes.
-        let callers = (0 ..< 12).map { _ in Task { await queue.refresh(on: plato.id) } }
+        let callers = (0 ..< 12).map { _ in Task { await queue.refresh(on: workstation.id) } }
         for caller in callers { await caller.value }
 
         // Two, not twelve and not one: the first read, and the ONE re-read
@@ -160,22 +160,22 @@ struct QueueStoreLiveTests {
         // starts only when the first has finished, so it necessarily starts
         // after the last caller joined it.
         #expect(backend.callCount("queue") == 2)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
         #expect(hosts.failures.isEmpty)
     }
 
     /// And one caller is one read -- the throttle must not invent a
     /// follow-up nobody asked for.
     @Test func oneRefreshIsOneRead() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
         backend.queueYields = true
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
-        await queue.refresh(on: plato.id)
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
+        await queue.refresh(on: workstation.id)
 
         // Sequential callers are not a storm: each gets its own read.
         #expect(backend.callCount("queue") == 2)
@@ -185,26 +185,26 @@ struct QueueStoreLiveTests {
     /// it. A marker cancels the pending coalesce -- a gap must not wait out a
     /// delay -- and then asks for a read that the throttle above bounds.
     @Test func aBurstOfResyncMarkersRepairsTheMachineWithoutAReadEach() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(["job-1"])
         backend.queueYields = true
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts, coalesceDelay: .seconds(60))
 
-        for _ in 0 ..< 12 { queue.apply(.resyncRequired, from: plato.id) }
-        await queue.coalescers[plato.id]?.value
+        for _ in 0 ..< 12 { queue.apply(.resyncRequired, from: workstation.id) }
+        await queue.coalescers[workstation.id]?.value
 
         #expect(backend.callCount("queue") <= 2)
-        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
 
     /// Three rows, three different batches, on screen at once -- their holds
     /// hydrate in the one call `POST /api/generation-batches/status` is for,
     /// not one request per batch.
     @Test func holdsAreHydratedInOneCallForEveryBatchOnScreen() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(entries: [
             FakeFixtures.queueEntry("job-1", batchId: "batch-1"),
             FakeFixtures.queueEntry("job-2", batchId: "batch-2"),
@@ -217,14 +217,14 @@ struct QueueStoreLiveTests {
                 FakeFixtures.batchStatus(id: "batch-3", [.init(0, jobId: "job-3")]),
             ]),
         ]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
-        await queue.refresh(on: plato.id)
+        await queue.refresh(on: workstation.id)
 
         #expect(backend.callCount("batchStatuses") == 1)
         #expect(Set(backend.batchStatusQueries.first ?? []) == ["batch-1", "batch-2", "batch-3"])
-        #expect(queue.groups(on: plato.id).count == 3)
+        #expect(queue.groups(on: workstation.id).count == 3)
     }
 
     /// `BatchChild.supersedes(_:)` is what decides this, and the store must
@@ -233,8 +233,8 @@ struct QueueStoreLiveTests {
     /// response landing after a fresher one -- must not overwrite what the
     /// first hydrate already knew.
     @Test func aLateAnswerNeverOverwritesANewerChild() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.queueListing = FakeFixtures.queueListing(entries: [
             FakeFixtures.queueEntry("job-1", state: "held", batchId: "batch-1"),
         ])
@@ -244,13 +244,13 @@ struct QueueStoreLiveTests {
             FakeFixtures.batchStatusListing([FakeFixtures.batchStatus(id: "batch-1", children: [newer])]),
             FakeFixtures.batchStatusListing([FakeFixtures.batchStatus(id: "batch-1", children: [older])]),
         ]
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let queue = QueueStore(hosts: hosts)
 
-        await queue.refresh(on: plato.id)
-        #expect(queue.children[plato.id]?["batch-1"]?.first?.revision == 5)
+        await queue.refresh(on: workstation.id)
+        #expect(queue.children[workstation.id]?["batch-1"]?.first?.revision == 5)
 
-        await queue.refresh(on: plato.id)
-        #expect(queue.children[plato.id]?["batch-1"]?.first?.revision == 5)
+        await queue.refresh(on: workstation.id)
+        #expect(queue.children[workstation.id]?["batch-1"]?.first?.revision == 5)
     }
 }

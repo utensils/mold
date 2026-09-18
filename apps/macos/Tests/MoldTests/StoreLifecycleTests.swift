@@ -12,7 +12,7 @@ import Testing
 /// those pin what `HostStore` decides, these pin what hangs off it.
 @MainActor
 struct StoreLifecycleTests {
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -20,16 +20,16 @@ struct StoreLifecycleTests {
     /// showing therefore reached nobody, and the Library only caught up when
     /// somebody hit ⌘R.
     @Test func aLibraryStoreIsListeningBeforeAnyPaneAppears() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.serverStatus = FakeFixtures.serverStatus()
         backend.capabilityBlock = FakeFixtures.capabilities(events: true)
         backend.exportBlock = FakeFixtures.exportOptions()
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         // Built the way the composition root builds it, and nothing else.
         let library = LibraryStore(hosts: hosts)
 
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         // Explicit, so these isolate their own defect rather than riding
         // on whether `refresh` reconciles yet.
         hosts.reconcileEventStreams()
@@ -44,21 +44,21 @@ struct StoreLifecycleTests {
     /// never checked against the machine list, so a removed machine keeps a
     /// live connection for the rest of the launch.
     @Test func aDownloadStreamStopsWhenItsMachineIsRemoved() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.downloadTicket = FakeFixtures.downloadTicket("job-1")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let licenses = LicenseStore(hosts: hosts)
         let downloads = DownloadStore(hosts: hosts, licenses: licenses)
 
-        await downloads.install("flux-dev:q4", on: plato)
+        await downloads.install("flux-dev:q4", on: workstation)
         await settle { backend.callCount("downloadEvents") == 1 }
-        #expect(downloads.streams[plato.id] != nil)
+        #expect(downloads.streams[workstation.id] != nil)
 
-        hosts.remove(plato)
+        hosts.remove(workstation)
         downloads.reconcile()
 
-        #expect(downloads.streams[plato.id] == nil)
+        #expect(downloads.streams[workstation.id] == nil)
         await settle { backend.downloadStreamEnded }
         #expect(backend.downloadStreamEnded)
     }

@@ -138,7 +138,7 @@ files; both are one line each in files this lane may not touch.
 2. **A card's menu** (right click): Open, Check Now, Set as Default, Copy
    Address, Edit…, a divider, Remove… in red -- and on This Mac's card, only
    the first four.
-3. **The detail** (`MOLD_NATIVE_DESTINATION=machines MOLD_NATIVE_MACHINE=plato`):
+3. **The detail** (`MOLD_NATIVE_DESTINATION=machines MOLD_NATIVE_MACHINE=workstation`):
    the unchanged machine page, titled with the machine's name, with a Back
    control in the toolbar.
 4. **The Add sheet** (Add a Machine… on the overview): the "Add a Machine"

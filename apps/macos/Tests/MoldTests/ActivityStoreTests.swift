@@ -15,7 +15,7 @@ struct ActivityStoreTests {
     private let becameActive = Notification.Name("f3.active")
     private let resignedActive = Notification.Name("f3.inactive")
 
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -57,23 +57,23 @@ struct ActivityStoreTests {
     }
 
     @Test func oneReadFillsTheFleetsRows() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, _, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, _, _) = await bench(backend, host: workstation)
 
         await store.refresh()
 
         #expect(store.rows.map(\.item.id) == ["w-1"])
-        #expect(store.rows.first?.host == plato.id)
+        #expect(store.rows.first?.host == workstation.id)
         #expect(backend.callCount("activity") == 1)
     }
 
     /// The tick stops while somebody is in another app -- nobody is reading a
     /// pane, and the first tick on becoming active catches up.
     @Test func itTicksOnlyWhileTheAppIsFrontmost() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, _, centre) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, _, centre) = await bench(backend, host: workstation)
 
         centre.post(name: becameActive, object: nil)
         await settle { store.isTicking }
@@ -96,9 +96,9 @@ struct ActivityStoreTests {
 
     /// Becoming active twice is one loop, not two.
     @Test func becomingActiveTwiceDoesNotDoubleTheLoop() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, _, centre) = await bench(backend, host: plato, interval: .milliseconds(30))
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, _, centre) = await bench(backend, host: workstation, interval: .milliseconds(30))
 
         centre.post(name: becameActive, object: nil)
         await settle { store.isTicking }
@@ -114,15 +114,15 @@ struct ActivityStoreTests {
     /// marked stale rather than dropped -- being asleep is not evidence that
     /// its work has gone.
     @Test func aMachineThatIsDownKeepsItsLastRowsAndIsNotAsked() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, hosts, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, hosts, _) = await bench(backend, host: workstation)
 
         await store.refresh()
         #expect(store.rows.map(\.item.id) == ["w-1"])
 
         backend.plantedErrors["status"] = MoldClientError.unreachable("it is asleep")
-        await hosts.refresh(plato)
+        await hosts.refresh(workstation)
         let asks = backend.callCount("activity")
         await store.refresh()
 
@@ -134,9 +134,9 @@ struct ActivityStoreTests {
     /// A machine that has been forgotten stops contributing rows nobody can
     /// attribute to a machine.
     @Test func aForgottenMachineStopsContributingRows() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, hosts, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, hosts, _) = await bench(backend, host: workstation)
 
         await store.refresh()
         #expect(!store.rows.isEmpty)
@@ -149,10 +149,10 @@ struct ActivityStoreTests {
     /// Two ticks landing at once are one read, and the second joins the
     /// first's promise -- `SingleFlight`'s contract, not a second mechanism.
     @Test func concurrentTicksAreOneReadPlusAtMostOneBehindIt() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.delays["activity"] = .milliseconds(20)
-        let (store, _, _) = await bench(backend, host: plato)
+        let (store, _, _) = await bench(backend, host: workstation)
 
         async let first: Void = store.refresh()
         async let second: Void = store.refresh()

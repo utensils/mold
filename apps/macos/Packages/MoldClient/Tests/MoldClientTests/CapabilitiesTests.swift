@@ -3,7 +3,7 @@ import Testing
 
 @testable import MoldClient
 
-// `Fixtures/capabilities.json` is a live `GET /api/capabilities` from plato
+// `Fixtures/capabilities.json` is a live `GET /api/capabilities` from workstation
 // (mold 0.29.0), with the private-H3 and mesh blocks removed because this app
 // reads neither. It is here so the decoder is pinned against a real payload
 // rather than against what we believed the shape was.
@@ -130,7 +130,7 @@ private let ancient = try! MoldJSON.decoder.decode(Capabilities.self, from: Data
 }
 
 /// Reference uploads exist on this host but are unavailable, because the
-/// protocol needs API-key auth and plato is keyless. Advertised-but-off is not
+/// protocol needs API-key auth and workstation is keyless. Advertised-but-off is not
 /// the same as absent, and neither is a reason to fail a small reference.
 @Test func referenceUploadsCanBeAdvertisedAndStillUnavailable() throws {
     let caps = try live()

@@ -11,7 +11,7 @@ import Testing
 @MainActor
 struct UpscaleStorePollTests {
 
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -49,19 +49,19 @@ struct UpscaleStorePollTests {
     /// stops asking, and re-reads that machine's gallery -- the bigger clip is
     /// a new row in it and nothing else is going to go and look.
     @Test func aJobThatFinishesBetweenTwoPollsRelistsTheGallery() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.prints = []
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
-        await settle { store.jobs[key(plato)]?.state == .running }
+        await store.start(clip(on: workstation))
+        await settle { store.jobs[key(workstation)]?.state == .running }
         let listingsBefore = backend.callCount("gallery")
 
         backend.extras.framewiseJobs = [
             FakeFixtures.framewiseJob("vup-1", state: "completed", done: 124, total: 124),
         ]
-        await settle { store.jobs[key(plato)]?.state == .completed }
+        await settle { store.jobs[key(workstation)]?.state == .completed }
         await settle { backend.callCount("gallery") > listingsBefore }
 
         // Settled work is never asked about again. At a 1 ms interval this is
@@ -75,12 +75,12 @@ struct UpscaleStorePollTests {
     /// forever, and the person is told. The repair is `recover()`, not a
     /// retry loop against a machine that is not there.
     @Test func aMachineThatGoesAwayMidPollStopsBeingAskedAndSaysSo() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, hosts) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, hosts) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
-        await settle { store.jobs[key(plato)]?.state == .running }
+        await store.start(clip(on: workstation))
+        await settle { store.jobs[key(workstation)]?.state == .running }
         backend.plantedErrors["framewiseUpscale"] = MoldClientError.unreachable("it is asleep")
 
         await settle { !hosts.failures.isEmpty }
@@ -91,7 +91,7 @@ struct UpscaleStorePollTests {
 
         // And the job is found again the next time the Library opens.
         backend.plantedErrors["framewiseUpscale"] = nil
-        await store.recover(on: plato.id)
+        await store.recover(on: workstation.id)
         await settle { backend.callCount("framewiseUpscale") > asks }
     }
 
@@ -103,12 +103,12 @@ struct UpscaleStorePollTests {
     /// starts again, and the hung answer -- about the FIRST job, at a frame
     /// count from before the cancel -- finally lands.
     @Test func aStaleAnswerNeverOverwritesANewerJob() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
-        await settle { store.jobs[key(plato)]?.id == "vup-1" }
+        await store.start(clip(on: workstation))
+        await settle { store.jobs[key(workstation)]?.id == "vup-1" }
 
         // Park the next ask. Its answer is about `vup-1`, and it will not
         // land until after the restart below.
@@ -120,18 +120,18 @@ struct UpscaleStorePollTests {
             "vup-1", state: "cancelled", done: 60, total: 124)
         let second = FakeFixtures.framewiseJob("vup-2", state: "running", total: 240)
         backend.extras.framewiseJobs = [cancelled, second]
-        await store.transition(key(plato), to: .cancel)
-        #expect(store.jobs[key(plato)]?.state == .cancelled)
+        await store.transition(key(workstation), to: .cancel)
+        #expect(store.jobs[key(workstation)]?.state == .cancelled)
 
         backend.extras.startedFramewiseAnswer = second
-        await store.start(clip(on: plato))
-        #expect(store.jobs[key(plato)]?.id == "vup-2")
+        await store.start(clip(on: workstation))
+        #expect(store.jobs[key(workstation)]?.id == "vup-2")
 
         // Now the answer about the FIRST job lands.
         backend.releaseFramewise()
         try? await Task.sleep(for: .milliseconds(30))
-        #expect(store.jobs[key(plato)]?.id == "vup-2", "the older answer was dropped")
-        #expect(store.jobs[key(plato)]?.totalFrames == 240)
+        #expect(store.jobs[key(workstation)]?.id == "vup-2", "the older answer was dropped")
+        #expect(store.jobs[key(workstation)]?.totalFrames == 240)
     }
 
     /// A Pause that FAILS must not stop the app following a job that is
@@ -141,20 +141,20 @@ struct UpscaleStorePollTests {
     ///
     /// **Fails today**: the `catch` reports and returns.
     @Test func aFailedPauseKeepsFollowingTheJobItCouldNotPause() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, hosts) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, hosts) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
-        await settle { store.jobs[key(plato)]?.state == .running }
+        await store.start(clip(on: workstation))
+        await settle { store.jobs[key(workstation)]?.state == .running }
         backend.plantedErrors["transitionFramewiseUpscale"] = MoldClientError.http(
             status: 500, code: nil, message: "The machine is having a moment.")
         let asks = backend.callCount("framewiseUpscale")
 
-        await store.transition(key(plato), to: .pause)
+        await store.transition(key(workstation), to: .pause)
 
         #expect(hosts.failures.first?.sentence.contains("having a moment") == true)
-        #expect(store.following.contains(key(plato)), "the job is still being asked about")
+        #expect(store.following.contains(key(workstation)), "the job is still being asked about")
         await settle { backend.callCount("framewiseUpscale") > asks }
     }
 
@@ -167,12 +167,12 @@ struct UpscaleStorePollTests {
     /// **Fails today**: the parked answer passes both fences and rewrites the
     /// paused job as running, with nothing polling it.
     @Test func aPauseIsNotUndoneByAnAnswerAlreadyInFlight() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (store, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
-        await settle { store.jobs[key(plato)]?.state == .running }
+        await store.start(clip(on: workstation))
+        await settle { store.jobs[key(workstation)]?.state == .running }
 
         // Park the next ask. Its answer says "running".
         backend.extras.framewiseHeldOpen = true
@@ -181,8 +181,8 @@ struct UpscaleStorePollTests {
         backend.extras.framewiseJobs = [
             FakeFixtures.framewiseJob("vup-1", state: "paused", done: 60, total: 124),
         ]
-        await store.transition(key(plato), to: .pause)
-        #expect(store.jobs[key(plato)]?.state == .paused)
+        await store.transition(key(workstation), to: .pause)
+        #expect(store.jobs[key(workstation)]?.state == .paused)
 
         // The parked answer lands. It is about the job before the pause.
         backend.extras.framewiseJobs = [
@@ -190,27 +190,27 @@ struct UpscaleStorePollTests {
         ]
         backend.releaseFramewise()
         try? await Task.sleep(for: .milliseconds(30))
-        #expect(store.jobs[key(plato)]?.state == .paused, "the older answer was dropped")
+        #expect(store.jobs[key(workstation)]?.state == .paused, "the older answer was dropped")
     }
 
     /// Opening the Library finds the clip upscales already running -- one
     /// listing per machine, never one call per print.
     @Test func openingTheLibraryFindsAJobAlreadyRunning() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.extras.framewiseJobs = [
             FakeFixtures.framewiseJob("vup-old", state: "completed", filename: "done.mp4"),
             FakeFixtures.framewiseJob("vup-live", state: "running", done: 7, total: 97),
             FakeFixtures.framewiseJob("vup-upload", state: "running", filename: "x.mp4"),
         ]
-        let (store, _) = await bench(backend, host: plato, interval: .seconds(9))
+        let (store, _) = await bench(backend, host: workstation, interval: .seconds(9))
 
         await store.recover()
 
         #expect(backend.callCount("framewiseUpscales") == 1)
-        #expect(store.jobs[key(plato)]?.id == "vup-live")
+        #expect(store.jobs[key(workstation)]?.id == "vup-live")
         // A settled job is history, not work in flight.
-        #expect(store.jobs[UpscaleStore.Key(host: plato.id, filename: "done.mp4")] == nil)
+        #expect(store.jobs[UpscaleStore.Key(host: workstation.id, filename: "done.mp4")] == nil)
     }
 
     /// A job somebody else started is still this print's job. Desktop asks
@@ -221,43 +221,43 @@ struct UpscaleStorePollTests {
     /// **Fails today**: `start`'s guard is local state only, so this makes a
     /// SECOND 124-frame job against the same print.
     @Test func aJobSomebodyElseStartedIsAdoptedRatherThanDuplicated() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.extras.framewiseJobs = [
             FakeFixtures.framewiseJob("vup-elsewhere", state: "running", done: 7, total: 97),
         ]
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
+        await store.start(clip(on: workstation))
 
         #expect(backend.callCount("startFramewiseUpscale") == 0)
-        #expect(store.jobs[key(plato)]?.id == "vup-elsewhere")
+        #expect(store.jobs[key(workstation)]?.id == "vup-elsewhere")
         await settle { backend.callCount("framewiseUpscale") >= 1 }
     }
 
     /// The check is about a job that is still MOVING. A settled one is
     /// history, and asking again is a new job.
     @Test func aSettledJobOnTheHostDoesNotBlockANewOne() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.extras.framewiseJobs = [
             FakeFixtures.framewiseJob("vup-old", state: "completed", done: 97, total: 97),
         ]
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(clip(on: plato))
+        await store.start(clip(on: workstation))
 
         #expect(backend.callCount("startFramewiseUpscale") == 1)
     }
 
     /// A still has no durable job to find, so it never pays for the listing.
     @Test func aStillIsNotCheckedAgainstTheHostsJobList() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.extras.stillUpscaleAnswer = FakeFixtures.stillUpscale("still-4x.png")
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
-        await store.start(LibraryEntry(host: plato, print: FakeFixtures.print("still.png")))
+        await store.start(LibraryEntry(host: workstation, print: FakeFixtures.print("still.png")))
 
         #expect(backend.callCount("framewiseUpscales") == 0)
         #expect(backend.callCount("upscaleLibraryImage") == 1)
@@ -267,10 +267,10 @@ struct UpscaleStorePollTests {
     /// host 404s that route, and a listing nobody can use is not worth a
     /// request on every visit to the Library.
     @Test func aMachineThatCannotUpscaleIsNotAskedAtAll() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.capabilityBlock = FakeFixtures.capabilities(videoUpscale: false)
-        let (store, _) = await bench(backend, host: plato)
+        let (store, _) = await bench(backend, host: workstation)
 
         await store.recover()
 

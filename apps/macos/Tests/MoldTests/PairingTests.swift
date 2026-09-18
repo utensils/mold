@@ -15,7 +15,7 @@ import Testing
 /// `ConfigStoreTests+Refusals.swift` needs its sibling's helper.
 @MainActor
 struct PairingTests {
-    func machine(_ name: String = "plato") -> MoldHost {
+    func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -62,22 +62,22 @@ struct PairingTests {
     /// followed by a re-read, the same "never trust the one row you asked
     /// for" rule `ConfigStore.set` already follows for `expand.*`.
     @Test func aRevokedClientLeavesTheListAndTheMachineWasAsked() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         let client = PairedClient(
             id: "client-1", name: "James's iPhone", clientKind: "mobile",
             createdAtMs: 1_700_000_000_000, lastUsedAtMs: nil)
         fake.pairedClientsAnswer = PairedClients(
             authRequired: true, pairingAvailable: true, clients: [client])
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let store = PairingStore(hosts: hosts)
-        await store.refresh(on: plato.id)
-        #expect(store.byHost[plato.id]?.clients.count == 1)
+        await store.refresh(on: workstation.id)
+        #expect(store.byHost[workstation.id]?.clients.count == 1)
 
-        await store.revoke(client, on: plato.id)
+        await store.revoke(client, on: workstation.id)
 
         #expect(fake.revokedClients == ["client-1"])
-        #expect(store.byHost[plato.id]?.clients.isEmpty == true)
+        #expect(store.byHost[workstation.id]?.clients.isEmpty == true)
         #expect(fake.callCount("pairedClients") == 2)
     }
 
@@ -85,16 +85,16 @@ struct PairingTests {
     /// state the section draws, not a banner over a machine that answered
     /// fine.
     @Test func aFourZeroThreeSetsAuthorityWithNoFailureBanner() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
         fake.plantedErrors["pairedClients"] = MoldClientError.http(
             status: 403, code: "PAIRING_OPERATOR_REQUIRED", message: "operator key required")
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let store = PairingStore(hosts: hosts)
 
-        await store.refresh(on: plato.id)
+        await store.refresh(on: workstation.id)
 
-        #expect(store.authority[plato.id] == .paired)
+        #expect(store.authority[workstation.id] == .paired)
         #expect(hosts.failures.isEmpty)
     }
 
@@ -105,28 +105,28 @@ struct PairingTests {
     /// the same class of hook as `QueueStore`'s (design M6 decision 27,
     /// here decision 25).
     @Test func theFixtureHookRefusesEveryWrite() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let store = PairingStore(hosts: hosts)
         let client = PairedClient(
             id: "client-1", name: "iPhone", clientKind: "mobile", createdAtMs: 0, lastUsedAtMs: nil)
         let fixture = PairingStore.Fixture(hosts: [
-            "plato": PairingStore.HostFixture(
+            "workstation": PairingStore.HostFixture(
                 clients: PairedClients(authRequired: true, pairingAvailable: true, clients: [client]))
         ])
 
         store.seed(from: fixture)
-        #expect(store.byHost[plato.id]?.clients.map(\.id) == ["client-1"])
+        #expect(store.byHost[workstation.id]?.clients.map(\.id) == ["client-1"])
         #expect(store.isSeeded)
 
-        await store.createSession(on: plato.id)
-        await store.revoke(client, on: plato.id)
-        await store.refresh(on: plato.id)
+        await store.createSession(on: workstation.id)
+        await store.revoke(client, on: workstation.id)
+        await store.refresh(on: workstation.id)
 
         #expect(fake.calls.isEmpty)
         #expect(hosts.failures.contains { $0.sentence.contains("fixture") })
-        #expect(store.byHost[plato.id]?.clients.map(\.id) == ["client-1"])
+        #expect(store.byHost[workstation.id]?.clients.map(\.id) == ["client-1"])
     }
 
     /// The orchestrator's own addition to S7: a fixture can seed an
@@ -136,15 +136,15 @@ struct PairingTests {
     /// real request, and the seeded session must survive that refusal
     /// untouched.
     @Test func aFixtureCanSeedAnInFlightSession() async {
-        let plato = machine()
-        let fake = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let workstation = machine()
+        let fake = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let store = PairingStore(hosts: hosts)
         let session = PairingSession(
             token: "tok", expiresAt: 4_102_444_800, authRequired: true,
-            instanceId: "instance-1", hostname: "plato")
+            instanceId: "instance-1", hostname: "workstation")
         let fixture = PairingStore.Fixture(hosts: [
-            "plato": PairingStore.HostFixture(
+            "workstation": PairingStore.HostFixture(
                 clients: PairedClients(authRequired: true, pairingAvailable: true, clients: []),
                 session: session)
         ])
@@ -152,9 +152,9 @@ struct PairingTests {
         store.seed(from: fixture)
 
         #expect(store.session == session)
-        #expect(store.sessionHost == plato.id)
+        #expect(store.sessionHost == workstation.id)
 
-        await store.createSession(on: plato.id)
+        await store.createSession(on: workstation.id)
 
         #expect(fake.calls.isEmpty)
         #expect(store.session == session)
@@ -164,17 +164,17 @@ struct PairingTests {
     /// "this app's key can't manage this machine" screenshot needs no live
     /// host either.
     @Test func aFixtureCanSeedOperatorRequired() {
-        let plato = machine()
-        let hosts = HostStore(hosts: [plato]) { _ in FakeBackend(host: plato) }
+        let workstation = machine()
+        let hosts = HostStore(hosts: [workstation]) { _ in FakeBackend(host: workstation) }
         let store = PairingStore(hosts: hosts)
         let fixture = PairingStore.Fixture(hosts: [
-            "plato": PairingStore.HostFixture(
+            "workstation": PairingStore.HostFixture(
                 clients: PairedClients(authRequired: true, pairingAvailable: true, clients: []),
                 operatorRequired: true)
         ])
 
         store.seed(from: fixture)
 
-        #expect(store.authority[plato.id] == .paired)
+        #expect(store.authority[workstation.id] == .paired)
     }
 }

@@ -37,7 +37,7 @@ final class DownloadStore {
     /// cross a file boundary even within one type.
     internal(set) var active: [MoldHost.ID: [String: Progress]] = [:]
     /// Jobs this app watched go terminal, newest first, 16 per machine --
-    /// the popover's own record, since plato retains no server-side history
+    /// the popover's own record, since workstation retains no server-side history
     /// for it to re-read. Cleared by `clearFinished(on:)`; written from
     /// `DownloadStore+Stream.swift`.
     internal(set) var finished: [MoldHost.ID: [DownloadJob]] = [:]

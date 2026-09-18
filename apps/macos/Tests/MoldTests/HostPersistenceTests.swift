@@ -27,7 +27,7 @@ struct HostPersistenceTests {
     /// exactly the machines that had just been removed.
     @Test func anEmptiedMachineListStaysEmpty() throws {
         let (defaults, secrets) = try scratch()
-        HostPersistence.save([host("plato")], to: defaults)
+        HostPersistence.save([host("workstation")], to: defaults)
         HostPersistence.save([], to: defaults)
 
         #expect(HostPersistence.load(from: defaults, secrets: secrets) == [])
@@ -45,7 +45,7 @@ struct HostPersistenceTests {
     /// overwrite.
     @Test func oneUnreadableMachineNeverForgetsTheRest() throws {
         let (defaults, secrets) = try scratch()
-        let good = StoredHost(host("plato"))
+        let good = StoredHost(host("workstation"))
         let json = try MoldJSON.localEncoder.encode([good])
         var array = try #require(
             try JSONSerialization.jsonObject(with: json) as? [[String: Any]])
@@ -54,7 +54,7 @@ struct HostPersistenceTests {
         defaults.set(data, forKey: "hosts")
 
         let loaded = try #require(HostPersistence.load(from: defaults, secrets: secrets))
-        #expect(loaded.map(\.name) == ["plato"])
+        #expect(loaded.map(\.name) == ["workstation"])
         #expect(defaults.data(forKey: HostPersistence.unreadableKey) == data)
     }
 }

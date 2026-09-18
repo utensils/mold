@@ -281,7 +281,7 @@ extension FakeFixtures {
     /// Assembles a listing from already-built rows, for a test that needs a
     /// row `modelComponents(_:rows:)`'s plain tuple can't express -- a
     /// missing component's repair name, or the 103-option `transformer` slot
-    /// measured on plato (design fact 4, M5).
+    /// measured on workstation (design fact 4, M5).
     static func modelComponents(_ model: String, statuses: [ModelComponentStatus]) -> ModelComponentsResponse {
         let componentsData = try! MoldJSON.encoder.encode(statuses)
         let componentsJSON = String(data: componentsData, encoding: .utf8)!
@@ -486,14 +486,14 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(BatchStatusListing.self, from: Data(json.utf8))
     }
 
-    /// A real `GET /api/config` from plato: 63 entries, 16 `models.*` rows
+    /// A real `GET /api/config` from workstation: 63 entries, 16 `models.*` rows
     /// for two configured models (`flux-dev:q8`, `flux2-klein:q8`), every
     /// value `null`, `source:"db"` -- what "configured but nothing set"
     /// looks like on a real host. Loaded by a path relative to THIS file
     /// rather than `MoldClientTests`' own `RepoFixtures`: this app test
     /// bundle is a separate target and cannot see that package's fixtures
     /// or its resource bundle.
-    static func configListing(fixture name: String = "config-plato.json") -> ConfigListing {
+    static func configListing(fixture name: String = "config-workstation.json") -> ConfigListing {
         let fixtures = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
@@ -503,7 +503,7 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(ConfigListing.self, from: data)
     }
 
-    /// One `ConfigEntry`, for a case the plato fixture doesn't already cover.
+    /// One `ConfigEntry`, for a case the workstation fixture doesn't already cover.
     /// `ConfigEntry` already has a public memberwise init; this exists so a
     /// store test reads the same `FakeFixtures.x(...)` shape as every other
     /// row builder here rather than switching conventions for one type.
@@ -527,11 +527,11 @@ extension FakeFixtures {
             lastUsedAtMs: lastUsedAtMs)
     }
 
-    /// Live on plato (design fact 9): `hf` configured from the environment,
+    /// Live on workstation (design fact 9): `hf` configured from the environment,
     /// masked `hf_••••hhml`; `civitai` not configured. The same relative-path
     /// trick as `configListing` -- this bundle cannot see `MoldClientTests`'
     /// own `RepoFixtures`.
-    static func credentialsFixture(_ name: String = "credentials-plato.json") -> CatalogCredentialStatus {
+    static func credentialsFixture(_ name: String = "credentials-workstation.json") -> CatalogCredentialStatus {
         let fixtures = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
@@ -541,7 +541,7 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(CatalogCredentialStatus.self, from: data)
     }
 
-    /// A composed status for the cases the plato fixture doesn't cover (a
+    /// A composed status for the cases the workstation fixture doesn't cover (a
     /// token stored ON this machine, or nothing at all) -- `CatalogCredentialStatus`
     /// and `CatalogCredentialState` have no public memberwise init either.
     static func credentialStatus(

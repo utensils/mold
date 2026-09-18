@@ -99,10 +99,10 @@ struct ActivityReconcileTests {
 
     @Test func aGoodAnswerReplacesWholesale() {
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil,
+            routeURL: "http://workstation", previous: nil,
             result: .success(snapshot([itemJSON("a"), itemJSON("b")])))
         let next = ActivityReconcile.host(
-            routeURL: "http://plato", previous: previous,
+            routeURL: "http://workstation", previous: previous,
             result: .success(snapshot([itemJSON("c")])))
         #expect(next.items.map(\.id) == ["c"])
         #expect(!next.stale)
@@ -112,9 +112,9 @@ struct ActivityReconcileTests {
     /// An offline machine is not evidence that its work vanished.
     @Test func aFailureKeepsTheLastVerifiedRowsAndSaysTheyAreStale() {
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil, result: .success(snapshot([itemJSON("a")])))
+            routeURL: "http://workstation", previous: nil, result: .success(snapshot([itemJSON("a")])))
         let next = ActivityReconcile.host(
-            routeURL: "http://plato", previous: previous,
+            routeURL: "http://workstation", previous: previous,
             result: .failure(MoldClientError.unreachable("it is asleep")))
         #expect(next.items.map(\.id) == ["a"])
         #expect(next.stale)
@@ -126,7 +126,7 @@ struct ActivityReconcileTests {
     /// different box's.
     @Test func aFailureAfterTheAddressMovedKeepsNothing() {
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil, result: .success(snapshot([itemJSON("a")])))
+            routeURL: "http://workstation", previous: nil, result: .success(snapshot([itemJSON("a")])))
         let next = ActivityReconcile.host(
             routeURL: "http://socrates", previous: previous,
             result: .failure(MoldClientError.unreachable("no")))
@@ -137,10 +137,10 @@ struct ActivityReconcileTests {
     /// the previous answer while every healthy kind is replaced.
     @Test func rowsOfAnUnreadableAuthorityAreRetained() {
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil,
+            routeURL: "http://workstation", previous: nil,
             result: .success(snapshot([itemJSON("g"), itemJSON("s", kind: "sequence")])))
         let next = ActivityReconcile.host(
-            routeURL: "http://plato", previous: previous,
+            routeURL: "http://workstation", previous: previous,
             result: .success(snapshot([itemJSON("g2")], unavailable: ["sequence"])))
         #expect(next.items.map(\.id).sorted() == ["g2", "s"])
     }
@@ -152,9 +152,9 @@ struct ActivityReconcileTests {
         let chain = itemJSON("c", kind: "generation", execution: "chain")
         let plain = itemJSON("g")
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil, result: .success(snapshot([chain, plain])))
+            routeURL: "http://workstation", previous: nil, result: .success(snapshot([chain, plain])))
         let next = ActivityReconcile.host(
-            routeURL: "http://plato", previous: previous,
+            routeURL: "http://workstation", previous: previous,
             result: .success(snapshot([], unavailable: ["chain_generation"])))
         #expect(next.items.map(\.id) == ["c"])
     }
@@ -163,10 +163,10 @@ struct ActivityReconcileTests {
     /// its answer reads.
     @Test func aDifferentInstanceRetainsNothing() {
         let previous = ActivityReconcile.host(
-            routeURL: "http://plato", previous: nil,
+            routeURL: "http://workstation", previous: nil,
             result: .success(snapshot([itemJSON("s", kind: "sequence")])))
         let next = ActivityReconcile.host(
-            routeURL: "http://plato", previous: previous,
+            routeURL: "http://workstation", previous: previous,
             result: .success(snapshot([], instance: "inst-2", unavailable: ["sequence"])))
         #expect(next.items.isEmpty)
     }

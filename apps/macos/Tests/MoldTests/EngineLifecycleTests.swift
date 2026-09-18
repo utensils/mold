@@ -141,7 +141,7 @@ struct EngineLifecycleTests {
         let local = MoldEngine.localHost(port: 61_440, apiKey: "minted")
         #expect(local.map(MoldEngine.isPairable) == false)
         // Every other machine is unaffected, keyed or not.
-        #expect(MoldEngine.isPairable(MoldHost(name: "plato", baseURL: url, apiKey: "k")))
+        #expect(MoldEngine.isPairable(MoldHost(name: "workstation", baseURL: url, apiKey: "k")))
         #expect(MoldEngine.isPairable(MoldHost(name: "hal9000", baseURL: url)))
     }
 

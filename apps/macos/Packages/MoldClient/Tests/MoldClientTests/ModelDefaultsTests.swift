@@ -3,14 +3,14 @@ import Testing
 
 @testable import MoldClient
 
-// `Fixtures/config-plato.json` is a live `GET /api/config` from plato: 63
+// `Fixtures/config-workstation.json` is a live `GET /api/config` from workstation: 63
 // entries, 16 of them `models.*` rows for two configured models
 // (`flux-dev:q8`, `flux2-klein:q8`), every value `null`, `source:"db"` --
 // which is what "configured but nothing set" looks like on a real host.
 
 private func live() throws -> ConfigListing {
     try MoldJSON.decoder.decode(
-        ConfigListing.self, from: RepoFixtures.fixture("config-plato.json"))
+        ConfigListing.self, from: RepoFixtures.fixture("config-workstation.json"))
 }
 
 @Test func aModelNobodyConfiguredHasNoDefaults() throws {
@@ -18,7 +18,7 @@ private func live() throws -> ConfigListing {
     #expect(defaults.isEmpty)
 }
 
-/// The state plato is actually in: a config row exists for the model but
+/// The state workstation is actually in: a config row exists for the model but
 /// every field is null. A present key with a null value must not read as
 /// "0 steps" -- it means the same thing as no row at all.
 @Test func aConfiguredModelWithEveryValueNullAlsoHasNoDefaults() throws {

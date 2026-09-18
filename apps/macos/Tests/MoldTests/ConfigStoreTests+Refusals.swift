@@ -18,40 +18,40 @@ extension ConfigStoreTests {
     /// `hosts.failures` -- that banner is for the MACHINE, not for a key it
     /// refused to change.
     @Test func aKeyTheMachineRefusesKeepsItsMessageOnThatRowAlone() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.configListing = FakeFixtures.configListing()
         backend.plantedErrors["setConfig"] = MoldClientError.http(
             status: 409, code: "RESTART_REQUIRED",
             message: "'output_dir' is fixed for the lifetime of mold serve")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
-        await store.refresh(on: plato.id)
+        await store.refresh(on: workstation.id)
 
-        let ok = await store.set("output_dir", to: .string("/new/path"), on: plato.id)
+        let ok = await store.set("output_dir", to: .string("/new/path"), on: workstation.id)
 
         #expect(ok == false)
-        #expect(store.refusal(for: "output_dir", on: plato.id)?.code == "RESTART_REQUIRED")
+        #expect(store.refusal(for: "output_dir", on: workstation.id)?.code == "RESTART_REQUIRED")
         #expect(hosts.failures.isEmpty)
     }
 
     /// An env-owned key's 403 `ENV_OVERRIDDEN` (`routes_config.rs:192-197`)
     /// is the same kind of refusal, naming the variable.
     @Test func anEnvOwnedKeysRefusalAlsoStaysOffTheBanner() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.configListing = FakeFixtures.configListing()
         backend.plantedErrors["setConfig"] = MoldClientError.http(
             status: 403, code: "ENV_OVERRIDDEN",
             message: "'models_dir' is set by MOLD_MODELS_DIR in the environment — unset it to edit")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
-        await store.refresh(on: plato.id)
+        await store.refresh(on: workstation.id)
 
-        let ok = await store.set("models_dir", to: .string("/elsewhere"), on: plato.id)
+        let ok = await store.set("models_dir", to: .string("/elsewhere"), on: workstation.id)
 
         #expect(ok == false)
-        #expect(store.refusal(for: "models_dir", on: plato.id)?.code == "ENV_OVERRIDDEN")
+        #expect(store.refusal(for: "models_dir", on: workstation.id)?.code == "ENV_OVERRIDDEN")
         #expect(hosts.failures.isEmpty)
     }
 
@@ -60,19 +60,19 @@ extension ConfigStoreTests {
     /// so the row must show exactly what the machine said, not a generic
     /// "invalid value".
     @Test func aFourTwentyTwoKeepsItsOwnSentence() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.configListing = FakeFixtures.configListing()
         backend.plantedErrors["setConfig"] = MoldClientError.http(
             status: 422, code: nil, message: "must be between 1 and 100 (got 200)")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
-        await store.refresh(on: plato.id)
+        await store.refresh(on: workstation.id)
 
-        let ok = await store.set("expand.max_tokens", to: .number(200), on: plato.id)
+        let ok = await store.set("expand.max_tokens", to: .number(200), on: workstation.id)
 
         #expect(ok == false)
-        #expect(store.refusal(for: "expand.max_tokens", on: plato.id)?.sentence
+        #expect(store.refusal(for: "expand.max_tokens", on: workstation.id)?.sentence
             == "Must be between 1 and 100 (got 200)")
     }
 
@@ -80,21 +80,21 @@ extension ConfigStoreTests {
     /// message rather than leaving it under a field that no longer needs
     /// it.
     @Test func editingARefusedRowAgainClearsItsMessage() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.configListing = FakeFixtures.configListing()
         backend.plantedErrors["setConfig"] = MoldClientError.http(
             status: 422, code: nil, message: "must be between 1 and 100 (got 200)")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
-        await store.refresh(on: plato.id)
-        await store.set("expand.max_tokens", to: .number(200), on: plato.id)
-        #expect(store.refusal(for: "expand.max_tokens", on: plato.id) != nil)
+        await store.refresh(on: workstation.id)
+        await store.set("expand.max_tokens", to: .number(200), on: workstation.id)
+        #expect(store.refusal(for: "expand.max_tokens", on: workstation.id) != nil)
 
         backend.plantedErrors["setConfig"] = nil
-        let ok = await store.set("expand.max_tokens", to: .number(50), on: plato.id)
+        let ok = await store.set("expand.max_tokens", to: .number(50), on: workstation.id)
 
         #expect(ok == true)
-        #expect(store.refusal(for: "expand.max_tokens", on: plato.id) == nil)
+        #expect(store.refusal(for: "expand.max_tokens", on: workstation.id) == nil)
     }
 }

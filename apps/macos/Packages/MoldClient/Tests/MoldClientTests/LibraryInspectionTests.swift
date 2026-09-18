@@ -14,10 +14,10 @@ import Testing
 // fills the window, and the Library menu acts on whatever the grid still holds
 // rather than on what you are looking at.
 
-private let plato = UUID()
+private let workstation = UUID()
 
 private func entry(_ name: String, at seconds: UInt64 = 1_000) -> LibraryEntry {
-    PrintFixtures.entry(name, host: plato, timestamp: seconds)
+    PrintFixtures.entry(name, host: workstation, timestamp: seconds)
 }
 
 private func showing(_ pool: [LibraryEntry], selecting: Set<PrintID> = []) -> LibraryShowing {

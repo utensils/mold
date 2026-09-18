@@ -9,7 +9,7 @@ import Testing
 // and the host's ticket check -- which compares against the encoded request
 // path -- refused it. `mediaPath` is the one rule that produces both.
 
-private let urls = MediaURL(baseURL: URL(string: "http://plato:7680")!)
+private let urls = MediaURL(baseURL: URL(string: "http://workstation:7680")!)
 
 @Test func aFilenameWithASpaceEncodesTheSameWayForSigningAndForFetching() {
     #expect(urls.mediaPath("a b.png") == "/api/gallery/image/a%20b.png")

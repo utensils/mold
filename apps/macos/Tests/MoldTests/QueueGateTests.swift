@@ -11,7 +11,7 @@ import Testing
 @MainActor
 struct QueueGateTests {
 
-    private func machine(_ name: String = "plato") -> MoldHost {
+    private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -37,61 +37,61 @@ struct QueueGateTests {
     /// press paused for real, the value stayed false because nobody had
     /// fetched it, and the second press paused again.
     @Test func theGateIsReadFromTheMachineBeforeItIsDecided() async {
-        let plato = machine()
-        let (gate, _, _) = await bench(fake(for: plato, paused: true), host: plato)
-        #expect(gate.isPaused(on: plato.id), "the status poll already carried the answer")
+        let workstation = machine()
+        let (gate, _, _) = await bench(fake(for: workstation, paused: true), host: workstation)
+        #expect(gate.isPaused(on: workstation.id), "the status poll already carried the answer")
     }
 
     @Test func togglingAPausedMachineResumesIt() async {
-        let plato = machine()
-        let backend = fake(for: plato, paused: true)
-        let (gate, _, _) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation, paused: true)
+        let (gate, _, _) = await bench(backend, host: workstation)
 
-        await gate.toggle(on: plato.id)
+        await gate.toggle(on: workstation.id)
 
         #expect(backend.extras.gateCalls == [false])
         #expect(backend.callCount("resumeQueue") == 1)
-        #expect(!gate.isPaused(on: plato.id))
+        #expect(!gate.isPaused(on: workstation.id))
     }
 
     /// The VERB is the writer. What is written is the MACHINE's answer, never
     /// the intent -- a machine that refuses to move leaves the state where it
     /// really is rather than where this app asked for.
     @Test func whatIsWrittenIsTheMachinesAnswerNotTheIntent() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.extras.gateAnswer = false
-        let (gate, _, _) = await bench(backend, host: plato)
+        let (gate, _, _) = await bench(backend, host: workstation)
 
-        await gate.set(true, on: plato.id)
+        await gate.set(true, on: workstation.id)
 
         #expect(backend.extras.gateCalls == [true], "it asked to pause")
-        #expect(!gate.isPaused(on: plato.id), "and the machine said it did not")
+        #expect(!gate.isPaused(on: workstation.id), "and the machine said it did not")
     }
 
     /// The frame is the CONFIRMATION. It carries a value rather than a
     /// toggle, so arriving after the verb has already written lands on the
     /// same state -- nothing double-applies.
     @Test func theFrameConfirmsRatherThanTogglingAgain() async {
-        let plato = machine()
-        let backend = fake(for: plato)
-        let (gate, store, hosts) = await bench(backend, host: plato)
-        await hosts.refresh(plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
+        let (gate, store, hosts) = await bench(backend, host: workstation)
+        await hosts.refresh(workstation)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
 
-        await gate.set(true, on: plato.id)
-        #expect(gate.isPaused(on: plato.id))
+        await gate.set(true, on: workstation.id)
+        #expect(gate.isPaused(on: workstation.id))
 
         backend.emit(.queue(.paused))
-        await settle { store.queuePaused[plato.id] == true }
-        #expect(gate.isPaused(on: plato.id), "still paused, not toggled back")
+        await settle { store.queuePaused[workstation.id] == true }
+        #expect(gate.isPaused(on: workstation.id), "still paused, not toggled back")
 
         // And a frame nobody's verb caused still moves it -- another client
         // pausing this machine is a real thing to hear about.
         backend.emit(.queue(.resumed))
-        await settle { store.queuePaused[plato.id] == false }
-        #expect(!gate.isPaused(on: plato.id))
+        await settle { store.queuePaused[workstation.id] == false }
+        #expect(!gate.isPaused(on: workstation.id))
     }
 
     /// A resync says deltas were DROPPED -- a `queue_resumed` may be among
@@ -101,29 +101,29 @@ struct QueueGateTests {
     ///
     /// **Fails today**: the cached value outlives the gap.
     @Test func aDroppedFrameHandsTheQuestionBackToTheMachine() async {
-        let plato = machine()
-        let backend = fake(for: plato, paused: false)
-        let (gate, store, hosts) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation, paused: false)
+        let (gate, store, hosts) = await bench(backend, host: workstation)
         hosts.reconcileEventStreams()
         await settle { backend.callCount("events") == 1 }
 
         backend.emit(.queue(.paused))
-        await settle { store.queuePaused[plato.id] == true }
-        #expect(gate.isPaused(on: plato.id))
+        await settle { store.queuePaused[workstation.id] == true }
+        #expect(gate.isPaused(on: workstation.id))
 
         backend.emit(.resyncRequired)
-        await settle { store.queuePaused[plato.id] == nil }
-        #expect(!gate.isPaused(on: plato.id), "the machine's own status answers again")
+        await settle { store.queuePaused[workstation.id] == nil }
+        #expect(!gate.isPaused(on: workstation.id), "the machine's own status answers again")
     }
 
     /// Absent means an older machine with no gate. The control is then ABSENT
     /// -- nothing is sent, and nothing is offered.
     @Test func aMachineThatDoesNotAdvertiseItIsNeverAsked() async {
-        let plato = machine()
-        let backend = fake(for: plato, canPause: false)
-        let (gate, store, hosts) = await bench(backend, host: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation, canPause: false)
+        let (gate, store, hosts) = await bench(backend, host: workstation)
 
-        await gate.set(true, on: plato.id)
+        await gate.set(true, on: workstation.id)
 
         #expect(backend.callCount("pauseQueue") == 0)
         #expect(QueueGateControl.targets(hosts.hosts, capabilities: hosts.capabilities).isEmpty)
@@ -132,15 +132,15 @@ struct QueueGateTests {
     /// A failure is a sentence about the machine, not a silently unchanged
     /// toggle.
     @Test func aRefusalIsSaidOutLoudAndChangesNothing() async {
-        let plato = machine()
-        let backend = fake(for: plato)
+        let workstation = machine()
+        let backend = fake(for: workstation)
         backend.plantedErrors["pauseQueue"] = MoldClientError.http(
             status: 409, code: nil, message: "Another client holds the gate.")
-        let (gate, store, hosts) = await bench(backend, host: plato)
+        let (gate, store, hosts) = await bench(backend, host: workstation)
 
-        await gate.set(true, on: plato.id)
+        await gate.set(true, on: workstation.id)
 
-        #expect(!gate.isPaused(on: plato.id))
+        #expect(!gate.isPaused(on: workstation.id))
         // `HostStore.report` makes the machine the sentence's subject, so the
         // refusal follows it in lower case.
         #expect(hosts.failures.first?.sentence.contains("another client holds the gate") == true)
@@ -154,9 +154,9 @@ struct QueueGateTests {
 
     /// The word on the control says what pressing it DOES.
     @Test func oneMachineIsOnePlainItem() {
-        let running = offer([.init(id: UUID(), name: "plato", isPaused: false)])
+        let running = offer([.init(id: UUID(), name: "workstation", isPaused: false)])
         #expect(running.items().map(\.title) == ["Pause Queue"])
-        let paused = offer([.init(id: UUID(), name: "plato", isPaused: true)])
+        let paused = offer([.init(id: UUID(), name: "workstation", isPaused: true)])
         #expect(paused.items().map(\.title) == ["Resume Queue"])
     }
 
@@ -164,10 +164,10 @@ struct QueueGateTests {
     /// unlabelled item would not say which machine it stops.
     @Test func severalMachinesEachGetNamed() {
         let offered = offer([
-            .init(id: UUID(), name: "plato", isPaused: false),
+            .init(id: UUID(), name: "workstation", isPaused: false),
             .init(id: UUID(), name: "hal9000", isPaused: true),
         ]).items().map(\.title)
-        #expect(offered == ["Pause Queue on plato", "Resume Queue on hal9000"])
+        #expect(offered == ["Pause Queue on workstation", "Resume Queue on hal9000"])
     }
 
     @Test func noMachineDrawsNothing() {
@@ -177,8 +177,8 @@ struct QueueGateTests {
     /// The pane says it in a sentence. A toggled label alone is not visible:
     /// it tells you what pressing it does, not what is true right now.
     @Test func aPausedMachineGetsASentenceNotJustALabel() {
-        let sentence = QueueGateOffer.pausedSentence(machine: "plato")
-        #expect(sentence.contains("plato"))
+        let sentence = QueueGateOffer.pausedSentence(machine: "workstation")
+        #expect(sentence.contains("workstation"))
         #expect(sentence.contains("paused"))
         #expect(sentence.contains("not starting anything new"))
     }

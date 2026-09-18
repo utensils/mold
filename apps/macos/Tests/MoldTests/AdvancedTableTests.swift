@@ -10,7 +10,7 @@ import Testing
 /// `ConfigStoreTests` asks the store with no view.
 @MainActor
 struct AdvancedTableTests {
-    func machine(_ name: String = "plato") -> MoldHost {
+    func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
@@ -65,15 +65,15 @@ struct AdvancedTableTests {
 
     /// **Fails today** -- there is no `AdvancedSettings` type at all.
     @Test func aMachineWithNoDatabaseReplacesTheTableRatherThanEmptyingIt() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
         backend.plantedErrors["config"] =
             MoldClientError.http(status: 503, code: "CONFIG_UNAVAILABLE", message: "no metadata db")
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
-        await store.refresh(on: plato.id)
+        await store.refresh(on: workstation.id)
 
-        #expect(AdvancedSettings.resolve(hosts: hosts, store: store, machine: plato.id) == .unavailable)
+        #expect(AdvancedSettings.resolve(hosts: hosts, store: store, machine: workstation.id) == .unavailable)
     }
 
     @Test func noMachinesShowsTheAddAMachineState() {
@@ -84,11 +84,11 @@ struct AdvancedTableTests {
     }
 
     @Test func aListingThatHasNotLoadedYetShowsProgress() {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
         let store = ConfigStore(hosts: hosts)
 
-        #expect(AdvancedSettings.resolve(hosts: hosts, store: store, machine: plato.id) == .loading)
+        #expect(AdvancedSettings.resolve(hosts: hosts, store: store, machine: workstation.id) == .loading)
     }
 }

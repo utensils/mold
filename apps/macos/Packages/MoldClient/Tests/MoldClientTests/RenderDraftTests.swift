@@ -321,7 +321,7 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     #expect(adopted.height == 832)
 }
 
-/// The wan resolution block exactly as plato advertises it
+/// The wan resolution block exactly as workstation advertises it
 /// (`recipe-wan.json`, `wan22-t2v-a14b:q8`): a BUCKET domain with
 /// `off_bucket: warn`, and a real alignment, minimum and pixel budget beside
 /// it. Every one of those is non-`Option` on the Rust side and therefore

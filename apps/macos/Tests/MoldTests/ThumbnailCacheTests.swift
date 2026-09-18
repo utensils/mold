@@ -31,13 +31,13 @@ struct ThumbnailCacheTests {
 
     @Test func aKeyedMachineGetsTheKeyOnTheThumbnailItself() async {
         StubProtocol.reset()
-        let machine = host("plato", key: "secret")
+        let machine = host("workstation", key: "secret")
 
         _ = await cache().image(for: entry("robot.png", on: machine), host: machine, size: 256)
 
         #expect(StubProtocol.seen.first?.value(forHTTPHeaderField: "X-Api-Key") == "secret")
         #expect(StubProtocol.seen.first?.url?.absoluteString
-            == "http://plato:7680/api/gallery/thumbnail/robot.png?size=256")
+            == "http://workstation:7680/api/gallery/thumbnail/robot.png?size=256")
     }
 
     /// A keyless host is open by policy. Sending no key is the correct request
@@ -53,7 +53,7 @@ struct ThumbnailCacheTests {
 
     @Test func anEmptyKeyIsNotAKey() async {
         StubProtocol.reset()
-        let machine = host("plato", key: "")
+        let machine = host("workstation", key: "")
 
         _ = await cache().image(for: entry("robot.png", on: machine), host: machine, size: 256)
 
@@ -62,7 +62,7 @@ struct ThumbnailCacheTests {
 
     @Test func aSecondAskForTheSamePictureIsAnsweredFromMemory() async {
         StubProtocol.reset()
-        let machine = host("plato", key: nil)
+        let machine = host("workstation", key: nil)
         let cache = cache()
         let row = entry("robot.png", on: machine)
 
@@ -80,7 +80,7 @@ struct ThumbnailCacheTests {
         StubProtocol.reset()
         StubProtocol.bodyBytes = ResponseCeiling.thumbnail + 1_024
         defer { StubProtocol.bodyBytes = nil }
-        let machine = host("plato", key: nil)
+        let machine = host("workstation", key: nil)
 
         let image = await cache().image(for: entry("huge.png", on: machine),
                                         host: machine, size: 256)
@@ -92,7 +92,7 @@ struct ThumbnailCacheTests {
     /// true of this cache too.
     @Test func purgingEmptiesWhatWasRemembered() async {
         StubProtocol.reset()
-        let machine = host("plato", key: nil)
+        let machine = host("workstation", key: nil)
         let cache = cache()
         let row = entry("robot.png", on: machine)
 

@@ -9,7 +9,7 @@ import Testing
 @MainActor
 struct MeshExportRoutingTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     /// `isMesh` reads the print's own `format`, not its extension, so these

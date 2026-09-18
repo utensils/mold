@@ -46,7 +46,7 @@ struct LibraryStoreFailureTests {
     /// **Fails today**: `deleteTag` sends with `try?` and says nothing when a
     /// machine refuses.
     @Test func deletingATagAMachineRefusesIsReported() async throws {
-        let machine = host("plato")
+        let machine = host("workstation")
         let fake = FakeBackend(host: machine)
         fake.refuses = ["deleteTag"]
         let hosts = HostStore(hosts: [machine]) { _ in fake }

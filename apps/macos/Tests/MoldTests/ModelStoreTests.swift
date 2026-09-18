@@ -10,7 +10,7 @@ import Testing
 @MainActor
 struct ModelStoreTests {
     @Test func aHostThatHasNeverBeenListedHasNotLoaded() async {
-        let machine = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let machine = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
         let hosts = HostStore(hosts: [machine])
         let models = ModelStore(hosts: hosts)
 
@@ -18,28 +18,28 @@ struct ModelStoreTests {
     }
 
     @Test func refreshingOneHostLoadsOnlyThatHostsModels() async {
-        let plato = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
-        let fake = FakeBackend(host: plato)
+        let workstation = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
+        let fake = FakeBackend(host: workstation)
         fake.modelRows = [FakeFixtures.model("flux-dev:q4")]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
 
-        await models.refresh(on: plato.id)
+        await models.refresh(on: workstation.id)
 
-        #expect(models.hasLoaded(on: plato.id) == true)
-        #expect(models.model(named: "flux-dev:q4", on: plato.id) != nil)
+        #expect(models.hasLoaded(on: workstation.id) == true)
+        #expect(models.model(named: "flux-dev:q4", on: workstation.id) != nil)
     }
 
     @Test func aRefusedListingIsReportedAndStillNotLoaded() async {
-        let plato = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
-        let fake = FakeBackend(host: plato)
+        let workstation = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
+        let fake = FakeBackend(host: workstation)
         fake.refuses = ["models"]
-        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let hosts = HostStore(hosts: [workstation]) { _ in fake }
         let models = ModelStore(hosts: hosts)
 
-        await models.refresh(on: plato.id)
+        await models.refresh(on: workstation.id)
 
-        #expect(models.hasLoaded(on: plato.id) == false)
-        #expect(hosts.failures.contains { $0.host == plato.id && $0.verb == "list its models" })
+        #expect(models.hasLoaded(on: workstation.id) == false)
+        #expect(hosts.failures.contains { $0.host == workstation.id && $0.verb == "list its models" })
     }
 }

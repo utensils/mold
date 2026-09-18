@@ -69,9 +69,9 @@ private func loadPrints() throws -> [GalleryPrint] {
 
 @Test func searchCoversTheModelAndTheHostNotJustThePrompt() throws {
     let item = try #require(loadPrints().first { $0.metadata.model != nil })
-    let library = LibraryEntry(host: MoldHost(id: UUID(), name: "plato", baseURL: URL(string: "http://h")!),
+    let library = LibraryEntry(host: MoldHost(id: UUID(), name: "workstation", baseURL: URL(string: "http://h")!),
                                print: item)
-    #expect(library.matches("plato"))
+    #expect(library.matches("workstation"))
     #expect(library.matches(try #require(item.metadata.model)))
 }
 
@@ -81,7 +81,7 @@ private func loadPrints() throws -> [GalleryPrint] {
 }
 
 @Test func aRowRebuiltFromANewPrintRefoldsItsSearchKey() {
-    let host = MoldHost(id: UUID(), name: "plato", baseURL: URL(string: "http://h")!)
+    let host = MoldHost(id: UUID(), name: "workstation", baseURL: URL(string: "http://h")!)
     let entry = PrintFixtures.entry("a.png", host: host.id, hostName: host.name, prompt: "owls")
     let rebuilt = entry.replacingPrint(PrintFixtures.print("a.png", prompt: "a brass helmet"))
 

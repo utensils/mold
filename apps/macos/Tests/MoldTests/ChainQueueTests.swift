@@ -14,7 +14,7 @@ import Testing
 @MainActor
 struct ChainQueueTests {
     private func machine() -> MoldHost {
-        MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
     }
 
     private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
@@ -43,19 +43,19 @@ struct ChainQueueTests {
     /// Image, then a long clip. The batch keeps the canvas; the chain is
     /// admitted and waits. The batch's POST is never cancelled.
     @Test func aChainPressBehindARunningBatchWaitsItsTurn() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         let first = FakeFixtures.batchStatus(
             id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         backend.submitAnswers = [first]
         backend.batchEventsHeldOpen.insert("batch-1")
         backend.chainJobAnswer = chainAnswer("chain-q1")
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { backend.calls.contains("batchEvents") }
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.queuedCount == 1 }
 
         // The batch is untouched and still on the canvas.
@@ -80,18 +80,18 @@ struct ChainQueueTests {
     /// A long clip, then an image. The chain keeps the canvas and the batch
     /// queues -- the mirror of the case above.
     @Test func abatchPressBehindARunningChainWaitsItsTurn() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = chainAnswer("chain-q2")
         backend.chainEventsHeldOpen.insert("chain-q2")
         backend.submitAnswers = [FakeFixtures.batchStatus(
             id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])]
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.stage == "Clip 1 of 3" }
 
-        controller.submit(on: plato, backend: backend)
+        controller.submit(on: workstation, backend: backend)
         await settle { controller.queuedCount == 1 }
         #expect(controller.run.stage == "Clip 1 of 3", "the batch did not take the canvas")
 
@@ -104,21 +104,21 @@ struct ChainQueueTests {
     /// Two long clips. The second waits; the FIRST is never orphaned on the
     /// GPU and never loses its recovery record.
     @Test func asecondChainNeverOrphansTheFirst() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = chainAnswer("chain-q3")
         backend.chainEventsHeldOpen.insert("chain-q3")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.stage == "Clip 1 of 3" }
 
         backend.chainJobAnswer = chainAnswer("chain-q4")
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.queuedCount == 1 }
 
         #expect(backend.cancelledChainJobIds.isEmpty, "the first chain was cancelled")
-        #expect(PendingChain.all()["chain-q3"] == plato.id.uuidString)
+        #expect(PendingChain.all()["chain-q3"] == workstation.id.uuidString)
         #expect(controller.run.stage == "Clip 1 of 3")
     }
 
@@ -126,14 +126,14 @@ struct ChainQueueTests {
     /// `draft.batchSize`, so asking for three long clips silently rendered
     /// one. Four copies are four chains, one per seed, sharing one batch id.
     @Test func abatchOfLongClipsRendersEveryCopyItWasAskedFor() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         controller.draft.batchSize = 3
         backend.chainJobAnswer = chainAnswer("chain-b1")
         backend.chainEventsHeldOpen.insert("chain-b1")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         // One on the canvas and the rest waiting is the STATE all four
         // assertions are about; the request count alone is satisfied before
         // the last create has landed anywhere.
@@ -149,16 +149,16 @@ struct ChainQueueTests {
     /// Stop All withdraws the waiting chain on its own machine too -- a queued
     /// chain is a REAL job on the host, not a local intention.
     @Test func stopAllWithdrawsAWaitingChain() async {
-        let plato = machine()
-        let backend = FakeBackend(host: plato)
-        let controller = makeController(backend, host: plato)
+        let workstation = machine()
+        let backend = FakeBackend(host: workstation)
+        let controller = makeController(backend, host: workstation)
         backend.chainJobAnswer = chainAnswer("chain-q5")
         backend.chainEventsHeldOpen.insert("chain-q5")
 
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.run.stage == "Clip 1 of 3" }
         backend.chainJobAnswer = chainAnswer("chain-q6")
-        controller.submit(on: plato, backend: backend, routing: routing)
+        controller.submit(on: workstation, backend: backend, routing: routing)
         await settle { controller.queuedCount == 1 }
 
         controller.stopAll()

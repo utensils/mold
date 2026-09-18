@@ -10,7 +10,7 @@ import Testing
 /// wrong. The answer is not "always" -- a newer edit for the same print may
 /// still be in flight, and reverting would undo something the person did after.
 @Suite struct MutationOutboxSuite {
-    let plato = UUID()
+    let workstation = UUID()
     let hal = UUID()
 
     private func edit(_ change: PrintChange, _ targets: [MoldHost.ID: [String]]) -> PrintEdit {
@@ -21,18 +21,18 @@ import Testing
 
     @Test func anEditBecomesOneEntryPerMachine() {
         var outbox = MutationOutbox()
-        let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"], hal: ["b.png"]]))
+        let queued = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"], hal: ["b.png"]]))
         #expect(queued.count == 2)
-        #expect(Set(queued.map(\.host)) == [plato, hal])
+        #expect(Set(queued.map(\.host)) == [workstation, hal])
     }
 
     /// The fence the server applies once. A fresh id per attempt is exactly the
     /// double-apply it exists to prevent, so the id is minted with the entry.
     @Test func everyEntryCarriesItsOwnStableOperationID() {
         var outbox = MutationOutbox()
-        let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"], hal: ["b.png"]]))
+        let queued = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"], hal: ["b.png"]]))
         #expect(Set(queued.map(\.id)).count == 2)
-        #expect(outbox.head(for: plato)?.id == queued.first { $0.host == plato }?.id)
+        #expect(outbox.head(for: workstation)?.id == queued.first { $0.host == workstation }?.id)
     }
 
     @Test func anEmptyEditQueuesNothing() {
@@ -45,31 +45,31 @@ import Testing
 
     @Test func eachMachineIsItsOwnQueueInOrder() {
         var outbox = MutationOutbox()
-        _ = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
-        _ = outbox.enqueue(edit(.tag("owls", adding: true), [plato: ["a.png"]]))
+        _ = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"]]))
+        _ = outbox.enqueue(edit(.tag("owls", adding: true), [workstation: ["a.png"]]))
         _ = outbox.enqueue(edit(.favorite(true), [hal: ["b.png"]]))
 
-        #expect(outbox.head(for: plato)?.change == .favorite(true))
+        #expect(outbox.head(for: workstation)?.change == .favorite(true))
         #expect(outbox.head(for: hal)?.change == .favorite(true))
-        outbox.succeeded(outbox.head(for: plato)!.id)
-        #expect(outbox.head(for: plato)?.change == .tag("owls", adding: true))
+        outbox.succeeded(outbox.head(for: workstation)!.id)
+        #expect(outbox.head(for: workstation)?.change == .tag("owls", adding: true))
     }
 
     /// A machine that is behind must never hold up another. They are separate
     /// servers; there is no fleet-wide order to preserve.
     @Test func oneMachineFallingBehindDoesNotBlockTheOther() {
         var outbox = MutationOutbox()
-        _ = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"], hal: ["b.png"]]))
+        _ = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"], hal: ["b.png"]]))
         outbox.succeeded(outbox.head(for: hal)!.id)
         #expect(outbox.head(for: hal) == nil)
-        #expect(outbox.head(for: plato) != nil)
+        #expect(outbox.head(for: workstation) != nil)
     }
 
     // MARK: - Giving up
 
     @Test func givingUpNamesTheRowsToRepair() {
         var outbox = MutationOutbox()
-        let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png", "b.png"]]))
+        let queued = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png", "b.png"]]))
         #expect(outbox.failed(queued[0].id) == ["a.png", "b.png"])
         #expect(outbox.isEmpty)
     }
@@ -80,14 +80,14 @@ import Testing
     /// failed.
     @Test func aRowWithANewerEditPendingIsLeftAlone() {
         var outbox = MutationOutbox()
-        let first = outbox.enqueue(edit(.favorite(true), [plato: ["a.png", "b.png"]]))
-        _ = outbox.enqueue(edit(.tag("owls", adding: true), [plato: ["a.png"]]))
+        let first = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png", "b.png"]]))
+        _ = outbox.enqueue(edit(.tag("owls", adding: true), [workstation: ["a.png"]]))
         #expect(outbox.failed(first[0].id) == ["b.png"])
     }
 
     @Test func aRowSupersededOnAnotherMachineIsStillRepairedHere() {
         var outbox = MutationOutbox()
-        let first = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
+        let first = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"]]))
         // Same filename, different machine. Different print entirely.
         _ = outbox.enqueue(edit(.tag("owls", adding: true), [hal: ["a.png"]]))
         #expect(outbox.failed(first[0].id) == ["a.png"])
@@ -95,7 +95,7 @@ import Testing
 
     @Test func failingAnEntryThatIsNoLongerQueuedRepairsNothing() {
         var outbox = MutationOutbox()
-        let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
+        let queued = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"]]))
         outbox.succeeded(queued[0].id)
         #expect(outbox.failed(queued[0].id).isEmpty)
     }
@@ -104,10 +104,10 @@ import Testing
 
     @Test func aRetryKeepsTheEntryAtTheHeadAndCountsTheAttempt() {
         var outbox = MutationOutbox()
-        let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
+        let queued = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"]]))
         outbox.retry(queued[0].id)
-        #expect(outbox.head(for: plato)?.id == queued[0].id)
-        #expect(outbox.head(for: plato)?.attempts == 1)
+        #expect(outbox.head(for: workstation)?.id == queued[0].id)
+        #expect(outbox.head(for: workstation)?.attempts == 1)
     }
 
     /// Whether trying again could plausibly work. Retrying something that
@@ -126,17 +126,17 @@ import Testing
 
     @Test func theWholeChainIsReadableInOrderForReplay() {
         var outbox = MutationOutbox()
-        _ = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
-        _ = outbox.enqueue(edit(.tag("owls", adding: true), [plato: ["a.png"]]))
-        #expect(outbox.chain(for: plato).map(\.change)
+        _ = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"]]))
+        _ = outbox.enqueue(edit(.tag("owls", adding: true), [workstation: ["a.png"]]))
+        #expect(outbox.chain(for: workstation).map(\.change)
             == [.favorite(true), .tag("owls", adding: true)])
         #expect(outbox.chain(for: hal).isEmpty)
     }
 
     @Test func machinesWithWorkAreTheOnesToDrain() {
         var outbox = MutationOutbox()
-        _ = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"], hal: ["b.png"]]))
-        outbox.succeeded(outbox.head(for: plato)!.id)
+        _ = outbox.enqueue(edit(.favorite(true), [workstation: ["a.png"], hal: ["b.png"]]))
+        outbox.succeeded(outbox.head(for: workstation)!.id)
         #expect(outbox.waiting == [hal])
     }
 }

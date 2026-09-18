@@ -53,7 +53,7 @@ public struct ModelDefaults: Hashable, Sendable {
     /// Reads a whole listing. An absent key means this machine has never been
     /// told anything about this model; a PRESENT key with a null value means
     /// the same thing and is what a configured-but-unset model looks like --
-    /// all sixteen `models.*` rows on plato are exactly that.
+    /// all sixteen `models.*` rows on workstation are exactly that.
     public init(from listing: ConfigListing, model: String) {
         let prefix = "models.\(model)."
         var byField: [String: ConfigScalar] = [:]
