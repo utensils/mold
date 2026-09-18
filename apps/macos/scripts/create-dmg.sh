@@ -45,8 +45,9 @@ if [ -f "$STAGE/.VolumeIcon.icns" ]; then
   else
     # No Xcode tools: the same bit, by hand. Finder flags are bytes 8-9 of
     # the 32-byte FinderInfo; 0x0400 is kHasCustomIcon.
+    # Exactly 32 bytes: type+creator (8), flags (2), the rest (22).
     xattr -wx com.apple.FinderInfo \
-      "0000000000000000 0400 0000000000000000000000000000000000000000 00" "$MOUNT"
+      "0000000000000000 0400 00000000000000000000000000000000000000000000" "$MOUNT"
   fi
   hdiutil detach "$MOUNT" -quiet
   MOUNT=""

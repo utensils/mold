@@ -1920,11 +1920,11 @@
                   # `pkill -f` matches ARGV, so the launch below must be by the
                   # same absolute path this pattern uses; it was relative, and
                   # the pattern matched nothing at all (review F6).
-                  pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
+                  pkill -f "$PWD/build/Debug/Mold Studio.app/Contents/MacOS/Mold" 2>/dev/null || true
                   # Exec'd rather than `open`ed: LaunchServices starts an app
                   # with a fresh environment, which would drop MOLD_NATIVE_HOSTS
                   # and send stdout somewhere you cannot watch.
-                  exec "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" "$@"
+                  exec "$PWD/build/Debug/Mold Studio.app/Contents/MacOS/Mold" "$@"
                 '';
               }
               {
@@ -1936,7 +1936,7 @@
                   cd apps/macos
                   # By bundle path, so Mold Desktop is left alone (05-M10);
                   # `make uat` launches by this same absolute path (F6).
-                  pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
+                  pkill -f "$PWD/build/Debug/Mold Studio.app/Contents/MacOS/Mold" 2>/dev/null || true
                   exec make uat
                 '';
               }
@@ -1948,7 +1948,7 @@
                   set -euo pipefail
                   cd apps/macos
                   CONFIG=Release make build
-                  echo "built apps/macos/build/Release/Mold.app"
+                  echo "built apps/macos/build/Release/Mold Studio.app"
                 '';
               }
               {

@@ -30,28 +30,51 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 
-OUT="$WORK/out.dmg"
-MOLD_SIGN_IDENTITY="" "$HERE/create-dmg.sh" "$APP" "$OUT" > /dev/null 2>&1
-[ -s "$OUT" ] || { echo "FAIL: no DMG produced" >&2; exit 1; }
+# Twice: with SetFile, and on a PATH without it so the by-hand FinderInfo
+# arm runs (its first draft wrote 31 bytes, which xattr refuses, and nothing
+# had exercised it).
+NO_SETFILE="$WORK/bin"
+mkdir -p "$NO_SETFILE"
+for tool in bash hdiutil ditto awk cp rm ln mktemp basename dirname cat xattr; do
+  ln -s "$(command -v "$tool")" "$NO_SETFILE/$tool"
+done
 
-MOUNT="$(hdiutil attach -nobrowse -readonly "$OUT" | awk -F'\t' '/\/Volumes\// { print $NF; exit }')"
-[ -n "$MOUNT" ] || { echo "FAIL: could not mount $OUT" >&2; exit 1; }
+check() {
+  local label="$1" path="$2"
+  local OUT="$WORK/$label.dmg"
+  MOLD_SIGN_IDENTITY="" PATH="$path" "$HERE/create-dmg.sh" "$APP" "$OUT" > /dev/null 2>&1 \
+    || { echo "FAIL ($label): create-dmg.sh failed" >&2; exit 1; }
+  [ -s "$OUT" ] || { echo "FAIL ($label): no DMG produced" >&2; exit 1; }
+  MOUNT="$(hdiutil attach -nobrowse -readonly "$OUT" | awk -F'\t' '/\/Volumes\// { print $NF; exit }')"
+  [ -n "$MOUNT" ] || { echo "FAIL ($label): could not mount $OUT" >&2; exit 1; }
+  verify "$label"
+  hdiutil detach "$MOUNT" -quiet
+  MOUNT=""
+}
+
+verify() {
+  local label="$1"
 
 case "$(basename "$MOUNT")" in
   "Mold Studio"*) ;;
-  *) echo "FAIL: volume is named '$(basename "$MOUNT")', not 'Mold Studio'" >&2; exit 1 ;;
+  *) echo "FAIL ($label): volume is named '$(basename "$MOUNT")', not 'Mold Studio'" >&2; exit 1 ;;
 esac
-[ -d "$MOUNT/Mold Studio.app" ] || { echo "FAIL: the app is not on the volume" >&2; exit 1; }
-[ -L "$MOUNT/Applications" ] || { echo "FAIL: no Applications symlink" >&2; exit 1; }
+[ -d "$MOUNT/Mold Studio.app" ] || { echo "FAIL ($label): the app is not on the volume" >&2; exit 1; }
+[ -L "$MOUNT/Applications" ] || { echo "FAIL ($label): no Applications symlink" >&2; exit 1; }
 cmp -s "$MOUNT/.VolumeIcon.icns" "$APP/Contents/Resources/AppIcon.icns" \
-  || { echo "FAIL: .VolumeIcon.icns is missing or is not the app's icon" >&2; exit 1; }
+  || { echo "FAIL ($label): .VolumeIcon.icns is missing or is not the app's icon" >&2; exit 1; }
 
 # The flag is what makes the Finder READ that file. Bytes 8-9 of FinderInfo
 # carry the Finder flags; 0x0400 is kHasCustomIcon.
 flags="$(xattr -px com.apple.FinderInfo "$MOUNT" 2>/dev/null | tr -d ' \n' | cut -c17-20)"
 if [ -z "$flags" ] || [ $(( 0x$flags & 0x0400 )) -eq 0 ]; then
-  echo "FAIL: the volume root has no custom-icon flag (FinderInfo flags: '${flags:-none}')" >&2
+  echo "FAIL ($label): the volume root has no custom-icon flag (FinderInfo flags: '${flags:-none}')" >&2
   exit 1
 fi
 
-echo "  dmg volume icon ok"
+}
+
+command -v SetFile > /dev/null || { echo "FAIL: SetFile not on PATH -- the primary arm cannot run" >&2; exit 1; }
+check setfile "$PATH"
+check xattr "$NO_SETFILE:/usr/libexec"
+echo "  dmg volume icon ok (SetFile and FinderInfo arms)"
