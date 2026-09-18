@@ -24,6 +24,10 @@ public extension HTTPBackend {
         try await send("/api/chain-jobs/\(escaped(id))/cancel", method: "POST", body: EmptyBody())
     }
 
+    func resumeChainJob(id: String) async throws {
+        try await send("/api/chain-jobs/\(escaped(id))/resume", method: "POST", body: EmptyBody())
+    }
+
     /// Follows one chain job.
     ///
     /// Unlike a batch's stream, these frames are DELTAS: `stage_start`,

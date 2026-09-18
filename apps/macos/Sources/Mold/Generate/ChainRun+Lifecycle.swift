@@ -26,6 +26,23 @@ extension ChainRun {
         return true
     }
 
+    /// Restarts a job a host restart parked. The follow is already sitting on
+    /// it, so nothing here re-attaches -- the `state_changed` that comes back
+    /// clears the paused label.
+    func resume(backend: (MoldHost.ID) -> (any MoldBackend)?) {
+        guard let active, active.isPaused, let host, let report,
+              let backend = backend(host) else { return }
+        update({ $0.isPaused = false }, report: report)
+        Task { [weak self] in
+            do { try await backend.resumeChainJob(id: active.jobId) }
+            catch {
+                // Still parked. Say so rather than leaving a button that did
+                // nothing: the job is fine, this machine just refused.
+                self?.update({ $0.isPaused = true }, report: report)
+            }
+        }
+    }
+
     /// Not `private`: `ChainRun+Follow` is the event loop, in its own file for
     /// size.
     func update(_ transform: (inout ChainProgress) -> Void, report: ChainRun.Reporter) {

@@ -24,6 +24,9 @@ final class ChainRun {
     var active: ChainProgress?
     var task: Task<Void, Never>?
     var host: MoldHost.ID?
+    /// Where the followed job reports to, held so Resume can push the
+    /// cleared paused state onto the same canvas.
+    var report: Reporter?
     /// The first reconnect delay. A constructor parameter so a test pins the
     /// BEHAVIOUR rather than waiting out a constant.
     let firstBackoff: Duration
@@ -80,6 +83,7 @@ final class ChainRun {
         self.host = host
         creating = true
         withdrawn = false
+        self.report = report
         let operationId = UUID().uuidString
         task = Task { [weak self] in
             let created: CreateChainJobResponse
@@ -122,14 +126,20 @@ final class ChainRun {
     /// whole recovery.
     func reattach(
         jobId: String, stageCount: Int, on host: MoldHost.ID,
-        backend: any MoldBackend, report: Reporter
+        backend: any MoldBackend, report: Reporter,
+        currentStage: Int = 1, isPaused: Bool = false
     ) {
         task?.cancel()
         generation += 1
         self.host = host
         creating = false
         withdrawn = false
-        active = ChainProgress(jobId: jobId, stageCount: stageCount)
+        self.report = report
+        var progress = ChainProgress(jobId: jobId, stageCount: stageCount,
+                                     currentStage: Swift.max(currentStage, 1))
+        progress.isPaused = isPaused
+        active = progress
+        report.progress(progress)
         task = Task { [weak self] in
             await self?.follow(jobId, on: host, backend: backend, report: report)
         }

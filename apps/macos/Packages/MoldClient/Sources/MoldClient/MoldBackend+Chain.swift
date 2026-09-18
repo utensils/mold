@@ -19,6 +19,11 @@ public protocol MoldChainBackend: Sendable {
     func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error>
     func chainJob(id: String) async throws -> ChainJobDetail
     func cancelChainJob(id: String) async throws
+    /// Restarts a job a host restart PARKED. An ephemeral chain keeps its
+    /// manifest, its source media, its finished clips and its tail cache
+    /// across a graceful shutdown, so resuming is continuing -- not a
+    /// re-render (CLAUDE.md, "Scripted sequences").
+    func resumeChainJob(id: String) async throws
     /// What this machine will chain for one model -- the HOST's own limits,
     /// which outrank every constant this app carries.
     func chainLimits(model: String, fps: Int?) async throws -> ChainLimits

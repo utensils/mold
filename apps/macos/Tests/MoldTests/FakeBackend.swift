@@ -440,6 +440,13 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         submitLock.withLock { cancelledChainJobIds.append(id) }
     }
 
+    nonisolated(unsafe) var resumedChainJobIds: [String] = []
+
+    func resumeChainJob(id: String) async throws {
+        try record("resumeChainJob")
+        submitLock.withLock { resumedChainJobIds.append(id) }
+    }
+
     func chainJobEvents(id: String) -> AsyncThrowingStream<ChainJobEvent, Error> {
         callsLock.withLock { recorded.append("chainJobEvents") }
         guard chainEventsHeldOpen.contains(id) else {

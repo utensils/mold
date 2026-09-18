@@ -9,6 +9,8 @@ extension GenerateController {
     /// to recover into.
     func recoverPending() async {
         guard case .idle = run else { return }
+        await PendingChainRecovery.reattach(on: self)
+        guard case .idle = run else { return }
         for found in await PendingRecovery.resolve(hosts: hosts) {
             guard let backend = hosts.backend(for: found.host) else { continue }
             activeBatch = ActiveBatch(

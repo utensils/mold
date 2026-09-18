@@ -33,6 +33,16 @@ extension PromptPanel {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if controller.chain.active?.isPaused == true {
+                // A host restart PARKS an ephemeral chain rather than losing
+                // it: its manifest, its finished clips and its tail cache are
+                // all still there, so this continues rather than re-renders.
+                Button("Resume") {
+                    controller.chain.resume(backend: { controller.hosts.backend(for: $0) })
+                }
+                .controlSize(.large)
+                .help("Continue this clip where the machine parked it")
+            }
             if controller.run.isBusy {
                 stopButton
             }
