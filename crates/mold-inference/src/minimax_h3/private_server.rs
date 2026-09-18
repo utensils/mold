@@ -4537,7 +4537,11 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                     }
                 })?;
             let metal_memory_guard =
-                H3MetalMemoryGuard::start(&execution_device, cancellation.clone())?;
+                if std::env::var("MOLD_H3_METAL_CAMPAIGN").as_deref() == Ok("1") {
+                    H3MetalMemoryGuard::start_campaign(&execution_device, cancellation.clone())?
+                } else {
+                    H3MetalMemoryGuard::start(&execution_device, cancellation.clone())?
+                };
             let qwen_on_cpu = matches!(
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop
