@@ -127,9 +127,10 @@ struct LibraryPane: View {
             .navigationSubtitle(fullSubtitle(showing))
             .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,
                         suggestedTokens: .constant(suggestedTokens),
-                        prompt: "Search prompts, models and tags") { token in
+                        prompt: "Search, or is:video · tag:name · on:machine") { token in
                 Label(token.label, systemImage: token.symbol)
             }
+            .onSubmit(of: .search) { commitTypedToken() }
             .searchFocused($isSearchFocused)
             .toolbar { toolbar }
     }

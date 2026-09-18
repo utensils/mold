@@ -40,35 +40,31 @@ extension LibraryPane {
         }
     }
 
-    /// Chips offered under the search field as you type.
-    ///
-    /// Only what this library actually holds: a machine you have, a tag
-    /// somebody used, a kind of thing that exists. Suggesting a filter that
-    /// can only ever return nothing is worse than suggesting nothing.
+    /// Chips offered under the search field as you type -- and the one a
+    /// Return commits. `LibrarySearchSyntax` owns the vocabulary (`is:`,
+    /// `tag:`, `on:`); this only feeds it what the library actually holds,
+    /// because suggesting a filter that can only ever return nothing is
+    /// worse than suggesting nothing. A machine is offered only when there
+    /// is more than one to tell apart.
     var suggestedTokens: [LibraryToken] {
-        let typed = navigation.query.text.trimmingCharacters(in: .whitespaces)
-        guard !typed.isEmpty else { return [] }
-        let folded = LibraryEntry.fold(typed)
-        var found: [LibraryToken] = []
+        LibrarySearchSyntax.suggestions(
+            for: navigation.query.text, machines: searchableMachines,
+            tags: library.tagCounts.map(\.name),
+            applied: Set(navigation.query.tokens.map(\.id)))
+    }
 
-        if hosts.hosts.count > 1 {
-            found += hosts.hosts
-                .filter { LibraryEntry.fold($0.name).contains(folded) }
-                .map { .machine(id: $0.id, name: $0.name) }
-        }
-        found += library.tagCounts
-            .filter { LibraryEntry.fold($0.name).contains(folded) }
-            .prefix(5)
-            .map { .tag($0.name) }
-        found += PrintKind.allCases
-            .filter { LibraryEntry.fold($0.rawValue).hasPrefix(folded) }
-            .map { .kind($0) }
-        if LibraryEntry.fold("favourite").hasPrefix(folded)
-            || LibraryEntry.fold("favorite").hasPrefix(folded) {
-            found.append(.favorite)
-        }
-        // Already-applied chips would read as "add this twice".
-        let applied = Set(navigation.query.tokens.map(\.id))
-        return found.filter { !applied.contains($0.id) }
+    /// Return over `is:video`, `tag:cat` or `on:hal9000` turns the text into
+    /// its chip; over anything else it searches the words, as it always did.
+    func commitTypedToken() {
+        guard let token = LibrarySearchSyntax.committed(
+            navigation.query.text, machines: searchableMachines,
+            tags: library.tagCounts.map(\.name))
+        else { return }
+        navigation.query.tokens.append(token)
+        navigation.query.text = ""
+    }
+
+    private var searchableMachines: [(id: MoldHost.ID, name: String)] {
+        hosts.hosts.count > 1 ? hosts.hosts.map { ($0.id, $0.name) } : []
     }
 }
