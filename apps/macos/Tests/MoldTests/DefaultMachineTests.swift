@@ -82,6 +82,43 @@ struct DefaultMachineTests {
         #expect(hosts.defaultMachine == nil)
     }
 
+    /// UAT 2026-09-17 #4: Set as Default wrote the key, and nothing redrew --
+    /// no Default badge on the card, the item still offered -- until the pane
+    /// was left and re-entered, because a computed accessor over the suite
+    /// is not observable state.
+    ///
+    /// **Fails today**: no observation is registered for a computed property,
+    /// so `onChange` never fires.
+    @Test func settingTheDefaultIsSomethingAViewCanWatch() {
+        reset()
+        let workstation = machine("workstation")
+        let hosts = HostStore(hosts: [workstation]) { self.fake($0, up: true) }
+        let fired = Flag()
+        withObservationTracking { _ = hosts.defaultMachine } onChange: { fired.raise() }
+
+        hosts.setDefault(workstation)
+
+        #expect(fired.isRaised)
+        #expect(AppStorageSuite.defaults.string(forKey: "defaultMachine") == workstation.id.uuidString)
+    }
+
+    /// A preferences reset clears the key straight from the suite, the way
+    /// every `@AppStorage` view expects -- the store must follow, not keep a
+    /// default the person just reset.
+    ///
+    /// **Fails today**: the observed copy is never told.
+    @Test func aPreferencesResetClearsTheDefaultInTheStoreToo() async {
+        reset()
+        let workstation = machine("workstation")
+        let hosts = HostStore(hosts: [workstation]) { self.fake($0, up: true) }
+        hosts.setDefault(workstation)
+
+        PreferencesReset.reset(in: AppStorageSuite.defaults)
+
+        await settle { hosts.defaultMachine == nil }
+        #expect(hosts.defaultMachine == nil)
+    }
+
     @Test func forgettingAMachineForgetsThatItWasTheDefault() {
         reset()
         let workstation = machine("workstation")

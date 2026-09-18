@@ -31,6 +31,15 @@ final class HostStore {
     /// reconnection.
     var instanceIDs: [MoldHost.ID: String] = [:]
 
+    /// The machine work goes to when nothing else says. Stored, not computed
+    /// over the suite, because a fleet card's Default badge and its menu
+    /// redraw from it; `HostStore+Default` persists it and follows the suite
+    /// so a preferences reset clears it here too.
+    var defaultMachine: MoldHost.ID? {
+        didSet { if oldValue != defaultMachine { persistDefaultMachine() } }
+    }
+    @ObservationIgnored var defaultsObserver: (any NSObjectProtocol)?
+
     /// How a machine's requests actually get made. A stored property, because
     /// it cannot live in an extension -- and this file may not construct a
     /// concrete backend itself, so the default reaches into `+Reachability`
@@ -57,6 +66,8 @@ final class HostStore {
          makeBackend: @escaping @MainActor (MoldHost) -> any MoldBackend = HostStore.http) {
         self.hosts = hosts
         self.makeBackend = makeBackend
+        self.defaultMachine = Self.storedDefaultMachine()
+        followDefaultMachineInSuite()
     }
 }
 

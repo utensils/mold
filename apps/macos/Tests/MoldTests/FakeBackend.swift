@@ -35,6 +35,15 @@ func settle(until condition: () -> Bool) async {
     }
 }
 
+/// A bool a `@Sendable` callback can raise -- `withObservationTracking`'s
+/// `onChange` cannot capture a local `var`.
+nonisolated final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var isRaised: Bool { lock.withLock { raised } }
+    func raise() { lock.withLock { raised = true } }
+}
+
 final class FakeBackend: MoldBackend, @unchecked Sendable {
     let host: MoldHost
     /// Every route asked, in order. Read and written under `callsLock`: a
