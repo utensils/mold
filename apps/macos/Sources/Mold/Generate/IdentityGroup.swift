@@ -92,6 +92,13 @@ struct IdentityGroup: View {
     /// The same square the reference strip stages one in.
     static let photoSize = ReferenceStrip.thumbnailSize
 
+    /// What this group's wells accept, named once so both of them -- and a
+    /// test -- read the same answer. STRICTER than every other picture well:
+    /// the server walks a PNG signature and then JPEG markers and nothing
+    /// else, so WebP, which the general wells take happily and the Library is
+    /// full of, is transcoded on the way in.
+    static let accepting = PictureImport.identityReadable
+
     private var weightBinding: Binding<Double> {
         Binding(
             get: { draft.media.identity?.weight ?? Identity.weightDefault },

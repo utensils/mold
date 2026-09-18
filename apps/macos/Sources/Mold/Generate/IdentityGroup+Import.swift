@@ -42,7 +42,7 @@ extension IdentityGroup {
     func stage(_ drops: [PictureDrop]) {
         importTask?.cancel()
         importTask = PictureIntake(
-            accepting: PictureImport.identityReadable, hosts: hosts, library: library,
+            accepting: Self.accepting, hosts: hosts, library: library,
             deliver: { draft.media = Self.staging($0, in: draft.media, maxPhotos: maxPhotos) },
             report: { importFailure = $0 }
         ).drops(drops)

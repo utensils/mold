@@ -12,7 +12,7 @@ extension IdentityGroup {
         PictureWell(
             rows: GenerateMenus.identityPhoto(),
             picture: photo.encoded,
-            accepting: PictureImport.identityReadable,
+            accepting: Self.accepting,
             size: Self.photoSize,
             opensOnClick: false,
             label: photo.name,
@@ -25,7 +25,7 @@ extension IdentityGroup {
         PictureWell(
             rows: GenerateMenus.identityAdd(canPaste: PicturePaste.hasPicture),
             placeholder: "person.crop.circle.badge.plus",
-            accepting: PictureImport.identityReadable,
+            accepting: Self.accepting,
             allowsMultiple: true,
             size: Self.photoSize,
             caption: WellCaption.identityAdd,

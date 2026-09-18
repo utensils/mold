@@ -141,6 +141,18 @@ struct PictureWellTests {
         #expect(forSource.name == "a-face.webp")
     }
 
+    /// The identity wells' acceptance policy is the STRICT one, and it is the
+    /// same one whichever door a photograph arrives through -- the add well,
+    /// a staged well's Replace, or a drop on the group. Copying the general
+    /// policy here is the one mistake that puts WebP in front of an encoder
+    /// that reads PNG and JPEG and nothing else.
+    @Test func theIdentityWellsAcceptLessThanEveryOtherWell() {
+        #expect(IdentityGroup.accepting == PictureImport.identityReadable)
+        #expect(IdentityGroup.accepting.isSubset(of: PictureImport.engineReadable))
+        #expect(IdentityGroup.accepting != PictureImport.engineReadable)
+        #expect(!IdentityGroup.accepting.contains(UTType.webP.identifier))
+    }
+
     /// What the identity add well does with a picked picture, whichever door
     /// it came through -- the value, so the test needs no view.
     @Test func aPickedPictureIsStagedAsAnIdentityPhotograph() {
@@ -165,13 +177,13 @@ struct PictureWellTests {
 
     /// Replace swaps ONE slot in place -- a remove-then-add sent the
     /// replacement to the end of the strip.
-    @Test func replacingAStagedPhotographKeepsItsPlace() {
+    @Test func replacingAStagedPhotographKeepsItsPlace() throws {
         var media = DraftMedia()
         for name in ["a.png", "b.png", "c.png"] {
             media = IdentityGroup.staging(
                 ImportedPicture(encoded: name, name: name, data: Data()), in: media, maxPhotos: 4)
         }
-        let middle = try! #require(media.identity?.photos[1])
+        let middle = try #require(media.identity?.photos[1])
 
         let picked = ImportedPicture(encoded: "NEW", name: "new.png", data: Data())
         media = IdentityGroup.replacing(middle, with: picked, in: media)
