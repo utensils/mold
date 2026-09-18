@@ -86,17 +86,28 @@ extension UpscaleStore {
             return
         }
         guard let backend = hosts.backend(for: key.host) else { return }
-        pollers[key]?.cancel()
-        pollers[key] = nil
+        // The epoch is bumped here for the same reason `start` bumps it: an
+        // `ask` already in flight is about the job BEFORE this transition,
+        // and landing it afterwards rewrites a paused job as running with
+        // nothing polling it. Relying on URLSession turning the cancelled
+        // request into a `CancellationError` is a property of the transport,
+        // not an invariant of this store.
+        let epoch = bump(key)
         do {
             let next = try await backend.transitionFramewiseUpscale(id: job.id, to: transition)
             // A newer job for the same print took the key while this was in
             // flight -- this answer is about a job nobody is following.
-            guard jobs[key]?.id == job.id else { return }
+            guard epochs[key] == epoch, jobs[key]?.id == job.id else { return }
             jobs[key] = next
             if UpscalePlan.shouldPoll(next) { poll(key) }
         } catch {
             hosts.report(error, on: key.host, doing: Self.followVerb)
+            // The transition failed; the JOB did not. `bump` stopped the
+            // poll before the request went out, so without this the row
+            // freezes at its last frame count and offers Pause forever --
+            // and the only repair is reopening the Library.
+            guard epochs[key] == epoch, UpscalePlan.shouldPoll(jobs[key]) else { return }
+            poll(key)
         }
     }
 

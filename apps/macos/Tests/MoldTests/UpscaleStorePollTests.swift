@@ -135,6 +135,65 @@ struct UpscaleStorePollTests {
         #expect(store.jobs[key(plato)]?.totalFrames == 240)
     }
 
+    /// A Pause that FAILS must not stop the app following a job that is
+    /// still running. The poller is cancelled before the POST, so without a
+    /// restart the row freezes at its last frame count and offers Pause
+    /// forever, and the only repair is reopening the Library.
+    ///
+    /// **Fails today**: the `catch` reports and returns.
+    @Test func aFailedPauseKeepsFollowingTheJobItCouldNotPause() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let (store, hosts) = await bench(backend, host: plato)
+
+        await store.start(clip(on: plato))
+        await settle { store.jobs[key(plato)]?.state == .running }
+        backend.plantedErrors["transitionFramewiseUpscale"] = MoldClientError.http(
+            status: 500, code: nil, message: "The machine is having a moment.")
+        let asks = backend.callCount("framewiseUpscale")
+
+        await store.transition(key(plato), to: .pause)
+
+        #expect(hosts.failures.first?.sentence.contains("having a moment") == true)
+        #expect(store.following.contains(key(plato)), "the job is still being asked about")
+        await settle { backend.callCount("framewiseUpscale") > asks }
+    }
+
+    /// An `ask` in flight when Pause is pressed must not land on top of the
+    /// paused state. `start` and `recover` bump the epoch; `transition` did
+    /// not, and was protected only by URLSession turning a cancelled request
+    /// into a `CancellationError` -- a transport property, not an invariant
+    /// of this store.
+    ///
+    /// **Fails today**: the parked answer passes both fences and rewrites the
+    /// paused job as running, with nothing polling it.
+    @Test func aPauseIsNotUndoneByAnAnswerAlreadyInFlight() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let (store, _) = await bench(backend, host: plato)
+
+        await store.start(clip(on: plato))
+        await settle { store.jobs[key(plato)]?.state == .running }
+
+        // Park the next ask. Its answer says "running".
+        backend.extras.framewiseHeldOpen = true
+        await settle { !backend.extras.framewiseWaiters.isEmpty }
+
+        backend.extras.framewiseJobs = [
+            FakeFixtures.framewiseJob("vup-1", state: "paused", done: 60, total: 124),
+        ]
+        await store.transition(key(plato), to: .pause)
+        #expect(store.jobs[key(plato)]?.state == .paused)
+
+        // The parked answer lands. It is about the job before the pause.
+        backend.extras.framewiseJobs = [
+            FakeFixtures.framewiseJob("vup-1", state: "running", done: 59, total: 124),
+        ]
+        backend.releaseFramewise()
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(store.jobs[key(plato)]?.state == .paused, "the older answer was dropped")
+    }
+
     /// Opening the Library finds the clip upscales already running -- one
     /// listing per machine, never one call per print.
     @Test func openingTheLibraryFindsAJobAlreadyRunning() async {
