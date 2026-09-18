@@ -104,6 +104,25 @@ struct PictureWellTests {
         #expect(GenerateMenus.referenceStrip(count: 2).map(\.kind) == [.removeAllReferences])
     }
 
+    /// Every row that TAKES a picture away is destructive, which is what the
+    /// chooser reads to cancel an import still in flight and retract the
+    /// failure sentence beside the well -- the four wells each used to do that
+    /// in their own `clear()`, and two of them forgot the task.
+    @Test func everyRowThatEmptiesAWellSaysItIsDestructive() {
+        let emptying: [GenerateAction] = [
+            .removeSource, .removeReference, .removeAllReferences, .removePhoto, .removeControl,
+        ]
+        for action in emptying {
+            #expect(action.isDestructive, "\(action) empties a well without saying so")
+        }
+        // And nothing that FILLS one claims to be destructive, or picking a
+        // file would cancel the import it just started.
+        for action in [GenerateAction.chooseFile, .chooseFromLibrary, .paste,
+                       .replacePicture, .replacePhoto, .replaceFromLibrary] {
+            #expect(!action.isDestructive)
+        }
+    }
+
     // MARK: - A Library print is conformed to the well that asked for it
 
     /// A 1x1 lossless WebP. Checked in as bytes because ImageIO on this Mac

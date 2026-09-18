@@ -21,6 +21,15 @@ extension PictureWell {
         case .paste:
             start { intake.paste() }
         default:
+            // A destructive row retracts the well's complaint about a file
+            // that did not land, and cancels an import still in flight: the
+            // picture both were about is being taken away, and a slow one
+            // finishing afterwards would refill a well somebody just emptied.
+            if action.isDestructive {
+                importTask?.cancel()
+                importTask = nil
+                importFailure = nil
+            }
             perform(action)
         }
     }
