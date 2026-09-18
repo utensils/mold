@@ -43,11 +43,9 @@ final class LibraryStore {
     /// Organization edits on their way to the machines, and the one task per
     /// machine walking them there. See `LibraryMutations`.
     let mutations = LibraryMutations()
-    /// Which live frames are this app's own edit coming back, and which
-    /// machines are owed a re-list because one was skipped. See `GalleryEcho`.
-    var echo = GalleryEcho()
-    /// One resync-driven re-list per machine at a time. See `RelistGate`.
-    let relists = RelistGate()
+    /// What the machines' live frames do to the rows on screen, and the two
+    /// pieces of memory that decision needs. See `GalleryLive`.
+    let live = GalleryLive()
 
     /// How many times the rows have changed. See `LibraryRevision`.
     let rows = LibraryRevision()
@@ -59,9 +57,10 @@ final class LibraryStore {
         // reached nobody and the timeline only caught up on the next ⌘R.
         // What still waits for a pane is the first LISTING -- these are
         // deltas, and a client that has read nothing has nothing to apply
-        // them to. See `LibraryStore+Live`.
+        // them to. See `GalleryLive`.
         hosts.onEvent { [weak self] host, event in
-            self?.apply(event, from: host)
+            guard let self else { return }
+            live.apply(event, from: host, in: self)
         }
     }
 

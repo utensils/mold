@@ -42,7 +42,7 @@ extension LibraryMutations {
                 // goes, and only it -- a favourite that succeeded a moment ago
                 // is still undoable.
                 store.undo.forget(entry: entry.id)
-                await store.relist(host)
+                await store.live.relist(host, in: store)
             }
             return error
         }

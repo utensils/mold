@@ -29,8 +29,8 @@ struct RelistGateTests {
             hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
         }
 
-        await settle(until: { library.relists.reads[machine.id] == 2 })
-        #expect(library.relists.reads[machine.id] == 2)
+        await settle(until: { library.live.relists.reads[machine.id] == 2 })
+        #expect(library.live.relists.reads[machine.id] == 2)
         #expect(fake.callCount("gallery") <= 2)
     }
 
@@ -46,14 +46,14 @@ struct RelistGateTests {
         let library = LibraryStore(hosts: hosts)
 
         hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
-        await settle(until: { library.relists.reads[machine.id] == 1 })
+        await settle(until: { library.live.relists.reads[machine.id] == 1 })
         // Mid-read: the answer in flight was asked for before this marker, so
         // it cannot be the repair the marker is asking for.
         hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
-        #expect(library.relists.reads[machine.id] == 1)
+        #expect(library.live.relists.reads[machine.id] == 1)
 
-        await settle(until: { library.relists.reads[machine.id] == 2 })
-        #expect(library.relists.reads[machine.id] == 2)
+        await settle(until: { library.live.relists.reads[machine.id] == 2 })
+        #expect(library.live.relists.reads[machine.id] == 2)
     }
 
     /// Markers with nothing in flight are each answered in turn -- the gate
@@ -66,11 +66,11 @@ struct RelistGateTests {
         let library = LibraryStore(hosts: hosts)
 
         hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
-        await settle(until: { library.relists.reads[machine.id] == 1 })
+        await settle(until: { library.live.relists.reads[machine.id] == 1 })
         hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
-        await settle(until: { library.relists.reads[machine.id] == 2 })
+        await settle(until: { library.live.relists.reads[machine.id] == 2 })
 
-        #expect(library.relists.reads[machine.id] == 2)
+        #expect(library.live.relists.reads[machine.id] == 2)
     }
 
     /// Two machines are two gates' worth of work, not one queue.
@@ -87,8 +87,8 @@ struct RelistGateTests {
         hosts.listeners.forEach { $0(workstation.id, .resyncRequired) }
         hosts.listeners.forEach { $0(hal.id, .resyncRequired) }
 
-        await settle(until: { library.relists.reads.count == 2 })
-        #expect(library.relists.reads[workstation.id] == 1)
-        #expect(library.relists.reads[hal.id] == 1)
+        await settle(until: { library.live.relists.reads.count == 2 })
+        #expect(library.live.relists.reads[workstation.id] == 1)
+        #expect(library.live.relists.reads[hal.id] == 1)
     }
 }

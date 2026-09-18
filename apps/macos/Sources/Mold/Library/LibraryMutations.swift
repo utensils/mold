@@ -72,7 +72,7 @@ final class LibraryMutations {
                 // thing `attempt`'s own give-up below does.
                 store.hosts.report(lastError ?? MoldClientError.malformedResponse,
                                    on: host, doing: entry.change.verb)
-                await store.relist(host)
+                await store.live.relist(host, in: store)
             }
         }
         // A frame from this machine was skipped as our own echo while the
@@ -80,7 +80,7 @@ final class LibraryMutations {
         // ALSO have been saying -- another client editing the same row -- is
         // the only thing left, and reading the listing again is how it is
         // recovered.
-        if store.echo.takeStale(host) { await store.relist(host) }
+        if store.live.echo.takeStale(host) { await store.live.relist(host, in: store) }
         // Membership moved, so every machine's collection counts are stale.
         if touchedCollections { await store.reloadCollections() }
         // Asked without mutating: `next(for:)` can retire an entry, and this
