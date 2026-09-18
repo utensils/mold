@@ -10,6 +10,16 @@ Two owner asks (2026-09-17, with screenshots), not review findings:
 | M#4 | a Library print is conformed the way a file is (WebP is not identity-readable)           | fixed  | (1)    | `PictureWellTests.aLibraryPrintIsConformedToTheWellThatAskedForIt`                                |
 | M#5 | README says it                                                                           | fixed  | (2)    | --                                                                                                 |
 
+Found while unifying, each its own commit:
+
+| id  | what                                                                                      | status | test                                                                 |
+| --- | ----------------------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------- |
+| M#6 | the identity acceptance policy was spelled out at three call sites                          | fixed  | `PictureWellTests.theIdentityWellsAcceptLessThanEveryOtherWell`         |
+| M#7 | emptying a well left its failure sentence, and two wells never cancelled the import         | fixed  | `PictureWellTests.everyRowThatEmptiesAWellSaysItIsDestructive`          |
+| M#8 | `.addReference` went unreachable when the strip's background lost it -- a row nobody offers | fixed  | `GenerateMenusTests.everyDeclaredActionIsOfferedBySomeMenu`             |
+| M#9 | a multi-file pick cleared its failure sentence on every delivery, so a batch that ended well said nothing about the files it lost | fixed | `PictureWellTests.aPickReportsWhatDidNotArriveEvenWhenSomethingDid` |
+| M#10 | the Library door did not cancel the import in flight, so a drop's slow file could land on top of the print just chosen | fixed | -- (one line; the rule it restores is pinned by the file's own header and by M#7's test for the destructive rows) |
+
 ## What the chooser is
 
 `PictureWell` (`PictureWell.swift` + `+Shape` + `+Import`), with `PictureIntake`
@@ -62,7 +72,25 @@ second `LibraryPickerSheet`, and three of the four `NSOpenPanel`s.
   TIFF.
 - **One feature commit, not three.** The chooser, the identity doors and the
   captions land on the same wells in the same files; a commit that rebuilt the
-  wells without their captions, or the reverse, would not compile.
+  wells without their captions, or the reverse, would not compile. M#6 to M#8
+  are their own commits on top.
+
+## Gates
+
+`make lint` green (the only files it still flags are the ones it flagged
+before). Package `swift test`: 918 tests, 50 suites, green. The app bundle was
+built and tested from a scratch derived-data directory
+(`/Volumes/ExternalStorage/xcb-lane-m`): `PictureWellTests`,
+`GenerateMenusTests`, `MenuSurfaceTests`, `PictureImportTests` and
+`ImageConditioningWellsTests` green, and the whole suite once at the end (743 tests, 106 suites) under
+the mkdir lock.
+
+**A note for whoever runs the app suite next**: `xcodebuild … test` (rather
+than `build-for-testing` + `test-without-building`) hung this lane twice, for
+ten minutes each time, inside the build's own `RegisterWithLaunchServices` step
+-- `lsregister -f -R -trusted` against an app on `/Volumes/ExternalStorage`. The
+two-step form does the same registration and does not hang. It is not a test
+failure and it held the shared lock while it sat there.
 
 ## Cross-lane edits
 
