@@ -136,8 +136,11 @@ files; both are one line each in files this lane may not touch.
    This Mac marked, a card carrying "4× …" with a load figure and two memory
    bars, and a dimmed card with a reason on any machine that is down.
 2. **A card's menu** (right click): Open, Check Now, Set as Default, Copy
-   Address, Edit…, a divider, Remove… in red -- and on This Mac's card, only
-   the first four.
+   Address, Edit…, a divider, Remove… last (declared `.destructive`; macOS
+   draws a destructive button in a contextual menu in the plain label colour,
+   unlike iOS and unlike the confirm dialog's red button, so "red" is not a
+   thing a screenshot can show here -- UAT 2026-09-17 #8) -- and on This
+   Mac's card, only the first four.
 3. **The detail** (`MOLD_NATIVE_DESTINATION=machines MOLD_NATIVE_MACHINE=workstation`):
    the unchanged machine page, titled with the machine's name, with a Back
    control in the toolbar.
