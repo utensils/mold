@@ -50,7 +50,11 @@ public extension RenderDraft {
     /// really ships: the value describes what was done to those bytes, and on
     /// a render carrying none it would describe nothing.
     internal func applySourceFit(to request: inout GenerateRequest, carriesSource: Bool) {
-        request.sourceFit = carriesSource ? media.sourceFit : nil
+        guard carriesSource else { request.sourceFit = nil; return }
+        // The defensive half. The adopt above has already coerced it, so
+        // this can only ever agree -- which is the point of a belt.
+        request.sourceFit = media.acceptsMask
+            ? media.sourceFit : media.sourceFit.coercedForMaskless()
     }
 
     /// LTX-2's overrides, or NOTHING. An empty object is refused outright

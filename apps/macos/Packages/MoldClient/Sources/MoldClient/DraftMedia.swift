@@ -20,10 +20,18 @@ public struct DraftMedia: Hashable, Sendable {
     /// an already-fitted picture crops a crop.
     public var sourceImageOriginal: String?
     public var sourceImageOriginalName: String?
+    /// The picked picture's own pixels. Held so a MODEL SWITCH can re-consult
+    /// `canvasIntent` without re-decoding the bytes -- the other half of #1166.
+    public var sourceImagePixels: SourcePixels?
     /// How a source whose shape differs from the canvas is mapped onto it.
     /// Recorded on the request as provenance -- the engine never reads it,
     /// the fitting happens here (`types.rs:3268-3273`).
     public var sourceFit: SourceFit = .default
+    /// Whether the ADOPTED recipe has a mask path at all, written by
+    /// `reconcile(for:family:model:)` and read by the request builder. Kept
+    /// here for the same reason `sourceMode` is: the fit that ships and the
+    /// rows on screen must not be able to disagree about it.
+    public var acceptsMask = true
     /// Ordered reference images, base64. For a recipe whose first image is the
     /// Target, index 0 is that one.
     public var editImages: [String] = []

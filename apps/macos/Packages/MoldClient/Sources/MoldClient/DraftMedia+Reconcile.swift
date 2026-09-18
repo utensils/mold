@@ -76,7 +76,15 @@ public extension DraftMedia {
         // The mask needs BOTH the recipe's own permission and a surviving
         // source image -- an orphaned mask over no source is meaningless
         // (`validation.rs:3101-3107`).
+        acceptsMask = capabilities.acceptsMask && capabilities.readsSourceImage
         reconcileMask(supported: capabilities.acceptsMask && sourceImage != nil)
+        // `pad-repaint` on a recipe with no mask path would pad the source
+        // with bands the model can never repaint -- and this app would then
+        // write a white-band mask into a draft that cannot carry one.
+        // `coerceSourceFitForMaskless` is applied "both when entering such a
+        // family and defensively on submit" (`sourceFit.ts:261-266`); this is
+        // the first half, and `applySourceFit` is the second.
+        if !acceptsMask { sourceFit = sourceFit.coercedForMaskless() }
 
         // Identity is positive-only: `supportsIdentity != true` means the
         // well is not drawn and the staged photo is held, because sending it

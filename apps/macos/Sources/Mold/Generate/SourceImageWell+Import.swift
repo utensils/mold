@@ -64,6 +64,7 @@ extension SourceImageWell {
         draft.media.sourceImageName = nil
         draft.media.sourceImageOriginal = nil
         draft.media.sourceImageOriginalName = nil
+        draft.media.sourceImagePixels = nil
         importFailure = nil
         preview = nil
     }
@@ -83,6 +84,7 @@ extension SourceImageWell {
         draft.media.sourceImage = picked.encoded
         draft.media.sourceImageName = picked.name
         if let size = PictureImport.pixelSize(of: picked.data) {
+            draft.media.sourceImagePixels = SourcePixels(width: size.width, height: size.height)
             draft.attachSourceShape(size, recipe: recipe, replaced: replaced)
         }
         // Last write wins on an EXCLUSIVE recipe: attaching here parks the

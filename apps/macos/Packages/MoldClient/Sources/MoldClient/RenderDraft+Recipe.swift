@@ -93,6 +93,16 @@ public extension RenderDraft {
             draft.negativePrompt = ""
         }
 
+        // The other half of #1166: a canvas that is FOLLOWING an attached
+        // source keeps following it. `adopting` writes the new recipe's
+        // defaults above, which is exactly the write studio's watcher
+        // re-resolves after (`sourceResolution.ts:50-59`) -- without this the
+        // canvas went square on the first model switch and stayed there.
+        if draft.canvasIntent.followsSource, let pixels = draft.media.sourceImagePixels {
+            draft.attachSourceShape((pixels.width, pixels.height),
+                                    recipe: recipe, replaced: false)
+        }
+
         // Echoed straight through on every adopt. `nil` on `auto`.
         draft.pipeline = recipe.requestSelector?.pipeline
 
