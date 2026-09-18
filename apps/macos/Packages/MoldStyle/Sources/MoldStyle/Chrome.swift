@@ -22,6 +22,12 @@ public enum Chrome {
     /// a row of mixed controls has one baseline.
     public static let fieldHeight: CGFloat = 26
 
+    /// What a window toolbar leaves between its trailing-most control and the
+    /// edge of the surface it sits over. Anything drawn directly under the
+    /// toolbar -- a banner, a note -- puts its own trailing control on this,
+    /// so the two read as one column rather than two near-misses.
+    public static let toolbarEdgeInset: CGFloat = 16
+
     public static let shadowRadius: CGFloat = 22
     public static let shadowY: CGFloat = 8
     public static let shadowOpacity: Double = 0.28

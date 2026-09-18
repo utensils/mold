@@ -32,12 +32,8 @@ extension LibraryPane {
                 .help("Thumbnail size")
                 .onChange(of: navigation.edge) { _, _ in navigation.rememberEdge() }
         }
-        ToolbarItem {
-            Button { showsInspector.toggle() } label: {
-                Label("Inspector", systemImage: "sidebar.trailing")
-            }
-            .help(showsInspector ? "Hide the inspector" : "Show the inspector")
-        }
+        // No inspector switch here: it belongs over the column it opens,
+        // and `trailingColumn` is what knows where that is.
     }
 
     /// Chips offered under the search field as you type -- and the one a

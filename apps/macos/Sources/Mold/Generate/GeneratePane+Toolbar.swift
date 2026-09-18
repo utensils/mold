@@ -23,11 +23,7 @@ extension GeneratePane {
                 controller.selectRecipe(recipe, in: selectedModel?.generationProfile)
             }
         }
-        ToolbarItem {
-            Button { showsInspector.toggle() } label: {
-                Label("Inspector", systemImage: "sidebar.trailing")
-            }
-            .help(showsInspector ? "Hide the inspector" : "Show the inspector")
-        }
+        // No inspector switch here: it belongs over the column it opens,
+        // and `trailingColumn` is what knows where that is.
     }
 }

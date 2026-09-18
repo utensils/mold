@@ -48,15 +48,18 @@ struct GeneratePane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .reuseNotice(reuse, draft: controller.draft)
-        .trailingColumn(isShowing: showsInspector) {
-            GenerateInspector(recipe: recipe, model: selectedModel, host: host,
-                              draft: $controller.draft, destination: $destination)
-        }
         .persistingDraft(controller, in: drafts)
         // Once per machine, model and rate -- never from `body`.
         .task(id: chainLimitsKey) { refreshChainLimits() }
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
+        // Before the pane's own `.toolbar`, so the column's switch is the
+        // LAST item in the row and the model and recipe capsules stop at the
+        // divider. See `TrailingColumn`.
+        .trailingColumn(isShowing: $showsInspector) {
+            GenerateInspector(recipe: recipe, model: selectedModel, host: host,
+                              draft: $controller.draft, destination: $destination)
+        }
         .toolbar { toolbar }
         // Escape brings the capsule back, the way it dismisses any other
         // temporary state -- a tucked prompt with no keyboard way out is a

@@ -35,9 +35,10 @@ extension LibraryPane {
         return content(showing)
             .failureBanner(hosts)
             .mediaCacheNote(materializer)
-            // The OPEN print while the viewer is showing one, and the grid's
-            // selection otherwise: see `LibraryInspector+Pane`.
-            .trailingColumn(isShowing: showsInspector) {
+            // The OPEN print while the viewer shows one, the grid's selection
+            // otherwise (`LibraryInspector+Pane`). Ahead of `.toolbar` so the
+            // column's switch is the row's last item -- see `TrailingColumn`.
+            .trailingColumn(isShowing: $showsInspector, searchFillsTheColumn: true) {
                 inspector(showing.inspected(viewing: viewing))
             }
             .navigationTitle(navigation.scope.title(in: library.shelves))

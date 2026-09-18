@@ -1,30 +1,69 @@
+import MoldStyle
 import SwiftUI
 
-/// A fixed column pinned to the trailing edge of the content, inside it.
+/// The inspector column pinned to the trailing edge of a pane.
 ///
-/// Deliberately NOT SwiftUI's `.inspector`: on macOS that splits the WINDOW's
-/// toolbar at the column's leading edge, so `.searchable`'s field -- which
-/// sits at the trailing end -- is drawn across the divider and the controls
-/// before it are crammed into what is left. Drawn here, inside the detail, the
-/// toolbar stays one undivided row over the whole pane, the way a Finder
-/// window's toolbar sits over its whole width.
+/// SwiftUI's own `.inspector`, because it is the only thing that carries the
+/// divider UP THROUGH the toolbar: everything before it belongs to the pane
+/// and everything after it to the column, in the toolbar exactly as in the
+/// content. Drawn as a plain `HStack` inside the detail -- which is what this
+/// was -- the toolbar stayed one undivided row over the whole pane while the
+/// column took a slice out of the content under it, so the sort, thumbnail
+/// size and inspector controls were crammed into what was left and the search
+/// field was drawn across a divider the toolbar knew nothing about (the
+/// owner's screenshot, 2026-09-17).
 ///
-/// A modifier rather than an inline `HStack` because Generate takes the same
+/// A modifier rather than an inline call because Generate takes the same
 /// column, and two copies of a rule are two rules.
 extension View {
+    /// - Parameter searchFillsTheColumn: whether this pane's own `.searchable`
+    ///   field already occupies the toolbar over the column. macOS pins that
+    ///   field to the toolbar's trailing end at a fixed width -- which is what
+    ///   `TrailingColumn.width` IS -- so a pane that has one needs nothing
+    ///   else there, and a pane that has not stretches the switch to reserve
+    ///   the same width instead. Either way what the PANE puts in the toolbar
+    ///   stops at the divider rather than being drawn across the column.
     func trailingColumn(
-        isShowing: Bool, @ViewBuilder _ column: () -> some View
+        isShowing: Binding<Bool>, searchFillsTheColumn: Bool = false,
+        @ViewBuilder _ column: () -> some View
     ) -> some View {
-        HStack(spacing: 0) {
-            // The content is the flexible side and must SAY so: an `HStack`
-            // hands a child its ideal width unless told otherwise, and the
-            // grid's ideal is one tile, which left it adrift in the middle
-            // with the column pushed off the trailing edge.
-            self.frame(maxWidth: .infinity, maxHeight: .infinity)
-            if isShowing {
-                Divider()
-                column().frame(width: 320)
+        inspector(isPresented: isShowing) {
+            column().inspectorColumnWidth(TrailingColumn.width)
+        }
+        .toolbar {
+            // Hidden, there is no column and no divider, so the switch is an
+            // ordinary trailing button whatever the pane does with search.
+            let reservesColumn = isShowing.wrappedValue && !searchFillsTheColumn
+            ToolbarItem {
+                Button { isShowing.wrappedValue.toggle() } label: {
+                    Label("Inspector", systemImage: "sidebar.trailing")
+                }
+                .help(isShowing.wrappedValue ? "Hide the inspector" : "Show the inspector")
+                .frame(width: reservesColumn ? TrailingColumn.toolbarRegion : nil,
+                       alignment: .trailing)
             }
         }
     }
+}
+
+enum TrailingColumn {
+    /// The column is exactly as wide as the search field above it.
+    ///
+    /// `.searchable` on macOS puts its field in the WINDOW's toolbar, at a
+    /// fixed width, hard against the toolbar's trailing inset -- there is no
+    /// supported placement that moves it, and none that makes it follow a
+    /// column. So the column follows IT: at any other width the field hangs
+    /// over the divider by the difference, which is the straddle in the
+    /// owner's screenshot; at this one it sits flush against the column's
+    /// leading edge and the two toolbar regions read as one clean split.
+    ///
+    /// Fixed rather than resizable for the same reason, and because the
+    /// `HStack` this replaced was a hard `.frame(width: 320)` anyway.
+    static let width: CGFloat = toolbarRegion + Chrome.toolbarEdgeInset
+
+    /// The column's share of the toolbar: its width, less the inset every
+    /// toolbar keeps at the window's edge. It is AppKit's own search-field
+    /// width because that field is the one thing in the toolbar whose size
+    /// nothing here can choose.
+    static let toolbarRegion: CGFloat = 320
 }
