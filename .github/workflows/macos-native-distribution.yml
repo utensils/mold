@@ -1,0 +1,228 @@
+name: macOS native distribution
+
+# Builds the signed + notarized + stapled native macOS app and the SIGNED
+# Sparkle appcast for one channel, exactly as `desktop-distribution.yml` does
+# for the Tauri app: ephemeral keychain, App Store Connect key at 0600, build,
+# notarize, verify, then the feed. It publishes nothing -- a caller owns the
+# publication order, because that order is the part that can go wrong.
+#
+# The runner is `macos-26`: the app's deployment target is macOS 26.0 and
+# nothing older carries that SDK (`macos-native.yml` says the same).
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Update channel to build
+        required: true
+        type: string
+    outputs:
+      version:
+        description: Marketing version in the bundle and the appcast
+        value: ${{ jobs.distribution.outputs.version }}
+      bundle_version:
+        description: CFBundleVersion -- the number Sparkle compares
+        value: ${{ jobs.distribution.outputs.bundle_version }}
+      dmg_name:
+        description: Version-unique DMG name
+        value: ${{ jobs.distribution.outputs.dmg_name }}
+      appcast_name:
+        description: Channel appcast (pointer) name
+        value: ${{ jobs.distribution.outputs.appcast_name }}
+      release_tag:
+        description: Release the assets belong to
+        value: ${{ jobs.distribution.outputs.release_tag }}
+      workflow_artifact_name:
+        description: Name of the uploaded build artifact
+        value: ${{ jobs.distribution.outputs.workflow_artifact_name }}
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Update channel to build
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - stable
+
+jobs:
+  distribution:
+    name: Signed + notarized distribution
+    runs-on: macos-26
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      bundle_version: ${{ steps.release.outputs.bundle_version }}
+      dmg_name: ${{ steps.release.outputs.dmg_name }}
+      appcast_name: ${{ steps.release.outputs.appcast_name }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      workflow_artifact_name: ${{ steps.release.outputs.workflow_artifact_name }}
+    defaults:
+      run:
+        working-directory: apps/macos
+    env:
+      CARGO_TERM_COLOR: always
+      MOLD_SIGN_IDENTITY: "Developer ID Application: James Brink (28X9H69QGE)"
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The build number is `git rev-list --count HEAD`, which needs the
+          # whole history to be a number at all.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/macos/rust/mold-macos-ffi
+          key: macos-native-${{ inputs.channel }}
+      - name: Install xcodegen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+
+      - name: Resolve channel version and artifact names
+        id: release
+        run: |
+          set -euo pipefail
+          channel="${{ inputs.channel }}"
+          if [[ "$channel" != "stable" && "$channel" != "nightly" ]]; then
+            echo "::error::channel must be stable or nightly"
+            exit 1
+          fi
+
+          # ONE source of truth for the marketing version -- the same line the
+          # Makefile reads, which is what the bundle actually reports.
+          marketing=$(awk -F'"' '/MARKETING_VERSION:/ { print $2; exit }' project.yml)
+          if [[ -z "$marketing" ]]; then
+            echo "::error::no MARKETING_VERSION in project.yml"
+            exit 1
+          fi
+
+          # Sparkle compares CFBundleVersion, across both channels. The commit
+          # count is monotonic and identical for a stable and a nightly cut
+          # from the same commit.
+          bundle_version=$(git rev-list --count HEAD)
+
+          if [[ "$channel" == "stable" ]]; then
+            version="$marketing"
+            release_tag="macos-native-v$marketing"
+            appcast_name="mold-native-appcast.xml"
+            if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$release_tag" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match version $marketing"
+              exit 1
+            fi
+          else
+            version="$marketing-nightly.$bundle_version"
+            release_tag="latest"
+            appcast_name="mold-native-appcast-nightly.xml"
+          fi
+
+          {
+            echo "version=$version"
+            echo "bundle_version=$bundle_version"
+            echo "release_tag=$release_tag"
+            echo "dmg_name=Mold-$version.dmg"
+            echo "appcast_name=$appcast_name"
+            echo "workflow_artifact_name=mold-native-macos-$channel"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "MOLD_NATIVE_CHANNEL=$channel"
+            echo "MOLD_NATIVE_VERSION=$version"
+            echo "MOLD_NATIVE_BUNDLE_VERSION=$bundle_version"
+            echo "MOLD_NATIVE_RELEASE_TAG=$release_tag"
+            echo "MOLD_NATIVE_DMG_NAME=Mold-$version.dmg"
+            echo "MOLD_NATIVE_APPCAST_NAME=$appcast_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Require signing, notarization and update-signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          MOLD_NATIVE_SPARKLE_KEY: ${{ secrets.MOLD_NATIVE_SPARKLE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_ISSUER \
+                      APPLE_API_KEY APPLE_API_PRIVATE_KEY MOLD_NATIVE_SPARKLE_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing repository secret $name"
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/mold-native-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$certificate"
+          echo "MOLD_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Prepare App Store Connect API key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      # `make signed` builds the Rust engine first (ALLOW_REMOTE_ONLY is NOT
+      # set, so `assert-embedded-engine.sh` fails closed on a client-only
+      # bundle), then refuses a placeholder update key, then makes the linkage
+      # portable, then signs innermost-first including Sparkle's helpers.
+      - name: Build, sign, package and notarize
+        run: |
+          set -euo pipefail
+          make gen
+          make signed
+          make dmg
+          make notarize
+
+      - name: Build the signed appcast
+        env:
+          MOLD_NATIVE_SPARKLE_KEY: ${{ secrets.MOLD_NATIVE_SPARKLE_KEY }}
+        run: |
+          set -euo pipefail
+          # Sparkle reads the update out of the same notarized DMG users
+          # download, so there is exactly one artifact per version.
+          mkdir -p dist/updates
+          cp "dist/$MOLD_NATIVE_DMG_NAME" "dist/updates/$MOLD_NATIVE_DMG_NAME"
+          make appcast \
+            APPCAST_CHANNEL="$MOLD_NATIVE_CHANNEL" \
+            APPCAST_DIR="$PWD/dist/updates" \
+            APPCAST_TAG="$MOLD_NATIVE_RELEASE_TAG"
+          # The feed must name the version this run built, or the pointer and
+          # the asset are describing different things.
+          grep -q "sparkle:shortVersionString=\"$MOLD_NATIVE_VERSION\"" \
+            "dist/updates/$MOLD_NATIVE_APPCAST_NAME" \
+            || grep -q "$MOLD_NATIVE_DMG_NAME" "dist/updates/$MOLD_NATIVE_APPCAST_NAME" \
+            || { echo "::error::the appcast does not mention this build"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.release.outputs.workflow_artifact_name }}
+          path: |
+            apps/macos/dist/*.dmg
+            apps/macos/dist/updates/*.xml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary signing keychain
+        if: always()
+        run: |
+          if [ -n "${MOLD_SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$MOLD_SIGNING_KEYCHAIN" || true
+          fi
