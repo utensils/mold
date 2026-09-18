@@ -28,17 +28,19 @@ struct Sidebar: View {
     var body: some View {
         List(selection: selection) {
             Section {
-                ForEach(Destination.allCases) { item in
-                    Label(item.title, systemImage: item.symbol).tag(Row.destination(item))
+                ForEach(SidebarRows.destinations) { item in
+                    Label(item.title, systemImage: item.symbol).tag(SidebarRow.destination(item))
                 }
             }
 
+            // The group label, not a destination: the rows under it ARE the
+            // library, each one a shelf of it.
             Section("Library") {
                 shelfRow(.all)
                 shelfRow(.favorites)
                 ForEach(library.shelves) { shelf in
                     CollectionRow(shelf: shelf, renaming: $renaming)
-                        .tag(Row.shelf(.collection(slug: shelf.slug)))
+                        .tag(SidebarRow.shelf(.collection(slug: shelf.slug)))
                 }
                 shelfRow(.trash)
                     // Present and inert on an empty trash, not absent: the
@@ -59,7 +61,7 @@ struct Sidebar: View {
                 ForEach(hosts.hosts) { host in
                     MachineRow(host: host, reachability: hosts.reachability(of: host),
                                destination: $destination)
-                        .tag(Row.machine(host.id))
+                        .tag(SidebarRow.machine(host.id))
                 }
             }
         }
@@ -85,7 +87,7 @@ struct Sidebar: View {
         } icon: {
             Image(systemName: scope.symbol)
         }
-        .tag(Row.shelf(scope))
+        .tag(SidebarRow.shelf(scope))
     }
 
     /// Every badge is a promise about what opening the row shows, so each one
@@ -100,38 +102,21 @@ struct Sidebar: View {
         }
     }
 
-    /// One selection over three kinds of row. Picking a shelf or a machine
-    /// also moves to its pane, because choosing what to look at and choosing
-    /// to look are the same act -- making them two clicks would be a bug
-    /// people report.
-    private var selection: Binding<Row?> {
+    /// One selection over three kinds of row, both ways, decided by
+    /// `SidebarRows` -- so the highlighted row and what picking one does can
+    /// never disagree about where the window is.
+    private var selection: Binding<SidebarRow?> {
         Binding(
             get: {
-                switch destination {
-                case .library: .shelf(navigation.scope)
-                case .machines: hosts.machine(selected: selectedMachine).map { .machine($0.id) }
-                    ?? .destination(.machines)
-                default: .destination(destination)
-                }
+                SidebarRows.selected(destination: destination, scope: navigation.scope,
+                                     machine: hosts.machine(selected: selectedMachine)?.id)
             },
             set: { row in
-                switch row {
-                case let .destination(item): destination = item
-                case let .shelf(scope):
-                    navigation.scope = scope
-                    destination = .library
-                case let .machine(id):
-                    selectedMachine = id.uuidString
-                    destination = .machines
-                case nil: break
-                }
+                guard let pick = SidebarRows.pick(row) else { return }
+                if let scope = pick.scope { navigation.scope = scope }
+                if let machine = pick.machine { selectedMachine = machine.uuidString }
+                destination = pick.destination
             }
         )
-    }
-
-    private enum Row: Hashable {
-        case destination(Destination)
-        case shelf(LibraryScope)
-        case machine(MoldHost.ID)
     }
 }
