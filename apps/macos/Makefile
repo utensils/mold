@@ -129,7 +129,10 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@cd Packages/MoldClient && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
-	@set -o pipefail; $(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
+	@# Every failing test and its issue, then the verdict -- `tail -5` alone
+	@# hid WHICH three of 758 failed (CI, 2026-09-18).
+	@set -o pipefail; $(XCB) -destination 'platform=macOS,arch=arm64' test \
+	  | grep -E '✘|recorded an issue|Expectation failed|error:|Test run with|TEST (SUCCEEDED|FAILED)'
 
 lint: lint-layers lint-color lint-size lint-type-size lint-a11y ## Run every architecture lint
 
