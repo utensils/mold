@@ -18,6 +18,15 @@ public extension OutputMetadata {
         return idImageSha256.map { [$0] } ?? []
     }
 
+    /// Whether the print was conditioned on a face. The knobs are recorded
+    /// ONLY when one actually rode along (`types.rs:3241-3248`), so any of
+    /// the four is evidence -- a print made before `id_weight` was recorded
+    /// still names its photograph.
+    var carriedAFace: Bool {
+        idWeight != nil || idStartStep != nil || idImageName != nil
+            || !identityDigests.isEmpty
+    }
+
     /// Whether the print was stitched from several clips, however it was
     /// authored. `chain_job_id` is present only for a DURABLE sequence, so it
     /// cannot answer this for an auto-chained one-shot.

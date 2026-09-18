@@ -98,31 +98,4 @@ public extension FloatControl {
     func clamp(_ value: Double) -> Double { Swift.min(Swift.max(value, min), max) }
 }
 
-public extension RenderDraft {
-    /// Rebuilds a draft from a finished print's provenance.
-    ///
-    /// A sequence's recorded `prompt` is every stage newline-joined, so reuse
-    /// takes the FIRST stage rather than restoring a wall of text that was
-    /// never one prompt. mold makes the same reduction on its other surfaces.
-    init(reusing metadata: OutputMetadata) {
-        self.init()
-        prompt = Self.firstStage(of: metadata)
-        negativePrompt = metadata.negativePrompt ?? ""
-        width = metadata.generationWidth ?? metadata.width ?? width
-        height = metadata.generationHeight ?? metadata.height ?? height
-        steps = metadata.steps ?? steps
-        guidance = metadata.guidance ?? guidance
-        frames = metadata.frames
-        fps = metadata.fps.map { Int($0.rounded()) }
-        // The seed is restored but NOT locked: reuse usually means "like that
-        // one, but different", and pinning it would make every reuse identical.
-        seed = metadata.seed
-        locksSeed = false
-    }
-
-    private static func firstStage(of metadata: OutputMetadata) -> String {
-        let prompt = metadata.prompt ?? ""
-        guard metadata.outputMode == "sequence" else { return prompt }
-        return prompt.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? prompt
-    }
-}
+// `RenderDraft(reusing:)` lives in `RenderDraft+Reuse.swift`.
