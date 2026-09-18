@@ -121,3 +121,22 @@ struct FailureVoiceTests {
             + "Accept the terms under Models.")
     }
 }
+
+/// A surface that shows a person a failure shows the WHOLE thing. The bare
+/// `reasonSentence` is for the two places a route would be noise: the voice
+/// itself, and a machine row already sitting under Machines.
+///
+/// **Fails today**: seven import, rewrite, upscale and config surfaces still
+/// stop at the reason.
+@Test func everyFailureSurfaceReadsTheWholeSentence() throws {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appending(path: "Sources/Mold")
+    let allowed: Set<String> = ["Error+Sentence.swift", "HostStore+Reachability.swift"]
+    let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+    let offenders = (files?.allObjects as? [URL] ?? [])
+        .filter { $0.pathExtension == "swift" && !allowed.contains($0.lastPathComponent) }
+        .filter { (try? String(contentsOf: $0, encoding: .utf8))?.contains(".reasonSentence") == true }
+        .map(\.lastPathComponent)
+    #expect(offenders.isEmpty, "\(offenders)")
+}

@@ -111,7 +111,7 @@ final class ConfigStore {
             unavailable.insert(host)
         case let MoldClientError.http(status, code, message):
             let rebuilt = MoldClientError.http(status: status, code: code, message: message)
-            refusals[host, default: [:]][key] = ConfigRefusal(code: code, sentence: rebuilt.reasonSentence)
+            refusals[host, default: [:]][key] = ConfigRefusal(code: code, sentence: rebuilt.failureSentence)
         default:
             hosts.report(error, on: host, doing: verb)
         }

@@ -105,7 +105,7 @@ struct MediaWell: View {
             } catch is CancellationError {
                 return
             } catch {
-                importFailure = error.reasonSentence
+                importFailure = error.failureSentence
             }
         }
     }

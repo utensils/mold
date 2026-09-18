@@ -54,7 +54,7 @@ extension UpscaleStore {
             guard epochs[key] == epoch else { return }
             // The row says it too, beside the print it is about -- the
             // banner names the machine and not which picture failed.
-            if stills[key] == .working { stills[key] = .failed(error.reasonSentence) }
+            if stills[key] == .working { stills[key] = .failed(error.failureSentence) }
             hosts.report(error, on: entry.hostID, doing: Self.startVerb)
         }
     }

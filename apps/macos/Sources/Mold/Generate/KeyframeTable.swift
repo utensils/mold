@@ -86,7 +86,7 @@ struct KeyframeTable: View {
                     name: picked.name))
                 importFailure = nil
             } catch {
-                importFailure = error.reasonSentence
+                importFailure = error.failureSentence
             }
         }
     }

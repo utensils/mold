@@ -69,7 +69,7 @@ final class ExpandStore {
             // A failed rewrite is about the prompt in front of you, not the
             // machine's health -- the answer belongs in the popover the wand
             // opened, never in the machine banner.
-            expansion = .refused(error.reasonSentence)
+            expansion = .refused(error.failureSentence)
         }
     }
 
@@ -102,7 +102,7 @@ final class ExpandStore {
         } catch is CancellationError {
             expansion = .idle
         } catch {
-            expansion = .refused(error.reasonSentence)
+            expansion = .refused(error.failureSentence)
         }
     }
 }

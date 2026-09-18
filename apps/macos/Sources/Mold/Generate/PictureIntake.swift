@@ -93,7 +93,7 @@ struct PictureIntake {
                 } catch is CancellationError {
                     return
                 } catch {
-                    failures.append(error.reasonSentence)
+                    failures.append(error.failureSentence)
                 }
             }
             guard !Task.isCancelled else { return }
