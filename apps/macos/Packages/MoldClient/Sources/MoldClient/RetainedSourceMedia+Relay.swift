@@ -36,20 +36,54 @@ public extension RetainedSourceMedia {
         return relayed
     }
 
-    /// Why a relay could not be made. Both cases are the client's own
-    /// mistake, not the machine's, and both name the thing rather than the
+    /// What a relay would put in the admission body, from the sizes the
+    /// INVENTORY already reported -- so it is answerable before a byte is
+    /// downloaded.
+    ///
+    /// The bytes are base64'd (+1/3) into every sibling and the whole
+    /// `BatchAdmission` goes out as one body, so four copies of a render
+    /// conditioned on a 400 MB retained clip is ~2.1 GB in a single POST.
+    /// Every machine refuses a body past `MAX_REQUEST_BODY_BYTES` anyway
+    /// (`lib.rs:178`), so this is the host's own limit asked early rather
+    /// than a number this app invented.
+    static func relayBodyBytes(_ members: [Member], copies: Int) -> Int {
+        let raw = members.reduce(0) { $0 + max($1.sizeBytes, 0) }
+        return (raw + 2) / 3 * 4 * max(copies, 1)
+    }
+
+    /// The refusal, when a relay would not fit, asked BEFORE downloading.
+    static func relayRefusal(_ members: [Member], copies: Int) -> RelayFailure? {
+        let bytes = relayBodyBytes(members, copies: copies)
+        guard bytes > RequestBodyLimit.bytes else { return nil }
+        return .tooLarge(bytes: bytes, copies: max(copies, 1))
+    }
+
+    /// Why a relay could not be made. Every case is the client's own
+    /// situation, not the machine's, and each names the thing rather than the
     /// step -- there is nothing to retry blindly.
     enum RelayFailure: LocalizedError, Hashable, Sendable {
         case unsupportedRole(String)
         case alreadyHeld(Field)
         case ambiguous(Field)
+        case tooLarge(bytes: Int, copies: Int)
 
         public var errorDescription: String? {
             switch self {
             case .unsupportedRole:
-                "This print kept something this version of Mold cannot reuse."
+                return "This print kept something this version of Mold cannot reuse."
             case .alreadyHeld, .ambiguous:
-                "Something is already attached where this print's source media goes."
+                return "Something is already attached where this print's source "
+                    + "media goes."
+            case let .tooLarge(bytes, copies):
+                let size = Int64(bytes).formatted(.byteCount(style: .binary))
+                return copies > 1
+                    ? "Carrying this print's source media to \(copies) copies would "
+                        + "send \(size), and a machine accepts at most "
+                        + "\(RequestBodyLimit.sentence). Make one at a time, or "
+                        + "attach the picture yourself."
+                    : "This print's source media is \(size), and a machine accepts "
+                        + "at most \(RequestBodyLimit.sentence). Attach the picture "
+                        + "yourself."
             }
         }
     }

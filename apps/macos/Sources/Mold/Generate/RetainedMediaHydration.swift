@@ -61,6 +61,10 @@ struct RetainedMediaHydration: Sendable {
     private func relay(
         _ members: [RetainedSourceMedia.Member], into requests: [GenerateRequest]
     ) async throws -> [GenerateRequest] {
+        // Asked from the sizes the INVENTORY already reported, so nothing is
+        // downloaded for a relay that could never be sent.
+        if let refusal = RetainedSourceMedia.relayRefusal(
+            members, copies: requests.count) { throw refusal }
         guard let origin = hosts.backend(for: authority.origin) else {
             throw MoldClientError.unreachable(
                 "The machine that made this print isn't connected.")

@@ -22,15 +22,35 @@ public extension HTTPBackend {
         }
     }
 
-    /// One retained file's original bytes. Bounded: the host serves at most
-    /// 512 MiB for a member and a clip can be most of that.
+    /// One retained file's original bytes.
+    ///
+    /// STREAMED and bounded as it arrives, not read whole and then measured:
+    /// a retained member is the one answer in this app that is routinely tens
+    /// or hundreds of megabytes, so a ceiling applied after the fact stops
+    /// this app KEEPING the bytes without stopping the allocation. The
+    /// declared length is refused before a byte is read, and the count is
+    /// kept as it comes in because a host that lies about the length is
+    /// exactly the one a ceiling exists for (`ResponseCeiling`, and the
+    /// thumbnail route's own note).
     func retainedSourceMediaBytes(
         for filename: String, member memberId: String
     ) async throws -> Data {
-        let data = try await bytes(for: request(
-            retainedSourceMediaPath(filename) + "/\(escaped(memberId))"))
-        return try ResponseCeiling.checked(
-            data, ceiling: ResponseCeiling.media, what: "retained source media")
+        let route = retainedSourceMediaPath(filename) + "/\(escaped(memberId))"
+        let (stream, response) = try await session.bytes(
+            for: request(route), delegate: redirectGuard)
+        guard let http = response as? HTTPURLResponse else {
+            throw MoldClientError.malformedResponse
+        }
+        guard (200 ..< 300).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw MoldClientError.unauthorized }
+            throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)
+        }
+        guard http.expectedContentLength <= Int64(ResponseCeiling.media) else {
+            throw ResponseCeiling.Exceeded(
+                bytes: Int(clamping: http.expectedContentLength),
+                ceiling: ResponseCeiling.media, what: "retained source media")
+        }
+        return try await stream.collected(upTo: ResponseCeiling.media)
     }
 
     /// Mints the handle for a SAME-HOST reuse.

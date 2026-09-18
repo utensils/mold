@@ -200,6 +200,42 @@ struct RetainedSourceMediaTests {
         }
     }
 
+    /// **Fails today**: nothing reads `sizeBytes`, so a relay downloads the
+    /// whole member and only then finds the request cannot be sent.
+    @Test func refusesARelayThatCouldNeverBeSentBeforeFetchingAByte() throws {
+        let big = RetainedSourceMedia.Member(
+            memberId: "m", role: "source_video", displayName: "clip",
+            sizeBytes: 400 * 1_024 * 1_024)
+        // One copy already exceeds what a machine accepts, base64 included.
+        let one = try #require(RetainedSourceMedia.relayRefusal([big], copies: 1))
+        // The machine's OWN limit, in the one sentence that spells it.
+        #expect(one.errorDescription?.contains(RequestBodyLimit.sentence) == true)
+
+        // Four siblings of a member that fits alone do NOT: the body carries
+        // it once per sibling.
+        let modest = RetainedSourceMedia.Member(
+            memberId: "m", role: "source_image", displayName: "picture",
+            sizeBytes: 30 * 1_024 * 1_024)
+        #expect(RetainedSourceMedia.relayRefusal([modest], copies: 1) == nil)
+        let four = try #require(RetainedSourceMedia.relayRefusal([modest], copies: 4))
+        #expect(four.errorDescription?.contains("4 copies") == true)
+
+        // An ordinary picture across four siblings is fine.
+        let ordinary = RetainedSourceMedia.Member(
+            memberId: "m", role: "source_image", displayName: "picture",
+            sizeBytes: 2 * 1_024 * 1_024)
+        #expect(RetainedSourceMedia.relayRefusal([ordinary], copies: 4) == nil)
+    }
+
+    @Test func theRelaySizeIsTheBodyItWouldSendNotTheBytesOnDisk() {
+        let member = RetainedSourceMedia.Member(
+            memberId: "m", role: "source_image", displayName: "p", sizeBytes: 3_000)
+        // base64 is 4 bytes per 3, once per sibling.
+        #expect(RetainedSourceMedia.relayBodyBytes([member], copies: 1) == 4_000)
+        #expect(RetainedSourceMedia.relayBodyBytes([member], copies: 4) == 16_000)
+        #expect(RetainedSourceMedia.relayBodyBytes([], copies: 4) == 0)
+    }
+
     // MARK: - The one-use handle
 
     @Test func theHandleRidesAHeaderAndNeverTheBody() throws {
