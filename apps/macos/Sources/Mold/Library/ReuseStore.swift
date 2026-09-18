@@ -24,6 +24,9 @@ final class ReuseStore {
     /// for it. `nil` means nothing to hydrate from -- a fresh draft, a reuse
     /// still in flight, or an edit that invalidated one.
     private(set) var authority: Authority?
+    /// The draft the reuse landed in. The authority is good only while the
+    /// draft still IS that one -- see `pending(for:)`.
+    private var restored: RenderDraft?
     /// What to say about a print whose media cannot be restored. Shown once,
     /// beside the prompt, and cleared by the next reuse or the next submit.
     var notice: String?
@@ -50,6 +53,7 @@ final class ReuseStore {
     func begin() -> Int {
         version += 1
         authority = nil
+        restored = nil
         notice = nil
         return version
     }
@@ -110,8 +114,15 @@ final class ReuseStore {
     /// checkpoint's own clip size cannot be hydrated from the print's
     /// archive, and this SAYS so rather than rendering it without the picture
     /// it was supposed to start from.
-    func warnIfTheRouteCannotCarryMedia(chained: Bool) {
-        guard chained, authority != nil else { return }
+    /// `outgoing` is the request the draft would actually build, so the
+    /// warning is given ONLY when something would have been hydrated. Gated
+    /// on the authority alone, it told a person who had attached the picture
+    /// themselves to attach a picture.
+    func warnIfTheRouteCannotCarryMedia(chained: Bool, outgoing: GenerateRequest?) {
+        guard chained, let authority, let outgoing else { return }
+        guard !RetainedSourceMedia.members(authority.members, forHydrating: outgoing)
+            .isEmpty
+        else { return }
         notice = "This clip is long enough that the machine renders it in "
             + "pieces, and that route can\u{2019}t restore the print\u{2019}s own source "
             + "picture. Attach one before developing."
@@ -121,7 +132,57 @@ final class ReuseStore {
     func clear() {
         version += 1
         authority = nil
+        restored = nil
         notice = nil
+    }
+}
+
+// Putting the authority down again, which is the whole of this type's other
+// half. An authority that is never released conditions renders nobody asked
+// for and, when the print goes away, refuses every render after it.
+extension ReuseStore {
+
+    /// Records the draft the recipe landed in, AFTER the model was adopted --
+    /// adoption clamps, parks and echoes the pipeline, so a snapshot taken
+    /// before it would differ from the draft the pane actually shows and the
+    /// authority would be dropped before anyone touched anything.
+    func arm(_ draft: RenderDraft) { restored = draft }
+
+    /// The authority, if it still describes the draft on screen.
+    ///
+    /// ANY edit puts it down. The draft is the whole recipe -- the prompt,
+    /// the model, the canvas, the wells, the sampler -- so this is the
+    /// cheapest honest form of desktop's rule that a new handoff supersedes
+    /// the prior print's authority (`composer.ts:29-59`), and it is stricter
+    /// than desktop needs to be because this app shows no restored picture in
+    /// the well: nothing else would tell a person that the render they are
+    /// now composing is still conditioned on somebody else's print.
+    func pending(for draft: RenderDraft) -> Authority? {
+        guard let authority, restored == draft else { return nil }
+        return authority
+    }
+
+    /// The authority, CONSUMED. A handle is good for one admission and a
+    /// relay's bytes are carried by the request that took them, so the submit
+    /// that takes this is the last one to have it -- which is also what makes
+    /// a print the machine can no longer honour refuse exactly one render
+    /// instead of every one after it.
+    func take(for draft: RenderDraft) -> Authority? {
+        defer { clear() }
+        return pending(for: draft)
+    }
+
+    /// What the pane says while a print's media is waiting to ride along.
+    ///
+    /// The available path used to be completely silent -- the person was told
+    /// when the picture would NOT come back and never when it would, which is
+    /// the disclosure exactly inverted.
+    func attachmentSentence(for draft: RenderDraft) -> String? {
+        guard let authority = pending(for: draft) else { return nil }
+        let machine = hosts.host(authority.origin)?.name ?? "its machine"
+        let what = authority.members.count == 1
+            ? "the source media" : "\(authority.members.count) source files"
+        return "Using \(what) from \(authority.filename) on \(machine)."
     }
 }
 

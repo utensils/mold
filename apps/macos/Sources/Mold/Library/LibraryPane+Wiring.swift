@@ -95,6 +95,10 @@ extension LibraryPane {
             }
         }
         destination = .generate
+        // AFTER the adopt, which clamps, parks and echoes the pipeline: this
+        // is the draft the pane will show, and the authority is good only
+        // while the draft still IS it.
+        reuseStore.arm(generate.draft)
         // ALWAYS ask, on every machine that lists this print. The server is
         // the only authority on what it retained -- inline source video,
         // audio and mask bytes leave no marker in the metadata at all -- and

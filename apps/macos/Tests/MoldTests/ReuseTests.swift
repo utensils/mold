@@ -171,6 +171,97 @@ struct ReuseTests {
         #expect(store.authority == nil)
     }
 
+    // MARK: - Putting the authority down again
+
+    /// Arms a store as a real reuse does: probe, then record the draft the
+    /// recipe landed in.
+    private func armed(_ store: ReuseStore, backend: FakeBackend, host: MoldHost,
+                       draft: RenderDraft) async {
+        backend.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
+            availability: .available, members: [member()])
+        await store.probe([PrintID(host: host.id, filename: "a.png")],
+                          fence: store.begin(), disclosing: conditioned())
+        store.arm(draft)
+    }
+
+    /// **Fails today**: nothing ever puts the authority down, so reuse print
+    /// A, retype the prompt, pick another model, Develop -- and the host
+    /// hydrates A's picture into a render that has nothing to do with it,
+    /// with nothing on screen having said so.
+    @Test func aDraftThatHasMovedOnNoLongerCarriesThePrintsPicture() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        var draft = RenderDraft()
+        draft.prompt = "the print's own prompt"
+        await armed(store, backend: backend, host: plato, draft: draft)
+        #expect(store.pending(for: draft) != nil)
+
+        draft.prompt = "something else entirely"
+        #expect(store.pending(for: draft) == nil)
+        #expect(store.take(for: draft) == nil)
+        // And it is GONE, not merely hidden: the next press cannot find it.
+        #expect(store.authority == nil)
+    }
+
+    /// **Fails today**: the authority outlives the render that used it, so
+    /// every later Develop silently conditions on the same print.
+    @Test func theSubmitThatTakesTheAuthorityIsTheLastOneToHaveIt() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft()
+        await armed(store, backend: backend, host: plato, draft: draft)
+
+        #expect(store.take(for: draft) != nil)
+        #expect(store.take(for: draft) == nil)
+        #expect(store.authority == nil)
+    }
+
+    /// **Fails today**: Sequence B. Reuse a print, delete it or let its Mac
+    /// sleep, and EVERY later Develop fails identically -- forever, with no
+    /// affordance to clear it and nothing calling `clear()`.
+    @Test func aPrintTheMachineCanNoLongerHonourNeverRefusesASecondRender() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft()
+        await armed(store, backend: backend, host: plato, draft: draft)
+
+        // The render that took it fails: nothing was planted, so the mint
+        // throws exactly as a purged print's 409 would.
+        let taken = try? #require(store.take(for: draft))
+        await #expect(throws: (any Error).self) {
+            _ = try await RetainedMedia.hydrated(
+                BatchAdmission(requests: [self.request()]),
+                with: RetainedMediaHydration(authority: taken!, hosts: hosts),
+                on: plato, backend: backend)
+        }
+        // The next press has nothing to fail on.
+        #expect(store.take(for: draft) == nil)
+        #expect(store.authority == nil)
+    }
+
+    /// The person can put it down themselves, from the sentence that names it.
+    @Test func theAttachmentSaysWhatItIsAndCanBeRemoved() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft()
+        await armed(store, backend: backend, host: plato, draft: draft)
+
+        let sentence = try? #require(store.attachmentSentence(for: draft))
+        #expect(sentence?.contains("a.png") == true)
+        #expect(sentence?.contains("plato") == true)
+        store.clear()
+        #expect(store.attachmentSentence(for: draft) == nil)
+        #expect(store.take(for: draft) == nil)
+    }
+
     // MARK: - How the bytes reach the render
 
     private func hydration(origin: MoldHost.ID, hosts: HostStore,
@@ -290,17 +381,36 @@ struct ReuseTests {
         let store = ReuseStore(hosts: hosts)
 
         // Nothing held yet: a chain with no retained print says nothing.
-        store.warnIfTheRouteCannotCarryMedia(chained: true)
+        store.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: request())
         #expect(store.notice == nil)
 
         await store.probe([PrintID(host: plato.id, filename: "a.png")],
                           fence: store.begin(), disclosing: conditioned())
         #expect(store.authority != nil)
         // An ordinary render still says nothing -- it CAN carry the media.
-        store.warnIfTheRouteCannotCarryMedia(chained: false)
+        store.warnIfTheRouteCannotCarryMedia(chained: false, outgoing: request())
         #expect(store.notice == nil)
 
-        store.warnIfTheRouteCannotCarryMedia(chained: true)
+        store.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: request())
         #expect(store.notice?.contains("renders it in pieces") == true)
+    }
+
+    /// **Fails today**: the warning is gated on the authority alone, so a
+    /// long clip whose source you attached BY HAND is still told to attach
+    /// one. Nothing would have been hydrated -- there is nothing to say.
+    @Test func aLongClipWithAPictureAlreadyAttachedIsToldNothing() async {
+        let plato = machine("plato")
+        let backend = FakeBackend(host: plato)
+        backend.retainedInventories["a.png"] = RetainedSourceMedia.Inventory(
+            availability: .available, members: [member()])
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        await store.probe([PrintID(host: plato.id, filename: "a.png")],
+                          fence: store.begin(), disclosing: conditioned())
+
+        var mine = request()
+        mine.sourceImage = "MINE"
+        store.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: mine)
+        #expect(store.notice == nil)
     }
 }

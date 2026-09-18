@@ -47,7 +47,7 @@ struct GeneratePane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .reuseNotice(reuse)
+        .reuseNotice(reuse, draft: controller.draft)
         .trailingColumn(isShowing: showsInspector) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
@@ -144,14 +144,36 @@ struct GeneratePane: View {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
         }?.decision ?? .single()
-        // The chain door redeems no reuse session, so a long clip says what
-        // it cannot bring back rather than rendering without it.
-        if case .chain = routing { reuse.warnIfTheRouteCannotCarryMedia(chained: true) }
+        // The chain door redeems no reuse session, so a long clip says what it
+        // cannot bring back -- but ONLY when something would have been
+        // brought back. Asked of the request the draft would actually build,
+        // so a person who attached the picture themselves is not told to.
+        if case .chain = routing {
+            reuse.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: outgoingProbe(on: host))
+        }
+        // TAKEN, not read: a handle is good for one admission and a relay's
+        // bytes ride the request that took them, so the submit that gets this
+        // is the last one to have it. That is what stops a print conditioning
+        // renders nobody asked for, and what stops a print the machine can no
+        // longer honour refusing every render after the first.
         controller.submit(
             on: host, backend: hosts.backend(for: host), routing: routing,
-            retained: reuse.authority.map {
+            retained: reuse.take(for: controller.draft).map {
                 RetainedMediaHydration(authority: $0, hosts: hosts)
             })
+    }
+
+    /// The first request the draft would build, for asking whether a retained
+    /// role would be hydrated at all. Built through the request builder rather
+    /// than by reading the wells, so the answer cannot disagree with what
+    /// actually ships (an exclusive well parks its media, and a probe that
+    /// looked at `media.sourceImage` would not know).
+    private func outgoingProbe(on host: MoldHost) -> GenerateRequest? {
+        guard let model = controller.modelName else { return nil }
+        return controller.draft.requests(
+            model: model, copies: 1, randomBase: 0,
+            maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
+        ).first
     }
 
     private func cancelRun() { controller.stop() }

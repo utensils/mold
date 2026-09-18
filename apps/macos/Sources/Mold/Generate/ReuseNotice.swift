@@ -1,3 +1,4 @@
+import MoldClient
 import SwiftUI
 
 /// One dismissable line about a print whose own source media could not be
@@ -11,11 +12,14 @@ import SwiftUI
 /// person clears by reconnecting.
 struct ReuseNotice: View {
     let sentence: String
+    /// The attachment line says what WILL ride along; the notice line says
+    /// what could not.
+    var glyph = "photo.badge.exclamationmark"
     let dismiss: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "photo.badge.exclamationmark")
+            Image(systemName: glyph)
                 .foregroundStyle(.secondary)
             Text(sentence)
                 .font(.callout)
@@ -37,8 +41,19 @@ struct ReuseNotice: View {
 
 extension View {
     /// The Generate pane's one call site.
-    func reuseNotice(_ reuse: ReuseStore) -> some View {
+    ///
+    /// TWO lines, and the order matters: what WILL happen first, then what
+    /// could not. The available path used to say nothing at all -- a person
+    /// was told when a print's picture would not come back and never when it
+    /// would, which is the disclosure exactly inverted, and it is what let a
+    /// render nobody associated with that print be silently conditioned on
+    /// it. The ✕ is the only way to put it down by hand.
+    func reuseNotice(_ reuse: ReuseStore, draft: RenderDraft) -> some View {
         VStack(spacing: 0) {
+            if let attachment = reuse.attachmentSentence(for: draft) {
+                ReuseNotice(sentence: attachment, glyph: "photo.on.rectangle.angled",
+                            dismiss: { reuse.clear() })
+            }
             if let sentence = reuse.notice {
                 ReuseNotice(sentence: sentence) { reuse.notice = nil }
             }
