@@ -18,6 +18,8 @@ struct MachinesDestination: View {
     @Environment(MachineStore.self) private var machines
     @Environment(QueueStore.self) private var queue
     @Environment(ModelStore.self) private var models
+    @Environment(ActivityStore.self) private var activity
+    @Environment(UpscaleStore.self) private var upscales
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) var selectedMachine = ""
     @Binding var destination: Destination
 
@@ -34,7 +36,8 @@ struct MachinesDestination: View {
     @State private var launchApplied = false
 
     private var fleet: MachineFleet {
-        MachineFleet(hosts: hosts, machines: machines, queue: queue, models: models)
+        MachineFleet(hosts: hosts, machines: machines, queue: queue, models: models,
+                     activity: activity, upscales: upscales)
     }
 
     var body: some View {

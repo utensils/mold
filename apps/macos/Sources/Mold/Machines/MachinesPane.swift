@@ -15,6 +15,8 @@ struct MachinesPane: View {
     @Environment(MachineStore.self) var machines
     @Environment(QueueStore.self) var queue
     @Environment(ModelStore.self) var models
+    @Environment(ActivityStore.self) var activity
+    @Environment(UpscaleStore.self) var upscales
     @Environment(PairingStore.self) var pairing
     /// The same key the sidebar declares, over the same suite. Two views
     /// sharing one preference by name stay in sync with no plumbing.
@@ -117,11 +119,16 @@ struct MachinesPane: View {
     /// The toolbar button, and what ⌘R reaches while this page is open
     /// (`MachinesDestination.refresh`) -- one implementation, in the type that
     /// knows how to read a machine (`MachineFleet.swift`).
+    /// Not `private`: `+Sections` counts a machine's work through it.
+    var fleet: MachineFleet {
+        MachineFleet(hosts: hosts, machines: machines, queue: queue, models: models,
+                     activity: activity, upscales: upscales)
+    }
+
     private func refresh() {
         guard let host = selected else { return }
         Task {
-            await MachineFleet(hosts: hosts, machines: machines,
-                               queue: queue, models: models).refresh(one: host)
+            await fleet.refresh(one: host)
         }
     }
 

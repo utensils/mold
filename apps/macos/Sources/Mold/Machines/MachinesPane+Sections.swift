@@ -127,7 +127,8 @@ extension MachinesPane {
 
     private func workCount(_ host: MoldHost) -> String {
         MachineFigures.workFigure(live: queue.hasLoaded(on: host.id)
-            ? queue.entries(on: host.id).filter(\.state.isLive) : nil)
+            ? queue.entries(on: host.id).filter(\.state.isLive) : nil,
+            alsoRunning: fleet.alsoRunning(on: host))
     }
 
     private func modelCount(_ host: MoldHost) -> String {

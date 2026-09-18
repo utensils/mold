@@ -76,7 +76,7 @@ extension MachineCard {
     /// machine -- the distinction `MachineFigures` exists to keep.
     init(host: MoldHost, reachability: HostStore.Reachability, isDefault: Bool,
          devices: [DeviceInfo], snapshot: ResourceSnapshot?,
-         live: [QueueEntry]?, models: [Model]?) {
+         live: [QueueEntry]?, alsoRunning: Int = 0, models: [Model]?) {
         id = host.id
         name = host.name
         address = HostAddress.displayString(for: host.baseURL)
@@ -104,7 +104,7 @@ extension MachineCard {
         gpuLoad = MachineCardFigures.load(devices: devices, snapshot: snapshot)
         gpuMemory = MachineCardFigures.videoMemory(devices: devices, snapshot: snapshot)
         systemMemory = MachineCardFigures.systemMemory(snapshot)
-        work = live.map { MachineFigures.workFigure(live: $0) }
+        work = live.map { MachineFigures.workFigure(live: $0, alsoRunning: alsoRunning) }
         self.models = models.map { MachineFigures.modelFigure(ready: $0) }
     }
 

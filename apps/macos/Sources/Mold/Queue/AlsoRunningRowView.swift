@@ -24,6 +24,9 @@ struct AlsoRunningRowView: View {
                 Text(row.isStale ? "\(row.detail) — last heard" : row.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let note = row.stopNote {
+                    Text(note).font(.caption).foregroundStyle(.tertiary)
+                }
                 if let progress = row.progress {
                     ProgressView(value: progress)
                         .progressViewStyle(.linear)
@@ -38,14 +41,14 @@ struct AlsoRunningRowView: View {
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.title). \(row.detail)")
+        .accessibilityLabel("\(row.title). \(row.detail)\(row.stopNote.map { ". \($0)" } ?? "")")
         .rowActionMenu(actions.offered(), perform: act)
     }
 
     @ViewBuilder private var controls: some View {
         // Inline, from the SAME list the menu draws -- a control the menu
         // does not offer would be a second opinion about what a row can do.
-        ForEach(actions.offered().filter { !$0.isSeparator }, id: \.title) { action in
+        ForEach(actions.offered().filter { !$0.isSeparator && !$0.isDisabled }, id: \.title) { action in
             if let kind = action.kind {
                 Button(action.title) { act(kind) }
                     .buttonStyle(.borderless)

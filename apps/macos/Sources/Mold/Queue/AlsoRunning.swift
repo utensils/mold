@@ -94,6 +94,24 @@ struct AlsoRunningRow: Identifiable, Equatable {
         }
     }
 
+    /// Why a live row offers no working Cancel, in one line -- shown on the
+    /// row and behind the inert item its menu still carries. A row that
+    /// offered nothing and explained nothing read as broken
+    /// (2026-09-17, a queued prompt rewrite).
+    var stopNote: String? {
+        guard !isSettled, !canCancel else { return nil }
+        switch work {
+        case let .reported(row) where row.item.canCancel:
+            return "Stop this from the machine\u{2019}s own web app; this app does not drive sequences."
+        case .reported:
+            return "This machine doesn\u{2019}t offer a way to stop this."
+        case .still:
+            return "The machine is already making this; there is no way to call it off."
+        case .upscale:
+            return nil
+        }
+    }
+
     /// A clip upscale can be held and picked back up; nothing else here can.
     var canPause: Bool {
         guard case let .upscale(_, job) = work else { return false }

@@ -20,10 +20,19 @@ enum MachineFigures {
         return "\(ready.count) installed · \(size.formatted(.number.precision(.fractionLength(1)))) GB"
     }
 
-    static func workFigure(live: [QueueEntry]?) -> String {
+    /// `alsoRunning` is what the machine is doing that never becomes a queue
+    /// row -- a prompt rewrite, a standalone upscale, a sequence. "Nothing
+    /// queued" over a machine mid-rewrite read as idle (2026-09-17).
+    static func workFigure(live: [QueueEntry]?, alsoRunning: Int = 0) -> String {
         guard let live else { return notLoaded }
-        guard !live.isEmpty else { return "Nothing queued" }
-        let running = live.count { $0.state == .running }
-        return "\(live.count - running) queued, \(running) running"
+        let queued: String
+        if live.isEmpty {
+            queued = "Nothing queued"
+        } else {
+            let running = live.count { $0.state == .running }
+            queued = "\(live.count - running) queued, \(running) running"
+        }
+        guard alsoRunning > 0 else { return queued }
+        return "\(queued) · \(alsoRunning) also running"
     }
 }

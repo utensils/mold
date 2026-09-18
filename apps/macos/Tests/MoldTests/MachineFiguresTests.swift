@@ -39,4 +39,14 @@ struct MachineFiguresTests {
         ]
         #expect(MachineFigures.workFigure(live: live) == "1 queued, 1 running")
     }
+
+    /// A prompt rewrite never becomes a queue row, and a machine mid-rewrite
+    /// read "Nothing queued" on its page and its card (2026-09-17).
+    @Test func workNeverBecomingAQueueRowStillCounts() {
+        #expect(MachineFigures.workFigure(live: [], alsoRunning: 1) == "Nothing queued · 1 also running")
+        let live = [FakeFixtures.queueEntry("a", state: "queued")]
+        #expect(MachineFigures.workFigure(live: live, alsoRunning: 2) == "1 queued, 0 running · 2 also running")
+        // Unknown queue stays unknown whatever else is reported.
+        #expect(MachineFigures.workFigure(live: nil, alsoRunning: 1) == "—")
+    }
 }

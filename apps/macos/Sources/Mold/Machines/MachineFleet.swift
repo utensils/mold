@@ -14,6 +14,8 @@ struct MachineFleet {
     let machines: MachineStore
     let queue: QueueStore
     let models: ModelStore
+    let activity: ActivityStore
+    let upscales: UpscaleStore
 
     var cards: [MachineCard] {
         MachineCard.sorted(hosts.hosts.map(card(for:)))
@@ -30,8 +32,18 @@ struct MachineFleet {
             // different fact from an empty answer (`MachineFigures`).
             live: queue.hasLoaded(on: host.id)
                 ? queue.entries(on: host.id).filter(\.state.isLive) : nil,
+            alsoRunning: alsoRunning(on: host),
             models: models.hasLoaded(on: host.id) ? models.ready(on: host.id) : nil
         )
+    }
+
+    /// The Queue pane's own **Also Running** rows for this machine, counted
+    /// by the same rule it draws them with.
+    func alsoRunning(on host: MoldHost) -> Int {
+        let queued = [host.id: Set(queue.entries(on: host.id).map(\.id))]
+        return AlsoRunning.rows(reported: activity.rows, queuedIDs: queued,
+                                upscales: upscales.live, stills: upscales.liveStills)
+            .count { $0.host == host.id && !$0.isSettled }
     }
 
     /// What the overview asks for when it appears.

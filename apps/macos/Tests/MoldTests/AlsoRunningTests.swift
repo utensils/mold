@@ -133,10 +133,20 @@ struct AlsoRunningTests {
     /// saying `can_cancel: true` is a durable sequence, whose cancel is an
     /// endpoint family this app does not speak -- a button that quietly does
     /// nothing is worse than no button.
+    /// It SAYS so instead: the row carries the reason, and its menu carries
+    /// Cancel inert rather than opening on nothing (2026-09-17, a queued
+    /// prompt rewrite that "doesn't seem to have any ability to cancel it").
     @Test func aReportedRowOffersNoCancelItCannotPerform() {
         let sequence = rows([item("s-1", kind: "sequence", canCancel: true)])
         #expect(sequence[0].canCancel == false)
-        #expect(AlsoRunningActions(sequence[0]).offered().isEmpty)
+        #expect(sequence[0].stopNote?.contains("web app") == true)
+        let offered = AlsoRunningActions(sequence[0]).offered()
+        #expect(offered.map(\.kind) == [.cancel])
+        #expect(offered[0].isDisabled)
+
+        let rewrite = rows([item("r-1", kind: "prompt_rewrite", canCancel: false)])
+        #expect(rewrite[0].stopNote == "This machine doesn\u{2019}t offer a way to stop this.")
+        #expect(AlsoRunningActions(rewrite[0]).offered().first?.isDisabled == true)
     }
 
     /// A settled upscale keeps its row until it is dismissed: somebody who
@@ -178,7 +188,9 @@ struct AlsoRunningTests {
         #expect(drawn[0].detail == "Making a bigger copy")
         #expect(drawn[0].progress == nil, "one picture, one pass")
         #expect(!drawn[0].canCancel, "the request IS the work")
-        #expect(AlsoRunningActions(drawn[0]).offered().isEmpty)
+        // Said, and offered inert, rather than a row that answers nothing.
+        #expect(drawn[0].stopNote?.contains("no way to call it off") == true)
+        #expect(AlsoRunningActions(drawn[0]).offered().map(\.isDisabled) == [true])
     }
 
     /// And it says what it made, which is the confirmation the whole action
