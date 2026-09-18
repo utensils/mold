@@ -39,8 +39,11 @@ struct LibraryInspector: View {
                 organize
             }
             if entries.count == 1, let entry = entries.first {
-                DisclosureGroup("Provenance", isExpanded: $showsProvenance) {
-                    ProvenanceGrid(entry: entry)
+                // Was "Provenance", which is what the wire format calls it.
+                // The `@AppStorage` key is unchanged, so an app that had this
+                // closed keeps it closed.
+                DisclosureGroup("Details", isExpanded: $showsProvenance) {
+                    InspectorDetails(entry: entry, scope: scope, actions: actions)
                         .padding(.top, 6)
                 }
                 .font(.callout)
