@@ -19,7 +19,10 @@ STABLE_FEED="https://github.com/utensils/mold/releases/latest/download/mold-nati
 GOOD_KEY="$(head -c 32 /dev/zero | tr '\0' 'A' | base64)"
 
 bundle() {
-  local name="$1" key="$2" feed="$3" app="$WORK/$name.app"
+  local name="$1" key="$2" feed="$3"
+  # Its own line: the runner's bash 3.2 expands every word of one `local`
+  # before assigning any, so `$name` there is unbound under `set -u`.
+  local app="$WORK/$name.app"
   mkdir -p "$app/Contents"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

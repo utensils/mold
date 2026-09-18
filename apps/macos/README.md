@@ -1,7 +1,9 @@
 # Mold for macOS (native)
 
-An experimental native Swift app for mold, on the long-running
-`feat/macos-native-app` branch. **This branch is never merged.**
+An experimental native Swift app for mold, developed on the
+`feat/macos-native-app` branch and merged through PR #1728. It ships as
+`Mold-native-<version>.dmg` beside the Tauri DMG, on the same stable and
+nightly channels.
 
 It is a candidate replacement for the Tauri `desktop/` app on macOS, scoped to
 generation and the library. No 3-D studio.
