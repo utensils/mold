@@ -11,6 +11,12 @@ public struct MediaURL: Sendable {
 
     public init(baseURL: URL) { self.baseURL = baseURL }
 
+    /// The renditions a host will render, in the server's own order
+    /// (`thumbnails.rs` `SIZES`). Anything else is a 422, not a rounding --
+    /// Quick Look on a mesh asked for 1024 and silently showed nothing.
+    public static let thumbnailSizes = [256, 512]
+    public static var largestThumbnail: Int { thumbnailSizes.max()! }
+
     /// `size` is honoured only by hosts new enough to report the rendition
     /// header; older ones ignore it and return their own default.
     public func thumbnail(_ filename: String, size: Int = 256, trashed: Bool = false) -> URL {

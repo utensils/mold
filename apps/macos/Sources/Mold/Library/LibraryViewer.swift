@@ -120,7 +120,7 @@ struct LibraryViewer: View {
         }
 
         guard let host else { return }
-        placeholder = await cache.image(for: entry, host: host, size: 512)
+        placeholder = await cache.image(for: entry, host: host, size: MediaURL.largestThumbnail)
         // A mesh stops at its poster: the stored bytes are a GLB, which
         // `NSImage(data:)` cannot read, so fetching them would be megabytes
         // downloaded to produce a nil. The interactive viewer is what will

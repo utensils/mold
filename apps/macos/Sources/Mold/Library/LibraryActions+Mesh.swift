@@ -42,8 +42,15 @@ extension LibraryActions {
         }
         let stem = MeshExport.filename(entry.print.filename, format: "png")
         let url = await materializer.url(for: entry, named: stem) {
-            try? await backend.thumbnail(entry.print.filename, size: 1024,
-                                         trashed: entry.print.trashedAt != nil)
+            do {
+                return try await backend.thumbnail(entry.print.filename, size: MediaURL.largestThumbnail,
+                                                   trashed: entry.print.trashedAt != nil)
+            } catch {
+                // A `try?` here is how a 422 for the wrong size became Space
+                // doing nothing on a mesh tile, with no sentence anywhere.
+                self.hosts.report(error, on: entry.hostID, doing: "preview that mesh")
+                return nil
+            }
         }
         return url.map { ($0, entry.print.displayName) }
     }
