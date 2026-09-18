@@ -245,11 +245,16 @@ jobs:
           # chain this looked like it pinned two things and pinned one, and
           # the arm that never fired was the one that would have caught the
           # nightly short-version bug.
+          # Sparkle 2's generate_appcast writes these as ITEM ELEMENTS
+          # (`<sparkle:version>1394</sparkle:version>`), not as attributes on
+          # the enclosure the way Sparkle 1 did; nightly 1394 wrote a correct
+          # feed and failed the attribute-only grep. Both spellings pass.
           feed="dist/updates/$MOLD_NATIVE_APPCAST_NAME"
-          grep -q "sparkle:shortVersionString=\"$MOLD_NATIVE_VERSION\"" "$feed" \
-            || { echo "::error::the appcast does not name version $MOLD_NATIVE_VERSION"; exit 1; }
-          grep -q "sparkle:version=\"$MOLD_NATIVE_BUNDLE_VERSION\"" "$feed" \
-            || { echo "::error::the appcast does not name build $MOLD_NATIVE_BUNDLE_VERSION"; exit 1; }
+          names() { grep -Eq "sparkle:$1(=\"|>)$2(\"|<)" "$feed"; }
+          names shortVersionString "$MOLD_NATIVE_VERSION" \
+            || { echo "::error::the appcast does not name version $MOLD_NATIVE_VERSION"; cat "$feed"; exit 1; }
+          names version "$MOLD_NATIVE_BUNDLE_VERSION" \
+            || { echo "::error::the appcast does not name build $MOLD_NATIVE_BUNDLE_VERSION"; cat "$feed"; exit 1; }
           grep -q "$MOLD_NATIVE_DMG_NAME" "$feed" \
             || { echo "::error::the appcast does not point at $MOLD_NATIVE_DMG_NAME"; exit 1; }
 
