@@ -137,7 +137,7 @@ struct ChainRunTests {
         backend.holdsChainCreate = true
 
         controller.submit(on: plato, backend: backend, routing: routing)
-        await settle { backend.calls.contains("createChainJob") }
+        await settle { backend.chainCreatesWaiting == 1 }
         #expect(controller.run.isBusy)
 
         controller.stop()
@@ -164,14 +164,18 @@ struct ChainRunTests {
             CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-5"}"#.utf8))
         backend.holdsChainCreate = true
 
+        // Settled on what a release ACTS ON, never on the call count: the
+        // route is recorded before the create suspends, so a count of one can
+        // be satisfied with nothing parked on the gate yet.
         controller.submit(on: plato, backend: backend, routing: routing)
-        await settle { backend.calls.contains("createChainJob") }
+        await settle { backend.chainCreatesWaiting == 1 }
         controller.stop()
 
-        // A second press while the FIRST create is still in the air.
+        // A second press while the FIRST create is still in the air. Both are
+        // now parked, in order, so `releaseChainCreate` is exact.
         backend.holdsChainCreate = true
         controller.submit(on: plato, backend: backend, routing: routing)
-        await settle { backend.calls.filter { $0 == "createChainJob" }.count == 2 }
+        await settle { backend.chainCreatesWaiting == 2 }
         // The first create lands now, and must touch nothing of the second's.
         backend.releaseChainCreate()
         await settle { backend.cancelledChainJobIds.count == 1 }
@@ -206,12 +210,18 @@ struct ChainRunTests {
         await settle { backend.calls.contains("chainJobEvents") }
 
         backend.failChainEvents(for: "chain-6")
-        await settle { backend.calls.filter { $0 == "chainJobEvents" }.count == 2 }
+        // BOTH facts, because neither implies the other and each is monotonic:
+        // the re-read lands before the reconnect, and the reconnect is
+        // recorded before anything it carries is applied. Settling on one and
+        // asserting the other is the shape that flaked on a slower machine.
+        await settle {
+            controller.run.stage == "Clip 2 of 3"
+                && backend.calls.filter { $0 == "chainJobEvents" }.count == 2
+        }
 
         // Still on the canvas, still recoverable, and the stage counter was
         // re-read from the host rather than invented.
         #expect(controller.run.isBusy)
-        #expect(controller.run.stage == "Clip 2 of 3")
         #expect(PendingChain.all()["chain-6"] == plato.id.uuidString)
         #expect(backend.calls.contains("chainJob"))
     }
