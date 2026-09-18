@@ -217,10 +217,14 @@ struct BatchOutcomeTests {
 
         controller.refreshPlacement(on: workstation)
         // `PlacementProbe` debounces before it calls out -- a constructor
-        // parameter, so this waits on the call rather than on a clock.
-        await settle { backend.callCount("placementPreview") == 1 }
+        // parameter, so this waits on the call rather than on a clock. On
+        // the ARGUMENT, not the call count: the fake notes a call's entry
+        // before it captures the argument, and a loaded runner read the
+        // count between the two (CI, 2026-09-18).
+        await settle { backend.placementCopiesRequested.last == 4 }
 
         #expect(backend.placementCopiesRequested.last == 4)
+        #expect(backend.callCount("placementPreview") == 1)
     }
 
     /// The probe is a planning READ: it prices a render, so it carries no
