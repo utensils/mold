@@ -249,7 +249,7 @@ with `AXRaise` + `set frontmost` instead (this is in the skill).
     its **Default** badge, **This Mac** marked with its own badge, GPU line with a
     load figure, two memory bars, "Nothing queued", the installed count and the
     address. **BLOCKED**: a card carrying "4× …" and a dimmed card with a reason
-    both need plato (the keyed host).
+    both need the keyed multi-GPU host.
 39. **PASS** — `uat/menu-machine-card.png`: Open, Check Now, Set as Default, Copy
     Address, Edit…, divider, Remove…; and on This Mac exactly the first four
     (`uat/menu-machine-card-this-mac.png`). Set as Default correctly disappears
