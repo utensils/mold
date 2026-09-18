@@ -210,18 +210,37 @@ SwiftPM resolved so the signer and the framework cannot drift. The private key
 arrives in `MOLD_NATIVE_SPARKLE_KEY` and reaches the tool on **stdin**, never in
 argv where every `ps` on the machine could read it, and never on disk.
 
-CI does it for you. `.github/workflows/macos-native-distribution.yml` is the
-reusable build (ephemeral keychain, ASC key at 0600, engine, sign, notarize,
-staple, signed appcast) and `.github/workflows/macos-native-publish.yml` owns
-the publication ORDER, taken step for step from the desktop nightly: the
-immutable version-unique DMG first, proved anonymously by SHA-256, a re-check
-that this build is still the one being asked for, **then** the channel pointer,
-proved anonymously too, and only then the prune.
+CI does it for you. **The native app ships alongside the Tauri one, on the
+channels that already exist — it never creates a release of its own.**
 
-Its triggers are a manual dispatch and this app's own `macos-native-v*` tag —
-deliberately **not** a push to `main`, the way the desktop nightly triggers,
-because this app lives on `feat/macos-native-app`, which never merges, and the
-`v*` tags release-plz pushes are cut from `main`.
+| | Built by | Published to | By |
+| --- | --- | --- | --- |
+| Stable | `macos-native-distribution.yml` (`channel: stable`) | the `v*` release release-plz cuts | `release.yml`'s `build-macos-native-dmg`, beside `build-desktop-dmg` |
+| Nightly | the same, `channel: nightly` | the rolling `latest` prerelease | `macos-native.yml`'s `publish-macos-native-nightly` |
+
+That is why `releases/latest/download/mold-native-appcast.xml` is the right
+stable URL: release-plz owns the repository's Latest pointer, and this app
+never touches it. Publishing to a tag of its own would have **taken** Latest
+away from the CLI download links, the website, the Android APK and the Tauri
+app's own stable updater — and then given it back at the next release, 404ing
+the native feed. It could only ever be correct while breaking everything else.
+
+The nightly publish follows the desktop nightly's order step for step
+(`desktop.yml:598-726`): the immutable version-unique DMG first, proved
+anonymously by SHA-256, a re-check that `main` has not moved, **then** the
+appcast pointer, proved anonymously too, and only then a prune of this app's
+own nightly DMGs — never the Tauri app's, on the release the two share. It
+sits in the same concurrency group as the desktop publisher, because both
+clobber assets on that one release.
+
+`Mold-native-<version>.dmg` carries `native` in its name for the same reason:
+three Molds on one release page is only confusing if they are not saying which.
+The artifact name and the bundle's own `CFBundleShortVersionString` both come
+from ONE variable — `MARKETING_VERSION`, exported by the workflow — so a
+nightly's DMG and the version Sparkle shows in its update alert always agree.
+`scripts/tests/release-names.sh` asks `make` what it would produce and greps
+the workflow for the same expression, because they once disagreed and nightly
+could not build at all.
 
 ## Not built yet
 

@@ -17,8 +17,45 @@ row per piece of PLAN "F5".
 | Composition root split so three lanes fit under the 150-line rule | done | `a7af5a6d` | the whole app suite (566) stays green |
 | Reset leaves the update channel alone (cross-lane) | done | `4aeb4d33` | `everyPersistedPreferenceIsEitherResetOrDeliberatelyKept` |
 | `make appcast`, `CFBundleVersion` from the commit count | done | `d26e0fd2` | `scripts/tests/appcast-recipe.sh` |
-| `macos-native-distribution.yml` + publish order, verbatim | done | `947888a6` | — (owed: its first run) |
+| `macos-native-distribution.yml` + publish order, verbatim | done, then reworked | `947888a6`, `7c00b10c` | `native-workflows-parse.sh` |
 | README updater + release sections | done | this commit | — |
+
+## Round two — the adversarial review's findings
+
+The security of the update path was found clean. Publishing was not.
+
+| # | Finding | Status | Commit | Test |
+| --- | --- | --- | --- | --- |
+| F5#1 | HIGH — nightly could not build: `make dmg` named the DMG after `MARKETING_VERSION`, the workflow copied the nightly name | fixed | `7c00b10c` | `scripts/tests/release-names.sh` |
+| F5#2 | HIGH — the stable feed used `releases/latest/`, an alias this app does not own | fixed, by the owner's design change | `7c00b10c` | `release-names.sh` (no native workflow may `gh release create`) |
+| F5#3 | MED — the prune failed the job when there was nothing to prune | fixed | `7c00b10c` | `scripts/tests/prune-native-nightly.sh` |
+| F5#4 | MED — the ledger's cross-lane instruction missed a fourth hunk | fixed below, and marked in the source | `64d56480` | — |
+| F5#5 | MED-LOW — every nightly reported `0.1.0`; the appcast assertion was dead for nightly | fixed | `7c00b10c` | `release-names.sh`; the workflow now asserts all three with `&&` |
+| F5#6 | LOW — Sparkle's own defaults keys escape `PreferencesReset`'s claim | classified in the comment | `64d56480` | the existing completeness test still passes |
+| F5#7 | LOW — the bundle guard was decorative | fixed: it is the fourth `UpdaterActivation` condition | `64d56480` | `theBundleQuestionIsAskedWhereItCanHold`, `onlyAPlainReleaseLaunchMayReplaceItself` (16 combinations) |
+| F5#8 | LOW — a channel change waited for the next scheduled check | fixed: `resetUpdateCycle()` | `64d56480` | — (it is one Sparkle call; nothing here can observe its scheduler) |
+| F5#9 | NIT — the key gate proves shape, not identity | deferred, deliberately | — | — |
+
+**F5#9 is deferred because the answer does not exist yet.** Pinning the key's
+first bytes needs the owner's key to have been generated. It belongs in the
+same sitting as the one-time key step, and the README's step is where to add
+it.
+
+### What the new publishing design is
+
+The native app ships **alongside** the Tauri one, on the channels that already
+exist, and never creates a release of its own:
+
+- **Stable** — `release.yml`'s new `build-macos-native-dmg` calls the reusable
+  builder beside `build-desktop-dmg`; the DMG and `mold-native-appcast.xml`
+  join the same `softprops/action-gh-release` `files:` list. So
+  `releases/latest/download/mold-native-appcast.xml` is correct *because*
+  release-plz owns that pointer.
+- **Nightly** — `macos-native.yml`'s `publish-macos-native-nightly` rides
+  desktop.yml's rolling `latest` prerelease, in the SAME concurrency group
+  (`desktop-nightly-publication`) because both clobber assets there.
+- `macos-native-publish.yml`, `check-publish-head.sh` and the
+  `macos-native-v*` tag namespace are **deleted**.
 
 ## What is OWED, exactly
 
@@ -39,14 +76,33 @@ covering them.
    installing over a real notarized bundle. The first end-to-end check should
    be: build two versions with different commit counts, publish the older,
    point the newer's feed at a local file, and watch the install.
-3. **The publish workflow's first run.** `macos-native-distribution.yml` and
-   `macos-native-publish.yml` have never executed. Both YAML files parse and
-   `scripts/tests/ci-routing-contract.sh` still passes, but the RUNTIME
-   unknowns are real and named here so the first run is read as a first run:
-   the engine step (`make signed` builds `rust/mold-macos-ffi` with cargo on
-   `macos-26`, which no CI job has ever done — `macos-native.yml` is
-   deliberately remote-only), the Developer ID identity string matching the
-   imported certificate, and `generate_appcast` reading a notarized DMG.
+3. **The publishing jobs' first real run.** None of them has ever executed,
+   and none CAN from this branch: `release.yml` runs on `v*` tags and
+   `macos-native.yml`'s nightly jobs on a push to `main`, and this branch is
+   never merged. They are correct by READING — mirrored line for line against
+   the desktop jobs they sit beside, cited in place — and by
+   `scripts/tests/native-workflows-parse.sh`, which parses all four workflows,
+   asserts the new jobs exist by name AND that the desktop ones are untouched,
+   and runs `bash -n` over every inline `run:` block in the two this app owns.
+   `scripts/tests/release-names.sh` ties the Makefile's artifact names to the
+   workflow's expectations, and `prune-native-nightly.sh` exercises the prune's
+   selection without GitHub.
+
+   What the first run will exercise that nothing here can:
+   - **The engine step.** `make signed` builds `rust/mold-macos-ffi` with
+     cargo on `macos-26`. No CI job has ever done that — `macos-native.yml`'s
+     `check` is deliberately remote-only — so the cargo build, the fdk-aac C
+     dependency and the 26.0 deployment target are all first-time on a runner.
+   - **The Developer ID identity string** matching the certificate imported
+     into the ephemeral keychain.
+   - **`generate_appcast` reading a notarized DMG**, and the three assertions
+     over the feed it writes.
+   - **Nightly:** whether the rolling `latest` prerelease already exists when
+     the native job runs (it bows out with a notice rather than creating one),
+     and the anonymous propagation waits.
+   - **Stable:** that the artifact lands as `artifacts/Mold-native-<v>.dmg` and
+     `artifacts/updates/mold-native-appcast.xml` under `release-version`'s
+     `merge-multiple: true` download, which is what the `files:` entries name.
 
 ## Decisions worth the reviewer's attention
 
@@ -89,11 +145,37 @@ covering them.
   `PreferencesResetTests` reads the sources and fails on any key written to
   the suite that neither list names, so this was not optional.
 - `Sources/Mold/MoldApp.swift` was split at the coordinator's instruction
-  (commit `a7af5a6d`). **The upscale lane's two stores now go in
-  `AppStores.swift`**: a `let` in the property list, a line in `init()` at the
-  marker `// NEW STORES GO HERE`, and — if a pane needs to read them — one
-  `.environment()` at the marker in `AppStores+Environment.swift`.
-  `MoldApp.swift` is 71 lines and needs no edit from that lane at all.
+  (commit `a7af5a6d`). **The instruction below replaces an earlier one in this
+  ledger that said `MoldApp.swift` needed no edit at all. It was wrong**, and
+  following it would have compiled, rendered, and left `ActivityStore` never
+  started at launch (review F5#4). The upscale lane has FOUR hunks in the old
+  `MoldApp.swift`, and the fourth one does not live in `AppStores`.
+
+  For the integrator, taking the upscale lane's work onto this shape:
+
+  1. **Discard its `MoldApp.swift` diff wholesale.** All four hunks will
+     conflict, because `a7af5a6d` MOVED the region and cherry-pick does not
+     follow moves.
+  2. `AppStores.swift` — two `let`s in the property list; in `init()`, at the
+     `// NEW STORES GO HERE` marker, `UpscaleStore(hosts:models:library:)` and
+     `ActivityStore(hosts:)`. Both dependencies are already above it
+     (`library`, then `models`).
+  3. `AppStores+Environment.swift` — two `.environment()` at its marker.
+  4. **`MoldApp.swift`, the line marked `THE LAUNCH START`:**
+     `if NSApp.isActive { stores.heartbeat.start(); stores.activity.start() }`.
+     That line is the one hunk of the old composition root that did not move,
+     and `applicationDidBecomeActive` has already fired by the time it runs —
+     a store that watches the activation notifications itself still needs its
+     first start from here.
+
+  Generate-controls lane: nothing in F5 touches `MoldAppDelegate`'s quit path,
+  so a `flush()` added to `applicationShouldTerminate` will not conflict.
+
+- `.github/workflows/release.yml` — three lines and a release-note sentence:
+  the `build-macos-native-dmg` job, its entry in `release-version`'s `needs`,
+  and `artifacts/updates/mold-native-appcast.xml` in the `files:` list. The
+  desktop and CLI jobs are untouched, and `native-workflows-parse.sh` asserts
+  that. Commit `7c00b10c`, at the owner's explicit direction.
 
 ## Findings judged wrong
 
@@ -118,10 +200,11 @@ not hit this; if a fresh clone does, that one `curl` + `cp` is the workaround.
 
 - `make lint` — green; `MoldApp.swift` no longer appears in `lint-size` at all.
 - `cd Packages/MoldClient && swift test` — 637 tests in 28 suites, passed.
-- App bundle, under the shared lane lock — 566 tests in 85 suites, passed
-  (558 before; this lane adds 8).
-- `scripts/tests/{linkage-fixup,sparkle-key-gate,sparkle-signing-order,appcast-recipe}.sh`
-  — all pass, and each has a negative arm that fails on the bug it pins.
+- App bundle, under the shared lane lock — 567 tests in 85 suites, passed
+  (558 before; this lane adds 9).
+- `scripts/tests/{linkage-fixup,sparkle-key-gate,sparkle-signing-order,appcast-recipe,release-names,prune-native-nightly,native-workflows-parse}.sh`
+  — all pass, all wired into `make test`, and each has a negative arm that
+  fails on the bug it pins.
 - `scripts/tests/ci-routing-contract.sh` — still PASS with the two new
   workflows.
 - Both new workflow files parse as YAML.
