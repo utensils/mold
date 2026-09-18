@@ -471,12 +471,26 @@ the bare shape or the keyed one that also seeds an in-flight session and the
 - A **type's** size is flagged too: `lint-type-size` sums `Type.swift` and every
   `Type+Concern.swift` beside it and prints anything over 600, because slicing
   a type into files that each pass the rule above does not make it smaller.
-  Today it prints two lines, `HTTPBackend` (1,130) and `LibraryStore` (834),
-  and both are the honest remaining debt rather than a threshold to raise.
-  `HTTPBackend`'s stands on purpose: Swift has no conformance delegation, so
-  composing it out of sub-types would cost roughly 190 forwarder lines that
-  this same rule sums straight back onto the total (M1.5 S8's rule, held
-  again at M7).
+  Today it prints ONE line, `HTTPBackend` (1,402), and that one stands on
+  purpose: Swift has no conformance delegation, so composing it out of
+  sub-types would cost roughly 190 forwarder lines that this same rule sums
+  straight back onto the total (M1.5 S8's rule, held again at M7, and again
+  in the consolidation pass below). It is the honest remaining debt rather
+  than a threshold to raise.
+
+  `GenerateController`, `LibraryActions`, `LibraryStore` and `RenderDraft`
+  were over it too, and came back under by COMPOSING rather than by slicing:
+  `ExpandStore` (a rewrite is a round trip with its own staleness fence, and
+  a submit reads none of it), `PrintImport` (a batch with a policy about one
+  unreadable file in the middle of ten), `GalleryLive` and `LibraryTags` (the
+  live reconciler, and the tag index as distinct from the timeline),
+  `CanvasFit` (a size and a `ResolutionProfile` -- it never touches a draft)
+  and `RenderRequest` (the translation to the wire, which answers questions
+  the draft holds no opinion on). Each takes the thing it serves as a
+  parameter, the arrangement `LibraryMutations` already had with
+  `LibraryStore`; none of them is a forwarder, and `TYPE_MAX` did not move.
+  A type declared inside ANOTHER type's file is a miscount rather than debt,
+  and is moved to its own (`EmptyBody`, `HostFailure`).
 - No `bytes.lines` in `MoldClient`. URLSession's splitter drops empty lines,
   and an empty line is what ends an SSE frame -- the download stream was
   silent for months because of it. `moldLines()` keeps them.
