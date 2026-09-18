@@ -55,6 +55,27 @@ struct QueuePaneTests {
         #expect(groups[1].rows.count == 4)
     }
 
+    /// UAT 2026-09-17 #6: a queued row's contextual menu offered Pause Job
+    /// and Cancel Job while the Queue menu offered neither, with the row
+    /// selected. Every render this app submits is a batch of one, drawn as a
+    /// plain row under its BATCH id -- the id the `List` selection carries.
+    ///
+    /// **Fails today**: the pane looked the selection up among ENTRY ids.
+    @Test func aSelectedBatchOfOneResolvesToItsEntryForTheQueueMenu() {
+        let solo = FakeFixtures.queueEntry("solo", state: "queued")
+        let only = FakeFixtures.queueEntry("only", state: "queued", batchId: "b1", batchIndex: 1)
+        let pair = (1 ... 2).map {
+            FakeFixtures.queueEntry("p\($0)", state: "queued", batchId: "b2", batchIndex: $0)
+        }
+        let groups = QueueGroup.build([solo, only] + pair, children: [:])
+
+        #expect(QueueGroup.selectedEntry("solo", in: groups)?.id == "solo")
+        #expect(QueueGroup.selectedEntry("b1", in: groups)?.id == "only")
+        // The batch's own disclosure row is not a job.
+        #expect(QueueGroup.selectedEntry("b2", in: groups) == nil)
+        #expect(QueueGroup.selectedEntry("only", in: groups) == nil)
+    }
+
     // MARK: - Group action
 
     /// **Fails today**: `QueueStore.act(_:onLiveChildrenOf:host:)` does not

@@ -21,6 +21,19 @@ public struct QueueGroup: Identifiable, Hashable, Sendable {
 
     public var id: String { batchId ?? rows[0].id }
 
+    /// The one entry a `List` selection names, or nil -- the selection is a
+    /// GROUP id, and a batch of one is drawn as a plain row under its BATCH
+    /// id, so looking the selection up among entry ids found nothing for
+    /// every render this app submits (each is a batch of one): the Queue
+    /// menu offered no Pause or Cancel for a row whose own contextual menu
+    /// did (UAT 2026-09-17 #6). An expandable group's own row resolves to no
+    /// entry, which is correct: none of the menu's items are batch-wide.
+    public static func selectedEntry(_ selection: String, in groups: [QueueGroup]) -> QueueEntry? {
+        guard let group = groups.first(where: { $0.id == selection }), !group.isExpandable
+        else { return nil }
+        return group.rows[0]
+    }
+
     /// Groups by `batchId`, keeps each group where its FIRST row sat in the
     /// listing (so grouping never reorders the machine's queue), and orders
     /// within a group by the batch's own children when they are known and by

@@ -23,17 +23,16 @@ extension QueuePane {
     /// state of its own, only the rule.
     var gate: QueueGateControl { QueueGateControl(hosts: hosts, queue: queue) }
 
-    /// `selection` is one id across every host's flat rows AND every batch
-    /// child -- `List`'s own automatic `Identifiable`-based tagging, since
-    /// `QueueGroup.id` and `QueueEntry.id` share one string space. A batch's
-    /// own disclosure row resolves to no entry here, which is correct: none
-    /// of this menu's items are batch-wide (`QueueBatchRow`'s own buttons
-    /// already cover that).
+    /// `selection` is a GROUP id -- `List`'s own automatic `Identifiable`
+    /// tagging over `rows(host:entries:)`'s `ForEach(groups)` -- resolved by
+    /// `QueueGroup.selectedEntry`, which says why an entry-id lookup missed
+    /// every row this app queues.
     private var selectedJob: QueueSelection.Job? {
         guard let selection else { return nil }
         for host in hosts.hosts {
             let entries = queue.entries(on: host.id)
-            guard let entry = entries.first(where: { $0.id == selection }) else { continue }
+            guard let entry = QueueGroup.selectedEntry(selection, in: queue.groups(on: host.id))
+            else { continue }
             let canReorder = hosts.capabilities[host.id]?.canReorderQueue == true
             // The same authority the row's own buttons and contextual menu
             // read, so this menu can never offer something they do not.
