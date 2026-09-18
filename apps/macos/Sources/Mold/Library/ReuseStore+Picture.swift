@@ -11,7 +11,12 @@ extension ReuseStore {
     /// survives the one edit this store made itself. A fetch that fails is
     /// said once, the way the long-clip route already says it, and the well
     /// stays empty rather than pretending.
-    func placePicture(in draft: RenderDraft, outgoing: GenerateRequest?) async -> RenderDraft? {
+    ///
+    /// `live` is the draft as it is NOW: a person who edited the prompt while
+    /// the picture downloaded keeps that edit, and the print's picture is
+    /// not placed over it -- the authority is theirs to have moved off.
+    func placePicture(in draft: RenderDraft, outgoing: GenerateRequest?,
+                      live: () -> RenderDraft) async -> RenderDraft? {
         guard let authority = pending(for: draft),
               let member = RetainedSourcePicture.member(of: authority, forHydrating: outgoing)
         else { return nil }
@@ -21,7 +26,7 @@ extension ReuseStore {
             if isCurrent(fence), notice == nil { notice = sentence }
             return nil
         case let .picture(picture):
-            guard isCurrent(fence), pending(for: draft) != nil else { return nil }
+            guard isCurrent(fence), pending(for: draft) != nil, live() == draft else { return nil }
             var placed = draft
             RetainedSourcePicture.place(picture, named: authority.filename, in: &placed)
             arm(placed)

@@ -115,7 +115,8 @@ extension LibraryPane {
             let outgoing = hosts.host(entry.hostID).flatMap {
                 RetainedSourcePicture.outgoing(generate, on: $0, hosts: hosts)
             }
-            if let placed = await reuseStore.placePicture(in: generate.draft, outgoing: outgoing) {
+            if let placed = await reuseStore.placePicture(
+                in: generate.draft, outgoing: outgoing, live: { generate.draft }) {
                 generate.draft = placed
             }
         }

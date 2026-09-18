@@ -532,7 +532,7 @@ struct ReuseTests {
         // Said while the picture is still the host's to apply...
         #expect(store.attachmentSentence(for: draft) != nil)
 
-        let placed = await store.placePicture(in: draft, outgoing: request())
+        let placed = await store.placePicture(in: draft, outgoing: request(), live: { draft })
 
         #expect(placed?.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
         #expect(placed?.media.sourceImageName == "a.png")
@@ -540,6 +540,29 @@ struct ReuseTests {
         // survives the store's own edit.
         #expect(store.pending(for: placed!) != nil)
         #expect(store.attachmentSentence(for: placed!) == nil)
+    }
+
+    /// An edit made while the picture downloaded is kept: the placed draft
+    /// is a snapshot from before it, and putting it back would erase the
+    /// prompt the person just typed.
+    ///
+    /// **Fails today**: the store checks its own snapshot, never the live
+    /// draft, and the wiring assigns the snapshot over the edit.
+    @Test func anEditMadeWhileThePictureDownloadedIsNotOverwritten() async {
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        backend.retainedMemberBytes["m1"] = Data([3, 1, 4])
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft()
+        await armed(store, backend: backend, host: workstation, draft: draft)
+        var edited = draft
+        edited.prompt = "a cat, typed meanwhile"
+
+        let placed = await store.placePicture(in: draft, outgoing: request(), live: { edited })
+
+        #expect(placed == nil)
+        #expect(store.pending(for: edited) == nil)
     }
 
     /// A picture of the person's own is never replaced, and a well that
@@ -555,7 +578,7 @@ struct ReuseTests {
         var mine = request()
         mine.sourceImage = "mine"
 
-        #expect(await store.placePicture(in: draft, outgoing: mine) == nil)
+        #expect(await store.placePicture(in: draft, outgoing: mine, live: { draft }) == nil)
         #expect(!backend.calls.contains("retainedSourceMediaBytes"))
     }
 
