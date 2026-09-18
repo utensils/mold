@@ -14,6 +14,22 @@ Branch `worktree-agent-a24ba166817b9671f`, on `feat/macos-native-app` at `a5172d
 | 8 | draft persistence across launches | fixed | `2beba105` | `DraftPersistenceTests` |
 | 9 | `RowAction` menus on every new row | fixed | `2f6c5e40`, `79a3edd1`, `22d9100a` | `ReferenceWeightTests` |
 
+### Second round — the adversarial review's findings
+
+| id | status | commit | test |
+|---|---|---|---|
+| S1 chain never survived a relaunch | fixed | `5eb8ed14` | `ChainRecoveryTests` (5) |
+| S2 a chain preempted the run queue | fixed | `5ca73d0f`, `faa53598` | `ChainQueueTests` (4) |
+| S3 a stale start clobbered the next | fixed | `d9cc66c6` | `ChainRunTests.aStaleStartNeverClobbersTheOneAfterIt` |
+| S4 a dropped stream lost the job | fixed | `646b56ce` | `ChainRunTests.adroppedStreamReconnectsAndKeepsTheJob` |
+| S5 `coercedForMaskless` unused | fixed | `2f47bc14` | `SourceFitAdoptTests` |
+| S6 a painted mask was destroyed | fixed | `60e92e62` | `SourceFitMaskTests` (3, real pixels) |
+| S7 canvas stopped following a source | fixed | `2f47bc14` | `SourceFitAdoptTests` |
+| S8 unreachable `upscale-then-fit` selection | fixed | `76fdd5a5` | `SourceFitTests` round-trip + reconcile |
+| S9 `batchSize` ignored by the chain | fixed | `76fdd5a5` | `ChainQueueTests.abatchOfLongClipsRendersEveryCopyItWasAskedFor` |
+| S10 dead code + a wrong ledger claim | fixed | `76fdd5a5` | — (`ClipRouting.refusal` wired up rather than deleted) |
+| S11 `onDisappear` is not a quit hook | fixed | `76fdd5a5` | — (UAT item 5) |
+
 ## Decisions worth knowing
 
 - **The legacy-host scheduler heuristic was NOT ported.** Studio has a third
@@ -41,7 +57,27 @@ Branch `worktree-agent-a24ba166817b9671f`, on `feat/macos-native-app` at `a5172d
 - **A chain id is not a batch id**: its own `PendingChain` store, its own cancel
   route, its own stream (and that stream is the one in the package that is NOT
   `latestOnly`, because its frames are deltas). Recovery re-attaches by reading
-  the durable job and following it again (`ChainRun.reattach`).
+  the durable job and following it again (`PendingChainRecovery`), which
+  `recoverPending()` calls at launch — in the first round that claim was FALSE:
+  `reattach` had no caller and `PendingChain` was write-only (review S1).
+- **A chain waits in the SAME run queue as a batch** (`QueuedRun`). It never
+  preempts the canvas and never cancels a POST in flight; a press while
+  something is showing is admitted and waits, which is M8 decision 8 for every
+  press whichever door it came through (review S2).
+- **A dropped stream is not a settlement.** The follow reconnects with the
+  `2^n`/32 s backoff `HostStore+Events.watch` uses, re-reads the job each time,
+  and forgets the record only on a TERMINAL state from the host (review S4).
+  `paused` is shown and offers Resume: a host restart PARKS an ephemeral chain
+  with everything it needs to continue.
+- **A re-fit composes a painted mask, never replaces it** — `buildMask`'s rule
+  (`sourceFitCanvas.ts:78-96`). The first round's "a rescaled mask is a
+  plausible-looking lie" was wrong about what the other surfaces do, and the
+  code it justified deleted an inpaint mask on a canvas nudge and on every
+  re-appearance of the Source well (review S6).
+- **`adopting` re-consults both the fit and the canvas intent**: `pad-repaint`
+  is coerced onto a recipe with no mask path, and a canvas whose recorded
+  intent still says "follow the source" keeps following it across a model
+  switch — the other half of #1166 (review S5, S7).
 
 ## Metadata keys for the Reuse lane (F2)
 
@@ -59,6 +95,12 @@ keys (`types.rs` field names, snake_case on the wire):
 | `media.sourceFit` | `source_fit` (parse with `try? MoldJSON.decoder.decode(SourceFit.self, …)`) |
 | `canvasIntent` | none — restore as `.manual`, and pass `preserveReplacement: true` to `attachSourceShape` so a restored canvas is not re-armed |
 
+A reused `source_fit` of mode `upscale-then-fit` is normalised to its inner
+policy by `DraftMedia.reconcile`: this app has no client-side upscale to run
+first, and leaving it would bind the Fit picker to a selection matching no row.
+Set `draft.media.sourceImagePixels` alongside any restored source image, or the
+canvas cannot follow it across a model switch.
+
 `AdvancedControls` has a `stgBlocks` free-text field; `Ltx2GuidanceOverrides`
 round-trips it as `[Int]` (`guidanceOverridesFromWire`'s `join(", ")`).
 
@@ -67,14 +109,14 @@ round-trips it as `[Int]` (`guidanceOverridesFromWire`'s `join(", ")`).
 - **`upscale-then-fit`** is not authored: there is no client-side upscale to run
   first (that verb is lane F3's). The policy round-trips through the wire, so a
   print made elsewhere keeps its provenance rather than being rewritten.
-- **A mask painted over a previous fit is replaced, not rescaled.** A rescaled
-  mask is a plausible-looking lie about which pixels somebody chose. What
-  survives a re-fit is what the fit implies: the `pad-repaint` bands.
 - **Whole-queue pause** is listed under F4 in `PLAN.md` but belongs to the
   upscale/activity/queue-pause lane per my task; not touched.
-- **Recovering a chain whose CREATE was lost to a relaunch.** The operation id
-  makes a retry safe inside one run, but there is no `by-operation-id` lookup
-  route for a chain the way there is for a batch. Documented in `PendingChain`.
+- **Recovering a chain whose CREATE was lost to a relaunch.** The server uses
+  the `x-mold-operation-id` AS the job id
+  (`routes_chain_jobs.rs:142-146`), so replaying one is idempotent by
+  construction — but nothing in the app retries a create, and across a relaunch
+  the body is gone anyway. What IS recovered is every job the host named: the
+  id is written the moment the create answers. Documented in `PendingChain`.
 
 ## Cross-lane edits (smallest possible, please sequence)
 
@@ -86,6 +128,8 @@ round-trips it as `[Int]` (`guidanceOverridesFromWire`'s `join(", ")`).
   added to the composition.
 - `Packages/MoldClient/Sources/MoldClient/CanvasIntent.swift` — `Codable` (new
   file this lane added; listed only because the draft descriptor needs it).
+- `Sources/Mold/Generate/PromptPanel+Actions.swift` — the Resume button, and
+  Generate's disabled state now also asks the routing.
 - `Sources/Mold/Generate/RunCanvas.swift` — ONE case label:
   `case .running, .runningChain:`. The mesh lane owns `RunCanvas+Result.swift`,
   which is untouched.
@@ -125,3 +169,10 @@ Nothing here has been exercised against a real machine. What needs a human:
    is parked as `.corrupt`.
 6. **A host too old to publish `/api/capabilities/chain-limits`** — the Length
    slider must still work off the ported constants, with no banner.
+7. **Quit mid-chain and relaunch** — the same job is followed again at the clip
+   the host says it reached. Then restart `mold serve` under a running chain:
+   the capsule must read "Paused after clip N of M" and Resume must continue it
+   rather than start it over.
+8. **Generate an image, then immediately a long clip** — the picture must land
+   on the canvas and the clip must follow it, with neither banner nor loss.
+   Then a batch of three long clips: three prints, not one.
