@@ -26,6 +26,11 @@ enum NativeUAT: String, CaseIterable {
     /// Where the window opens, and which sheet is already up
     /// (`Destination.launch`, `RootView`, `MachinesSettings`).
     case destination = "MOLD_NATIVE_DESTINATION"
+    /// Which machine's page is open on the Machines destination, by name
+    /// (`MachineLaunch`). Its own hook rather than a `machines:<name>`
+    /// spelling of the one above, so `Destination.launch` still parses a bare
+    /// destination name and nothing outside this feature had to change.
+    case machine = "MOLD_NATIVE_MACHINE"
     /// Which Settings tab (`SettingsUAT`).
     case settingsTab = "MOLD_NATIVE_SETTINGS_TAB"
     /// A preloaded source picture (`GeneratePane+UAT`).

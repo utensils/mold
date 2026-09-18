@@ -18,7 +18,8 @@ struct NativeUATTests {
     /// `ProcessInfo.processInfo.environment["MOLD_NATIVE_…"]` directly.
     @Test func everyHookReadsThroughTheOneGate() throws {
         let declared = Set(NativeUAT.allCases.map(\.rawValue))
-        #expect(declared.count == 9)  // the eight launch seeds, and the UAT script
+        // the nine launch seeds, and the UAT script
+        #expect(declared.count == 10)
 
         var offences: [String] = []
         var mentioned: Set<String> = []
