@@ -71,6 +71,20 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// what a licence retry actually resent.
     nonisolated(unsafe) var startedDownloads: [String] = []
     nonisolated(unsafe) var modelRows: [Model] = []
+    // MARK: - Retained source media (F2)
+
+    /// Answered per FILENAME, the same "absent is unplanted" rule as
+    /// `componentRows`. A store that probes a print nobody planted throws.
+    nonisolated(unsafe) var retainedInventories: [String: RetainedSourceMedia.Inventory] = [:]
+    /// Every filename an inventory was asked for, in call order -- which is
+    /// how a test pins that EVERY known copy of a print was probed.
+    nonisolated(unsafe) var retainedInventoryRequests: [String] = []
+    nonisolated(unsafe) var retainedMemberBytes: [String: Data] = [:]
+    nonisolated(unsafe) var retainedMemberRequests: [String] = []
+    nonisolated(unsafe) var retainedSession: RetainedSourceMedia.ReuseSession?
+    /// Every session mint, with the request it was bound to.
+    nonisolated(unsafe) var retainedSessionRequests:
+        [(filename: String, members: [String], target: GenerateRequest)] = []
     // MARK: - Models (M5 S1b)
 
     /// Answered per MODEL, the same "absent is unplanted" rule as `loraRows`.

@@ -10,7 +10,14 @@ import Foundation
 // note).
 public extension HTTPBackend {
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
-        try await post("/api/generation-batches", body: admission)
+        if let refusal = admission.retainedMediaBatchRefusal { throw refusal }
+        return try await post(
+            "/api/generation-batches", body: admission,
+            // The reuse handle is a credential and rides a header, so it can
+            // never end up in a persisted body or a log line.
+            headers: admission.retainedMediaSession.map {
+                [RetainedSourceMedia.sessionHeader: $0]
+            } ?? [:])
     }
 
     func batchStatus(id: String) async throws -> BatchStatus {
