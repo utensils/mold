@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 /// The window's one split view.
@@ -74,12 +75,21 @@ enum Destination: String, Hashable, CaseIterable, Identifiable {
     var id: Self { self }
 
     /// Where the window opens: an explicit override, else where you were last.
-    static var launch: Destination {
-        if let named = NativeUAT.destination.value(),
+    static var launch: Destination { launch(defaults: AppStorageSuite.defaults) }
+
+    /// The same answer with both of its inputs handed in, so a test can ask
+    /// what `MOLD_NATIVE_DESTINATION=library` opens without launching a
+    /// window -- the hook that lands a UAT run on the library now that no
+    /// sidebar row of that name exists to click.
+    static func launch(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults
+    ) -> Destination {
+        if let named = NativeUAT.destination.value(in: environment),
            let forced = Destination(rawValue: named) {
             return forced
         }
-        let remembered = AppStorageSuite.defaults.string(forKey: "destination")
+        let remembered = defaults.string(forKey: "destination")
         return remembered.flatMap(Destination.init(rawValue:)) ?? .generate
     }
 

@@ -116,4 +116,32 @@ struct SidebarRowsTests {
                                      machine: nil) == .shelf(.favorites))
     }
 
+    /// `MOLD_NATIVE_DESTINATION=library` still opens the library, and on a
+    /// fresh preferences domain -- which is what a UAT run launches with --
+    /// the row standing highlighted is All Prints.
+    ///
+    /// **Fails today**: `Destination.launch` reads the process environment and
+    /// the shared suite, so there is nothing to ask.
+    @Test func theUATHookLandsOnAllPrints() {
+        let defaults = scratch()
+        let environment = [NativeUAT.destination.rawValue: "library"]
+        let navigation = LibraryNavigation(defaults: defaults)
+
+        #if DEBUG
+        #expect(Destination.launch(environment: environment, defaults: defaults) == .library)
+        #else
+        // The hook is compiled out of Release, so the remembered destination
+        // is the only answer there -- and nothing was remembered.
+        #expect(Destination.launch(environment: environment, defaults: defaults) == .generate)
+        #endif
+        #expect(SidebarRows.selected(destination: .library, scope: navigation.scope,
+                                     machine: nil) == .shelf(.all))
+    }
+
+    /// The remembered destination is still what a launch with no hook reads.
+    @Test func aLaunchWithNoHookOpensWhereYouWere() {
+        let defaults = scratch()
+        defaults.set(Destination.models.rawValue, forKey: "destination")
+        #expect(Destination.launch(environment: [:], defaults: defaults) == .models)
+    }
 }
