@@ -40,7 +40,7 @@ settings:
     # `scripts/assert-sparkle-key.sh` runs before signing and refuses anything
     # that is not a real 32-byte key. Debug builds are unaffected and have no
     # updater at all. Replacing it is a one-time owner step (README, "Updates").
-    MOLD_SPARKLE_PUBLIC_ED_KEY: REPLACE_WITH_SPARKLE_PUBLIC_KEY
+    MOLD_SPARKLE_PUBLIC_ED_KEY: d9yomLY2sbrntlwBWKOsukwbwk6bs66g4d3BFue0eyc=
   configs:
     Release:
       SWIFT_COMPILATION_MODE: wholemodule
