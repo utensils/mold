@@ -88,6 +88,10 @@ extension HostStore {
         // invalidate what the OLD address answered, and an edit must not
         // silently un-default the machine being edited.
         if defaultMachine == host.id { defaultMachine = nil }
+        // Nor can its in-flight bookkeeping: nothing will ever recover a
+        // batch or a chain from a machine that is no longer listed.
+        PendingBatch.forgetAll(on: host.id)
+        PendingChain.forgetAll(on: host.id)
         reconcileEventStreams()
         do {
             try HostPersistence.forget(host)

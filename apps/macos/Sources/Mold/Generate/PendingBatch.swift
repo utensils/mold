@@ -22,6 +22,16 @@ enum PendingBatch {
         defaults.set(pending, forKey: key)
     }
 
+    /// Everything remembered against ONE machine. A removed machine can never
+    /// answer for its batchs, so records keyed on it are orphans that
+    /// outlived both Remove and Reset (UAT 2026-09-17 #10) -- the reset keeps
+    /// this key on purpose, as in-flight bookkeeping, which is exactly why
+    /// the removal has to do its own clearing.
+    static func forgetAll(on host: MoldHost.ID, in defaults: UserDefaults = AppStorageSuite.defaults) {
+        let kept = all(in: defaults).filter { $0.value != host.uuidString }
+        defaults.set(kept, forKey: key)
+    }
+
     static func all(in defaults: UserDefaults = AppStorageSuite.defaults) -> [String: String] {
         defaults.dictionary(forKey: key) as? [String: String] ?? [:]
     }

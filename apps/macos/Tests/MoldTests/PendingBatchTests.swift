@@ -32,4 +32,25 @@ struct PendingBatchTests {
         PendingBatch.forget("batch-1", in: defaults)
         #expect(PendingBatch.all(in: defaults).keys.sorted() == ["batch-2"])
     }
+
+    /// UAT 2026-09-17 #10: five entries keyed on a removed machine survived
+    /// both Remove and Reset. The reset keeps the key on purpose; the
+    /// removal must clear its own machine's share.
+    ///
+    /// **Fails today**: nothing clears by machine.
+    @Test func removingAMachineForgetsEverythingPendingOnIt() {
+        let defaults = scratch()
+        let gone = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
+        let kept = MoldHost(name: "hal9000", baseURL: URL(string: "http://hal9000")!)
+        PendingBatch.remember("batch-1", host: gone.id, in: defaults)
+        PendingBatch.remember("batch-2", host: kept.id, in: defaults)
+        PendingChain.remember("job-1", host: gone.id, in: defaults)
+        PendingChain.remember("job-2", host: kept.id, in: defaults)
+
+        PendingBatch.forgetAll(on: gone.id, in: defaults)
+        PendingChain.forgetAll(on: gone.id, in: defaults)
+
+        #expect(PendingBatch.all(in: defaults).keys.sorted() == ["batch-2"])
+        #expect(PendingChain.all(in: defaults).keys.sorted() == ["job-2"])
+    }
 }
