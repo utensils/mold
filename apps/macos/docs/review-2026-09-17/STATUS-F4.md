@@ -30,6 +30,18 @@ Branch `worktree-agent-a24ba166817b9671f`, on `feat/macos-native-app` at `a5172d
 | S10 dead code + a wrong ledger claim | fixed | `76fdd5a5` | — (`ClipRouting.refusal` wired up rather than deleted) |
 | S11 `onDisappear` is not a quit hook | fixed | `76fdd5a5` | — (UAT item 5) |
 
+### Third round — a flaky gate on `macos-26`
+
+`ChainRunTests.aStaleStartNeverClobbersTheOneAfterIt` failed on the GitHub
+runner and passed everywhere else. The race was in `FakeBackend`, NOT in
+`ChainRun`: `record(_:)` appends the route name before a create suspends on its
+gate, so a settle on the call count returned with nothing parked, and
+`releaseChainCreate()` BANKED the release for whichever create arrived first --
+the second one, on a slow machine. Banking is gone (a release with nothing
+waiting is an `Issue.record`), `chainCreatesWaiting` exposes what a release
+acts on, and two other tests of the same shape were hardened the same way.
+`f123917e`; 20/20 for `ChainRunTests`, `ChainQueueTests`, `ChainRecoveryTests`.
+
 ## Decisions worth knowing
 
 - **The legacy-host scheduler heuristic was NOT ported.** Studio has a third
