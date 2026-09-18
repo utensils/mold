@@ -19,6 +19,9 @@ on:
     paths:
       - "apps/macos/**"
       - ".github/workflows/macos-native.yml"
+      # The reusable distribution workflow this one calls: a fix to it must
+      # rebuild the nightly, and #1736's did not.
+      - ".github/workflows/macos-native-distribution.yml"
       # The app's contract tests PARSE these, so a change here can turn the
       # macOS suite red without touching apps/macos.
       - "crates/mold-core/src/config_keys.rs"
@@ -27,6 +30,9 @@ on:
     paths:
       - "apps/macos/**"
       - ".github/workflows/macos-native.yml"
+      # The reusable distribution workflow this one calls: a fix to it must
+      # rebuild the nightly, and #1736's did not.
+      - ".github/workflows/macos-native-distribution.yml"
       - "crates/mold-core/src/config_keys.rs"
       - "crates/mold-server/src/lib.rs"
   workflow_dispatch:
