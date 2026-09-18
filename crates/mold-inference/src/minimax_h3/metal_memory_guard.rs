@@ -12,6 +12,8 @@ use crate::progress::InferenceCancellationToken;
 
 const MINIMUM_AVAILABLE_FLOOR_BYTES: u64 = 8 << 30;
 const MAXIMUM_ATTEMPT_SWAP_GROWTH_BYTES: u64 = 2 << 30;
+const CAMPAIGN_MINIMUM_AVAILABLE_FLOOR_BYTES: u64 = 12 << 30;
+const CAMPAIGN_MAXIMUM_SWAP_GROWTH_BYTES: u64 = 256 << 20;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 type MemorySampler = Arc<dyn Fn() -> Result<H3MetalMemorySample> + Send + Sync>;
@@ -35,6 +37,20 @@ impl H3MetalMemoryPolicy {
             minimum_available_bytes: MINIMUM_AVAILABLE_FLOOR_BYTES,
             baseline_swap_bytes: sample.used_swap_bytes,
             maximum_swap_growth_bytes: MAXIMUM_ATTEMPT_SWAP_GROWTH_BYTES,
+        }
+    }
+
+    /// The tighter policy the H3 Metal default-resolution campaign requires.
+    ///
+    /// This is not an output-semantics switch: it only narrows the same live
+    /// host-floor and swap-growth invariants that the shipped guard already
+    /// checks. Campaign evidence may therefore be compared against the shipped
+    /// guard without introducing a second runtime authority.
+    fn for_campaign_sample(sample: H3MetalMemorySample) -> Self {
+        Self {
+            minimum_available_bytes: CAMPAIGN_MINIMUM_AVAILABLE_FLOOR_BYTES,
+            baseline_swap_bytes: sample.used_swap_bytes,
+            maximum_swap_growth_bytes: CAMPAIGN_MAXIMUM_SWAP_GROWTH_BYTES,
         }
     }
 
@@ -92,6 +108,37 @@ impl H3MetalMemoryGuard {
 
         let initial = sample_metal_memory()?;
         let policy = H3MetalMemoryPolicy::for_sample(initial);
+        if let Some(message) = policy.violation(initial) {
+            bail!(message);
+        }
+        Self::spawn(
+            policy,
+            cancellation,
+            Arc::new(sample_metal_memory),
+            SAMPLE_INTERVAL,
+        )
+    }
+
+    /// Start the attempt-scoped Metal guard with the campaign-only thresholds.
+    ///
+    /// The default (shipped) guard remains the production default. The
+    /// campaign policy is opt-in through `MOLD_H3_METAL_CAMPAIGN=1` and is
+    /// deliberately narrower than the shipped guard; it must never be used to
+    /// relax the production invariants.
+    pub(crate) fn start_campaign(
+        device: &Device,
+        cancellation: InferenceCancellationToken,
+    ) -> Result<Self> {
+        if !device.is_metal() {
+            return Ok(Self {
+                stop: Arc::new(AtomicBool::new(true)),
+                violation: Arc::new(Mutex::new(None)),
+                worker: None,
+            });
+        }
+
+        let initial = sample_metal_memory()?;
+        let policy = H3MetalMemoryPolicy::for_campaign_sample(initial);
         if let Some(message) = policy.violation(initial) {
             bail!(message);
         }
@@ -173,6 +220,37 @@ mod tests {
 
     fn gib(value: u64) -> u64 {
         value << 30
+    }
+
+    #[test]
+    fn campaign_policy_rejects_stricter_floor_and_swap_growth() {
+        let policy = H3MetalMemoryPolicy::for_campaign_sample(H3MetalMemorySample {
+            available_bytes: gib(20),
+            used_swap_bytes: gib(10),
+        });
+        assert_eq!(policy.minimum_available_bytes, gib(12));
+        assert_eq!(policy.maximum_swap_growth_bytes, 256 << 20);
+        assert!(policy
+            .violation(H3MetalMemorySample {
+                available_bytes: gib(11),
+                used_swap_bytes: gib(10),
+            })
+            .unwrap()
+            .contains("host safety floor"));
+        assert!(policy
+            .violation(H3MetalMemorySample {
+                available_bytes: gib(12),
+                used_swap_bytes: gib(10) + (256 << 20) + 1,
+            })
+            .unwrap()
+            .contains("attempt swap grew"));
+        assert_eq!(
+            policy.violation(H3MetalMemorySample {
+                available_bytes: gib(12),
+                used_swap_bytes: gib(10),
+            }),
+            None
+        );
     }
 
     #[test]

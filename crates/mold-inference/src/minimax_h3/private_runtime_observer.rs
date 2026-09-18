@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
 use std::fs;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 use std::fs::File;
@@ -504,6 +505,7 @@ fn phase_transient_bytes(state: &ObservationState, phase: H3PipelinePhase) -> Re
         .ok_or_else(|| anyhow!("private H3 phase {phase:?} has no attributed workspace peak"))
 }
 
+#[cfg(all(target_os = "linux", feature = "cuda"))]
 fn process_resident_bytes() -> Result<u64> {
     let statm = fs::read_to_string("/proc/self/statm")
         .context("private H3 runtime capture requires Linux process memory evidence")?;
@@ -523,6 +525,7 @@ fn process_resident_bytes() -> Result<u64> {
         .ok_or_else(|| anyhow!("private H3 resident bytes overflow or are zero"))
 }
 
+#[cfg(all(target_os = "linux", feature = "cuda"))]
 fn process_peak_resident_bytes() -> Result<u64> {
     let status = fs::read_to_string("/proc/self/status")
         .context("private H3 runtime capture requires Linux peak-memory evidence")?;
@@ -535,6 +538,57 @@ fn process_peak_resident_bytes() -> Result<u64> {
     kib.checked_mul(1024)
         .filter(|bytes| *bytes > 0)
         .ok_or_else(|| anyhow!("private H3 VmHWM overflows or is zero"))
+}
+
+#[cfg(target_os = "macos")]
+fn process_resident_bytes() -> Result<u64> {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let expected_size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `proc_pidinfo` writes exactly the supplied buffer size and the
+    // returned byte count is the one the kernel actually filled.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            (&mut info) as *mut libc::proc_taskinfo as *mut libc::c_void,
+            expected_size,
+        )
+    };
+    if expected_size <= 0
+        || std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int != expected_size
+    {
+        bail!("private H3 macOS process memory probe has an invalid ABI size")
+    }
+    if written != expected_size {
+        bail!("private H3 macOS process memory probe returned an incomplete taskinfo")
+    }
+    if info.pti_resident_size == 0 {
+        bail!("private H3 macOS process memory probe omitted resident bytes")
+    }
+    Ok(info.pti_resident_size)
+}
+
+#[cfg(target_os = "macos")]
+fn process_peak_resident_bytes() -> Result<u64> {
+    let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+    // SAFETY: `mach_task_self_` is the live task port and `task_info`
+    // writes only `MACH_TASK_BASIC_INFO_COUNT` natural words into the buffer.
+    #[allow(deprecated)]
+    let port = unsafe { libc::mach_task_self_ };
+    let result = unsafe {
+        libc::task_info(
+            port,
+            libc::MACH_TASK_BASIC_INFO,
+            (&mut info) as *mut libc::mach_task_basic_info as libc::task_info_t,
+            &mut count,
+        )
+    };
+    if result != libc::KERN_SUCCESS || info.resident_size_max == 0 {
+        bail!("private H3 macOS process peak-memory probe failed")
+    }
+    Ok(info.resident_size_max)
 }
 
 fn build_observation(

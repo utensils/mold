@@ -152,7 +152,13 @@ no production accounting formula, new layout, or launcher.
    prepared unified peak to fit below current availability minus a 12 GiB
    host floor and below effective device headroom. Reserve that exact grant;
    do not infer it from checkpoint file sizes or enlarge it after refusal.
-4. Derive and record a separate native-allocation ceiling from current
+4. Set `MOLD_H3_METAL_CAMPAIGN=1` on the exact campaign binary to opt the
+   shipped Metal memory guard into its narrower invariants: 12 GiB available
+   floor and 256 MiB maximum attempt swap growth, at the same 250 ms sample
+   cadence. This is a safety-policy switch, not an output-semantics switch; it
+   must never be used to relax the shipped 8 GiB / 2 GiB default. The
+   independent native-allocation ceiling remains a separate launch gate.
+5. Derive and record a separate native-allocation ceiling from current
    capacity/headroom and the measured phase plan, retaining the host floor.
    Reject a case whose safe ceiling cannot cover its planned device phase.
    Keep the previous 8 GiB ceiling for row A; do not reuse it blindly for C.
@@ -160,12 +166,12 @@ no production accounting formula, new layout, or launcher.
    available, on non-normal pressure or more than 256 MiB swap growth, and
    fails closed on a missing/invalid/stale sample. These campaign limits are
    tighter than the built-in 8 GiB/2 GiB cooperative guard.
-5. Freeze a per-case wall-clock deadline before launch. A watchdog failure
+6. Freeze a per-case wall-clock deadline before launch. A watchdog failure
    or missing allocation event stream cancels the isolated child; enforce
    a bounded shutdown deadline and terminate only that owned process group
    if cooperative cancellation does not settle. Record abnormal exits and
    incomplete commands as failures, never resumable successful evidence.
-6. In every exit path, reap the child, confirm the owned process group has
+7. In every exit path, reap the child, confirm the owned process group has
    no descendants, retain stdout/stderr/request/telemetry and refusal facts,
    stop its sampler, and release only this attempt's reservation and lock.
    Verify pressure and swap after settlement. Preserve partial media as
