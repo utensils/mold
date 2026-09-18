@@ -51,9 +51,9 @@ struct LibraryStoreHostsTests {
         let hosts = HostStore(hosts: [known, silent]) { fakes[$0.id]! }
         let library = LibraryStore(hosts: hosts)
         // Only `known` has ever reported tags.
-        library.tagsPerHost[known.id] = [TagCount(name: "old", count: 1)]
+        library.tags.perHost[known.id] = [TagCount(name: "old", count: 1)]
 
-        library.renameTag("old", to: "new")
+        library.tags.rename("old", to: "new", in: library)
         try await waitUntil { fakeSilent.calls.contains("renameTag") }
 
         #expect(fakeSilent.calls.contains("renameTag"))

@@ -49,7 +49,7 @@ extension LibraryPane {
     var suggestedTokens: [LibraryToken] {
         LibrarySearchSyntax.suggestions(
             for: navigation.query.text, machines: searchableMachines,
-            tags: library.tagCounts.map(\.name),
+            tags: library.tags.counts.map(\.name),
             applied: Set(navigation.query.tokens.map(\.id)))
     }
 
@@ -58,7 +58,7 @@ extension LibraryPane {
     func commitTypedToken() {
         guard let token = LibrarySearchSyntax.committed(
             navigation.query.text, machines: searchableMachines,
-            tags: library.tagCounts.map(\.name))
+            tags: library.tags.counts.map(\.name))
         else { return }
         navigation.query.tokens.append(token)
         navigation.query.text = ""

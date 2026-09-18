@@ -20,7 +20,7 @@ extension LibraryActions {
     }
 
     func renameTag(_ name: String, to newName: String) {
-        library.renameTag(name, to: newName)
+        library.tags.rename(name, to: newName, in: library)
     }
 
     func deleteTag(_ name: String) {
@@ -28,7 +28,7 @@ extension LibraryActions {
             title: "Delete the tag \u{201C}\(name)\u{201D}?",
             message: "It comes off every print on every machine. The prints are kept.",
             verb: "Delete Tag",
-            perform: { library.deleteTag(name) }
+            perform: { library.tags.delete(name, in: library) }
         ))
     }
 }

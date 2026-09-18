@@ -19,7 +19,7 @@ extension LibraryStore {
         etags = etags.filter { live.contains($0.key) }
         trashEtags = trashEtags.filter { live.contains($0.key) }
         collectionsPerHost = collectionsPerHost.filter { live.contains($0.key) }
-        tagsPerHost = tagsPerHost.filter { live.contains($0.key) }
+        tags.prune(to: live)
         rebuild()
         trashed = trashPerHost.values.flatMap(\.self)
             .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }

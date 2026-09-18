@@ -30,11 +30,14 @@ final class LibraryStore {
     var etags: [MoldHost.ID: String] = [:]
     var trashEtags: [MoldHost.ID: String] = [:]
 
-    /// Collections and tags as each MACHINE holds them. A collection's id is
-    /// that machine's, so these are never merged in storage -- only when they
-    /// are read, by `CollectionShelf.merge`.
+    /// Collections as each MACHINE holds them. A collection's id is that
+    /// machine's, so these are never merged in storage -- only when they are
+    /// read, by `CollectionShelf.merge`.
     var collectionsPerHost: [MoldHost.ID: [Collection]] = [:]
-    var tagsPerHost: [MoldHost.ID: [TagCount]] = [:]
+
+    /// The tag index, and renaming or deleting a tag everywhere. See
+    /// `LibraryTags`.
+    let tags = LibraryTags()
 
     /// The Edit menu's Undo, for the edits this store makes. Its manager is
     /// the window's, handed over by the pane -- see `MoldUndo`.

@@ -52,7 +52,7 @@ struct LibraryStoreFailureTests {
         let hosts = HostStore(hosts: [machine]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
 
-        library.deleteTag("owls")
+        library.tags.delete("owls", in: library)
         try await waitUntil { fake.calls.contains("deleteTag") }
         try await waitUntil { !hosts.failures.isEmpty }
 

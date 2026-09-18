@@ -8,23 +8,6 @@ extension LibraryStore {
     /// Every machine's collections, folded into the shelves a person sees.
     var shelves: [CollectionShelf] { CollectionShelf.merge(collectionsPerHost) }
 
-    /// Tag names and how many prints carry them, summed across machines.
-    /// Sorted by how much they are used, because a tag suggestion list is only
-    /// useful if the tags you actually use are at the top.
-    var tagCounts: [TagCount] {
-        var totals: [String: Int] = [:]
-        for counts in tagsPerHost.values {
-            for tag in counts { totals[tag.name, default: 0] += tag.count }
-        }
-        return totals
-            .map { TagCount(name: $0.key, count: $0.value) }
-            .sorted {
-                $0.count == $1.count
-                    ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                    : $0.count > $1.count
-            }
-    }
-
     /// Which collections each machine hides, as that machine's own ids -- the
     /// form a print's `collections` are in.
     var hiddenCollectionIDs: [MoldHost.ID: Set<String>] {
@@ -47,16 +30,16 @@ extension LibraryStore {
                         do { return .success(try await client.collections()) }
                         catch { return .failure(error) }
                     }()
-                    async let tags: Result<[TagCount], Error> = {
+                    async let counts: Result<[TagCount], Error> = {
                         do { return .success(try await client.tags()) }
                         catch { return .failure(error) }
                     }()
-                    return (host.id, await collections, await tags)
+                    return (host.id, await collections, await counts)
                 }
             }
             for await (id, collectionsResult, tagsResult) in group {
                 if case let .success(collections) = collectionsResult { collectionsPerHost[id] = collections }
-                if case let .success(tags) = tagsResult { tagsPerHost[id] = tags }
+                if case let .success(counts) = tagsResult { tags.perHost[id] = counts }
                 switch (collectionsResult, tagsResult) {
                 case (.success, .success):
                     // Scoped: this is `reload()`'s own passive listing, run
