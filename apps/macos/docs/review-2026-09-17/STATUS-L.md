@@ -3,26 +3,30 @@
 `make lint` on the lane's tip prints:
 
 ```
-  large: Sources/Mold/Library/ReuseStore.swift (211 lines)
+  large: Sources/Mold/Library/ReuseStore.swift (221 lines)
+  large: Sources/Mold/Machines/MachinesPane.swift (154 lines)
   large type: HTTPBackend (1402 lines across its files)
 ```
 
-Nothing else. `ReuseStore.swift` is left ALONE at the integrator's request —
-a UAT fix is landing there and a split would collide with it.
+**No type is over budget but `HTTPBackend`**, which is the point of the lane.
+The two files are not this lane's: `ReuseStore.swift` was left ALONE at the
+integrator's request (a UAT fix is landing there and a split would collide),
+and `MachinesPane.swift` arrived on the branch during the lane (`be5a4907`)
+and belongs to whoever wrote it.
 
 ## What moved, and why each new type exists
 
 | step | type | before → after | the new type, and its reason |
 | --- | --- | --- | --- |
-| 1 | `GenerateController` | 603 → 454 | `ExpandStore` — a rewrite is a round trip with its own backend calls, its own staleness fence and its own result, and a submit reads none of it. Composed and `.environment()`'d like every other store. |
-| 2 | `LibraryActions` | 657 → 559 | `PrintImport` — a batch with a policy: what one unreadable file in the middle of ten means, what a machine refusing means, one line about the lot when it is done. Named for what it moves, because `LibraryImport` is already the Import menu's model. |
+| 1 | `GenerateController` | 603 → 446 | `ExpandStore` — a rewrite is a round trip with its own backend calls, its own staleness fence and its own result, and a submit reads none of it. Composed and `.environment()`'d like every other store. |
+| 2 | `LibraryActions` | 657 → 566 | `PrintImport` — a batch with a policy: what one unreadable file in the middle of ten means, what a machine refusing means, one line about the lot when it is done. Named for what it moves, because `LibraryImport` is already the Import menu's model. |
 | 2 | `LibraryActions.swift` | 151 → 122 | `save(_:)` moved beside `saveAll` in `+Files`, where the rest of "turning prints into files on this disk" lives. |
-| 3 | `LibraryStore` | 779 → 653 → 540 | `GalleryLive` — the live RECONCILER, and the only thing that needs `GalleryEcho` and the `RelistGate`, which moved with it. Then `LibraryTags` — the tag INDEX, and renaming or deleting a tag everywhere, which is one request per machine and not a loop over prints. |
-| 4 | `RenderDraft` | 915 → 753 → 498 | `CanvasFit` — a size and a `ResolutionProfile`; it never reads or writes a draft. Then `RenderRequest` — the translation to the wire, which answers questions the draft holds no opinion on (which well ships, what the DESTINATION host understands about identity photos, how a batch of four fans out). |
+| 3 | `LibraryStore` | 779 → 653 → 541 | `GalleryLive` — the live RECONCILER, and the only thing that needs `GalleryEcho` and the `RelistGate`, which moved with it. Then `LibraryTags` — the tag INDEX, and renaming or deleting a tag everywhere, which is one request per machine and not a loop over prints. |
+| 4 | `RenderDraft` | 915 → 753 → 500 | `CanvasFit` — a size and a `ResolutionProfile`; it never reads or writes a draft. Then `RenderRequest` — the translation to the wire, which answers questions the draft holds no opinion on (which well ships, what the DESTINATION host understands about identity photos, how a batch of four fans out). |
 | 5 | `HTTPBackend` | 1420 → 1402 | NOT restructured (README says why). `EmptyBody` and `CollectionCreate`/`CollectionChange` moved — the first is posted by three route groups, the second two are `MoldBackend`'s vocabulary. |
-| 6 | `GeneratePane.swift` | 211 → 137 | `+Run.swift` — pressing Generate: the clip's routing, the one retained picture a chain must be handed first, and the probe both ask. |
-| 6 | `LibraryPane.swift` | 156 → 90 | `+Chrome.swift` — what the pane re-reads when the fleet or the shelves move, the chrome it wears, and what is on screen. |
-| 8 | `HostStore` | 613 → 588 | `HostFailure` — a different type declared inside `HostStore+Failures.swift`. A miscount, not debt; same rule as `EmptyBody`. |
+| 6 | `GeneratePane.swift` | 202 → 137 | `+Run.swift` — pressing Generate: the clip's routing, the one retained picture a chain must be handed first, and the probe both ask. |
+| 6 | `LibraryPane.swift` | 157 → 92 | `+Chrome.swift` — what the pane re-reads when the fleet or the shelves move, the chrome it wears, and what is on screen. |
+| 8 | `HostStore` | 613 → 600 | `HostFailure` — a different type declared inside `HostStore+Failures.swift`. A miscount, not debt; same rule as `EmptyBody`. It lands at exactly 600, which does not print: the branch grew `HostStore` during this lane and the next line added to it WILL, so it is the one to watch. |
 
 Every one takes the thing it serves as a PARAMETER — the arrangement
 `LibraryMutations` already had with `LibraryStore`. No forwarders, no renamed
@@ -38,7 +42,7 @@ files, `TYPE_MAX` untouched. All are pure moves except `CanvasFit`, noted below.
   `sourceExactCanvas` built a throwaway `RenderDraft` purely to call
   `fit(to:)` on it, because the rule was only reachable through a draft. It
   calls the rule directly now, and `fit(to:)` is GONE rather than left as a
-  wrapper. 913 package tests green either side.
+  wrapper. The package suite is green either side.
 - **The remaining `HTTPBackend` request bodies stay where they are.** Each is
   one route's own body, and a route's body is part of its route group. Only
   the shared and the public ones moved.
@@ -77,10 +81,15 @@ Proof:
 
 ## Gates
 
-- `make lint` — the two lines quoted at the top, nothing else.
-- `MoldClient` package `swift test` — 913 tests, 49 suites, green.
-- App bundle `xcodebuild test`, full `MoldTests` — green (under the shared
-  mkdir lock).
+- `make lint` — the three lines quoted at the top, nothing else.
+- `MoldClient` package `swift test` — 920 tests, 50 suites, green.
+- App bundle `xcodebuild test`, full `MoldTests` — 730 tests, 105 suites,
+  green (under the shared mkdir lock).
+- Rebased onto `be5a4907` at the end. Three commits conflicted with work that
+  landed during the lane and were re-resolved in the branch's favour: the
+  toolbar's token suggestions (now `LibrarySearchSyntax`), the outgoing probe
+  (now `RetainedSourcePicture.outgoing`, re-pointed at `RenderRequest`), and
+  both pane splits, which were redone against the new file contents.
 
 ## Cross-lane edits
 
@@ -101,6 +110,7 @@ Proof:
 
 ## Not done, and why
 
-- `ReuseStore.swift` (211) — the integrator asked for it to be left alone.
+- `ReuseStore.swift` (221) and `MachinesPane.swift` (154) — neither is this
+  lane's; see the top of this file.
 - `HTTPBackend` (1,402) — the README states the reason; it is not a threshold
   to raise.
