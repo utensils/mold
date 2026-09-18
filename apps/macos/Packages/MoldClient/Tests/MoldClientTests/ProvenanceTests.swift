@@ -110,6 +110,21 @@ enum Provenance {
         .extendOverlapFrames != nil)
 }
 
+/// `id_image_sha256s` carries the same `Sha256S` trap and NOTHING on hal9000
+/// has ever produced it -- a multi-photograph print records the plural, a
+/// single-photograph one deliberately does not. So the fixture cannot pin it,
+/// `identityDigests` falls back to the singular, and the obvious misspelling
+/// would decode nil on every print with every other test still green. This is
+/// the only thing standing between that and shipping. SYNTHETIC.
+@Test func theOtherSha256SKeyIsPinnedToo() {
+    let several = Synthetic.metadata(#""id_image_sha256s":["a","b"]"#)
+    #expect(several.identityDigests == ["a", "b"])
+    // And the plural OUTRANKS the singular, which is what a multi-photograph
+    // print needs -- both are recorded only for the form that shipped.
+    let both = Synthetic.metadata(#""id_image_sha256":"one","id_image_sha256s":["a","b"]"#)
+    #expect(both.identityDigests == ["a", "b"])
+}
+
 @Test func readsAChainPrintsOwnProvenance() throws {
     let authored = try Provenance.metadata(
         "mold-chain-8c352a5a9ac5d5c23549e66d96f07c97f26331a7798de3fce244cdc4da754073-take-1.mp4")
