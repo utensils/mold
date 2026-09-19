@@ -25,6 +25,8 @@ public extension DraftDescriptor {
         fps = draft.fps
         pipeline = draft.pipeline
         enableAudio = draft.enableAudio
+        preferredAudio = draft.preferredAudio
+        hasAudioPreference = draft.preferredAudio != nil
         videoOnly = draft.videoOnly
         strength = draft.strength
         title = draft.title
@@ -66,7 +68,16 @@ public extension DraftDescriptor {
         draft.frames = frames
         draft.fps = fps
         draft.pipeline = pipeline
-        draft.enableAudio = enableAudio
+        if hasAudioPreference == nil {
+            // A descriptor from before capability and preference were split.
+            // Its one bool is the only user-state evidence available. In
+            // particular, legacy false stays an explicit off: changing an
+            // existing person's saved choice to the new default would be a
+            // silent migration of authored state.
+            draft.preferredAudio = enableAudio
+        } else {
+            draft.preferredAudio = hasAudioPreference == true ? preferredAudio : nil
+        }
         draft.videoOnly = videoOnly
         draft.strength = strength
         draft.title = title

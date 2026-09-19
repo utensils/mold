@@ -44,7 +44,7 @@ struct OutputGroup: View {
                 }
                 .labelsHidden()
                 if output?.audioRequiresMp4 == true {
-                    Text("Audio-enabled delivery requires MP4.")
+                    Text("Audio requires MP4. Choosing another format turns audio off.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -78,7 +78,7 @@ struct OutputGroup: View {
     private func formatBinding(fallback: String) -> Binding<String> {
         Binding(
             get: { draft.outputFormat ?? fallback },
-            set: { draft.outputFormat = $0 }
+            set: { draft = draft.selectingOutputFormat($0, output: output) }
         )
     }
 }

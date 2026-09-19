@@ -23,7 +23,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// Which of LTX-2's pipelines to run -- echoed from the recipe's own
     /// `request_selector.pipeline` string, never spelled `"auto"`.
     public var pipeline: String?
-    /// LTX-2's audio branch. Sent only as `true` -- see `RenderDraft.request`.
+    /// A controllable video's audio choice. Fixed-audio and unsupported
+    /// recipes omit it; ordinary capable recipes send either true or false.
     public var enableAudio: Bool?
     /// Skips the audio branch on a video render. Sent only as `true`, and
     /// only when `VideoOnlyPolicy` finds no conflict.

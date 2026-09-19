@@ -21,6 +21,7 @@ struct GeneratePane: View {
     /// media can be brought back. Not `private`: `startRun` is here, but the
     /// notice is drawn by the body below.
     @Environment(ReuseStore.self) var reuse
+    @Environment(DraftPersistence.self) var drafts
     /// Persisted, and deliberately not `private`: the toolbar button that
     /// flips it lives in an extension in another file. Its own key beside
     /// `libraryShowsInspector` -- ⌥⌘I is one shortcut whose STATE is per
@@ -30,7 +31,6 @@ struct GeneratePane: View {
     /// The draft this pane was holding when the app last quit (`+Models`
     /// asks it which model to adopt), and what each machine says it will
     /// chain (`+Chain`). Neither is `private`: both are read from extensions.
-    @State var drafts = DraftPersistence()
     @State var chainLimits = ChainLimitsStore()
 
     var body: some View {

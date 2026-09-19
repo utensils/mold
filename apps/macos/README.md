@@ -370,6 +370,18 @@ from a default (`routes_config.rs:48-53`).
 
 ## Running it
 
+Library pictures can be used as a source image or added as a reference from
+the tile menu, full-size viewer, or Library menu. These actions preserve the
+current prompt and model, fetch from the machine holding the picture, and appear only
+when the destination recipe accepts that kind of conditioning. They apply to
+one live still at a time. Leaving the Library or changing the draft while a
+picture downloads cancels the attachment.
+
+Audio starts on for video recipes that can deliver it. Optional-audio models
+remember an explicit off choice across model switches and relaunches; H3 always
+includes synchronized audio. A recipe without denoise-strength control sends
+its fixed strength without losing the slider value chosen for another model.
+
 From inside `nix develop`:
 
 ```bash

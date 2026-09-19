@@ -39,17 +39,7 @@ struct PersistedDraft: ViewModifier {
     /// prompt away -- so an already-edited draft wins, exactly as a live
     /// conditioning value beats a parked one.
     private func restore() {
-        guard let descriptor = drafts.restore() else { return }
-        guard controller.draft == RenderDraft() else { return }
-        var draft = controller.draft
-        descriptor.apply(to: &draft)
-        controller.draft = draft
-        // The model and machine are RECORDED, not selected here: the model
-        // list arrives asynchronously, and `GeneratePane+Models` adopts one
-        // through the ordinary path so the recipe reconciles the draft it
-        // just restored rather than a default one.
-        controller.modelFamily = descriptor.family ?? controller.modelFamily
-        controller.recipeID = descriptor.recipeID ?? controller.recipeID
+        drafts.restore(into: controller)
     }
 }
 

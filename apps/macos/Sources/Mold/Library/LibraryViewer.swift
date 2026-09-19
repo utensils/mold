@@ -12,6 +12,10 @@ struct LibraryViewer: View {
     let entry: LibraryEntry
     let host: MoldHost?
     let actions: LibraryActions
+    let scope: LibraryScope
+    let shelves: [CollectionShelf]
+    let enclosingShelf: CollectionShelf?
+    let trashCount: Int
     let onClose: () -> Void
     let onStep: (Int) -> Void
 
@@ -57,6 +61,9 @@ struct LibraryViewer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
         .overlay(alignment: .top) { bar }
+        .libraryMenu(LibraryMenu(targets: [entry], scope: scope, actions: actions,
+                                 shelves: shelves, enclosingShelf: enclosingShelf,
+                                 trashCount: trashCount, open: nil))
         .task(id: entry.id) { await load() }
         .onReceive(NotificationCenter.default.publisher(for: MeshMetalView.claimChanged)) { _ in
             readArrowClaim()

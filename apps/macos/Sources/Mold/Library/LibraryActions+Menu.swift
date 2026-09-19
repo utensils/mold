@@ -14,6 +14,14 @@ extension LibraryActions {
             open?()
         case .reuse:
             if let entry = targets.first { reuse?(entry) }
+        case .useAsSourceImage:
+            if let entry = targets.first, targets.count == 1, entry.isAttachableRaster {
+                useAsSource?(entry)
+            }
+        case .addAsReference:
+            if let entry = targets.first, targets.count == 1, entry.isAttachableRaster {
+                addAsReference?(entry)
+            }
         case .quickLook:
             quickLook(targets)
         case let .favorite(on):

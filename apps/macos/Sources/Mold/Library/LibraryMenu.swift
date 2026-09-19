@@ -45,11 +45,19 @@ struct LibraryMenu {
             exportFormats: targets.count == 1 ? actions.exportFormats(for: targets[0]) : [],
             meshExports: targets.count == 1 && targets[0].print.isMesh
                 ? actions.meshExports(for: targets[0]) : nil,
-            canReuse: actions.reuse != nil && open != nil,
+            canOpen: open != nil,
+            canReuse: actions.reuse != nil && !scope.isTrash,
+            canUseAsSource: canAttach(using: actions.useAsSource),
+            canAddReference: canAttach(using: actions.addAsReference),
             canUpscale: actions.canUpscale(targets),
             upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount
         )
+    }
+
+    private func canAttach(using action: ((LibraryEntry) -> Void)?) -> Bool {
+        guard action != nil, !scope.isTrash, targets.count == 1 else { return false }
+        return targets[0].isAttachableRaster
     }
 }
 

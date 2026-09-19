@@ -18,14 +18,34 @@ struct CreateStoresTests {
     /// would be nil and adoption would never reach `applying` at all -- this
     /// wraps a real recipe into a model the way the wire actually carries
     /// one, by re-encoding the recipe into the `generation_profile` block.
-    private func model(_ name: String, recipe: GenerationRecipe) -> Model {
+    private func model(
+        _ name: String, family: String = "flux", recipe: GenerationRecipe
+    ) -> Model {
         let recipeJSON = String(data: try! MoldJSON.encoder.encode(recipe), encoding: .utf8)!
         let json = """
-        {"name": "\(name)", "family": "flux", "description": "\(name) — fake", "size_gb": null,
+        {"name": "\(name)", "family": "\(family)", "description": "\(name) — fake", "size_gb": null,
          "generation_profile": {"schema_version": 1, "profile_id": "p", "profile_hash": "h",
            "default_recipe_id": "\(recipe.id)", "recipes": [\(recipeJSON)]}}
         """
         return try! MoldJSON.decoder.decode(Model.self, from: Data(json.utf8))
+    }
+
+    private func contractRecipe(strength: Bool, audio: Bool) -> GenerationRecipe {
+        let json = """
+        {"id":"default","label":"Default",
+         "defaults":{"width":768,"height":768,"steps":5,"guidance":0,"frames":124,"fps":24},
+         "resolution":{"domain":"dynamic","alignment":16,"min_width":256,"min_height":256},
+         "steps":{"default":5,"min":5,"max":5,"step":1,"mode":"fixed"},
+         "guidance":{"default":0,"min":0,"max":0,"step":0.1,"mode":"fixed"},
+         "temporal":{"frames":{"default":124,"min":107,"max":345,"step":17,
+                     "recommended":[124],"mode":"adjustable"},
+                     "frame_offset":5,"fps":{"mode":"fixed","value":24}},
+         "capabilities":{"supports_strength":\(strength),"supports_audio":\(audio),
+                         "source_image":"required",
+                         "output":{"default_format":"mp4","formats":["mp4"],
+                                   "audio_requires_mp4":true}}}
+        """
+        return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))
     }
 
     // MARK: - PromptHistoryStore
@@ -152,6 +172,89 @@ struct CreateStoresTests {
         controller.adopt(model: model("flux-dev:q8", recipe: recipe), on: workstation.id, keepingDraft: true)
 
         #expect(controller.draft.steps == 55)
+    }
+
+    @Test func aProfilelessModelClearsThePreviousRecipesWireCapabilities() {
+        let workstation = machine()
+        let hosts = HostStore(hosts: [workstation]) { _ in FakeBackend(host: workstation) }
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+
+        func seedStaleCapabilities() {
+            controller.draft.supportsAudio = true
+            controller.draft.requiresAudio = true
+            controller.draft.offersAudioControl = true
+            controller.draft.audioUnavailableForModel = true
+            controller.draft.usesOptionalAudioBranch = true
+            controller.draft.supportsStrength = false
+            controller.draft.videoOnly = true
+            controller.draft.pipeline = "t2a"
+        }
+        func expectCleared() {
+            #expect(!controller.draft.supportsAudio)
+            #expect(!controller.draft.requiresAudio)
+            #expect(!controller.draft.offersAudioControl)
+            #expect(!controller.draft.audioUnavailableForModel)
+            #expect(!controller.draft.usesOptionalAudioBranch)
+            #expect(controller.draft.supportsStrength == nil)
+            #expect(!controller.draft.videoOnly)
+            #expect(controller.draft.pipeline == nil)
+            let request = RenderRequest.one(controller.draft, model: "m")
+            #expect(request.enableAudio == nil)
+            #expect(request.videoOnly == nil)
+        }
+
+        let profileless = FakeFixtures.model("catalog:model", family: "ltx2")
+        seedStaleCapabilities()
+        controller.select(model: profileless, on: workstation.id)
+        expectCleared()
+
+        seedStaleCapabilities()
+        controller.adopt(model: profileless, on: workstation.id, keepingDraft: true)
+        expectCleared()
+    }
+
+    @Test func missingPrintModelReuseKeepsCurrentLTXAudioContract() throws {
+        let workstation = machine()
+        let hosts = HostStore(hosts: [workstation]) { _ in FakeBackend(host: workstation) }
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        let current = model(
+            "ltx-current", family: "ltx2", recipe: contractRecipe(strength: true, audio: true))
+        controller.select(model: current, on: workstation.id)
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data("""
+        {"prompt":"old clip","model":"removed-ltx","steps":5,"guidance":0,
+         "width":768,"height":768,"enable_audio":false}
+        """.utf8))
+
+        controller.draft = RenderDraft(reusing: metadata)
+        controller.reconcileReusedDraft(with: current)
+
+        #expect(controller.modelName == "ltx-current")
+        #expect(controller.draft.preferredAudio == false)
+        #expect(controller.draft.offersAudioControl)
+        #expect(RenderRequest.one(controller.draft, model: "ltx-current").enableAudio == false)
+    }
+
+    @Test func modelLessPrintReuseKeepsCurrentH3FixedStrengthContract() throws {
+        let workstation = machine()
+        let hosts = HostStore(hosts: [workstation]) { _ in FakeBackend(host: workstation) }
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        let current = model(
+            "minimax-h3-current", family: "minimax-h3",
+            recipe: contractRecipe(strength: false, audio: true))
+        controller.select(model: current, on: workstation.id)
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data("""
+        {"prompt":"old clip","steps":5,"guidance":0,"width":768,"height":768}
+        """.utf8))
+
+        controller.draft = RenderDraft(reusing: metadata)
+        controller.reconcileReusedDraft(with: current)
+
+        #expect(controller.modelName == "minimax-h3-current")
+        #expect(controller.draft.supportsStrength == false)
+        #expect(controller.draft.requiresAudio)
+        let request = RenderRequest.one(controller.draft, model: "minimax-h3-current")
+        #expect(request.strength == 1)
+        #expect(request.enableAudio == nil)
     }
 
     // MARK: - Saving and clearing

@@ -11,6 +11,7 @@ struct LibraryPane: View {
     @Environment(LibraryStore.self) var library
     @Environment(LibraryNavigation.self) var navigation
     @Environment(GenerateController.self) var generate
+    @Environment(DraftPersistence.self) var drafts
     @Environment(ModelStore.self) var models
     /// Which print the Generate pane's draft came from, and what its own
     /// machine still holds for it. Written by `reuse(_:)` in `+Wiring`.
@@ -28,6 +29,8 @@ struct LibraryPane: View {
 
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
+    /// Cancels an attachment whose selection moved while its bytes loaded.
+    @State var attachmentVersion = 0
     /// Backs Edit ▸ Find (design S6): `.searchFocused($isSearchFocused)`
     /// below, set from `body`'s own `findAction` focused value.
     /// Deliberately not `private`: what the menu is offered is assembled in an
@@ -55,6 +58,10 @@ struct LibraryPane: View {
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
+                       useAsSource: attachmentOffer.canUseAsSource
+                           ? { attach($0, as: .source) } : nil,
+                       addAsReference: attachmentOffer.canAddReference
+                           ? { attach($0, as: .reference) } : nil,
                        confirmDestruction: { pendingDestruction = $0 },
                        materializer: materializer, upscales: upscales,
                        collectionAction: { performCollection($0) },

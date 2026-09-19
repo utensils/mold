@@ -17,6 +17,7 @@ extension View {
             .environment(stores.materializer)
             .environment(stores.models)
             .environment(stores.generate)
+            .environment(stores.drafts)
             .environment(stores.queue)
             .environment(stores.transfers)
             .environment(stores.licenses)

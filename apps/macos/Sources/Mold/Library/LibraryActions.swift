@@ -12,6 +12,9 @@ struct LibraryActions {
     /// Set by the pane so a print can seed a new render. Absent in contexts
     /// that have no Generate pane to send it to.
     var reuse: ((LibraryEntry) -> Void)?
+    /// Attach one live raster print to the draft already open in Generate.
+    var useAsSource: ((LibraryEntry) -> Void)?
+    var addAsReference: ((LibraryEntry) -> Void)?
     /// Set by the pane, which owns the dialog. Destroying somebody's pictures
     /// must ask first, and there are three doors into it -- the Delete key,
     /// the context menu and the inspector -- so the question belongs here

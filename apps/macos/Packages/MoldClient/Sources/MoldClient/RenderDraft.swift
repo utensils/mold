@@ -40,11 +40,36 @@ public struct RenderDraft: Hashable, Sendable {
     /// means "let the server pick" and must never be spelled as the string
     /// `"auto"` (`RenderDraft+Recipe.swift`'s `adopting`).
     public var pipeline: String?
-    /// The opt-in for LTX-2's audio branch. Sent only when `true`
-    /// (`RenderDraft+Request.swift`) -- a `false` still reaches the wire as
-    /// absence, because an explicit `false` conflicts with an audio-only
-    /// pipeline (`validation.rs:3555`).
-    public var enableAudio: Bool = false
+    /// The person's audio choice, apart from whether the current recipe can
+    /// honour it. `nil` is untouched, whose default is sound ON for a capable
+    /// video recipe. Moving through a still or video-only recipe must not turn
+    /// an authored OFF into ON (or an authored ON into OFF), so availability
+    /// is kept separately below.
+    public var preferredAudio: Bool?
+    /// The recipe answer last reconciled by `adopting`. This is draft state so
+    /// every request path -- one render, a batch, placement and an auto-chain
+    /// -- reads the same effective capability without accepting a recipe as a
+    /// second argument.
+    public var supportsAudio: Bool = false
+    /// H3 and text-to-audio always render audio. Their fixed capability keeps
+    /// a parked preference but never turns the effective request off.
+    public var requiresAudio: Bool = false
+    /// Whether the current family exposes the two LTX audio choices in the
+    /// Clip group. A fixed-audio recipe can support sound without a switch.
+    public var offersAudioControl: Bool = false
+    /// The recipe supports sound but this checkpoint row explicitly reports
+    /// missing audio assets.
+    public var audioUnavailableForModel: Bool = false
+    /// LTX video resolves an omitted audio flag from the output format, so
+    /// even an unavailable checkpoint must send an explicit false.
+    public var usesOptionalAudioBranch: Bool = false
+    /// What the Sound switch shows. Writing it records a real preference;
+    /// recipe reconciliation changes only `supportsAudio` and therefore parks
+    /// that preference while sound is unavailable.
+    public var enableAudio: Bool {
+        get { supportsAudio && (requiresAudio || (preferredAudio ?? true)) }
+        set { preferredAudio = newValue }
+    }
     /// Skips the audio branch on a video render. Never sent while
     /// `VideoOnlyPolicy` finds a conflict -- see `RenderDraft.videoOnlyInputs`.
     public var videoOnly: Bool = false
@@ -53,6 +78,11 @@ public struct RenderDraft: Hashable, Sendable {
     /// Stays here rather than on `DraftMedia` -- it is a numeric control like
     /// `guidance`, not a conditioning input, even though it rides with one.
     public var strength: Double = 0.75
+    /// The recipe's advertised answer for denoise strength. `nil` means an
+    /// older host, where the pre-profile behaviour remains compatible; false
+    /// fixes the WIRE value to 1 without overwriting the authored slider value
+    /// parked in `strength`.
+    public var supportsStrength: Bool?
     /// What this render is conditioned on besides its prompt and numbers --
     /// the still, references, mask, identity, adapters, ControlNet,
     /// keyframes, extend continuation, audio file and source video, plus the

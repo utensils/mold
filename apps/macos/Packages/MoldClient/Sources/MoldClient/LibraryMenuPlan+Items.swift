@@ -19,12 +19,20 @@ public extension LibraryMenuPlan {
 
     private var printItems: [Item] {
         guard count > 0 else { return [] }
-        var items: [Item] = [
-            Item(kind: .open, title: "Open"),
-            Item(kind: .quickLook, title: quickLookTitle),
-        ]
+        var items: [Item] = []
+        if canOpen { items.append(Item(kind: .open, title: "Open")) }
+        items.append(Item(kind: .quickLook, title: quickLookTitle))
         if canReuse, count == 1 {
             items += [.separator, Item(kind: .reuse, title: Self.reuseTitle)]
+        }
+        if count == 1, canUseAsSource || canAddReference {
+            items.append(.separator)
+        }
+        if canUseAsSource, count == 1 {
+            items.append(Item(kind: .useAsSourceImage, title: "Use as Source Image"))
+        }
+        if canAddReference, count == 1 {
+            items.append(Item(kind: .addAsReference, title: "Add as Reference"))
         }
         // Beside Use These Settings, because both make a NEW print out of
         // this one. One print at a time: the clip half is a durable job per

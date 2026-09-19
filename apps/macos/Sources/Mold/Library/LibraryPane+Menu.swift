@@ -28,6 +28,10 @@ extension LibraryPane {
             trashCount: library.trashed.count,
             name: entries.count == 1 ? entries[0].print.displayName : nil,
             canReuse: entries.count == 1,
+            canUseAsSource: entries.count == 1 && attachmentOffer.canUseAsSource
+                && entries[0].isAttachableRaster,
+            canAddReference: entries.count == 1 && attachmentOffer.canAddReference
+                && entries[0].isAttachableRaster,
             canUpscale: actions.canUpscale(entries),
             upscalers: actions.upscalerOptions(for: entries),
             share: navigation.scope.isTrash ? [] : entries.map(actions.draggable),

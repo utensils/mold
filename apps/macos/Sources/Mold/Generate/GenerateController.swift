@@ -25,6 +25,9 @@ final class GenerateController {
     /// `modelName` rather than re-derived, because the controller does not
     /// otherwise hold the `Model` it was chosen from.
     var modelFamily: String?
+    /// Checkpoint-level audio asset veto retained across recipe switches on
+    /// the same model.
+    var modelSupportsAudio: Bool?
     /// Where the next render goes; `nil` is Auto. STORED, and mirrored to the
     /// suite on write -- see `MachineChoiceStore` for why a computed property
     /// reading `UserDefaults` was invisible to `@Observable`.
@@ -83,10 +86,12 @@ final class GenerateController {
     func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool) {
         modelName = model.name
         modelFamily = model.family
+        modelSupportsAudio = model.supportsAudio
         hostID = host
         recipeID = nil
         machineChoice = host
         guard let recipe = model.defaultRecipe else {
+            clearRecipeCapabilities()
             // No recipe to reconcile against, but the draft must not keep
             // describing the PREVIOUS model's layout -- the request builder
             // routes the wire off `sourceMode` (finding 08, low).
@@ -103,9 +108,11 @@ final class GenerateController {
         let isNewModel = model.name != modelName
         modelName = model.name
         modelFamily = model.family
+        modelSupportsAudio = model.supportsAudio
         hostID = host
         if isNewModel { recipeID = nil }
         guard let recipe = model.defaultRecipe else {
+            clearRecipeCapabilities()
             draft.media.sourceMode = .single
             return
         }
@@ -119,7 +126,21 @@ final class GenerateController {
     func selectRecipe(_ recipe: GenerationRecipe, in profile: GenerationProfileSet?) {
         recipeID = recipe.id
         draft = draft.adopting(recipe, isNewModel: false, family: modelFamily,
-                               model: modelName, profile: profile)
+                               model: modelName, profile: profile,
+                               modelSupportsAudio: modelSupportsAudio)
+    }
+
+    /// Keep authored preferences parked on a profile-less model, but clear
+    /// every effective capability consumed by the request builder.
+    private func clearRecipeCapabilities() {
+        draft.supportsAudio = false
+        draft.requiresAudio = false
+        draft.offersAudioControl = false
+        draft.audioUnavailableForModel = false
+        draft.usesOptionalAudioBranch = false
+        draft.supportsStrength = nil
+        draft.videoOnly = false
+        draft.pipeline = nil
     }
 
     /// Asks the host where this would run -- see `PlacementProbe`.

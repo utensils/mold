@@ -43,6 +43,11 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var fps: Int?
     public var pipeline: String?
     public var enableAudio: Bool
+    /// New descriptors carry the parked preference and whether it was ever
+    /// authored. Both are optional so v1 files written before the split still
+    /// decode; their `enableAudio` value is the conservative fallback.
+    public var preferredAudio: Bool?
+    public var hasAudioPreference: Bool?
     public var videoOnly: Bool
     public var strength: Double
     public var title: String
@@ -71,7 +76,8 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case version, model, family, recipeID, prompt, negativePrompt, width, height
         case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline
-        case enableAudio, videoOnly, strength, title, tags, collectionName, autoTagTitle
+        case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
+             collectionName, autoTagTitle
         case outputFormat, upscaleModel, savesToGallery, canvasIntent, sourceFit
         case scheduler, cfgPlus, sampleShift, distillStrengthHigh, distillStrengthLow
         case stgScale, stgBlocks, rescaleScale, modalityScale, skipStep

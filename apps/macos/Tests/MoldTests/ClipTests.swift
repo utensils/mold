@@ -45,16 +45,27 @@ struct ClipTests {
 
     @Test func generatingAudioPinsTheFormatWhereTheRecipeAsksForMp4() throws {
         let auto = try Self.recipe("recipe-ltx2.json", "auto")
-        let draft = RenderDraft().enablingAudio(true, capabilities: auto.capabilities)
+        let draft = RenderDraft().adopting(
+            auto, isNewModel: true, family: "ltx2")
+            .enablingAudio(true, capabilities: auto.capabilities)
         #expect(draft.enableAudio == true)
         #expect(draft.outputFormat == "mp4")
     }
 
-    @Test func doesNotWhereItDoesNot() throws {
+    @Test func unsupportedRecipeDoesNotEnableOrPinAudio() throws {
         let wan = try Self.recipe("recipe-wan.json")
         let draft = RenderDraft().enablingAudio(true, capabilities: wan.capabilities)
-        #expect(draft.enableAudio == true)
+        #expect(draft.enableAudio == false)
+        #expect(draft.preferredAudio == true)
         #expect(draft.outputFormat == nil)
+    }
+
+    @Test func fixedAudioRecipesDoNotOfferSoundSwitches() throws {
+        let audioOnly = try Self.recipe("recipe-ltx2.json", "t2a")
+        let draft = RenderDraft().adopting(
+            audioOnly, isNewModel: true, family: "ltx2")
+        #expect(draft.requiresAudio)
+        #expect(!draft.offersAudioControl)
     }
 
     // MARK: - Pipeline propagation

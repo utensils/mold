@@ -31,6 +31,8 @@ struct LibrarySelection: Equatable {
     let trashCount: Int
     let name: String?
     let canReuse: Bool
+    let canUseAsSource: Bool
+    let canAddReference: Bool
     /// Whether the machine holding the one selected print advertises
     /// upscaling it. The menu bar cannot see a capability block.
     let canUpscale: Bool
@@ -57,7 +59,9 @@ struct LibrarySelection: Equatable {
         LibraryMenuPlan(scope: scope.menuKind, count: count, allFavorite: allFavorite,
                         name: name, shelves: shelves, enclosingShelf: enclosingShelf,
                         exportFormats: exportFormats, meshExports: meshExports,
-                        canReuse: canReuse, canUpscale: canUpscale, upscalers: upscalers,
+                        canReuse: canReuse, canUseAsSource: canUseAsSource,
+                        canAddReference: canAddReference,
+                        canUpscale: canUpscale, upscalers: upscalers,
                         trashCount: trashCount)
     }
 
@@ -69,6 +73,8 @@ struct LibrarySelection: Equatable {
             && lhs.exportFormats == rhs.exportFormats
             && lhs.meshExports == rhs.meshExports && lhs.trashCount == rhs.trashCount
             && lhs.name == rhs.name && lhs.canReuse == rhs.canReuse
+            && lhs.canUseAsSource == rhs.canUseAsSource
+            && lhs.canAddReference == rhs.canAddReference
             && lhs.canUpscale == rhs.canUpscale && lhs.upscalers == rhs.upscalers
     }
 }

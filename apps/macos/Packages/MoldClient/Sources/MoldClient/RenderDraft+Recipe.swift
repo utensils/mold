@@ -8,7 +8,8 @@ public extension RenderDraft {
     /// model does not spell three out.
     func adopting(_ recipe: GenerationRecipe, isNewModel: Bool, for model: Model) -> RenderDraft {
         adopting(recipe, isNewModel: isNewModel, family: model.family,
-                 model: model.name, profile: model.generationProfile)
+                 model: model.name, profile: model.generationProfile,
+                 modelSupportsAudio: model.supportsAudio)
     }
 
     /// Adopts a recipe: takes its defaults for anything the previous model
@@ -35,7 +36,7 @@ public extension RenderDraft {
     public func adopting(
         _ recipe: GenerationRecipe, isNewModel: Bool,
         family: String? = nil, model: String? = nil,
-        profile: GenerationProfileSet? = nil
+        profile: GenerationProfileSet? = nil, modelSupportsAudio: Bool? = nil
     ) -> RenderDraft {
         var draft = self
         if isNewModel {
@@ -106,6 +107,7 @@ public extension RenderDraft {
 
         // Echoed straight through on every adopt. `nil` on `auto`.
         draft.pipeline = recipe.requestSelector?.pipeline
+        draft.supportsStrength = recipe.capabilities.supportsStrength
 
         // A format picked against a different recipe must not survive onto
         // one that cannot deliver it -- `t2a`'s `formats` is `["wav"]` alone,
@@ -115,12 +117,16 @@ public extension RenderDraft {
             draft.outputFormat = nil
         }
 
-        // `enable_audio`/`video_only` are LTX-2-only (`validation.rs:3255`,
-        // `:3258`); carried onto a family that cannot generate an audio
-        // branch, either would arm a mismatch 422.
-        if recipe.capabilities.supportsAudio != true {
-            draft.enableAudio = false
+        draft.reconcileAudio(
+            recipe: recipe, family: family, modelSupportsAudio: modelSupportsAudio)
+        if !draft.supportsAudio {
             draft.videoOnly = false
+        } else if let format = draft.outputFormat {
+            draft = draft.selectingOutputFormat(
+                format, output: recipe.capabilities.output)
+        } else if draft.enableAudio,
+                  recipe.capabilities.output?.audioRequiresMp4 == true {
+            draft.outputFormat = "mp4"
         }
         return draft
     }

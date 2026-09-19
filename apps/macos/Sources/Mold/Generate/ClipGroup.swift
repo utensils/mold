@@ -23,7 +23,7 @@ struct ClipGroup: View {
     }
 
     @ViewBuilder private var soundSection: some View {
-        if recipe?.capabilities.supportsAudio == true {
+        if draft.offersAudioControl {
             LabeledSection("Sound") {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle("Generate audio", isOn: audioBinding)
@@ -34,6 +34,18 @@ struct ClipGroup: View {
                     }
                     videoOnlyRow
                 }
+            }
+        } else if draft.requiresAudio {
+            LabeledSection("Sound") {
+                Text("Audio is always included.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else if draft.audioUnavailableForModel {
+            LabeledSection("Sound") {
+                Text("Audio is unavailable for this checkpoint.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

@@ -19,10 +19,13 @@ import Testing
     private func plan(scope: LibraryScopeKind = .prints, count: Int = 1,
                       allFavorite: Bool = false, shelves: [CollectionShelf] = [],
                       enclosing: CollectionShelf? = nil, formats: [String] = [],
-                      canReuse: Bool = true, trashCount: Int = 0) -> LibraryMenuPlan {
+                      canReuse: Bool = true, canSource: Bool = false,
+                      canReference: Bool = false, trashCount: Int = 0) -> LibraryMenuPlan {
         LibraryMenuPlan(scope: scope, count: count, allFavorite: allFavorite,
                         name: "robot.png", shelves: shelves, enclosingShelf: enclosing,
-                        exportFormats: formats, canReuse: canReuse, trashCount: trashCount)
+                        exportFormats: formats, canReuse: canReuse,
+                        canUseAsSource: canSource, canAddReference: canReference,
+                        trashCount: trashCount)
     }
 
     /// Every row that is not a divider, by the words on it -- which pins the
@@ -68,6 +71,18 @@ import Testing
         #expect(!kinds(offered).contains(.reuse))
         #expect(!titles(offered).contains("Export…"))
         #expect(kinds(offered).contains(.trash))
+    }
+
+    @Test func oneRasterOffersOnlyTheSupportedDestinationAttachments() {
+        let both = plan(canSource: true, canReference: true)
+        #expect(kinds(both).contains(.useAsSourceImage))
+        #expect(kinds(both).contains(.addAsReference))
+
+        let sourceOnly = plan(canSource: true)
+        #expect(kinds(sourceOnly).contains(.useAsSourceImage))
+        #expect(!kinds(sourceOnly).contains(.addAsReference))
+        #expect(!kinds(plan(count: 2, canSource: true, canReference: true))
+            .contains(.useAsSourceImage))
     }
 
     @Test func theTrashOffersItsOwnThings() {

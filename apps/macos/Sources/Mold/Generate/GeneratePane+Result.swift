@@ -12,17 +12,10 @@ extension GeneratePane {
             copy: { result in Task { await copyResult(result) } },
             showInLibrary: { destination = .library },
             useAsSource: canReuseAsSource ? { result in
-                Task { await attachResult(result) { picked, draft in
-                    draft.media.sourceImage = picked.encoded
-                    draft.media.sourceImageName = picked.name
-                    draft.media.lastExclusiveWrite = .source
-                } }
+                Task { await attachResult(result, as: .source) }
             } : nil,
             addAsReference: referenceRoom ? { result in
-                Task { await attachResult(result) { picked, draft in
-                    draft.media.editImages.append(picked.encoded)
-                    draft.media.lastExclusiveWrite = .references
-                } }
+                Task { await attachResult(result, as: .reference) }
             } : nil)
     }
 
@@ -82,11 +75,34 @@ extension GeneratePane {
 
     /// Bytes already on a machine, base64'd off the main actor exactly as an
     /// imported file is -- the draft holds what will be sent.
-    private func attachResult(
-        _ result: BatchResult, apply: (ImportedPicture, inout RenderDraft) -> Void
-    ) async {
+    private func attachResult(_ result: BatchResult, as kind: LibraryAttachmentKind) async {
+        let fence = DraftAttachmentFence(controller: controller, reuse: reuse)
         guard let data = await bytes(of: result), let filename = result.filename else { return }
-        let picked = await PictureImport.encoded(data, name: filename)
-        apply(picked, &controller.draft)
+        guard fence.permits(controller, reuse: reuse), let recipe else { return }
+        let picked: ImportedPicture
+        do {
+            picked = try await PictureImport.conforming(
+                data, name: filename, accepting: PictureImport.engineReadable)
+        } catch {
+            guard fence.permits(controller, reuse: reuse),
+                  let host = finishedHost else { return }
+            hosts.report(error, on: host.id, doing: "use that picture")
+            return
+        }
+        guard fence.permits(controller, reuse: reuse) else { return }
+        var draft = controller.draft
+        switch kind {
+        case .source:
+            guard canReuseAsSource else { return }
+            DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: recipe)
+        case .reference:
+            let layout = ImageConditioningWells.layout(
+                recipe: recipe, model: selectedModel, media: draft.media)
+            guard let capability = layout.references,
+                  capability.hasRoom(for: draft.media.editImages.count) else { return }
+            DraftPictureAttachment.addReference(picked, to: &draft, capability: capability)
+        }
+        controller.draft = draft
+        reuse.clear()
     }
 }

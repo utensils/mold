@@ -34,9 +34,20 @@ public enum RenderRequest {
         request.frames = draft.frames
         request.fps = draft.fps
         request.pipeline = draft.pipeline
-        request.enableAudio = draft.enableAudio ? true : nil
-        request.videoOnly = VideoOnlyPolicy.requestValue(
-            enabled: draft.videoOnly, draft.videoOnlyInputs)
+        // A controllable video recipe receives BOTH choices explicitly:
+        // omission resolves to audio-on at the server, so an authored OFF
+        // must travel as false. Fixed-audio H3 and t2a recipes omit the flag;
+        // an LTX checkpoint missing audio assets must send false, while
+        // unrelated families omit the flag.
+        if draft.requiresAudio {
+            request.enableAudio = nil
+        } else if draft.usesOptionalAudioBranch || draft.supportsAudio {
+            request.enableAudio = draft.enableAudio
+        }
+        if draft.supportsAudio && !draft.requiresAudio {
+            request.videoOnly = VideoOnlyPolicy.requestValue(
+                enabled: draft.videoOnly, draft.videoOnlyInputs)
+        }
         // WHICH well ships is `requestConditioning`'s decision, never
         // "references if there are any": an EXCLUSIVE recipe keeps both wells
         // and one render carries a source image OR references, so a builder
@@ -52,7 +63,16 @@ public enum RenderRequest {
         request.referenceWeight = carries.carriesReferences ? draft.media.referenceWeight : nil
         // Strength means nothing with nothing to apply it to, and a mask with
         // no source is refused outright (`validation.rs:3101-3107`).
-        request.strength = carriesSource ? draft.strength : nil
+        // MiniMax H3 validates its fixed value even for Ref2VA, where the
+        // request carries references and no source image. More generally an
+        // advertised false means there is no authored denoise control: put
+        // the protocol's neutral/fixed value on the wire. Older hosts (`nil`)
+        // retain the pre-profile source-only behaviour.
+        request.strength = switch draft.supportsStrength {
+        case false: 1
+        case true: draft.strength
+        case nil: carriesSource ? draft.strength : nil
+        }
         request.maskImage = carriesSource ? draft.media.maskImage : nil
         request.loras = draft.media.loras.isEmpty ? nil : draft.media.loras
         applyIdentity(draft, to: &request, maxPhotos: maxIdentityPhotos)

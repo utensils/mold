@@ -58,7 +58,70 @@
     ],
     "description": "CLI-native local AI image and video generation for people, scripts, and agents. Note: this project has over 100 source files; consider scoping analysis to a subdirectory for faster results.",
     "analyzedAt": "2026-08-28T16:27:44.501Z",
-    "gitCommitHash": "3db4501d931196954bb80290797c4cc6c004bc5b"
+    "gitCommitHash": "3db4501d931196954bb80290797c4cc6c004bc5b",
+    "scopedUpdates": [
+      {
+        "id": "macos-generation-library-parity",
+        "updatedAt": "2026-09-19T02:44:28.646Z",
+        "baseCommit": "b44e756393870d52b4d8e29a2488f7a5b8af1c13",
+        "scope": "Native macOS fixed strength/audio formats, app-scoped draft restoration, exact model adoption, and transactional Library source/reference routing",
+        "files": [
+          "CHANGELOG.md",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Reuse.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/DraftPersistenceTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelMeshFamilyTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/RenderDraftReuseTests.swift",
+          "apps/macos/README.md",
+          "apps/macos/Sources/Mold/AppStores+Environment.swift",
+          "apps/macos/Sources/Mold/AppStores.swift",
+          "apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+          "apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+          "apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+          "apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+          "apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+          "apps/macos/Sources/Mold/Generate/GenerateController.swift",
+          "apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+          "apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+          "apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+          "apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+          "apps/macos/Sources/Mold/Generate/PictureImport.swift",
+          "apps/macos/Sources/Mold/Generate/ReferenceStrip+Import.swift",
+          "apps/macos/Sources/Mold/Generate/SourceImageWell+Import.swift",
+          "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+          "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+          "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+          "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+          "apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+          "apps/macos/Sources/Mold/Library/ReuseStore.swift",
+          "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+          "apps/macos/Tests/MoldTests/ClipTests.swift",
+          "apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+          "apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+          "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+          "apps/macos/docs/parity-2026-09-18/verification.md",
+          "docs/plans/macos-generation-library-parity.md"
+        ],
+        "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original global scan values."
+      }
+    ]
   },
   "nodes": [
     {
@@ -290584,6 +290647,1814 @@
         "function"
       ],
       "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+      "type": "file",
+      "name": "DraftDescriptor+Draft.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+      "summary": "Converts between live generation drafts and persisted descriptors without resurrecting media bytes.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+      "type": "file",
+      "name": "DraftDescriptor.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+      "summary": "Defines persisted non-media draft state, including backward-compatible audio preference fields.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+      "type": "file",
+      "name": "GenerateRequest.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+      "summary": "Defines the Codable request sent from the native client to generation admission.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "type": "file",
+      "name": "LibraryMenuPlan+Items.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "summary": "Builds the ordered Library menu, including source-image and reference attachment actions.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "type": "file",
+      "name": "LibraryMenuPlan.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "summary": "Defines the shared Library action vocabulary and capability inputs used by context and menu-bar surfaces.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "type": "file",
+      "name": "Recipe.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "summary": "Defines advertised generation recipes and their capabilities, including audio, source image, output, and strength controls.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "type": "file",
+      "name": "RenderDraft+Audio.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "summary": "Reconciles family, recipe, checkpoint, and output-container audio policy while preserving a parked preference when the checkpoint cannot currently generate audio.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+      "type": "file",
+      "name": "RenderDraft+Recipe.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+      "summary": "Reconciles a draft against the selected recipe, including strength, checkpoint audio policy, valid formats, and optional-audio container compatibility.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Reuse.swift",
+      "type": "file",
+      "name": "RenderDraft+Reuse.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Reuse.swift",
+      "summary": "Restores a generation draft from print provenance while distinguishing absent audio provenance from an explicit opt-out.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+      "type": "file",
+      "name": "RenderDraft.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+      "summary": "Defines authored generation state with separate user audio preference, recipe support, fixed-audio policy, checkpoint availability, and strength capability.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "type": "file",
+      "name": "RenderRequest.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "summary": "Builds all native generation request paths, suppressing fixed-audio switches, explicitly disabling unavailable LTX audio, and preserving fixed or authored strength through later media hydration.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "file",
+      "name": "GenerationContractParityTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "summary": "Covers fixed strength, H3/LTX/checkpoint audio policy, active and unavailable output-format transitions, model decoding, persistence, reuse, batch, and placement parity.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "type": "file",
+      "name": "LibraryMenuPlanTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "summary": "Covers shared Library menu action ordering and attachment eligibility.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/RenderDraftReuseTests.swift",
+      "type": "file",
+      "name": "RenderDraftReuseTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/RenderDraftReuseTests.swift",
+      "summary": "Covers reuse restoration when audio provenance is absent or records an explicit disabled choice.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "type": "file",
+      "name": "DraftPictureAttachment.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "summary": "Centralizes mutations that attach a conformed picture to a generation draft as its source or a reference.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "type": "file",
+      "name": "GenerateController.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "summary": "Owns the generation target, retains checkpoint audio policy across recipe switches, and clears request capabilities for profileless models.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+      "type": "file",
+      "name": "GeneratePane+Result.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+      "summary": "Routes generated result images through shared source and reference attachment helpers, rejecting stale completions and reporting conformance errors only while the draft fence and result host remain current.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+      "type": "file",
+      "name": "ImageConditioningWells.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+      "summary": "Resolves which source and reference wells the selected recipe exposes and whether reference capacity remains.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/PictureImport.swift",
+      "type": "file",
+      "name": "PictureImport.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/PictureImport.swift",
+      "summary": "Conforms authenticated image bytes into the engine-readable picture representation used by generation drafts.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/ReferenceStrip+Import.swift",
+      "type": "file",
+      "name": "ReferenceStrip+Import.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/ReferenceStrip+Import.swift",
+      "summary": "Routes reference imports through the shared draft picture attachment policy.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/SourceImageWell+Import.swift",
+      "type": "file",
+      "name": "SourceImageWell+Import.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/SourceImageWell+Import.swift",
+      "summary": "Routes source-image imports through the shared draft picture attachment policy.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "type": "file",
+      "name": "LibraryActions+Menu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "summary": "Routes shared Library action values to their concrete operations.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "type": "file",
+      "name": "LibraryActions.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "summary": "Provides the shared operations and callbacks used by every native Library action surface.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "type": "file",
+      "name": "LibraryAttachment+Run.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "summary": "Loads destination models, chooses exact restored-model versus ordinary default adoption, recomputes recipe context after adoption, and revalidates attachment state around conversion.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "type": "file",
+      "name": "LibraryAttachment.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "summary": "Defines exact restored-model adoption policy, attachment eligibility, asynchronous transaction guards, live-raster validation, and complete draft fencing.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "type": "file",
+      "name": "LibraryMenu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "summary": "Builds one print context menu from the shared plan and gates attachment actions to live single raster selections.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "type": "file",
+      "name": "LibraryPane+Chrome.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "summary": "Passes the current Library scope and menu context into the full-size viewer.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "type": "file",
+      "name": "LibraryPane+Menu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "summary": "Publishes the same attachment eligibility to the macOS menu-bar selection model.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "type": "file",
+      "name": "LibraryPane.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "summary": "Consumes the shared draft store and routes eligible Library images into the current generation draft without bypassing restoration.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+      "type": "file",
+      "name": "LibraryViewer.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+      "summary": "Displays a full-size print and attaches the shared Library context menu to the viewer.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/ReuseStore.swift",
+      "type": "file",
+      "name": "ReuseStore.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/ReuseStore.swift",
+      "summary": "Tracks authority for asynchronous generation reuse and invalidates stale retained-media work.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "type": "file",
+      "name": "LibrarySelection.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "summary": "Carries Library menu capability state through focused values into application commands.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/ClipTests.swift",
+      "type": "file",
+      "name": "ClipTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/ClipTests.swift",
+      "summary": "Covers native clip controls after audio availability and user preference were separated.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "file",
+      "name": "LibraryAttachmentTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "summary": "Covers exact restored-model adoption, attachment transactions, draft fences, Library-first restore, live-raster eligibility, action routing, and picture mutation.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "type": "file",
+      "name": "LibrarySelectionTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "summary": "Covers focused Library selection equality and menu routing capability state.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:apps/macos/docs/parity-2026-09-18/verification.md",
+      "type": "document",
+      "name": "verification.md",
+      "filePath": "apps/macos/docs/parity-2026-09-18/verification.md",
+      "summary": "Records native macOS parity verification evidence for generation and Library behavior.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "document:docs/plans/macos-generation-library-parity.md",
+      "type": "document",
+      "name": "macos-generation-library-parity.md",
+      "filePath": "docs/plans/macos-generation-library-parity.md",
+      "summary": "Records the confirmed native macOS generation and Library parity failures, implementation plan, and acceptance evidence.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift:RenderDraft",
+      "type": "class",
+      "name": "RenderDraft",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+      "lineRange": [
+        8,
+        109
+      ],
+      "summary": "Holds authored generation state while recipe capability values determine what may reach a request.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift:adopting",
+      "type": "function",
+      "name": "adopting",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+      "lineRange": [
+        9,
+        12
+      ],
+      "summary": "Reconciles draft values with recipe capabilities and the selected checkpoint's retained audio veto.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:enablingAudio",
+      "type": "function",
+      "name": "enablingAudio",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "lineRange": [
+        10,
+        18
+      ],
+      "summary": "Records an explicit audio preference and pins MP4 when the recipe requires it.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:RenderRequest",
+      "type": "class",
+      "name": "RenderRequest",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "lineRange": [
+        13,
+        120
+      ],
+      "summary": "Translates one reconciled draft into all native generation request paths.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:one",
+      "type": "function",
+      "name": "one",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "lineRange": [
+        25,
+        95
+      ],
+      "summary": "Builds the canonical request with fixed strength for unsupported controls, authored strength for capable recipes even before retained source hydration, and explicit optional LTX audio choices including asset vetoes.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift:GenerateRequest",
+      "type": "class",
+      "name": "GenerateRequest",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+      "lineRange": [
+        9,
+        139
+      ],
+      "summary": "Represents the native client's generation wire contract.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift:DraftDescriptor",
+      "type": "class",
+      "name": "DraftDescriptor",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+      "lineRange": [
+        18,
+        85
+      ],
+      "summary": "Persists byte-free generation choices across app launches.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift:apply",
+      "type": "function",
+      "name": "apply",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+      "lineRange": [
+        58,
+        99
+      ],
+      "summary": "Restores persisted choices into a live draft while preserving staged media.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:RecipeCapabilities",
+      "type": "class",
+      "name": "RecipeCapabilities",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "lineRange": [
+        43,
+        77
+      ],
+      "summary": "Describes request features advertised by one generation recipe.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:GenerationRecipe",
+      "type": "class",
+      "name": "GenerationRecipe",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "lineRange": [
+        81,
+        93
+      ],
+      "summary": "Combines generation defaults, controls, temporal limits, and capabilities.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryAction",
+      "type": "class",
+      "name": "LibraryAction",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "lineRange": [
+        20,
+        47
+      ],
+      "summary": "Names every action shared by native Library menus.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryMenuPlan",
+      "type": "class",
+      "name": "LibraryMenuPlan",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "lineRange": [
+        50,
+        101
+      ],
+      "summary": "Carries selection and capability facts needed to build the shared Library menu.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift:items",
+      "type": "function",
+      "name": "items",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "lineRange": [
+        13,
+        15
+      ],
+      "summary": "Builds the ordered menu actions for prints, trash, and collections.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:DraftPictureAttachment",
+      "type": "class",
+      "name": "DraftPictureAttachment",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "lineRange": [
+        4,
+        28
+      ],
+      "summary": "Owns the single draft mutation policy for source and reference pictures.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:useAsSource",
+      "type": "function",
+      "name": "useAsSource",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "lineRange": [
+        5,
+        18
+      ],
+      "summary": "Attaches a conformed image as the source, updates source geometry, and resolves exclusive-well precedence.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:addReference",
+      "type": "function",
+      "name": "addReference",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "lineRange": [
+        20,
+        27
+      ],
+      "summary": "Appends a conformed reference only while the advertised recipe has capacity.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift:ImageConditioningWells",
+      "type": "class",
+      "name": "ImageConditioningWells",
+      "filePath": "apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+      "lineRange": [
+        13,
+        58
+      ],
+      "summary": "Resolves the recipe-specific source and reference authoring layout.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/PictureImport.swift:ImportedPicture",
+      "type": "class",
+      "name": "ImportedPicture",
+      "filePath": "apps/macos/Sources/Mold/Generate/PictureImport.swift",
+      "lineRange": [
+        9,
+        13
+      ],
+      "summary": "Carries conformed image bytes, name, and encoded form into a draft.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/GenerateController.swift:GenerateController",
+      "type": "class",
+      "name": "GenerateController",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "lineRange": [
+        8,
+        129
+      ],
+      "summary": "Owns the active generation draft and selected model, recipe, and host.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:LibraryAttachmentOffer",
+      "type": "class",
+      "name": "LibraryAttachmentOffer",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        5,
+        8
+      ],
+      "summary": "Reports whether the current generation recipe can accept a Library print as source or reference.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:DraftAttachmentFence",
+      "type": "class",
+      "name": "DraftAttachmentFence",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        11,
+        31
+      ],
+      "summary": "Captures draft, model, recipe, host, machine choice, and reuse authority for stale-result rejection.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:draftFencePermits",
+      "type": "function",
+      "name": "draftFencePermits",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        67,
+        69
+      ],
+      "summary": "Accepts media completion only while the generation draft, model, recipe, host selection, and reuse authority match the captured fence.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attach",
+      "type": "function",
+      "name": "attach",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "lineRange": [
+        16,
+        24
+      ],
+      "summary": "Starts authenticated loading while capturing Library destination, scope, selection, viewer, and complete draft authority.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "type": "function",
+      "name": "finishAttachment",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "lineRange": [
+        26,
+        58
+      ],
+      "summary": "After conversion, adopts the exact restored model with authored values or an ordinary fallback with defaults, recomputes context, then attaches against the adopted recipe.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryActions.swift:LibraryActions",
+      "type": "class",
+      "name": "LibraryActions",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "lineRange": [
+        9,
+        125
+      ],
+      "summary": "Collects operations shared by grid, viewer, inspector, and menu-bar Library surfaces.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryActions.swift:data",
+      "type": "function",
+      "name": "data",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "lineRange": [
+        111,
+        124
+      ],
+      "summary": "Fetches bounded authenticated media bytes from the print's holding host.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift:perform",
+      "type": "function",
+      "name": "perform",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "lineRange": [
+        10,
+        53
+      ],
+      "summary": "Routes one shared Library action to its concrete callback or operation.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
+      "type": "class",
+      "name": "LibraryMenu",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "lineRange": [
+        13,
+        62
+      ],
+      "summary": "Builds a print context menu from shared action planning and live raster eligibility.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:canAttach",
+      "type": "function",
+      "name": "canAttach",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "lineRange": [
+        58,
+        61
+      ],
+      "summary": "Restricts attachment actions to one live non-video, non-mesh print with a destination callback.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "type": "class",
+      "name": "LibraryPane",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "lineRange": [
+        9,
+        98
+      ],
+      "summary": "Coordinates native Library state, action routing, viewer presentation, and generation handoff.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuSelection",
+      "type": "function",
+      "name": "menuSelection",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "lineRange": [
+        13,
+        43
+      ],
+      "summary": "Builds the focused menu-bar selection from the same attachment capability facts as context menus.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryViewer.swift:LibraryViewer",
+      "type": "class",
+      "name": "LibraryViewer",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+      "lineRange": [
+        11,
+        138
+      ],
+      "summary": "Displays one print while exposing the shared Library context menu.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Shell/LibrarySelection.swift:LibrarySelection",
+      "type": "class",
+      "name": "LibrarySelection",
+      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "lineRange": [
+        13,
+        80
+      ],
+      "summary": "Carries focused Library action capability into macOS commands.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/ReuseStore.swift:ReuseStore",
+      "type": "class",
+      "name": "ReuseStore",
+      "filePath": "apps/macos/Sources/Mold/Library/ReuseStore.swift",
+      "lineRange": [
+        20,
+        141
+      ],
+      "summary": "Tracks asynchronous print-reuse authority and retained-media placement.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+      "type": "file",
+      "name": "Model.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+      "summary": "Defines a native model row, including the checkpoint-level audio asset veto that can narrow recipe support.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+      "type": "file",
+      "name": "ClipGroup.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+      "summary": "Renders optional LTX audio controls, fixed-audio status, or checkpoint-unavailable status from reconciled draft state.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
+      "type": "file",
+      "name": "ModelTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
+      "summary": "Covers decoding and behavior of native model rows after the checkpoint audio capability was added.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelMeshFamilyTests.swift",
+      "type": "file",
+      "name": "ModelMeshFamilyTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelMeshFamilyTests.swift",
+      "summary": "Keeps direct native Model construction and mesh-family behavior compatible with the checkpoint audio capability.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:apps/macos/README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "apps/macos/README.md",
+      "summary": "Documents the native macOS generation and Library behavior affected by this parity repair.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift:Model",
+      "type": "class",
+      "name": "Model",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+      "lineRange": [
+        8,
+        47
+      ],
+      "summary": "Represents an installed or available checkpoint and its optional audio asset capability veto.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:reconcileAudio",
+      "type": "function",
+      "name": "reconcileAudio",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "lineRange": [
+        21,
+        34
+      ],
+      "summary": "Combines recipe support, family policy, pipeline policy, and the model checkpoint veto into effective audio state.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/ClipGroup.swift:ClipGroup",
+      "type": "class",
+      "name": "ClipGroup",
+      "filePath": "apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+      "lineRange": [
+        11,
+        69
+      ],
+      "summary": "Shows editable LTX sound controls, fixed-audio status, or checkpoint-unavailable status from reconciled draft state.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/GenerateController.swift:selectRecipe",
+      "type": "function",
+      "name": "selectRecipe",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "lineRange": [
+        124,
+        129
+      ],
+      "summary": "Reconciles a recipe while retaining the selected model's checkpoint-level audio veto.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:prepareAttachmentModels",
+      "type": "function",
+      "name": "prepareAttachmentModels",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "lineRange": [
+        25,
+        30
+      ],
+      "summary": "Loads destination-host models so cold-launch Library actions can derive attachment capability.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/AppStores.swift",
+      "type": "file",
+      "name": "AppStores.swift",
+      "filePath": "apps/macos/Sources/Mold/AppStores.swift",
+      "summary": "Creates one window-scoped DraftPersistence store and restores the generation draft before any destination mounts.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/AppStores+Environment.swift",
+      "type": "file",
+      "name": "AppStores+Environment.swift",
+      "filePath": "apps/macos/Sources/Mold/AppStores+Environment.swift",
+      "summary": "Injects the shared DraftPersistence instance into native app content alongside the other window-scoped stores.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+      "type": "file",
+      "name": "DraftPersistence.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+      "summary": "Owns one-shot draft restoration, restored-model handoff, debounced writes, and synchronous termination flushes.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+      "type": "file",
+      "name": "DraftPersistence+Controller.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+      "summary": "Restores a persisted descriptor into an untouched GenerateController before Library-first attachment can adopt a model.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+      "type": "file",
+      "name": "DraftPersistence+Pane.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+      "summary": "Schedules and flushes the shared app-scoped draft store while delegating idempotent restoration to its controller seam.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+      "type": "file",
+      "name": "GeneratePane.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+      "summary": "Consumes the app-scoped DraftPersistence instance while rendering and persisting the active generation draft.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "type": "file",
+      "name": "OutputGroup.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "summary": "Routes explicit output-format choices through audio/container reconciliation before updating the generation draft.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "implementation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/DraftPersistenceTests.swift",
+      "type": "file",
+      "name": "DraftPersistenceTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/DraftPersistenceTests.swift",
+      "summary": "Covers byte-free draft persistence, field round trips, corrupt/version handling, exact coding keys, and legacy audio preference migration.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+      "type": "file",
+      "name": "CreateStoresTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+      "summary": "Covers generation store adoption and defaults, profileless capability clearing, and missing or model-less print reuse reconciled to the current LTX or H3 recipe contract.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/AppStores.swift:AppStores",
+      "type": "class",
+      "name": "AppStores",
+      "filePath": "apps/macos/Sources/Mold/AppStores.swift",
+      "lineRange": [
+        21,
+        85
+      ],
+      "summary": "Owns the native window's shared stores and performs draft restoration before any destination mounts.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/AppStores+Environment.swift:moldEnvironment",
+      "type": "function",
+      "name": "moldEnvironment",
+      "filePath": "apps/macos/Sources/Mold/AppStores+Environment.swift",
+      "lineRange": [
+        11,
+        38
+      ],
+      "summary": "Injects app-scoped stores, including DraftPersistence, into native content views.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "class",
+      "name": "DraftPersistence",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+      "lineRange": [
+        12,
+        66
+      ],
+      "summary": "Coordinates one-shot restore, restored-model adoption, debounced persistence, and immediate flush.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift:restore",
+      "type": "function",
+      "name": "restore",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+      "lineRange": [
+        5,
+        12
+      ],
+      "summary": "Restores persisted non-media state into an untouched controller before Generate or Library can mutate it.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift:PersistedDraft",
+      "type": "class",
+      "name": "PersistedDraft",
+      "filePath": "apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+      "lineRange": [
+        7,
+        44
+      ],
+      "summary": "Observes the active draft and schedules or flushes persistence through the app-scoped store.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/GeneratePane.swift:GeneratePane",
+      "type": "class",
+      "name": "GeneratePane",
+      "filePath": "apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+      "lineRange": [
+        9,
+        140
+      ],
+      "summary": "Authors generation state using the controller and app-scoped persistence environment.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Generate/OutputGroup.swift:OutputGroup",
+      "type": "class",
+      "name": "OutputGroup",
+      "filePath": "apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "lineRange": [
+        6,
+        84
+      ],
+      "summary": "Presents output format and gallery controls while enforcing audio container compatibility.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/OutputGroup.swift:formatBinding",
+      "type": "function",
+      "name": "formatBinding",
+      "filePath": "apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "lineRange": [
+        78,
+        83
+      ],
+      "summary": "Turns a format picker change into a draft operation that disables optional audio when MP4 is no longer selected.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:selectingOutputFormat",
+      "type": "function",
+      "name": "selectingOutputFormat",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "lineRange": [
+        21,
+        32
+      ],
+      "summary": "Records an authored format and disables audio only when an active optional branch requires MP4, preserving preference while audio is checkpoint-unavailable.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/GenerateController.swift:clearRecipeCapabilities",
+      "type": "function",
+      "name": "clearRecipeCapabilities",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "lineRange": [
+        135,
+        144
+      ],
+      "summary": "Clears every effective request capability when a selected model has no generation recipe while preserving authored preferences.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:LibraryAttachmentTransaction",
+      "type": "class",
+      "name": "LibraryAttachmentTransaction",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        17,
+        35
+      ],
+      "summary": "Captures the Library UI transaction whose destination, scope, selection, viewer, and version must survive an asynchronous media read.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:transactionPermits",
+      "type": "function",
+      "name": "transactionPermits",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        24,
+        34
+      ],
+      "summary": "Validates asynchronous completion against current UI, draft, live-raster, and source-host state.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attachmentIsCurrent",
+      "type": "function",
+      "name": "attachmentIsCurrent",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "lineRange": [
+        83,
+        94
+      ],
+      "summary": "Resolves the live print and source host, then delegates all asynchronous completion guards to LibraryAttachmentTransaction.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:AttachmentModelAdoption",
+      "type": "class",
+      "name": "AttachmentModelAdoption",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        6,
+        12
+      ],
+      "summary": "Defines whether first Library adoption may preserve a restored draft: only an exact restored-model match keeps authored values.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:keepsDraft",
+      "type": "function",
+      "name": "keepsDraft",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "lineRange": [
+        9,
+        11
+      ],
+      "summary": "Keeps restored draft values only when the model being adopted exactly matches the model named by persistence.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "type": "file",
+      "name": "GenerateController+Reuse.swift",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "summary": "Reconciles print-restored controls against the currently selected model and recipe when a reused print cannot adopt its recorded model.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "type": "file",
+      "name": "LibraryPane+Reuse.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "summary": "Seeds Generate from a Library print, adopting the print model when available and otherwise reconciling the restored draft to the current selected model before retained-media probing.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Wiring.swift",
+      "type": "file",
+      "name": "LibraryPane+Wiring.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Wiring.swift",
+      "summary": "Provides Library pane subtitle, host, query, viewer, selection, and collection-action wiring after print reuse moved to its dedicated extension.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "document:changelog.d/macos-generation-library-parity.md",
+      "type": "document",
+      "name": "macos-generation-library-parity.md",
+      "filePath": "changelog.d/macos-generation-library-parity.md",
+      "summary": "Release-note fragment for native macOS fixed strength and audio capability parity plus guarded Library source and reference attachment actions.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "release-notes"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+      "type": "function",
+      "name": "reconcileReusedDraft",
+      "filePath": "apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "lineRange": [
+        7,
+        14
+      ],
+      "summary": "Resolves the current recipe and reapplies its strength, audio, format, and media capabilities to a draft restored from a print whose own model is unavailable.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+      "type": "function",
+      "name": "reuse",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "lineRange": [
+        10,
+        62
+      ],
+      "summary": "Restores print provenance, adopts an available print model or reconciles to the current model, then starts authoritative retained-media recovery.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel",
+      "type": "function",
+      "name": "selectedGenerateModel",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "lineRange": [
+        66,
+        71
+      ],
+      "summary": "Resolves the active Generate model using the explicit machine, adoption host, or preferred host in the same order as GeneratePane.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+      "type": "function",
+      "name": "attachResult",
+      "filePath": "apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+      "lineRange": [
+        78,
+        107
+      ],
+      "summary": "Conforms a generated picture and attaches it through shared draft helpers only while the captured draft fence remains valid; conformance errors also require the original result host to remain available.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity"
+      ],
+      "complexity": "complex"
     }
   ],
   "edges": [
@@ -515603,6 +517474,867 @@
       "type": "contains",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift:RenderDraft",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift:adopting",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:enablingAudio",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:RenderRequest",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:one",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift:GenerateRequest",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift:DraftDescriptor",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift:apply",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:RecipeCapabilities",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:GenerationRecipe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryAction",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryMenuPlan",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift:items",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:DraftPictureAttachment",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:useAsSource",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:addReference",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift:ImageConditioningWells",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/PictureImport.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/PictureImport.swift:ImportedPicture",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/GenerateController.swift:GenerateController",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:LibraryAttachmentOffer",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:DraftAttachmentFence",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:draftFencePermits",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attach",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryActions.swift:LibraryActions",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryActions.swift:data",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift:perform",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:canAttach",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuSelection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryViewer.swift:LibraryViewer",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "target": "class:apps/macos/Sources/Mold/Shell/LibrarySelection.swift:LibrarySelection",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/ReuseStore.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/ReuseStore.swift:ReuseStore",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:RenderRequest",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift:RenderDraft",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift:one",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift:GenerateRequest",
+      "type": "transforms",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift:adopting",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:GenerationRecipe",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:enablingAudio",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift:RecipeCapabilities",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attach",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryActions.swift:data",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:DraftPictureAttachment",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryMenuPlan",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift:perform",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryAction",
+      "type": "routes",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryViewer.swift:LibraryViewer",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:DraftAttachmentFence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "target": "class:apps/macos/Sources/Mold/Generate/GenerateController.swift:GenerateController",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:LibraryAttachmentOffer",
+      "target": "class:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift:ImageConditioningWells",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:DraftPictureAttachment",
+      "target": "class:apps/macos/Sources/Mold/Generate/PictureImport.swift:ImportedPicture",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "document:docs/plans/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/plans/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:docs/plans/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift:Model",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:reconcileAudio",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/ClipGroup.swift:ClipGroup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/GenerateController.swift:selectRecipe",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:prepareAttachmentModels",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Generate/GenerateController.swift:GenerateController",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift:Model",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GenerateController.swift:selectRecipe",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:reconcileAudio",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Generate/ClipGroup.swift:ClipGroup",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift:RenderDraft",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:DraftAttachmentFence",
+      "type": "validates",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Reuse.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "target": "file:apps/macos/Tests/MoldTests/ClipTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+      "target": "file:apps/macos/Tests/MoldTests/ClipTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/AppStores.swift",
+      "target": "class:apps/macos/Sources/Mold/AppStores.swift:AppStores",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/AppStores+Environment.swift",
+      "target": "function:apps/macos/Sources/Mold/AppStores+Environment.swift:moldEnvironment",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift:restore",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift:PersistedDraft",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/GeneratePane.swift:GeneratePane",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "target": "class:apps/macos/Sources/Mold/Generate/OutputGroup.swift:OutputGroup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/OutputGroup.swift:formatBinding",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:selectingOutputFormat",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/GenerateController.swift:clearRecipeCapabilities",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:LibraryAttachmentTransaction",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:transactionPermits",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attachmentIsCurrent",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/AppStores.swift:AppStores",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/AppStores+Environment.swift:moldEnvironment",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift:restore",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift:apply",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift:PersistedDraft",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Generate/GeneratePane.swift:GeneratePane",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/OutputGroup.swift:formatBinding",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift:selectingOutputFormat",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:attachmentIsCurrent",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:transactionPermits",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "target": "class:apps/macos/Sources/Mold/Generate/DraftPersistence.swift:DraftPersistence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "target": "file:apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/DraftPersistenceTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:AttachmentModelAdoption",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:keepsDraft",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift:finishAttachment",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:keepsDraft",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+      "target": "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift:Model",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift:adopting",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+      "target": "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+      "target": "class:apps/macos/Sources/Mold/Library/ReuseStore.swift:ReuseStore",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryAttachment.swift:DraftAttachmentFence",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+      "target": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:useAsSource",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+      "target": "function:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:addReference",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "target": "file:apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:changelog.d/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:changelog.d/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:changelog.d/macos-generation-library-parity.md",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
     }
   ],
   "layers": [
@@ -516783,7 +519515,62 @@
         "file:desktop/src/vite-env.d.ts",
         "file:desktop/vite.config.ts",
         "file:desktop/vite.mobile.config.ts",
-        "file:desktop/vitest.config.ts"
+        "file:desktop/vitest.config.ts",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Reuse.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/RenderDraftReuseTests.swift",
+        "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
+        "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+        "file:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift",
+        "file:apps/macos/Sources/Mold/Generate/ImageConditioningWells.swift",
+        "file:apps/macos/Sources/Mold/Generate/PictureImport.swift",
+        "file:apps/macos/Sources/Mold/Generate/ReferenceStrip+Import.swift",
+        "file:apps/macos/Sources/Mold/Generate/SourceImageWell+Import.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryViewer.swift",
+        "file:apps/macos/Sources/Mold/Library/ReuseStore.swift",
+        "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+        "file:apps/macos/Tests/MoldTests/ClipTests.swift",
+        "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
+        "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
+        "file:apps/macos/Sources/Mold/Generate/ClipGroup.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelMeshFamilyTests.swift",
+        "file:apps/macos/Sources/Mold/AppStores.swift",
+        "file:apps/macos/Sources/Mold/AppStores+Environment.swift",
+        "file:apps/macos/Sources/Mold/Generate/DraftPersistence.swift",
+        "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Controller.swift",
+        "file:apps/macos/Sources/Mold/Generate/DraftPersistence+Pane.swift",
+        "file:apps/macos/Sources/Mold/Generate/GeneratePane.swift",
+        "file:apps/macos/Sources/Mold/Generate/OutputGroup.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/DraftPersistenceTests.swift",
+        "file:apps/macos/Tests/MoldTests/CreateStoresTests.swift",
+        "file:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Wiring.swift",
+        "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
+        "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
+        "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
+        "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel"
       ]
     },
     {
@@ -517974,7 +520761,11 @@
         "document:website/models/wan.md",
         "document:website/models/wuerstchen.md",
         "document:website/models/z-image.md",
-        "document:website/privacy.md"
+        "document:website/privacy.md",
+        "document:apps/macos/docs/parity-2026-09-18/verification.md",
+        "document:docs/plans/macos-generation-library-parity.md",
+        "document:apps/macos/README.md",
+        "document:changelog.d/macos-generation-library-parity.md"
       ]
     }
   ],

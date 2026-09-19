@@ -141,4 +141,20 @@ struct DraftPersistenceTests {
         #expect(written.contains("recipe_id") == false)
         #expect(written.contains("negative_prompt") == false)
     }
+
+    @Test func legacyFalseAudioRemainsAnExplicitSavedPreference() throws {
+        let descriptor = DraftDescriptor(RenderDraft(), model: "m", family: "ltx2",
+                                         recipeID: "auto")
+        var object = try #require(JSONSerialization.jsonObject(
+            with: MoldJSON.localEncoder.encode(descriptor)) as? [String: Any])
+        object.removeValue(forKey: "preferredAudio")
+        object.removeValue(forKey: "hasAudioPreference")
+        object["enableAudio"] = false
+        let legacy = try MoldJSON.localDecoder.decode(
+            DraftDescriptor.self, from: JSONSerialization.data(withJSONObject: object))
+
+        var restored = RenderDraft()
+        legacy.apply(to: &restored)
+        #expect(restored.preferredAudio == false)
+    }
 }

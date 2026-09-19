@@ -15,6 +15,9 @@ extension LibraryPane {
             // the events are deltas and a client that has read nothing has
             // nothing to apply them to.
             .task { await actions.reload() }
+            // Library can be the launch destination. Read models here too so
+            // attachment actions do not depend on Generate having appeared.
+            .task(id: attachmentModelKey) { await prepareAttachmentModels() }
             // The clip upscales already running on each machine. One listing
             // per machine, so a job survives a restart and a second Mac.
             .task { await upscales.recover() }
@@ -57,6 +60,8 @@ extension LibraryPane {
     @ViewBuilder func content(_ showing: LibraryShowing) -> some View {
         if let viewing, let entry = entry(viewing, in: showing.visible) {
             LibraryViewer(entry: entry, host: host(of: entry), actions: actions,
+                          scope: navigation.scope, shelves: library.shelves,
+                          enclosingShelf: enclosingShelf, trashCount: library.trashed.count,
                           onClose: { close(viewing) },
                           onStep: { step($0, in: showing.visible) })
         } else if showing.visible.isEmpty {

@@ -20,6 +20,8 @@ import Foundation
 public enum LibraryAction: Hashable, Sendable {
     case open
     case reuse
+    case useAsSourceImage
+    case addAsReference
     case quickLook
     case favorite(Bool)
     case file(slug: String)
@@ -58,7 +60,10 @@ public struct LibraryMenuPlan: Sendable {
     /// geometry files are one entry each and the animated ones collapse into
     /// a single Turntable… that opens the sheet.
     public let meshExports: MeshExport.Split?
+    public let canOpen: Bool
     public let canReuse: Bool
+    public let canUseAsSource: Bool
+    public let canAddReference: Bool
     /// Whether the machine holding this print advertises upscaling it -- a
     /// clip needs `video_upscale`, a still `gallery_image` as well. Absence
     /// is a definitive no, and the item is then ABSENT rather than inert.
@@ -73,7 +78,9 @@ public struct LibraryMenuPlan: Sendable {
                 name: String? = nil, shelves: [CollectionShelf] = [],
                 enclosingShelf: CollectionShelf? = nil, exportFormats: [String] = [],
                 meshExports: MeshExport.Split? = nil,
-                canReuse: Bool = false, canUpscale: Bool = false,
+                canOpen: Bool = true, canReuse: Bool = false,
+                canUseAsSource: Bool = false,
+                canAddReference: Bool = false, canUpscale: Bool = false,
                 upscalers: [UpscalerOption] = [], trashCount: Int = 0) {
         self.meshExports = meshExports
         self.scope = scope
@@ -83,7 +90,10 @@ public struct LibraryMenuPlan: Sendable {
         self.shelves = shelves
         self.enclosingShelf = enclosingShelf
         self.exportFormats = exportFormats
+        self.canOpen = canOpen
         self.canReuse = canReuse
+        self.canUseAsSource = canUseAsSource
+        self.canAddReference = canAddReference
         self.canUpscale = canUpscale
         self.upscalers = upscalers
         self.trashCount = trashCount

@@ -21,6 +21,10 @@ public struct Model: Codable, Hashable, Sendable, Identifiable {
     /// different state from "not installed", and says so in the UI.
     public let remainingDownloadBytes: Int?
     public let generationProfile: GenerationProfileSet?
+    /// A checkpoint-level veto for audio generation. `false` means this row
+    /// lacks the audio assets even when its family recipe supports sound;
+    /// absent on older hosts and models that inherit the recipe answer.
+    public let supportsAudio: Bool?
     /// Bytes this model occupies on the machine, present only when
     /// `downloaded` (`catalog.rs:220-225`). NEVER SUM THIS COLUMN: a shared
     /// VAE or encoder is counted once per model that references it -- the

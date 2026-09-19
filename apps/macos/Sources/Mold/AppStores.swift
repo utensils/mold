@@ -27,6 +27,7 @@ final class AppStores {
     let materializer = PrintMaterializer()
     let models: ModelStore
     let generate: GenerateController
+    let drafts: DraftPersistence
     let queue: QueueStore
     let transfers: TransferStore
     let licenses: LicenseStore
@@ -63,6 +64,10 @@ final class AppStores {
         modelDefaults = ConfigStore(hosts: hosts)
         promptHistory = PromptHistoryStore(hosts: hosts)
         generate = GenerateController(hosts: hosts, defaults: modelDefaults)
+        drafts = DraftPersistence()
+        // Before any destination mounts: Library may attach a print first,
+        // and that must extend the saved draft rather than replace it.
+        drafts.restore(into: generate)
         machines = MachineStore(hosts: hosts)
         pairing = PairingStore(hosts: hosts)
         adapters = LoraStore(hosts: hosts)

@@ -100,7 +100,9 @@ import Testing
         let clip = try draft("mold-ltx-2.5-22b-distilled-q8-1789532686738.mp4")
         #expect(clip.frames != nil)
         #expect(clip.fps != nil)
-        #expect(clip.enableAudio)
+        // Reuse has not adopted its recipe yet, so the recorded choice is
+        // parked; capability reconciliation makes it effective afterwards.
+        #expect(clip.preferredAudio == true)
         #expect(clip.strength == 0.75)
         #expect(clip.media.sourceFit == .cropFill(alignX: nil, alignY: nil))
         // A print that recorded the alignment too keeps it.

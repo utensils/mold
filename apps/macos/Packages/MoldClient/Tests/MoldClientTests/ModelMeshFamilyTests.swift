@@ -6,7 +6,7 @@ import Testing
 private func model(family: String) -> Model {
     Model(name: "x", family: family, description: "d", sizeGb: nil, isLoaded: nil,
           downloaded: nil, hfRepo: nil, displayName: nil,
-          remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil,
+          remainingDownloadBytes: nil, generationProfile: nil, supportsAudio: nil, diskUsageBytes: nil,
           kind: nil, modality: nil, nsfw: nil, runtimeAvailable: nil,
           runtimeUnavailableReason: nil)
 }

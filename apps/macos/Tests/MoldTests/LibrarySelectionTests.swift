@@ -20,7 +20,9 @@ struct LibrarySelectionTests {
         LibrarySelection(
             count: count, allFavorite: false, scope: .all, shelves: [],
             enclosingShelf: nil, isEditingText: editing, exportFormats: [],
-            meshExports: nil, trashCount: 0, name: nil, canReuse: count == 1, canUpscale: false, upscalers: [], share: [],
+            meshExports: nil, trashCount: 0, name: nil, canReuse: count == 1,
+            canUseAsSource: false, canAddReference: false,
+            canUpscale: false, upscalers: [], share: [],
             perform: { performed.actions.append($0) })
     }
 

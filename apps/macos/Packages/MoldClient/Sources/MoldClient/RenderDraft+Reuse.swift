@@ -101,7 +101,11 @@ public extension RenderDraft {
     private mutating func restoreOutput(from metadata: OutputMetadata) {
         frames = metadata.frames
         fps = metadata.fps.map { Int($0.rounded()) }
-        enableAudio = metadata.enableAudio ?? false
+        // Absence is an untouched choice. Once the recipe is adopted that
+        // means its capability-owned default (ON for sound-capable video),
+        // while a recorded false remains an explicit opt-out.
+        preferredAudio = metadata.enableAudio
+            ?? (metadata.videoOnly == true ? false : nil)
         videoOnly = metadata.videoOnly ?? false
         // `pipeline` records what RAN; only `pipeline_requested` says the
         // author named it. Restoring the former on a print that named nothing

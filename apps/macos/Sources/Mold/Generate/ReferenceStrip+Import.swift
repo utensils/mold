@@ -9,10 +9,7 @@ import SwiftUI
 // picture.
 extension ReferenceStrip {
     func append(_ picked: ImportedPicture) {
-        guard capability.hasRoom(for: draft.media.editImages.count) else { return }
-        draft.media.editImages.append(picked.encoded)
-        // Last write wins on an EXCLUSIVE recipe (`ExclusiveWells`).
-        draft.media.lastExclusiveWrite = .references
+        DraftPictureAttachment.addReference(picked, to: &draft, capability: capability)
     }
 
     /// Replace swaps ONE slot in place, so the strip's order -- and Qwen's
