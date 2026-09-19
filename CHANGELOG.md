@@ -11,6 +11,24 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-19
+
+- **Honor native macOS generation capabilities and image actions.** Submit fixed
+  strength for recipes without a denoise-strength control, including MiniMax H3,
+  and enable audio by default on capable video recipes while preserving explicit
+  choices. Use Library pictures as source images or references from the grid,
+  full-size viewer, and Library menu, with authenticated loading and protection
+  against attaching a late download to a different draft.
+- **Mold for macOS installs as `Mold Studio.app` and carries its icon.** The native app used to install as `Mold.app`, on top of the Tauri desktop app of the same name; it is now `Mold Studio.app` (executable and bundle id unchanged). The first nightly shipped with a generic app icon and a generic disk-image icon because the icon set's images were gitignored; they are tracked now, a release refuses to sign a bundle with no icon, and the mounted DMG shows the app's icon.
+- **Mold for macOS, a native app.** A Swift app under `apps/macos` for
+  Macs on macOS 26: every machine's Library, Queue, Models and Machines in
+  one window, a Generate pane whose controls come from the chosen model's
+  own generation profile, a native Metal viewer for 3-D prints, Reuse with
+  retained source media, upscaling, Sparkle updates on the same stable and
+  nightly channels as the desktop app, and an embedded engine on This Mac
+  behind a minted API key. Ships as `Mold-native-<version>.dmg` beside the
+  Tauri DMG ([#1728](https://github.com/utensils/mold/pull/1728)).
+
 ## [0.30.1] - 2026-09-18
 
 - **Build Nix release dependencies with valid Cargo sources.** Keep static crate
@@ -5877,7 +5895,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.30.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/utensils/mold/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0

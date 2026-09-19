@@ -1,6 +1,6 @@
 [package]
 name = "mold-mobile"
-version = "0.30.1"
+version = "0.31.0"
 edition = "2024"
 license = "MIT"
 description = "Mold mobile companion for remote generation and gallery access"
