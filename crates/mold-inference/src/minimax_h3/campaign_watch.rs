@@ -217,6 +217,7 @@ pub struct ParsedArgs {
     pub log_path: PathBuf,
     pub lock_path: PathBuf,
     pub ceiling_mib: u64,
+    pub budget_only: bool,
     pub limits: WatchdogLimits,
     pub child: Vec<String>,
 }
@@ -227,6 +228,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs> {
     let mut log_path = None;
     let mut lock_path = PathBuf::from("/tmp/mold-metal-qualification.lock");
     let mut ceiling_mib = None;
+    let mut budget_only = false;
     let mut available_floor_gib = 12_u64;
     let mut max_swap_growth_mib = 256_u64;
     let mut deadline_secs = None;
@@ -248,6 +250,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs> {
         };
         if arg == "--" {
             in_child = true;
+        } else if arg == "--budget-only" {
+            budget_only = true;
         } else if let Some(value) = arg.strip_prefix("--case-id=") {
             case_id = Some(value.to_string());
         } else if arg == "--case-id" {
@@ -321,6 +325,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs> {
         log_path: log_path.ok_or_else(|| anyhow!("campaign watchdog requires --log"))?,
         lock_path,
         ceiling_mib,
+        budget_only,
         limits: WatchdogLimits {
             available_floor_bytes: available_floor_gib << 30,
             maximum_swap_growth_bytes: max_swap_growth_mib << 20,
@@ -355,10 +360,13 @@ pub fn run(parsed: ParsedArgs) -> Result<i32> {
         .env(
             "MOLD_H3_METAL_CAMPAIGN_CEILING_MB",
             parsed.ceiling_mib.to_string(),
-        )
-        .env_remove("MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY")
-        .process_group(0);
-    let mut child = child_command.spawn().with_context(|| {
+        );
+    if parsed.budget_only {
+        child_command.env("MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY", "1");
+    } else {
+        child_command.env_remove("MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY");
+    }
+    let mut child = child_command.process_group(0).spawn().with_context(|| {
         format!(
             "campaign watchdog could not spawn {}",
             parsed.child.join(" ")
@@ -554,6 +562,7 @@ mod tests {
             log_path: dir.join("watch.jsonl"),
             lock_path: dir.join("lock"),
             ceiling_mib: 8192,
+            budget_only: false,
             limits: WatchdogLimits {
                 available_floor_bytes: gib(12),
                 maximum_swap_growth_bytes: 256 << 20,
@@ -589,6 +598,7 @@ mod tests {
             log_path: dir.join("watch.jsonl"),
             lock_path: dir.join("lock"),
             ceiling_mib: 8192,
+            budget_only: false,
             limits: limits(600),
             child: vec!["true".into()],
         };
@@ -620,12 +630,14 @@ mod tests {
             "8192".to_string(),
             "--deadline-secs".to_string(),
             "600".to_string(),
+            "--budget-only".to_string(),
             "--".to_string(),
             "true".to_string(),
         ]
         .to_vec();
         let parsed = parse_args(&full).expect("complete arguments parse");
         assert_eq!(parsed.case_id, "a");
+        assert!(parsed.budget_only);
         assert_eq!(parsed.limits.available_floor_bytes, gib(12));
         assert_eq!(parsed.limits.maximum_swap_growth_bytes, 256 << 20);
         assert_eq!(parsed.child, ["true"]);
