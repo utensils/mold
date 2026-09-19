@@ -34,25 +34,34 @@ struct RunQueueTests {
         let first = FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-1", [.init(1, state: "running")])
         let second = FakeFixtures.batchStatus(id: "batch-2", clientBatchId: "client-2", [.init(1, state: "running")])
         backend.submitAnswers = [first, second]
-        // Stays unsettled once `follow()`'s one-shot fallback read lands.
-        backend.batchStatusAnswers["batch-1"] = first
+        // Backend tasks may enter in either order, so either answer can
+        // belong to the first click. Keep both streams genuinely running.
+        backend.batchEventsHeldOpen.formUnion(["batch-1", "batch-2"])
+        defer { controller.stopAll() }
 
         controller.submit(on: workstation, backend: backend)
         // `run = .submitting` is set synchronously, before either `Task`
         // has run -- so this holds true no matter how the two `Task`s
         // launched below later interleave.
         #expect(controller.run.isBusy)
+        controller.draft.prompt = "a dog"
         controller.submit(on: workstation, backend: backend)
 
-        // Settled on the STATE the assertions read, not on a call count: the
-        // fake records `submit` before the controller has adopted its answer,
-        // so the count is satisfied while `activeBatch` is still nil.
-        await settle { controller.activeBatch?.id == "batch-1" && controller.queuedCount == 1 }
+        // Wait for adopted state: recording a POST precedes adopting its answer.
+        await settle { controller.activeBatch != nil && controller.queuedCount == 1 }
 
         #expect(backend.calls.filter { $0 == "submit" }.count == 2)
         #expect(controller.run.isBusy)
-        #expect(controller.activeBatch?.id == "batch-1")
+        let firstAdmission = backend.submittedAdmissions.first { $0.requests.first?.prompt == "a cat" }
+        let secondAdmission = backend.submittedAdmissions.first { $0.requests.first?.prompt == "a dog" }
+        #expect(firstAdmission != nil && secondAdmission != nil)
+        #expect(controller.activeBatch?.clientBatchId == firstAdmission?.clientBatchId)
         #expect(controller.queuedCount == 1)
+        if case let .batch(queued) = controller.queued.first {
+            #expect(queued.clientBatchId == secondAdmission?.clientBatchId)
+        } else {
+            Issue.record("expected the second click to be queued")
+        }
     }
 
     // MARK: - Advancing the queue

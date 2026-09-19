@@ -6,7 +6,7 @@
   "scopedUpdates": [
     {
       "id": "macos-generation-library-parity",
-      "updatedAt": "2026-09-19T02:54:16.081Z",
+      "updatedAt": "2026-09-19T03:03:49.479Z",
       "baseCommit": "b44e756393870d52b4d8e29a2488f7a5b8af1c13",
       "scope": "Native macOS fixed strength/audio formats, app-scoped draft restoration, current-model reuse reconciliation, exact model adoption, and transactional Library source/reference routing",
       "files": [
@@ -62,13 +62,14 @@
         "apps/macos/Tests/MoldTests/CreateStoresTests.swift",
         "apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
         "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+        "apps/macos/Tests/MoldTests/RunQueueTests.swift",
         "apps/macos/docs/parity-2026-09-18/verification.md",
         "changelog.d/macos-generation-library-parity.md",
         "docs/plans/macos-generation-library-parity.md"
       ],
       "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original global scan values.",
-      "addedNodes": 113,
-      "addedEdges": 123
+      "addedNodes": 116,
+      "addedEdges": 126
     }
   ]
 }

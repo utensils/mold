@@ -292455,6 +292455,58 @@
         "scoped-refresh:macos-generation-library-parity"
       ],
       "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "type": "file",
+      "name": "RunQueueTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "summary": "Covers native Generate FIFO admission and cancellation, including concurrent first and second submissions identified by their request clientBatchId rather than nondeterministic backend answer order.",
+      "tags": [
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Tests/MoldTests/RunQueueTests.swift:RunQueueTests",
+      "type": "class",
+      "name": "RunQueueTests",
+      "filePath": "apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "lineRange": [
+        14,
+        149
+      ],
+      "summary": "Pins durable FIFO queue behavior when multiple Generate submissions race, settle, stop, or fail admission.",
+      "tags": [
+        "type-definition",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/RunQueueTests.swift:aSecondGenerateWhileOneRunsIsAdmittedAndQueued",
+      "type": "function",
+      "name": "aSecondGenerateWhileOneRunsIsAdmittedAndQueued",
+      "filePath": "apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "lineRange": [
+        30,
+        65
+      ],
+      "summary": "Holds both backend streams open and maps each click through its admission clientBatchId, proving the first click stays active and the second queues regardless of backend task ordering.",
+      "tags": [
+        "function",
+        "swift",
+        "native-macos",
+        "scoped-refresh:macos-generation-library-parity",
+        "test"
+      ],
+      "complexity": "moderate"
     }
   ],
   "edges": [
@@ -518335,6 +518387,27 @@
       "type": "documents",
       "direction": "forward",
       "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "target": "class:apps/macos/Tests/MoldTests/RunQueueTests.swift:RunQueueTests",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "target": "function:apps/macos/Tests/MoldTests/RunQueueTests.swift:aSecondGenerateWhileOneRunsIsAdmittedAndQueued",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
+      "target": "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
     }
   ],
   "layers": [
@@ -519570,7 +519643,10 @@
         "function:apps/macos/Sources/Mold/Generate/GenerateController+Reuse.swift:reconcileReusedDraft",
         "function:apps/macos/Sources/Mold/Generate/GeneratePane+Result.swift:attachResult",
         "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:reuse",
-        "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel"
+        "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel",
+        "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
+        "class:apps/macos/Tests/MoldTests/RunQueueTests.swift:RunQueueTests",
+        "function:apps/macos/Tests/MoldTests/RunQueueTests.swift:aSecondGenerateWhileOneRunsIsAdmittedAndQueued"
       ]
     },
     {

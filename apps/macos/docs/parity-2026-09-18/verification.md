@@ -74,6 +74,16 @@ remained visible/off and the captured request explicitly sent enable_audio false
 Final Claude Code (Sonnet, medium) review: **No actionable findings.** All valid
 findings from earlier passes were fixed before opening the pull request.
 
+## CI follow-up
+
+The first GitHub native run exposed a pre-existing queue-test ordering assumption:
+two synchronous clicks can enter the asynchronous fake backend in either order.
+The test incorrectly assumed batch-1 always belonged to the first click and left
+the other stream unconfigured. The failure reproduced locally before the fix.
+The test now keeps both streams open and verifies first-click/second-click order
+using each admission's client ID. All four queue tests passed ten repetitions
+(40 runs), retaining the synchronous double-submit coverage.
+
 ## Limits
 
 The original failing request was independently reproduced against Plato's
