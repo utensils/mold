@@ -319,7 +319,10 @@ fn emit(core: &Arc<CampaignCaptureCore>, mut row: H3MetalCampaignRow) {
         return;
     }
     if let Err(error) = sample_row_into(&mut row) {
-        row.error = Some(error.to_string());
+        row.error = Some(match row.error.take() {
+            Some(existing) => format!("{existing}; {error}"),
+            None => error.to_string(),
+        });
     }
     match native_allocated_bytes() {
         Ok(native) => {
@@ -376,22 +379,22 @@ fn process_peak_resident() -> Result<u64> {
     super::private_runtime_observer::process_peak_resident_bytes()
 }
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(target_os = "linux")]
 fn process_resident() -> Result<u64> {
     super::private_runtime_observer::process_resident_bytes()
 }
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(target_os = "linux")]
 fn process_peak_resident() -> Result<u64> {
     super::private_runtime_observer::process_peak_resident_bytes()
 }
 
-#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "cuda"))))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_resident() -> Result<u64> {
     bail!("campaign capture process-resident sampling requires macOS")
 }
 
-#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "cuda"))))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_peak_resident() -> Result<u64> {
     bail!("campaign capture process peak-resident sampling requires macOS")
 }

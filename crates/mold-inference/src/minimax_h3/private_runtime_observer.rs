@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-#[cfg(all(feature = "cuda", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 use std::fs::File;
@@ -506,7 +506,7 @@ fn phase_transient_bytes(state: &ObservationState, phase: H3PipelinePhase) -> Re
         .ok_or_else(|| anyhow!("private H3 phase {phase:?} has no attributed workspace peak"))
 }
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn process_resident_bytes() -> Result<u64> {
     let statm = fs::read_to_string("/proc/self/statm")
         .context("private H3 runtime capture requires Linux process memory evidence")?;
@@ -526,7 +526,7 @@ pub(crate) fn process_resident_bytes() -> Result<u64> {
         .ok_or_else(|| anyhow!("private H3 resident bytes overflow or are zero"))
 }
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn process_peak_resident_bytes() -> Result<u64> {
     let status = fs::read_to_string("/proc/self/status")
         .context("private H3 runtime capture requires Linux peak-memory evidence")?;
