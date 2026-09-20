@@ -49,10 +49,10 @@ Apple M5 Max (40 GPU cores, 128 GiB unified memory), official checkpoint,
 F32 Metal. Both prompt lengths produced bit-identical predictions at all four
 tested steps (maximum absolute and relative RMS error both zero).
 
-| Prefix | Uncached reuse steps | Cached reuse steps | Result |
-| --- | ---: | ---: | --- |
-| 29 tokens | 26.4185 s | 26.8411 s | No measured gain; this exploratory run overlapped a tiny Metal test and compilation, so it is not a clean performance comparison. |
-| 271 tokens | 25.8385 s | 24.2836 s | 1.064x throughput, 6.0% less time, across three paired steps. No concurrent GPU test. |
+| Prefix     | Uncached reuse steps | Cached reuse steps | Result                                                                                                                            |
+| ---------- | -------------------: | -----------------: | --------------------------------------------------------------------------------------------------------------------------------- |
+| 29 tokens  |            26.4185 s |          26.8411 s | No measured gain; this exploratory run overlapped a tiny Metal test and compilation, so it is not a clean performance comparison. |
+| 271 tokens |            25.8385 s |          24.2836 s | 1.064x throughput, 6.0% less time, across three paired steps. No concurrent GPU test.                                             |
 
 For the 271-token case, uncached/cached times were respectively
 8.4033/7.9158, 8.6647/8.0866 and 8.7706/8.2812 seconds. The initial prefill
