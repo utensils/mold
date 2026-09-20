@@ -81,6 +81,7 @@ function componentToAdvancedField(
       case "z-image":
       case "qwen-image":
       case "qwen_image":
+      case "qwen-image21":
         return "qwen";
       default:
         return "t5";

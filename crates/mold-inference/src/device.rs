@@ -813,7 +813,7 @@ pub enum ActivationFamily {
     Sd3Mmdit,
     /// SDXL UNet (CFG-batched + cross-attn KV cache).
     SdxlUnet,
-    /// Qwen-Image / Qwen-Image-Edit dit.
+    /// Qwen Image family DiT, including Qwen Image 2.1.
     QwenImageDit,
     /// Z-Image dit.
     ZImageDit,
@@ -2312,7 +2312,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "sd3" => ActivationFamily::Sd3Mmdit,
         "sdxl" | "sd15" | "hunyuan3d-delight" => ActivationFamily::SdxlUnet,
         "hunyuan3d-matting" => ActivationFamily::SmallTransformer,
-        "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
+        "qwen-image" | "qwen-image-edit" | "qwen-image21" => ActivationFamily::QwenImageDit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
         "hunyuan3d" | "hunyuan-3d" => ActivationFamily::Hunyuan3dShape,
@@ -5518,6 +5518,10 @@ mod tests {
         assert_eq!(activation_family_for("sdxl"), ActivationFamily::SdxlUnet);
         assert_eq!(
             activation_family_for("qwen-image"),
+            ActivationFamily::QwenImageDit
+        );
+        assert_eq!(
+            activation_family_for("qwen-image21"),
             ActivationFamily::QwenImageDit
         );
         assert_eq!(

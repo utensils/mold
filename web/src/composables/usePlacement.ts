@@ -15,6 +15,7 @@ const TIER2_FAMILIES: ReadonlyArray<string> = [
   "z-image",
   "qwen-image",
   "qwen_image",
+  "qwen-image21",
 ];
 
 export interface UsePlacement {

@@ -9,6 +9,7 @@ use crate::flux2::Flux2Engine;
 use crate::ltx2::Ltx2Engine;
 use crate::ltx_video::LtxVideoEngine;
 use crate::qwen_image::QwenImageEngine;
+use crate::qwen_image21::QwenImage21Engine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
@@ -850,6 +851,18 @@ where
             frozen.qwen2_variant.clone(),
             frozen.qwen2_text_encoder_mode.clone(),
         ))),
+        "qwen-image21" => {
+            anyhow::ensure!(
+                !offload,
+                "Qwen Image 2.1 does not support transformer block offload; use sequential loading instead"
+            );
+            Ok(boxed_inference_engine(QwenImage21Engine::new(
+                model_name,
+                paths,
+                load_strategy,
+                gpu_ordinal,
+            )))
+        }
         "ltx-video" | "ltx_video" => {
             if is_single_file(&paths) {
                 // Civitai single-file dispatch. `paths.vae` is
@@ -998,7 +1011,7 @@ where
             shared_pool,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, hunyuan3d, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wan, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, hunyuan3d, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, qwen-image21, wan, wuerstchen",
             other,
             model_name
         ),
@@ -1158,6 +1171,26 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn qwen_image21_refuses_block_offload_before_engine_construction() {
+        let error = create_engine(
+            "qwen-image-2.1:bf16".to_string(),
+            dummy_paths(),
+            &Config::default(),
+            LoadStrategy::Sequential,
+            0,
+            true,
+        )
+        .err()
+        .expect("Qwen Image 2.1 has component-sequential, not block-offload, residency");
+        assert!(
+            error
+                .to_string()
+                .contains("does not support transformer block offload"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1529,6 +1562,7 @@ mod tests {
             "z-image",
             "qwen-image",
             "qwen-image-edit",
+            "qwen-image21",
             "ltx-video",
             "ltx2",
             "wan",

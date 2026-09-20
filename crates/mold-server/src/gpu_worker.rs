@@ -3088,6 +3088,7 @@ pub(crate) fn oom_user_message_with_advice(
         | Some("flux2")
         | Some("qwen-image")
         | Some("qwen-image-edit")
+        | Some("qwen-image21")
         | Some("z-image")
         | Some("wuerstchen") => {
             " The checkpoint size is only the weights; peak VRAM also includes \

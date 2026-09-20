@@ -132,6 +132,7 @@ describe("modelFilters", () => {
       ["z-image", "Z-Image"],
     ]);
     expect(familyLabel("qwen-image-edit")).toBe("Qwen Image Edit");
+    expect(familyLabel("qwen-image21")).toBe("Qwen Image 2.1");
   });
 
   it("labels wan rather than falling back to the raw slug", () => {

@@ -23,7 +23,9 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "sd3" | "sd3.5" => padded.bright_green().to_string(),
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
-        "qwen-image" | "qwen_image" | "qwen-image-edit" => padded.bright_blue().to_string(),
+        "qwen-image" | "qwen_image" | "qwen-image-edit" | "qwen-image21" => {
+            padded.bright_blue().to_string()
+        }
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "ltx-video" | "ltx_video" => padded.red().to_string(),
         "ltx2" => padded.truecolor(255, 140, 80).to_string(),

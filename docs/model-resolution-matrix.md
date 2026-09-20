@@ -32,6 +32,14 @@ Pinned source: [https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac
 
 Candidates: `1328x1328`, `1664x928`, `928x1664`, `1472x1104`, `1104x1472`, `1584x1056`, `1056x1584`.
 
+### `qwen-image21`
+
+Status: qualified `true`. Evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery`.
+
+Pinned source: [https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`.
+
+Candidates: `1024x1024`.
+
 ## `flux`
 
 ### Profile `flux.flux-dev`
@@ -2446,6 +2454,26 @@ Models: `qwen-image-edit-lightning:fp8`.
 | `2:3` | `1056x1584` (recommended) |
 
 Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified: `true`, evidence: `source fitting preserves the input aspect on the dynamic /16 canvas and caps edit inputs at upstream's 1024x1024 VAE area; optional shape presets reuse Mold's qualified Qwen Image aspect set`.
+
+## `qwen-image21`
+
+### `qwen-image-2.1:bf16`
+
+Schema 1 · hash `2a8d20c0be7a116109db8e1514ee510a141a5dc3ad38c9979d5e199ed2a85f0a` · default recipe `default`
+
+Models: `qwen-image-2.1:bf16`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 40 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `1024x1024` (recommended) |
+
+Provenance: [Upstream](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`, qualified: `true`, evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery`.
 
 ## `sd15`
 

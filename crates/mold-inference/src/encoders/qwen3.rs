@@ -47,6 +47,32 @@ impl Qwen3Model {
             Self::Quantized(m) => m.forward_with_layers(input_ids, layer_indices, attention),
         }
     }
+
+    /// Run the forward pass through the final pre-norm hidden states.
+    #[allow(dead_code)]
+    pub fn forward_final_pre_norm(&mut self, input_ids: &Tensor) -> Result<Tensor> {
+        self.forward_final_pre_norm_with_attention(input_ids, None)
+    }
+
+    /// Run through the final pre-norm Qwen3-VL language-model state with a
+    /// separate padding visibility row for every batch sample.
+    ///
+    /// Qwen Image 2.1 batches prompts using left padding, so one shared
+    /// `(1, 1, L, L)` key mask is insufficient: each row can have a different
+    /// number of leading pads.
+    pub(crate) fn forward_final_pre_norm_with_attention(
+        &mut self,
+        input_ids: &Tensor,
+        attention: Option<&[Vec<bool>]>,
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(m) => m.forward_final_pre_norm_with_attention(input_ids, attention),
+            Self::Quantized(_) => anyhow::bail!(
+                "Qwen Image 2.1 requires the native BF16/safetensors text encoder; \
+                 quantized Qwen3 is unsupported"
+            ),
+        }
+    }
 }
 
 /// Reusable Qwen3 text encoder wrapper.
@@ -131,7 +157,7 @@ pub(crate) const QWEN3_PAD_TOKEN_ID: u32 = 151_643;
 /// Asks the tokenizer first — its configured padding parameters, then the
 /// `<|endoftext|>` special token — and only then falls back to
 /// [`QWEN3_PAD_TOKEN_ID`].
-fn resolve_pad_token_id(tokenizer: &Tokenizer) -> u32 {
+pub(crate) fn resolve_pad_token_id(tokenizer: &Tokenizer) -> u32 {
     if let Some(padding) = tokenizer.get_padding() {
         return padding.pad_id;
     }
@@ -391,6 +417,29 @@ impl Qwen3Encoder {
         let emb = model.forward_with_layers(&input_ids, layer_indices, attention.as_deref())?;
         let emb = emb.to_device(target_device)?.to_dtype(target_dtype)?;
         Ok((emb, token_count))
+    }
+
+    /// Run the forward pass through the final pre-norm hidden states.
+    #[allow(dead_code)]
+    pub fn forward_final_pre_norm(&mut self, input_ids: &Tensor) -> Result<Tensor> {
+        self.forward_final_pre_norm_with_attention(input_ids, None)
+    }
+
+    /// [`Self::forward_final_pre_norm`] with one padding mask per batch row.
+    ///
+    /// Qwen Image 2.1 uses this form because its processor trains with
+    /// left-padded prompt batches and consumes the last decoder layer before
+    /// Qwen3-VL's final RMSNorm.
+    pub(crate) fn forward_final_pre_norm_with_attention(
+        &mut self,
+        input_ids: &Tensor,
+        attention: Option<&[Vec<bool>]>,
+    ) -> Result<Tensor> {
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Qwen3 model not loaded (weights dropped)"))?;
+        model.forward_final_pre_norm_with_attention(input_ids, attention)
     }
 
     /// Drop model weights to free memory (e.g. GPU VRAM after encoding).

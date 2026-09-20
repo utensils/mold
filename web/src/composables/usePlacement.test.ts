@@ -13,6 +13,7 @@ describe("usePlacement", () => {
     expect(supportsAdvanced("flux2")).toBe(true);
     expect(supportsAdvanced("z-image")).toBe(true);
     expect(supportsAdvanced("qwen-image")).toBe(true);
+    expect(supportsAdvanced("qwen-image21")).toBe(true);
   });
 
   it("supportsAdvanced returns false for Tier 1 only families (including sd3)", () => {

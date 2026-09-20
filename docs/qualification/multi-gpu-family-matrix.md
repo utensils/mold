@@ -48,6 +48,7 @@ noise transferred to the execution device.
 | `z-image` | — | supported / supported / supported | none | yes | no | `[1]` / cooperative | image; source, inpaint, LoRA |
 | `qwen-image` | `qwen_image` | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; source, inpaint, LoRA |
 | `qwen-image-edit` | — | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; ordered edit references, LoRA |
+| `qwen-image21` | — | supported / supported / supported | Qwen3-VL text encoder, VAE | no | no | `[1]` / cooperative | image; text-to-image only; no source, edit references, or LoRA |
 | `ltx-video` | `ltx_video` | supported / supported / supported | none | no | no | `[1]` / cooperative | video; independent-clip chains; no source/audio/LoRA |
 | `ltx2` | `ltx-2`, `ltx2.3` | supported / supported / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
 | `wan` | — | supported / supported / correctness-only | UMT5 text encoder | yes | no | `[1]` / cooperative | video; source, LoRA, chain and extend — both per checkpoint, since only an image-conditioned one carries context across a seam or accepts a continuation; no generated audio |
@@ -78,6 +79,7 @@ yet, so they carry the same Tier-1 caveat as the rest of the wan row.
 | `z-image` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source cases |
 | `qwen-image` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source/LoRA cases |
 | `qwen-image-edit` | runtime qualification | `scripts/qwen-edit-parity-smoke.sh`, explicit source-edit CUDA smoke |
+| `qwen-image21` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base case |
 | `ltx-video` | runtime qualification | `scripts/regression-matrix.sh`, video and independent-chain cases |
 | `ltx2` | runtime qualification | `scripts/regression-matrix.sh`, video/source/audio/durable-chain cases |
 | `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video, image-to-video, first/last-frame, and single-frame-still cases across every installed tier (no hardware campaign recorded yet); admission memory is `mold-server/src/wan_admission.rs`, calibrated against four measured RTX 4090 peaks |
@@ -104,6 +106,7 @@ model artifact, command, output validation, and logs.
 | Z-Image offload/source/LoRA | `mold-inference` | `zimage/pipeline.rs::zimage_selected_bf16_offload_reaches_runtime_loader`, `zimage_img2img_source_decode_uses_vae_native_zero_to_one_range`, and `zimage_lora_requests_use_sequential_generation_path` |
 | Qwen-Image tiling/source | `mold-inference` | `qwen_image/pipeline.rs::qwen_proactive_tiled_decode_skips_primary_full_decode` and `qwen_img2img_uses_minus_one_to_one_source_normalization` |
 | Qwen-Image-Edit | `mold-inference` | `qwen_image/pipeline.rs::qwen_image_edit_accepts_quantized_text_with_bf16_vision_sidecar` and `qwen_quantized_edit_always_uses_split_cfg_on_high_vram_cuda` |
+| Qwen Image 2.1 text-to-image | `mold-inference` | `qwen_image21/pipeline.rs::text_to_image_contract_accepts_native_canvas` |
 | LTX-Video video/chain | `mold-inference` | `ltx_video/pipeline.rs::decode_apng_round_trips_rgb_frames` and `chain/capability.rs::ltx_video_is_independent_clips_without_audio` |
 | LTX-2 source image/video/keyframes | `mold-inference` | `ltx2/conditioning.rs::stage_conditioning_stages_source_image_as_frame_zero_replacement`, `stage_conditioning_keeps_audio_and_reference_video_paths`, and `stage_conditioning_preserves_keyframe_targets` |
 | LTX-2 audio supported/unsupported | `mold-inference` | `ltx2/runtime.rs::runtime_prepare_tracks_audio_and_video_latent_shapes` and `ltx2/pipeline.rs::audio_request_is_rejected_before_runtime_for_video_only_checkpoint_assets` |

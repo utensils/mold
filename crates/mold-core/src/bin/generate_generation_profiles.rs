@@ -145,6 +145,7 @@ fn render_typescript_contract() -> String {
         "z-image",
         "qwen-image",
         "qwen-image-edit",
+        "qwen-image21",
         "wuerstchen",
         "ltx-video",
         "ltx2",
@@ -216,7 +217,7 @@ fn model_profiles() -> RegistryDocument<'static> {
     }
     RegistryDocument {
         schema_version: mold_core::GENERATION_PROFILE_SCHEMA_VERSION,
-        resolution_candidates: ["z-image", "qwen-image"]
+        resolution_candidates: ["z-image", "qwen-image", "qwen-image21"]
             .into_iter()
             .map(|family| {
                 let record = resolution_qualification_record(family)

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "family": "qwen-image21",
+  "model": "qwen-image-2.1:bf16",
+  "upstream_repository": "Qwen/Qwen-Image-2.1",
+  "upstream_revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+  "mold_source": "uncommitted qwen-image-2-1 worktree based on e7d50865e587479acb41d1aed0b1bb2045209751",
+  "backend": "metal",
+  "device": "Apple M5 Max, 40 GPU cores, Metal 4",
+  "device_memory_mb": 131072,
+  "qualified_at": "2026-09-20T15:24:00-07:00",
+  "artifact_integrity_check": "mold info qwen-image-2.1:bf16 --verify reported all two transformer shards, VAE, four text-encoder shards, and tokenizer OK",
+  "prompt": "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows",
+  "seed": 210001,
+  "guidance": 1.0,
+  "output_format": "png",
+  "delivery_check": "Decoded as a non-interlaced 8-bit RGB PNG at the exact requested 1024x1024 dimensions; visual inspection found a coherent red ceramic teapot on a sunlit wooden windowsill with shadows.",
+  "renders": [
+    {
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "denoise_seconds": 391.8,
+      "vae_decode_seconds": 18.7,
+      "reported_total_seconds": 410.5,
+      "sha256": "0e8fc93c5686a6f1c8107daf91a53e151bedc2bf8379e801612857e08fbc516b"
+    }
+  ]
+}

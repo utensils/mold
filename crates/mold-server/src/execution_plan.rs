@@ -3081,9 +3081,8 @@ fn concrete_artifacts_for_family(
     for (index, path) in selected_text_paths.iter().enumerate() {
         let role = match family {
             "ltx2" | "ltx-2" | "ltx2.3" => ComponentRole::GemmaShard(index),
-            "qwen-image" | "qwen-image-edit" | "z-image" | "flux2" | "flux.2" | "flux2-klein" => {
-                ComponentRole::QwenShard(index)
-            }
+            "qwen-image" | "qwen-image-edit" | "qwen-image21" | "z-image" | "flux2" | "flux.2"
+            | "flux2-klein" => ComponentRole::QwenShard(index),
             _ => ComponentRole::GenericTextEncoderShard(index),
         };
         artifacts.insert(role, path.clone());
@@ -8189,7 +8188,7 @@ mod tests {
         assert!(artifacts.contains_key(&ComponentRole::ClipG));
         assert!(artifacts.contains_key(&ComponentRole::QwenShard(0)));
         assert!(artifacts.contains_key(&ComponentRole::QwenShard(1)));
-        for family in ["flux2", "flux.2", "flux2-klein", "z-image"] {
+        for family in ["flux2", "flux.2", "flux2-klein", "z-image", "qwen-image21"] {
             let family_artifacts = concrete_artifacts_for_family(&paths, family, &[], &frozen);
             assert!(
                 family_artifacts.contains_key(&ComponentRole::QwenShard(0)),

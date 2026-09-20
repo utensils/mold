@@ -143,6 +143,12 @@ pub const FAMILY_GUIDES: &[FamilyGuide] = &[
     family!("wuerstchen", "wuerstchen.md", 50, &["wuerstchen-v2"]),
     family!("qwen-image", "qwen-image.md", 180, &["qwen_image"]),
     family!(
+        "qwen-image21",
+        "qwen-image21.md",
+        180,
+        &["qwen-image-2.1", "qwen_image21"]
+    ),
+    family!(
         "qwen-image-edit",
         "qwen-image-edit.md",
         100,

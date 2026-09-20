@@ -1554,6 +1554,10 @@ const QWEN_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1584, 1056),
     (1056, 1584),
 ];
+/// Qwen Image 2.1's published text-to-image default canvas. Unlike the older
+/// Qwen Image ratio list, the 2.1 model card only pins this default; Mold still
+/// admits any safe canvas on its checkpoint-required 32px grid.
+const QWEN_IMAGE21_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[(1024, 1024)];
 const WUERSTCHEN: &[(u32, u32)] = &[(1024, 1024)];
 const LTX_VIDEO: &[(u32, u32)] = &[
     (704, 480),
@@ -1618,6 +1622,16 @@ const QWEN_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
         candidates: QWEN_UPSTREAM_CANDIDATES,
     };
 
+const QWEN_IMAGE21_QUALIFICATION: ResolutionQualificationRecord =
+    ResolutionQualificationRecord {
+        family: "qwen-image21",
+        source: "https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa",
+        revision: "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+        qualified: true,
+        evidence: "docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery",
+        candidates: QWEN_IMAGE21_UPSTREAM_CANDIDATES,
+    };
+
 /// Return the pinned upstream dimension record and its Mold qualification
 /// status for a family with an authored aspect set.
 pub fn resolution_qualification_record(
@@ -1626,6 +1640,7 @@ pub fn resolution_qualification_record(
     match canonical_family(family) {
         "z-image" => Some(&Z_IMAGE_QUALIFICATION),
         "qwen-image" => Some(&QWEN_IMAGE_QUALIFICATION),
+        "qwen-image21" => Some(&QWEN_IMAGE21_QUALIFICATION),
         _ => None,
     }
 }
@@ -1638,6 +1653,7 @@ pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
         "flux" | "flux2" => FLUX,
         "z-image" => Z_IMAGE_UPSTREAM_CANDIDATES,
         "qwen-image" | "qwen-image-edit" => QWEN_UPSTREAM_CANDIDATES,
+        "qwen-image21" => QWEN_IMAGE21_UPSTREAM_CANDIDATES,
         "wuerstchen" => WUERSTCHEN,
         "ltx-video" => LTX_VIDEO,
         "ltx2" => LTX2,
@@ -2149,6 +2165,16 @@ fn recipe(
             audio_requires_mp4: family == "ltx2",
             delivery_reason: (family == "ltx2")
                 .then(|| "Audio-enabled video delivery requires MP4.".to_string()),
+        }
+    } else if family == "qwen-image21" {
+        OutputCapabilitiesProfile {
+            default_format: OutputFormat::Png,
+            formats: vec![OutputFormat::Png, OutputFormat::Jpeg],
+            audio_requires_mp4: false,
+            delivery_reason: Some(
+                "Qwen Image 2.1's native Mold path currently publishes RGB PNG or JPEG."
+                    .to_string(),
+            ),
         }
     } else {
         OutputCapabilitiesProfile {
@@ -3888,6 +3914,13 @@ mod tests {
                 "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 true,
                 "no per-size runtime-performance claim",
+            ),
+            (
+                "qwen-image-2.1:bf16",
+                "qwen-image21",
+                "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+                true,
+                "docs/qualification/qwen-image-2.1-metal-uat.json",
             ),
         ] {
             let profile = resolve_generation_profile(input(model, family));

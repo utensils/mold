@@ -118,6 +118,19 @@
       }
     },
     {
+      "family": "qwen-image21",
+      "aliases": [
+        "qwen-image-2.1",
+        "qwen_image21"
+      ],
+      "word_limit": 180,
+      "guide": {
+        "path": "families/qwen-image21.md",
+        "contents": "# Qwen-Image 2.1 prompting\n\nManifest family: `qwen-image21`.\n\n## Prompt style\n\nWrite one direct, complete description of the image. State the primary subject,\nsetting, action or pose, composition, lighting, and visual medium in a natural\norder. Preserve the user's requested subject and style; add only details that\nmake an underspecified composition legible. Keep the result under\n180 words.\n\n## Syntax\n\nPut requested on-image text in quotation marks and say where it belongs and how\nit should look. Keep the quoted string exact. Describe positive visual content\nin the prompt. A separate negative prompt is used only when the caller\nexplicitly enables classifier-free guidance with a value greater than one.\n\n## Generation context\n\nMold currently exposes this checkpoint as text-to-image only. Use a canvas\nwhose width and height are multiples of 32; the native 1024x1024 recipe is the\ndefault. The model's standard quality recipe uses forty denoising steps and\nguidance 1, so no negative prompt is needed for normal generation.\n\n## Examples\n\nInput: a poster for a small bakery called MOLD & FLOUR\n\nOutput: Straight-on editorial photograph of a tiny artisan bakery on a quiet\nEuropean corner, deep teal facade with three arched windows and a striped\nawning. A hand-painted sign above the door reads \"MOLD & FLOUR\" in cream serif\ncapitals. A vintage delivery bicycle rests at the right edge. Sunny spring\nmorning, crisp realistic detail, balanced symmetrical composition.\n\nInput: a lion statue\n\nOutput: Dynamic stone lion sculpture mid-pounce in an ancient courtyard, front\nlegs airborne and hind legs pushing off, weathered carved surface and defined\nmuscles. Trees and shallow stone steps in soft morning haze, documentary\nphotography, low eye-level composition, finely detailed natural light.\n\n## Pitfalls\n\n- A vague request for lettering does not specify the characters to render;\n  write the exact string in quotation marks.\n- Do not rely on image-reference, source-image, mask, ControlNet, or LoRA\n  wording in a prompt: those inputs are not exposed for this first Mold\n  integration.\n- Very crowded compositions and many independent text blocks compete for the\n  same canvas. Give the principal subject and the important lettering clear\n  spatial priority.\n\n## CLI\n\n```bash\nmold run qwen-image-2.1:bf16 \\\n  'Straight-on editorial photograph of a tiny artisan bakery named \"MOLD & FLOUR\" on a quiet European corner, deep teal facade, three arched windows, striped awning, sunny spring morning, crisp realistic detail, balanced composition' \\\n  --seed 210001\n```\n\n## Sources\n\n- https://huggingface.co/Qwen/Qwen-Image-2.1\n- https://github.com/QwenLM/Qwen-Image\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite one direct, complete description of the image. State the primary subject,\nsetting, action or pose, composition, lighting, and visual medium in a natural\norder. Preserve the user's requested subject and style; add only details that\nmake an underspecified composition legible. Keep the result under\n180 words.\n\n## Syntax\n\nPut requested on-image text in quotation marks and say where it belongs and how\nit should look. Keep the quoted string exact. Describe positive visual content\nin the prompt. A separate negative prompt is used only when the caller\nexplicitly enables classifier-free guidance with a value greater than one.\n\n## Generation context\n\nMold currently exposes this checkpoint as text-to-image only. Use a canvas\nwhose width and height are multiples of 32; the native 1024x1024 recipe is the\ndefault. The model's standard quality recipe uses forty denoising steps and\nguidance 1, so no negative prompt is needed for normal generation.\n\n## Examples\n\nInput: a poster for a small bakery called MOLD & FLOUR\n\nOutput: Straight-on editorial photograph of a tiny artisan bakery on a quiet\nEuropean corner, deep teal facade with three arched windows and a striped\nawning. A hand-painted sign above the door reads \"MOLD & FLOUR\" in cream serif\ncapitals. A vintage delivery bicycle rests at the right edge. Sunny spring\nmorning, crisp realistic detail, balanced symmetrical composition.\n\nInput: a lion statue\n\nOutput: Dynamic stone lion sculpture mid-pounce in an ancient courtyard, front\nlegs airborne and hind legs pushing off, weathered carved surface and defined\nmuscles. Trees and shallow stone steps in soft morning haze, documentary\nphotography, low eye-level composition, finely detailed natural light.\n\n## Pitfalls\n\n- A vague request for lettering does not specify the characters to render;\n  write the exact string in quotation marks.\n- Do not rely on image-reference, source-image, mask, ControlNet, or LoRA\n  wording in a prompt: those inputs are not exposed for this first Mold\n  integration.\n- Very crowded compositions and many independent text blocks compete for the\n  same canvas. Give the principal subject and the important lettering clear\n  spatial priority."
+      }
+    },
+    {
       "family": "qwen-image-edit",
       "aliases": [
         "qwen_image_edit"
@@ -771,6 +784,16 @@
       ],
       "word_limit": 100,
       "excerpt_words": 594
+    },
+    {
+      "model": "qwen-image-2.1",
+      "family": "qwen-image21",
+      "paths": [
+        "shared.md",
+        "families/qwen-image21.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 417
     },
     {
       "model": "wuerstchen-v2",

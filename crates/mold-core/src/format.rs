@@ -72,6 +72,7 @@ pub fn family_display_label(family: &str) -> Option<&'static str> {
         "z-image" => "Z-Image",
         "qwen-image" | "qwen_image" => "Qwen-Image",
         "qwen-image-edit" => "Qwen-Image-Edit",
+        "qwen-image21" => "Qwen Image 2.1",
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         "ltx-video" | "ltx_video" => "LTX Video",
         "ltx2" => "LTX-2",

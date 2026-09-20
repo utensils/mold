@@ -98,4 +98,19 @@ describe("PlacementPanel", () => {
     expect(last.advanced?.qwen).toEqual({ kind: "gpu", ordinal: 1 });
     expect(last.advanced?.t5).toBeNull();
   });
+
+  it("maps Qwen Image 2.1 text shards to the Qwen placement field", async () => {
+    const wrapper = await mountPanel({
+      family: "qwen-image21",
+      component: "text encoder",
+    });
+    await wrapper
+      .get("[data-test='component-placement-select']")
+      .setValue("cpu");
+
+    const emitted = wrapper.emitted("update:modelValue");
+    const last = emitted!.at(-1)![0] as import("../types").DevicePlacement;
+    expect(last.advanced?.qwen).toEqual({ kind: "cpu" });
+    expect(last.advanced?.t5).toBeNull();
+  });
 });

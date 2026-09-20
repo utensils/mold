@@ -113,6 +113,7 @@ import {
 const STORAGE_KEY = "mold.generate.form";
 const FORM_VERSION = 3 as const;
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
+const QWEN_IMAGE21_FAMILY = "qwen-image21";
 
 function selectedFamily(s: GenerateFormState): string {
   if (s.modelFamily) return s.modelFamily;
@@ -127,6 +128,7 @@ function selectedFamily(s: GenerateFormState): string {
     return "flux2";
   if (s.model.startsWith("flux")) return "flux";
   if (s.model.startsWith("z-image")) return "z-image";
+  if (s.model.startsWith("qwen-image-2.1")) return QWEN_IMAGE21_FAMILY;
   if (s.model.startsWith("qwen-image-edit")) return "qwen-image-edit";
   if (s.model.startsWith("qwen-image")) return "qwen-image";
   if (s.model.startsWith("ltx-video")) return "ltx-video";

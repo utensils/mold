@@ -59,6 +59,7 @@ describe("model family labels", () => {
     expect(familyLabel("flux")).toBe("FLUX");
     expect(familyLabel("ltx-2")).toBe("LTX-2");
     expect(familyLabel("qwen-image-edit")).toBe("Qwen Image Edit");
+    expect(familyLabel("qwen-image21")).toBe("Qwen Image 2.1");
     expect(familyLabel("minimax-h3")).toBe("MiniMax H3");
   });
 
@@ -89,6 +90,7 @@ describe("model family labels", () => {
       "z-image",
       "qwen-image",
       "qwen-image-edit",
+      "qwen-image21",
       "wuerstchen",
       "ltx-video",
       "ltx-2",

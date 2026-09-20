@@ -41,6 +41,7 @@ export const TIER2_FAMILIES: readonly string[] = [
   "z-image",
   "qwen-image",
   "qwen_image",
+  "qwen-image21",
 ];
 
 export function supportsAdvanced(family: string): boolean {

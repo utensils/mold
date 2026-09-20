@@ -26,6 +26,7 @@ const FAMILY_LABELS: Record<string, string> = {
   zimage: "Z-Image",
   "qwen-image": "Qwen Image",
   "qwen-image-edit": "Qwen Image Edit",
+  "qwen-image21": "Qwen Image 2.1",
   wuerstchen: "Wuerstchen",
   "ltx-video": "LTX Video",
   ltx2: "LTX-2",

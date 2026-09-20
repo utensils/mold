@@ -36,6 +36,7 @@ const FAMILY_ORDER = [
   "z-image",
   "qwen-image",
   "qwen-image-edit",
+  "qwen-image21",
   "wuerstchen",
   "ltx-video",
   "ltx2",

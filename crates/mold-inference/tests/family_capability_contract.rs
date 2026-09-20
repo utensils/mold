@@ -15,6 +15,7 @@ const FACTORY_FAMILIES: &[&str] = &[
     "z-image",
     "qwen-image",
     "qwen-image-edit",
+    "qwen-image21",
     "ltx-video",
     "ltx2",
     "wan",
@@ -141,6 +142,14 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             "{family}"
         );
     }
+    let qwen21 = capabilities
+        .iter()
+        .find(|capability| capability.family == "qwen-image21")
+        .unwrap();
+    assert_eq!(qwen21.tiled_vae, TiledVaeCapability::Unsupported);
+    assert!(!qwen21.workflows.source);
+    assert!(!qwen21.workflows.edit_references);
+    assert!(!qwen21.workflows.lora);
     assert_eq!(ltx2.tiled_vae, TiledVaeCapability::NativeTemporalChunks);
 
     let expected = [
@@ -255,6 +264,23 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
                 source: false,
                 edit_references: true,
                 lora: true,
+                generated_audio: false,
+                chain: false,
+            },
+        ),
+        (
+            "qwen-image21",
+            ComponentPlacementCapability {
+                text_encoder_cpu: true,
+                vae_cpu: true,
+                audio_components_cpu: false,
+            },
+            false,
+            MediaKind::Image,
+            WorkflowCapabilities {
+                source: false,
+                edit_references: false,
+                lora: false,
                 generated_audio: false,
                 chain: false,
             },

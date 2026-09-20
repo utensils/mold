@@ -52,6 +52,7 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-distill` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 513 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 594 |
+| `qwen-image-2.1` | `qwen-image21` | `shared.md`, `families/qwen-image21.md` | 180 | 417 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
@@ -1027,6 +1028,77 @@ mold run qwen-image-flash:q8 "A red enamel teapot on a sunlit windowsill, still-
 - https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py
 - https://github.com/QwenLM/Qwen-Image
 - https://huggingface.co/Qwen/Qwen-Image
+
+<!-- families/qwen-image21.md -->
+
+Default word limit: 180. Also accepted on the wire as `qwen-image-2.1`, `qwen_image21`.
+
+### Qwen-Image 2.1 prompting
+
+Manifest family: `qwen-image21`.
+
+#### Prompt style
+
+Write one direct, complete description of the image. State the primary subject,
+setting, action or pose, composition, lighting, and visual medium in a natural
+order. Preserve the user's requested subject and style; add only details that
+make an underspecified composition legible. Keep the result under
+180 words.
+
+#### Syntax
+
+Put requested on-image text in quotation marks and say where it belongs and how
+it should look. Keep the quoted string exact. Describe positive visual content
+in the prompt. A separate negative prompt is used only when the caller
+explicitly enables classifier-free guidance with a value greater than one.
+
+#### Generation context
+
+Mold currently exposes this checkpoint as text-to-image only. Use a canvas
+whose width and height are multiples of 32; the native 1024x1024 recipe is the
+default. The model's standard quality recipe uses forty denoising steps and
+guidance 1, so no negative prompt is needed for normal generation.
+
+#### Examples
+
+Input: a poster for a small bakery called MOLD & FLOUR
+
+Output: Straight-on editorial photograph of a tiny artisan bakery on a quiet
+European corner, deep teal facade with three arched windows and a striped
+awning. A hand-painted sign above the door reads "MOLD & FLOUR" in cream serif
+capitals. A vintage delivery bicycle rests at the right edge. Sunny spring
+morning, crisp realistic detail, balanced symmetrical composition.
+
+Input: a lion statue
+
+Output: Dynamic stone lion sculpture mid-pounce in an ancient courtyard, front
+legs airborne and hind legs pushing off, weathered carved surface and defined
+muscles. Trees and shallow stone steps in soft morning haze, documentary
+photography, low eye-level composition, finely detailed natural light.
+
+#### Pitfalls
+
+- A vague request for lettering does not specify the characters to render;
+  write the exact string in quotation marks.
+- Do not rely on image-reference, source-image, mask, ControlNet, or LoRA
+  wording in a prompt: those inputs are not exposed for this first Mold
+  integration.
+- Very crowded compositions and many independent text blocks compete for the
+  same canvas. Give the principal subject and the important lettering clear
+  spatial priority.
+
+#### CLI
+
+```bash
+mold run qwen-image-2.1:bf16 \
+  'Straight-on editorial photograph of a tiny artisan bakery named "MOLD & FLOUR" on a quiet European corner, deep teal facade, three arched windows, striped awning, sunny spring morning, crisp realistic detail, balanced composition' \
+  --seed 210001
+```
+
+#### Sources
+
+- https://huggingface.co/Qwen/Qwen-Image-2.1
+- https://github.com/QwenLM/Qwen-Image
 
 <!-- families/qwen-image-edit.md -->
 

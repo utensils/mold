@@ -1565,6 +1565,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(zimage_manifests());
     manifests.extend(flux2_manifests());
     manifests.extend(qwen_image_manifests());
+    manifests.extend(qwen_image21_manifests());
     manifests.extend(wuerstchen_manifests());
     manifests.extend(hunyuan3d_manifests());
     manifests.extend(ltx_video_manifests());
@@ -3490,6 +3491,102 @@ fn shared_qwen_image_edit_files() -> Vec<ModelFile> {
             sha256: None,
         },
     ]
+}
+
+/// Qwen Image 2.1 has a distinct Qwen3-VL conditioner, transformer, and VAE
+/// layout from the older Qwen Image family. Keep its artifact graph separate:
+/// sharing a similarly named tokenizer or VAE would make a complete-looking
+/// install that cannot be loaded by either runtime.
+fn qwen_image21_manifests() -> Vec<ModelManifest> {
+    const REPO: &str = "Qwen/Qwen-Image-2.1";
+    vec![ModelManifest {
+        name: "qwen-image-2.1:bf16".to_string(),
+        family: "qwen-image21".to_string(),
+        description:
+            "Qwen Image 2.1 BF16 — Qwen3-VL conditioner and 32-block causal-condition transformer"
+                .to_string(),
+        files: vec![
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                    .to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes: 9_968_332_504,
+                gated: false,
+                sha256: Some("9e6bc2d641e67bf277895ea8777141044a38f3edb7101bc469b2961dd7c36b4b"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                    .to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes: 4_261_951_904,
+                gated: false,
+                sha256: Some("3aaf234dcbe128530479735854a346b5e3e66283b7c11db56f836bbd1c13ebaa"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Vae,
+                size_bytes: 1_350_989_512,
+                gated: false,
+                sha256: Some("a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+                component: ModelComponent::TextEncoder,
+                size_bytes: 4_998_056_552,
+                gated: false,
+                sha256: Some("dde00291b5f7fb92013895310a3da0ddba78674df9f10d505d375243dc01fc6f"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+                component: ModelComponent::TextEncoder,
+                size_bytes: 4_915_962_464,
+                gated: false,
+                sha256: Some("9047faccc0a6d98496a52d55f27be1c94a9c259d1e283fbea0128d054a948d42"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+                component: ModelComponent::TextEncoder,
+                size_bytes: 4_915_962_496,
+                gated: false,
+                sha256: Some("8c54187654c0176b73ae73785bf791dc9a14c9df7fb4310083a09d42048cb57e"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+                component: ModelComponent::TextEncoder,
+                size_bytes: 2_704_357_976,
+                gated: false,
+                sha256: Some("5311532aaaeae3259eb6a7b2c600636be1159adf7ded35f53579f7d0e7d43cdd"),
+            },
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: "processor/tokenizer.json".to_string(),
+                component: ModelComponent::TextTokenizer,
+                size_bytes: 11_422_654,
+                gated: false,
+                sha256: Some("aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"),
+            },
+        ],
+        defaults: ManifestDefaults {
+            steps: 40,
+            guidance: 1.0,
+            width: 1024,
+            height: 1024,
+            is_schnell: false,
+            scheduler: None,
+            negative_prompt: None,
+            frames: None,
+            fps: None,
+            source_image: Some(crate::types::SourceImageCapability::Unsupported),
+        },
+        hidden: false,
+    }]
 }
 
 /// All known Qwen-Image model manifests.
@@ -8776,6 +8873,95 @@ mod tests {
     }
 
     #[test]
+    fn qwen_image21_manifest_pins_the_native_artifact_graph() {
+        let manifest = find_manifest("qwen-image-2.1:bf16").expect("Qwen Image 2.1 manifest");
+        assert_eq!(manifest.family, "qwen-image21");
+        assert_eq!(manifest.defaults.steps, 40);
+        assert_eq!(manifest.defaults.guidance, 1.0);
+        assert_eq!(
+            (manifest.defaults.width, manifest.defaults.height),
+            (1024, 1024)
+        );
+
+        let expected = [
+            (
+                ModelComponent::TransformerShard,
+                "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+                9_968_332_504,
+            ),
+            (
+                ModelComponent::TransformerShard,
+                "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+                4_261_951_904,
+            ),
+            (
+                ModelComponent::Vae,
+                "vae/diffusion_pytorch_model.safetensors",
+                1_350_989_512,
+            ),
+            (
+                ModelComponent::TextEncoder,
+                "text_encoder/model-00001-of-00004.safetensors",
+                4_998_056_552,
+            ),
+            (
+                ModelComponent::TextEncoder,
+                "text_encoder/model-00002-of-00004.safetensors",
+                4_915_962_464,
+            ),
+            (
+                ModelComponent::TextEncoder,
+                "text_encoder/model-00003-of-00004.safetensors",
+                4_915_962_496,
+            ),
+            (
+                ModelComponent::TextEncoder,
+                "text_encoder/model-00004-of-00004.safetensors",
+                2_704_357_976,
+            ),
+            (
+                ModelComponent::TextTokenizer,
+                "processor/tokenizer.json",
+                11_422_654,
+            ),
+        ];
+        assert_eq!(manifest.files.len(), expected.len());
+        for (component, filename, size_bytes) in expected {
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.component == component && file.hf_filename == filename)
+                .unwrap_or_else(|| panic!("missing {filename}"));
+            assert_eq!(file.hf_repo, "Qwen/Qwen-Image-2.1", "{filename}");
+            assert_eq!(file.size_bytes, size_bytes, "{filename}");
+            assert!(file.sha256.is_some(), "{filename} must be checksum-pinned");
+        }
+
+        let downloads = manifest
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.component,
+                    PathBuf::from(format!("/models/{}", file.hf_filename)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let paths = paths_from_downloads(&downloads, &manifest.family)
+            .expect("native Qwen Image 2.1 artifacts must resolve to ModelPaths");
+        assert_eq!(paths.transformer_shards.len(), 2);
+        assert_eq!(paths.text_encoder_files.len(), 4);
+        assert_eq!(
+            paths.text_tokenizer,
+            Some(PathBuf::from("/models/processor/tokenizer.json"))
+        );
+        assert_eq!(
+            paths.vae,
+            PathBuf::from("/models/vae/diffusion_pytorch_model.safetensors")
+        );
+    }
+
+    #[test]
     fn qwen_flash_manifests_are_four_step_dmd2_distills() {
         for (name, filename, size) in [
             (
@@ -9680,7 +9866,9 @@ mod tests {
         // share their vision tower — the OpenCLIP ViT-H/14 at the SAME
         // `shared/ip-adapter/` paths — and differ by one file, the adapter.
         // Neither is a checkpoint or a default-model candidate.
-        assert_eq!(known_manifests().len(), 210);
+        // Qwen Image 2.1: one self-contained BF16 checkpoint with its own
+        // Qwen3-VL conditioner, two transformer shards, and decoder.
+        assert_eq!(known_manifests().len(), 211);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
@@ -10855,6 +11043,39 @@ mod tests {
                         components.contains(&ModelComponent::TextEncoder),
                         "{} (ltx2) missing Gemma text encoder files",
                         manifest.name
+                    );
+                }
+                "qwen-image21" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer)
+                            || components.contains(&ModelComponent::TransformerShard),
+                        "{} ({}) missing Transformer or TransformerShard",
+                        manifest.name,
+                        manifest.family
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} ({}) missing TextEncoder",
+                        manifest.name,
+                        manifest.family
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} ({}) missing TextTokenizer",
+                        manifest.name,
+                        manifest.family
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::Vae),
+                        "{} ({}) missing Vae",
+                        manifest.name,
+                        manifest.family
+                    );
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} ({}) should not have ClipEncoder",
+                        manifest.name,
+                        manifest.family
                     );
                 }
                 "qwen-image" | "qwen-image-edit" => {

@@ -762,10 +762,10 @@ pub fn max_axis_pixels_for_family_composed(
 
 /// Required pixel grid for a generation family.
 ///
-/// LTX video VAEs compress spatial dimensions by 32. Every other current
-/// family uses the shared 16px generation grid.
+/// LTX video VAEs and Qwen Image 2.1's decoder/DiT contract require 32px
+/// canvases. Every other current image family uses the shared 16px grid.
 pub fn dimension_alignment_for_family(family: Option<&str>) -> u32 {
-    if matches!(family, Some("ltx-video" | "ltx2"))
+    if matches!(family, Some("ltx-video" | "ltx2" | "qwen-image21"))
         || family.is_some_and(crate::minimax_h3::is_family)
     {
         32
@@ -1415,7 +1415,9 @@ fn model_family(model_name: &str) -> Option<&str> {
     crate::manifest::find_manifest(model_name)
         .map(|m| m.family.as_str())
         .or_else(|| {
-            if model_name.starts_with("qwen-image-edit") {
+            if model_name.starts_with("qwen-image-2.1") {
+                Some("qwen-image21")
+            } else if model_name.starts_with("qwen-image-edit") {
                 Some("qwen-image-edit")
             } else if model_name.starts_with("qwen-image") {
                 Some("qwen-image")
@@ -2051,8 +2053,8 @@ pub fn request_satisfies_source_requirement(req: &GenerateRequest, family: Optio
 /// rejection reads identically wherever it lands.
 ///
 /// `family` selects the family-aware phrasing — Wan keeps its checkpoint-swap
-/// suggestions, every other family (plain LTX-Video today) gets wording that
-/// names the actual model instead of mislabeling it as Wan. `has_source`
+/// suggestions and Qwen Image 2.1 names its text-to-image-only boundary;
+/// legacy LTX-Video keeps its text-to-video explanation. `has_source`
 /// counts first/last-frame keyframes as well as a source image (#779): both
 /// carry source frames, so either satisfies a required contract and either is
 /// refused by a text-to-video-only checkpoint. A `None` capability remains
@@ -2073,6 +2075,13 @@ pub fn source_image_contract_violation(
              or keyframes — remove them, or pick an I2V-capable checkpoint such as \
              wan22-ti2v-5b or wan22-i2v-a14b"
                 .to_string()
+        } else if family == Some("qwen-image21") {
+            format!(
+                "{model} is text-to-image only and does not accept a source image or \
+                 keyframes — Qwen Image 2.1's native Mold path currently supports \
+                 text conditioning only; remove the image or choose a checkpoint with \
+                 image conditioning"
+            )
         } else {
             format!(
                 "{model} is text-to-video only and does not accept a source image — its \
@@ -6699,6 +6708,20 @@ mod tests {
         // An ordinary render still carries nothing.
         let plain = valid_req();
         assert!(!request_carries_source_frames(&plain));
+    }
+
+    #[test]
+    fn qwen_image21_source_refusal_names_its_text_to_image_contract() {
+        let message = source_image_contract_violation(
+            Some("qwen-image21"),
+            "qwen-image-2.1:bf16",
+            Some(crate::SourceImageCapability::Unsupported),
+            true,
+        )
+        .expect("Qwen Image 2.1 must refuse source images");
+        assert!(message.contains("text-to-image only"), "{message}");
+        assert!(message.contains("Qwen Image 2.1"), "{message}");
+        assert!(!message.contains("text-to-video"), "{message}");
     }
 
     #[test]
