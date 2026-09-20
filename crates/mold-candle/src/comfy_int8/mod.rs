@@ -82,10 +82,9 @@ pub enum Int8LinearKind {
 ///
 /// Metal always takes the portable arm: [`cuda`]'s cuBLASLt kernel has no
 /// Metal twin, and unlike Qwen-Image's `QMatMul` there is no candle-side Metal
-/// quantized kernel to qualify — so this is a correctness fallback by
-/// construction, not a tuning choice. It is also why the H3 Metal tier is
-/// `CorrectnessOnly`: the portable arm re-uploads and widens the packed weight
-/// chunk on every forward.
+/// quantized kernel. The portable arm is exact against the shared reference
+/// but slower because it re-uploads and widens each packed weight chunk on
+/// every forward.
 ///
 /// This answers for the KERNEL CALL only — the cuBLASLt layout descriptors
 /// need both extents to be multiples of four, and the kernel folds no bias.

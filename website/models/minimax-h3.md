@@ -68,66 +68,63 @@ and a hummingbird with synchronized water, wings, foliage, chimes, and score.
 </figure>
 </div>
 
-::: warning CUDA is the supported runtime
-Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
-release can run the compact FL2VA **and** Ref2VA models for the supported
-request profiles below; the Apple Silicon Metal route below is admitted and
-shipped with a retained reduced-size FL2VA smoke render; the default-resolution path remains unqualified.
-The CPU backend remains unavailable. Broader request
-shapes also remain unavailable until those paths are implemented and
-tested; Mold reports that limitation normally rather than treating it as a
-licensing or authorization failure.
+::: warning CUDA and Apple Metal are supported runtimes
+The compact FL2VA and Ref2VA variants run on H3-enabled SM89 CUDA builds and
+the shipped Apple Silicon Metal build. Metal admission checks the request's
+exact phase budget against live unified-memory headroom; support is not a
+promise that every shape fits every Mac. CPU remains unavailable. Unsupported
+weight layouts and request shapes are refused normally rather than reported as
+licensing or authorization failures.
 :::
 
 `mold run --local` accepts one FL2VA request and prepares a single-use owned
 attempt with the same request, device, memory, and output checks as the server.
 Local H3 batches and chains are refused before preparation; use the server
 for those requests and for Ref2VA reference uploads. These limits also apply
-when a remote command falls back to local execution. This routing fix does
-not change the hardware qualification limits below.
+when a remote command falls back to local execution. This does not change the
+request limits below.
 
-::: info Apple Metal is a correctness-only path in progress
-The Apple Silicon execution path exists as of #1164; family-scoped BF16, a
-folded audio-VAE reduction, chunked dense attention sized so the score matrix
-fits a Metal buffer, the portable INT8 ConvRot arm, and fp8-scaled weights
-refused by name because candle has no Metal fp8 widening kernel. It is
-advertised as **correctness-only**, the same tier Wan and LTX-2 landed on
-before their performance qualification. Admission now accepts a Metal device,
-the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and
-the released macOS builds carry the `h3` feature. The route exists in a
-shipped binary. A guarded 256×256, 107-frame FL2VA Turbo 4-step render with
-a first frame and stereo audio completed on a 48 GiB Mac. This is reduced-size
-smoke evidence; the default-resolution H3 Metal path remains unqualified.
-See the [memory qualification record](https://github.com/utensils/mold/blob/main/docs/qualification/minimax-h3-metal-memory.md). The compact stack's
-~42.5 GB download size is not its simultaneous memory requirement: Metal
-streams Qwen language layers and DiT blocks, and admission sums host and device
-memory within each phase before selecting the peak. A 48 GB machine's fit
-therefore depends on the request and live headroom.
-Metal attention completes each query chunk and copies its result into one
-preallocated output so temporary score allocations cannot accumulate across
-chunks. Portable INT8 row chunks use the same bounded assembly and completion
-rule. `mold system metal-memory status` reports the local budget, including
-`iogpu.wired_limit_mb` when available; this system setting is not a process
-memory cap or an OOM guarantee. See [Metal memory](../guide/metal-memory.md). The reduced-size run took about 21 minutes including admission and setup, so
-this remains a slow portability path.
+::: info Apple Metal is supported, memory-gated, and intentionally portable
+The Apple Silicon route uses family-scoped BF16, a folded audio-VAE reduction,
+bounded chunked dense attention, portable INT8 ConvRot, and streamed Qwen and
+DiT blocks. Fp8-scaled weights remain refused by name because candle has no
+qualified Metal fp8 widening kernel.
+
+The final attention lifetime pass releases fused QKV before attention,
+transposes keys directly into their consumed layout, converts only the active
+query slice, caps each score matrix at 768 MiB, and uses fused last-dimension
+softmax so command buffers retain the one probability matrix the phase budget
+prices. A guarded 256×256, 107-frame FL2VA Turbo 4-step render with first-frame
+conditioning and stereo audio completed on a 48 GiB M4 Max under the exact
+8 GiB native ceiling, normal memory pressure, and zero swap growth.
+
+The compact stack's ~42.5 GB download size is not simultaneous residency.
+Admission sums host and device memory within each phase and selects the peak;
+larger requests may be refused when live headroom is insufficient. Use
+`mold system metal-memory status` to inspect this machine. The kernel setting
+it reports is not a process cap or an OOM guarantee. See
+[Metal memory](../guide/metal-memory.md) and the
+[qualification record](https://github.com/utensils/mold/blob/main/docs/qualification/minimax-h3-metal-next-campaign.md).
+Metal remains much slower than CUDA; it is a supported portability path, not a
+throughput claim.
 :::
 
 ## Compact variants
 
-| Model                                                      | Task                                                       | Total pull | Runtime status                       |
-| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA generation; ordered references  |
-| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable  |
-| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable  |
+| Model                                                      | Task                                                       | Total pull | Runtime status                             |
+| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ------------------------------------------ |
+| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; first-frame profile |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile   |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile   |
+| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references  |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable        |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable        |
 
 The official `minimax-h3-fl2va:official-bf16` and
 `minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
@@ -356,8 +353,9 @@ full-file manifest identities rather than estimates from repository listings.
 
 The current compact implementation supports this request profile:
 
-- an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
-  enabled (an Apple Silicon Metal GPU is admitted but unqualified; see above)
+- an SM89 CUDA or Apple Silicon Metal GPU with the H3 attention/runtime
+  operators enabled; the exact request must pass live device and host-memory
+  admission
 - any canvas the compact rule admits (both axes a multiple of 32, each at
   least 256 px, at most 1,032,192 pixels in total (the area of `1344x768`),
   aspect between 1:4 and 4:1) batch size 1

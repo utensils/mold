@@ -56,7 +56,7 @@ pub(crate) mod minimax_h3;
 /// The external H3 Metal campaign watchdog core. Only the
 /// `h3_metal_campaign_watch` dev-bin consumes it; `dev-bins` keeps the
 /// supervisor out of every production feature graph.
-#[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]
+#[cfg(all(feature = "dev-bins", any(feature = "h3", feature = "h3-private-uat")))]
 pub use minimax_h3::campaign_watch as h3_metal_campaign_watch;
 /// Release every cached MiniMax H3 conditioner output, reporting the host
 /// bytes handed back. The server's reclaim paths call this; see

@@ -987,12 +987,12 @@ pub const fn capabilities(task: Task) -> Capabilities {
             } else {
                 BackendQualification::ContractTarget
             },
-            // The Apple Silicon execution path landed in #1164: family-scoped
-            // BF16, a folded audio-VAE reduction, chunked dense attention, the
-            // portable INT8 arm, and fp8 refused by name. It is advertised as
-            // correctness-only and stays that way until performance UAT, per
-            // the Wan #800 precedent.
-            metal: BackendQualification::CorrectnessOnly,
+            // The Apple Silicon execution path is a supported public runtime:
+            // family-scoped BF16, folded audio-VAE reduction, bounded dense
+            // attention, portable INT8, streamed Qwen/DiT blocks, and exact
+            // per-request memory admission. Unsupported fp8 layouts remain
+            // refused by name.
+            metal: BackendQualification::Supported,
             cpu: BackendQualification::Unsupported,
         },
         native_batch_sizes: NATIVE_BATCH_SIZES,
@@ -3623,7 +3623,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (downloadable qualification reference; execution unavailable)",
             (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (downloadable qualification reference; execution unavailable)",
             (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; CUDA or Apple Metal)",
-            (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
+            (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; CUDA or Apple Metal)",
             (Task::Fl2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "MiniMax H3 FL2VA pruned NVFP4 transformer + NVFP4-AWQ conditioner (downloadable; execution not implemented in this build)",
             (Task::Ref2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA pruned NVFP4 transformer + NVFP4-AWQ conditioner (downloadable; execution not implemented in this build)",
         }
@@ -5248,10 +5248,10 @@ mod tests {
                     BackendQualification::ContractTarget
                 }
             );
-            // #1164: Metal is a real execution path, qualified for
-            // correctness only. CPU stays unsupported — a real capability
-            // limit, not a licence gate.
-            assert_eq!(caps.backends.metal, BackendQualification::CorrectnessOnly);
+            // #1164/#1542: the compact path is a supported Apple Metal
+            // runtime. CPU stays unsupported — a real capability limit, not
+            // a licence gate.
+            assert_eq!(caps.backends.metal, BackendQualification::Supported);
             assert_eq!(caps.backends.cpu, BackendQualification::Unsupported);
             assert!(caps.synchronized_audio);
             assert!(!caps.audio_disable_supported);
@@ -5400,7 +5400,7 @@ mod tests {
                     } else {
                         BackendQualification::ContractTarget
                     },
-                    metal: BackendQualification::CorrectnessOnly,
+                    metal: BackendQualification::Supported,
                     cpu: BackendQualification::Unsupported,
                 }
             );

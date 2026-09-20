@@ -79,9 +79,8 @@ pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = crate::comfy_int8::PORTABLE_ROW_C
 /// linear to the portable arm, because the native kernel folds none and
 /// `forward_reference` adds a bias only on the portable path. Everything else
 /// is [`select_int8_linear_kind`]'s answer — Metal always takes the portable
-/// arm (the cuBLASLt kernel has no Metal twin, and unlike Qwen-Image's
-/// `QMatMul` there is no candle-side Metal quantized kernel to qualify), which
-/// is also why the H3 Metal tier is `CorrectnessOnly`: the portable arm
+/// arm because the cuBLASLt kernel has no Metal twin and candle has no native
+/// Metal quantized kernel for this layout. That arm is exact but slower: it
 /// re-uploads and widens the packed weight chunk on every forward.
 pub fn select_h3_int8_linear_kind(
     device: &Device,

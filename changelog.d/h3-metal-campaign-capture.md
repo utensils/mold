@@ -1,10 +1,17 @@
-Added Metal campaign instrumentation for MiniMax H3: an opt-in
-`minimax_h3::campaign_capture` that records machine-readable memory and
-phase-budget rows plus an allocation-free budget sidecar for exact prepared
-requests, a required native-allocation ceiling in the campaign Metal memory
-guard (`MOLD_H3_METAL_CAMPAIGN=1`, `MOLD_H3_METAL_CAMPAIGN_CEILING_MB`), a
-budget-only pre-flight refusal path
-(`MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY=1`), macOS process-memory probes in the
-H3 runtime observer, and the `h3_metal_campaign_watch` external supervisor
-dev-bin. Production behavior is unchanged: the capture is inactive without
-the campaign variables.
+- **Enabled MiniMax H3 across shipped Apple Silicon surfaces.** Promoted the
+  compact Metal runtime to supported, taught the shared web/desktop/mobile
+  capability parser and inventory UI to accept the server's `cuda-or-metal`
+  contract, and retained exact per-request memory admission for shapes that do
+  not fit safely.
+- **Made MiniMax H3 Metal qualification fail closed.** Added opt-in
+  machine-readable phase and memory capture, exact prepared-request budget
+  sidecars, a required native-allocation ceiling, allocation-free preflight,
+  macOS process probes, and an external watchdog enforcing the campaign's
+  availability, swap, pressure, deadline, lock, and cleanup gates. The
+  instrumentation is inactive outside a campaign.
+- **Reduced MiniMax H3 Metal attention residency.** Chunked dense attention now
+  converts only the active query slice, transposes keys directly into their
+  consumed layout, releases the fused QKV projection before attention, bounds
+  each F32 score matrix at 768 MiB, and uses the fused last-dimension softmax so
+  runtime retains the single probability matrix its workspace prices. CUDA
+  dispatch and attention arithmetic remain unchanged.

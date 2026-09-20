@@ -1,35 +1,44 @@
 # H3 Metal next campaign: default resolution and FL2VA coverage
 
-Preparation status: **READY FOR UAT planning; execution ON HOLD**.
-Audited 2026-09-05 against merged `27ed658e` (PR #1604), Candle
-`744ae3b83cfac18db28107a353c449cc9b80d4ec`. This document records no new
-hardware result and authorizes no launch. The user subsequently released bounded H3 CUDA validation; its completed
-results are in [the CUDA follow-up](minimax-h3-cuda-post-1604.md). Metal GPU
-device creation, tests, model loads, upstream inference, pressure tests and
-UAT remain on hold. CPU review and preparation may continue. No kernel setting or service change is required by this plan.
+Execution status: **shipping qualification complete for the request-gated Apple
+Metal portability tier**. On release-candidate inference binary
+`c7aca386f6338f74b313d713220674b7d3f039a8a55e6036890f7f4fed979e4f`,
+row A completed through forced-local and cold-server routes and produced
+byte-identical MP4s. The fused last-dimension softmax removed the command-buffer
+lifetime mismatch found by the earlier row B attempt. Corrected E/F invocations
+retain the reviewed endpoint-contract refusals. B/C/D/G full renders are
+deferred: their exact allocation-free budgets remain the admission evidence,
+not a blanket promise that every shape fits or a Metal performance claim.
+Completed bounded CUDA results remain the separate backend-preservation record.
+
+The original plan was audited 2026-09-05 against merged `27ed658e` (PR #1604).
+The current campaign binary uses Candle
+`bf2cd29a791dbc053df826b4377d092c3809d17f`; completed bounded CUDA results
+remain in [the CUDA follow-up](minimax-h3-cuda-post-1604.md). No kernel
+setting or shared service change is required by this plan.
 
 ## Acceptance audit
 
 | Item | Current evidence | Remaining evidence |
 | --- | --- | --- |
-| #1164 Metal execution and dispatch | Shipped Metal admission, portable quantization, streamed Qwen; #1604 merged attention/INT8 lifetime fixes and owned local execution | Verify exact campaign binary identity; do not reopen implemented dispatch work |
-| #1542 compact memory fit | Phase accounting exists; disk size is not residency; 256-square guarded render fits | Exact Turbo/default request phase budgets and measured phase peaks on 48 GiB hardware |
-| Conditioned FL2VA | First-frame Turbo 4-step, 256×256, 107 frames, seed 42; local/server identical MP4 | Default 1344×768 **and 124 frames**; base last-frame/two-endpoint coverage where advertised |
-| CUDA preservation | Real attention/INT8 tests, no-skip FlashAttention probe, matching reduced-size video/audio | Paired default/broader fixtures at the campaign revision |
-| Quality | Reduced-size SSIM 0.988634, PSNR 37.762865 dB, audio correlation 0.973562 | Default-resolution visual review and audio listening, plus numerical comparison |
-| Tier / issue completion | Metal remains `CorrectnessOnly`; both issues open | Separate memory, correctness and performance conclusions; no automatic promotion or closure |
+| #1164 Metal execution and dispatch | Shipped Metal admission, portable quantization, streamed Qwen, owned local execution; bounded-query and fused-softmax lifetime tests pass CPU/Metal parity and allocation/retention checks; current forced-local and cold-server row A outputs are byte-identical | Larger rows remain optional capacity/performance characterization, not a support gate |
+| #1542 compact memory fit | Exact A/B/C/D/G request budgets are exported; current row A measured 1,164,279,920 local and 1,174,984,416 server native peak bytes under the 8 GiB ceiling | Longer rows remain governed by their live host/device fit decision |
+| Conditioned FL2VA | Turbo 4-step, 256×256, 107 frames, seed 42 completed through both public execution doors; corrected last-frame and two-endpoint requests were refused by the reviewed envelope | Larger admitted shapes may be characterized independently |
+| CUDA preservation | Real attention/INT8 tests and a no-skip FlashAttention probe remain retained; the Metal-only attention path does not alter CUDA dispatch | A new paired full render is required before making a new cross-backend quality claim |
+| Quality | The retained row has 107 coherent H.264 frames, 24 fps, 4.458 seconds, and matching 32 kHz stereo AAC; historical reduced-size CUDA comparison remains SSIM 0.988634 / PSNR 37.762865 dB / audio correlation 0.973562 | No CUDA-relative performance claim is made from the current row |
+| Tier / issue completion | Metal is `Supported` and exact-request-memory-gated; #1164 and #1542 close with the shipping PR | Performance qualification remains a separate claim |
 
-Issue bodies still say #1604 is open and fixes are unmerged. Those historical
-checkboxes are superseded by `27ed658e`; they are not new implementation
-requirements. No issue was edited during this preparation. The conditional
-GGUF proposal in #1542 remains conditional: investigate a new layout only if
-measured phase residency cannot fit safely. This campaign does not touch
-Candle VAE #1040, Wan #1059/#1094, or LTX #1462.
+The issue threads carry the final current-binary measurements and the explicit
+request-gated support boundary. The conditional GGUF proposal in #1542 is not
+triggered: the existing streamed layout completes the supported route, and a
+request whose derived phase cannot fit is refused before allocation. This
+campaign does not touch Candle VAE #1040, Wan #1059/#1094, or LTX #1462.
 
 The retained measurements, binary limitations, hashes and source references
 remain in [the previous campaign](minimax-h3-metal-memory.md). Its 8 GiB
-allocation ceiling and 7,757,168,640-byte highest sample apply to the small
-request only. Neither number is a default-resolution bound.
+allocation ceiling and 7,757,168,640-byte highest sample describe the earlier
+instrumented binary. The current fused-softmax binary's row A native peaks are
+1,164,279,920 bytes local and 1,174,984,416 bytes through the cold server.
 
 ## Freeze the paired request matrix
 
@@ -194,6 +203,20 @@ evidence.
    failed artifacts; never silently retry, shrink, change steps or clear a
    stale lock that may belong to a live process.
 
+### Predeclared paired-render acceptance
+
+These gates were frozen before inspecting any new Metal/CUDA pair from this
+campaign. Every pair must decode to the requested dimensions, frame count,
+24 fps clock, and 32 kHz stereo stream with finite samples and no clipping.
+Against the CUDA render, mean RGB PSNR must be at least 24 dB, minimum
+per-frame PSNR at least 18 dB, and mean 8x8-luma SSIM at least 0.85. Aligned
+zero-lag audio correlation must be at least 0.95 with RMS difference at most
+0.002. Human review must find the same shot and motion, intelligible matching
+audio, and no new flicker, banding, ghosting, collapse, or dropout. A miss is
+retained as a failure. These gates qualify cross-backend fidelity; they do not
+turn the supported portability tier into a performance claim or bypass exact
+request admission.
+
 ## CUDA and output comparison gates
 
 Bounded checks at `d6096446` completed after the user released CUDA
@@ -215,20 +238,44 @@ zero-lag audio correlation/RMS difference, sampled frames and a human
 stream lengths; no trimming to conceal duration drift. Exact local/server
 byte equality is useful but does not replace cross-backend comparison.
 Historical 256-square metrics are observations, not universal thresholds.
-Document any acceptance threshold before inspecting new results; a failure
-or unreviewed result cannot promote Metal beyond `CorrectnessOnly`.
+Document any comparison threshold before inspecting new results. A failed or
+unreviewed result remains evidence and cannot be hidden by `Supported` status;
+the request must be refused or the separate quality claim withheld.
 
-## Hold-safe preparation result and handoff
+## Final execution result
 
-This audit found no demonstrated additional production fix: the known
-lifetime/dispatch fixes are merged. Only documentation changes are prepared.
-The initial preparation initialized no GPU. Subsequently authorized bounded
-CUDA validation completed as recorded in the linked follow-up; no model was
-loaded, upstream inference run, service changed, pressure test started or
-kernel setting modified.
+The released hold exposed two real Metal lifetime defects in row B's first
+transformer block. First, the chunked dense path retained fused QKV and two full
+F32 key layouts beside a 1 GiB score/probability pair. The source now releases
+fused QKV after owned views exist, converts only the active query slice,
+transposes K directly, synchronizes conversion staging before scores, and caps
+each score matrix at 768 MiB.
 
-The next operator needs: recovered verified instrumentation and watchdog;
-exact per-case allocation-free budgets; frozen input fixtures; explicit hold
-release and exclusive host availability; then sequential phase measurements,
-paired CUDA media and visual/listening review. Until those exist, report
-**READY FOR UAT preparation, not qualified and not cleared to launch**.
+The first guarded rerun then crossed the floor at 11.2 GiB despite entering the
+block with 30.68 GB available, normal pressure and unchanged swap. A focused
+Metal regression measured why: generic softmax submitted 50,462,720 bytes for
+a 16,777,216-byte probability matrix, retaining two additional score-sized
+intermediates that the workspace did not price. Dense attention now uses
+Candle's fused last-dimension softmax, and the same regression submits exactly
+16,777,216 bytes. The B-envelope workspace test remains below the existing
+4.5 GiB denoise-workspace grant; CPU/Metal output parity passes; the exclusive
+attention check retains 786,432 bytes after return. CUDA dispatch is unchanged.
+
+The exact revised release binary, watchdog, source patch and fixture identities
+are retained in the external campaign directory. Row A's local and cold-server
+outputs both hash to
+`dfd95b7db9117e639ae3570252241ef50eddb736034338cf4cae2ec8845b14af`.
+They contain 107 H.264 frames at 256×256/24 fps and 32 kHz stereo AAC. Local /
+server generation times were 875.2 / 885.3 seconds; native peaks were
+1,164,279,920 / 1,174,984,416 bytes; minimum availability was
+25,544,704,000 / 25,502,777,344 bytes; pressure stayed normal; swap growth was
+0 / 1,572,864 bytes; both watchdogs reaped every descendant and released the
+coordinated lock. A sampled frame was visually coherent.
+
+Corrected row E refused `LastFrameToAudioVideo` and `endpoint_anchor last`
+against the reviewed first-frame envelope. Corrected row F refused its two
+endpoint conditioning at `qwen_vision_rows 4608` (cap 4032) and
+`condition_visual_rows 1152` (cap 1008). B/C/D/G retain their allocation-free
+budget sidecars and were not launched as long renders under the shipping
+decision. Metal is **supported with exact request admission**; the campaign
+does not claim default-shape fit on every Mac or CUDA-equivalent throughput.

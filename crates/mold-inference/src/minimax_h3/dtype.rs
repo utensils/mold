@@ -54,8 +54,8 @@ pub(crate) fn compute_dtype(device: &Device) -> DType {
 pub(crate) fn ensure_supported(device: &Device) -> Result<()> {
     if device.is_cpu() {
         bail!(
-            "MiniMax H3 has no CPU execution route — the compact stack is qualified on CUDA and, \
-             for correctness only, on Apple Metal. Select a GPU device."
+            "MiniMax H3 has no CPU execution route — the compact stack is qualified on CUDA and \
+             Apple Metal. Select a GPU device."
         );
     }
     Ok(())

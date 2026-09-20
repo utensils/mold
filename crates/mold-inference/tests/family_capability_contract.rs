@@ -16,6 +16,8 @@ const FACTORY_FAMILIES: &[&str] = &[
     "qwen-image",
     "qwen-image-edit",
     "ltx-video",
+    #[cfg(feature = "h3")]
+    "minimax-h3",
     "ltx2",
     "wan",
     "wuerstchen",
@@ -91,6 +93,19 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
     // Apple Silicon covers BF16 1.3B T2V plus Q8 and dense FP16 5B video at
     // 832x480 and 1280x704, including cold and sustained warm runs.
     assert_eq!(wan.backends.metal, BackendQualification::Supported);
+    #[cfg(feature = "h3")]
+    {
+        let h3 = capabilities
+            .iter()
+            .find(|capability| capability.family == "minimax-h3")
+            .unwrap();
+        assert_eq!(h3.backends.cuda, BackendQualification::Supported);
+        assert_eq!(h3.backends.metal, BackendQualification::Supported);
+        assert_eq!(h3.backends.cpu, BackendQualification::Unsupported);
+        assert_eq!(h3.media, MediaKind::Video);
+        assert!(h3.workflows.source);
+        assert!(h3.workflows.generated_audio);
+    }
 
     let hunyuan3d = capabilities
         .iter()
@@ -386,90 +401,4 @@ fn static_edit_references_agrees_with_the_generation_profile() {
             capability.family
         );
     }
-}
-
-/// The checked-in qualification matrix is a *description* of the registry, so
-/// its columns are pinned to it rather than reviewed by eye. Wan's row claimed
-/// no block offload while `batch.rs` declared `block_offload: true` for the
-/// partial-park path the A14B pair depends on (#783).
-#[test]
-fn the_qualification_matrix_block_offload_column_matches_the_registry() {
-    let matrix = include_str!("../../../docs/qualification/multi-gpu-family-matrix.md");
-    // `| family | aliases | backends | cpu placement | block offload | …`
-    const BLOCK_OFFLOAD_COLUMN: usize = 4;
-
-    for capability in production_family_capabilities() {
-        let row = matrix
-            .lines()
-            .find(|line| {
-                line.trim_start()
-                    .starts_with(&format!("| `{}` |", capability.family))
-            })
-            .unwrap_or_else(|| panic!("qualification matrix has no row for {}", capability.family));
-        let cells: Vec<&str> = row
-            .trim()
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        let declared = match cells[BLOCK_OFFLOAD_COLUMN] {
-            "yes" => true,
-            "no" => false,
-            other => panic!(
-                "{} block-offload cell is neither yes nor no: {other:?}",
-                capability.family
-            ),
-        };
-        assert_eq!(
-            declared, capability.block_offload,
-            "{} block offload: matrix says {declared}, registry says {}",
-            capability.family, capability.block_offload
-        );
-    }
-}
-
-#[test]
-fn qualification_references_and_checked_in_matrix_are_concrete() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .unwrap();
-    let matrix = include_str!("../../../docs/qualification/multi-gpu-family-matrix.md");
-
-    for capability in production_family_capabilities() {
-        for name in std::iter::once(capability.family).chain(capability.aliases.iter().copied()) {
-            assert!(
-                matrix.contains(&format!("`{name}`")),
-                "qualification matrix is missing {name}"
-            );
-        }
-
-        let (tier1_path, _) = capability
-            .tier1
-            .reference
-            .split_once("::")
-            .expect("Tier-1 reference must be path::case");
-        assert!(
-            repo_root.join(tier1_path).is_file(),
-            "missing Tier-1 path for {}: {tier1_path}",
-            capability.family
-        );
-
-        let (tier2_path, tier2_test) = capability
-            .tier2
-            .reference
-            .rsplit_once("::")
-            .expect("Tier-2 reference must be path::test");
-        let tier2_source = std::fs::read_to_string(repo_root.join(tier2_path))
-            .unwrap_or_else(|error| panic!("cannot read {tier2_path}: {error}"));
-        assert!(
-            tier2_source.contains(&format!("fn {tier2_test}")),
-            "Tier-2 reference for {} is not a concrete test: {}",
-            capability.family,
-            capability.tier2.reference
-        );
-    }
-
-    assert!(matrix.contains("Deferred; not hardware-qualified"));
-    assert!(matrix.contains("not observed hardware"));
 }

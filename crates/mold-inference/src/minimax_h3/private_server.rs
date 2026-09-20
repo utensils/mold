@@ -5818,9 +5818,9 @@ const PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA: &str =
 
 /// The device rule is FL2VA's, deliberately: `mold_core::minimax_h3`'s backend
 /// applicability is a FAMILY declaration (`cuda: Supported`, `metal:
-/// CorrectnessOnly`), so a Ref2VA-only Metal refusal would contradict the
-/// capability every client reads. Both tasks share one Metal correctness tier
-/// and one CUDA SM89 qualification.
+/// Supported`), so a Ref2VA-only Metal refusal would contradict the capability
+/// every client reads. Both tasks share one supported Metal route and one CUDA
+/// SM89 qualification.
 #[cfg(feature = "h3")]
 const PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION: &str = "supported-compact-ref2va-cuda-sm89-or-metal";
 

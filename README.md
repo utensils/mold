@@ -86,8 +86,10 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   requirements.
   Wan's 1.3B BF16 and 5B Q8/FP16 paths are performance-qualified on Apple
   Metal as well as CUDA; fp8-scaled Wan checkpoints remain CUDA-only.
-  MiniMax H3 forced-local execution accepts one FL2VA request; batches,
-  sequences, and Ref2VA reference uploads require the server route.
+  MiniMax H3's compact runtime is supported on SM89 CUDA and Apple Metal;
+  Metal admission checks each request against live unified-memory headroom.
+  Forced-local H3 execution accepts one FL2VA request; batches, sequences, and
+  Ref2VA reference uploads require the server route.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
   identity photos, reference-image prompting, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
