@@ -20,7 +20,7 @@ public struct WrappingHStack: Layout {
 
     public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
                              cache: inout ()) -> CGSize {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = measured(subviews, within: proposal.width)
         let rows = Self.rows(of: sizes, within: proposal.width ?? .infinity, spacing: horizontalSpacing)
         var width: CGFloat = 0
         var height: CGFloat = 0
@@ -36,7 +36,7 @@ public struct WrappingHStack: Layout {
 
     public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
                               subviews: Subviews, cache: inout ()) {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = measured(subviews, within: bounds.width)
         let rows = Self.rows(of: sizes, within: bounds.width, spacing: horizontalSpacing)
 
         var index = 0
@@ -54,6 +54,16 @@ public struct WrappingHStack: Layout {
                 index += 1
             }
             y += rowHeight + verticalSpacing
+        }
+    }
+
+    /// Ask oversized children to wrap or truncate within the offered width.
+    /// Measuring only their ideal size lets one long tag widen an inspector.
+    private func measured(_ subviews: Subviews, within width: CGFloat?) -> [CGSize] {
+        subviews.map { view in
+            let ideal = view.sizeThatFits(.unspecified)
+            guard let width, width.isFinite, ideal.width > width else { return ideal }
+            return view.sizeThatFits(ProposedViewSize(width: max(0, width), height: nil))
         }
     }
 

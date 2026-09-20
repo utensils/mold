@@ -22,11 +22,12 @@ struct MoldApp: App {
                 .task { TextEditingFocus.shared.startObserving() }
                 .task { handOverToTheDelegate() }
                 .moldEnvironment(stores)
-                // Below this the split view stops being a split view and
-                // starts being two cramped columns.
-                .frame(minWidth: 880, minHeight: 560)
+                // Allow 220 for the sidebar, 336 for the inspector and
+                // 524 for the canvas, toolbar and split dividers.
+                .frame(minWidth: 1_080, minHeight: 560)
         }
         .defaultSize(width: 1_280, height: 860)
+        .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .commands {
             // SwiftUI's own View ▸ Hide/Show Sidebar (⌃⌘S). Nothing bespoke:
@@ -44,6 +45,7 @@ struct MoldApp: App {
             SettingsView()
                 .moldSettingsEnvironment(stores)
         }
+        .windowResizability(.contentMinSize)
     }
 
     /// The delegate owns quitting, and quitting has to reach the engine and

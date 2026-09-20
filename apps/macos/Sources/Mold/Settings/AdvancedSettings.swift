@@ -74,7 +74,7 @@ struct AdvancedSettings: View {
                 // item that read like a tenth tab (M7 UAT).
                 TextField("Search settings", text: $query)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
+                    .frame(minWidth: 140, idealWidth: 220, maxWidth: 280)
                     .accessibilityLabel("Search settings")
             }
             ProfileHeader(profiles: store.profiles[machine.id])
@@ -89,12 +89,14 @@ struct AdvancedSettings: View {
     private func table(_ rows: [Row], machine: MoldHost) -> some View {
         Table(of: Row.self, selection: $selection) {
             TableColumn("Key") { row in keyCell(row) }
+                .width(min: 180, ideal: 240)
             TableColumn("Value") { row in
                 ConfigValueField(entry: row.entry) { scalar in
                     await store.set(row.entry.key, to: scalar, on: machine.id)
                 }
             }
             TableColumn("Source") { row in SourceBadge(entry: row.entry) }
+                .width(min: 90, ideal: 110, max: 130)
             TableColumn("") { row in resetButton(row, machine: machine) }
                 .width(44)
         } rows: {
@@ -120,6 +122,9 @@ struct AdvancedSettings: View {
     @ViewBuilder private func keyCell(_ row: Row) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(row.entry.key).textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(row.entry.key)
             if let refusal = row.refusal {
                 Text(refusal)
                     .font(.caption2)

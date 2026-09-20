@@ -120,6 +120,29 @@
           "docs/plans/macos-generation-library-parity.md"
         ],
         "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original global scan values."
+      },
+      {
+        "id": "macos-settings-responsive-layout",
+        "updatedAt": "2026-09-20T04:30:03.914380+00:00",
+        "baseCommit": "aa4fdb1a8b0661768cac6946fbea61641a089f05",
+        "scope": "Native macOS Settings host alignment, constrained window columns and oversized flow-layout children",
+        "files": [
+          "apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+          "apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift",
+          "apps/macos/Sources/Mold/Library/CollectionsField.swift",
+          "apps/macos/Sources/Mold/Library/InspectorDetails.swift",
+          "apps/macos/Sources/Mold/Library/TagEditor.swift",
+          "apps/macos/Sources/Mold/Machines/MachineRow.swift",
+          "apps/macos/Sources/Mold/MoldApp.swift",
+          "apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+          "apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+          "apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+          "apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+          "apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+          "apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+          "apps/macos/Sources/Mold/Shell/SettingsView.swift"
+        ],
+        "note": "Scoped source-verified refresh; global analysis metadata remains unchanged."
       }
     ]
   },
@@ -292507,6 +292530,188 @@
         "test"
       ],
       "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+      "type": "file",
+      "name": "WrappingHStack.swift",
+      "filePath": "apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Flow layout that remeasures oversized children within proposed width before packing and placement."
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift",
+      "type": "file",
+      "name": "WrappingHStackTests.swift",
+      "filePath": "apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Packing contracts and rendered regression coverage for oversized chips within a constrained width."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/CollectionsField.swift",
+      "type": "file",
+      "name": "CollectionsField.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/CollectionsField.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Collection membership chips with bounded labels and full-name help."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/InspectorDetails.swift",
+      "type": "file",
+      "name": "InspectorDetails.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/InspectorDetails.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Wrapped selectable print provenance with no repeated heading for a lone prose row."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/TagEditor.swift",
+      "type": "file",
+      "name": "TagEditor.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/TagEditor.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Shared selection tag editing with truncatable chips that fit the inspector."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Machines/MachineRow.swift",
+      "type": "file",
+      "name": "MachineRow.swift",
+      "filePath": "apps/macos/Sources/Mold/Machines/MachineRow.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Sidebar host row with bounded machine name and full-name hover help."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/MoldApp.swift",
+      "type": "file",
+      "name": "MoldApp.swift",
+      "filePath": "apps/macos/Sources/Mold/MoldApp.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Native app scenes with a 1080-point main window minimum preserving sidebar, canvas and inspector space."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+      "type": "file",
+      "name": "AdvancedSettings.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Editable config table with bounded source and reset columns, flexible values and full-key hover help."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+      "type": "file",
+      "name": "ConfigValueField+Fields.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Typed configuration editors with a single secret status label and unchanged commit safeguards."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+      "type": "file",
+      "name": "SettingRow+Editors.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Curated configuration editors with visible text fields and empty-value placeholders."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+      "type": "file",
+      "name": "SettingsLayout.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Settings window minimum dimensions and tab width budget."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "type": "file",
+      "name": "SettingsPane.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Shared machine-scoped settings state and labeled machine selector, with native form alignment."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+      "type": "file",
+      "name": "AccountsSettings.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Catalog credentials scoped to the selected machine through the shared settings machine header."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/SettingsView.swift",
+      "type": "file",
+      "name": "SettingsView.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/SettingsView.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "layout"
+      ],
+      "complexity": "moderate",
+      "summary": "Nine native settings tabs with minimum and ideal window dimensions."
     }
   ],
   "edges": [
@@ -518408,6 +518613,69 @@
       "type": "tested_by",
       "direction": "forward",
       "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/SettingsView.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/SettingsView.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+      "target": "file:apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/TagEditor.swift",
+      "target": "file:apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/CollectionsField.swift",
+      "target": "file:apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift",
+      "target": "file:apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
     }
   ],
   "layers": [
@@ -519646,7 +519914,19 @@
         "function:apps/macos/Sources/Mold/Library/LibraryPane+Reuse.swift:selectedGenerateModel",
         "file:apps/macos/Tests/MoldTests/RunQueueTests.swift",
         "class:apps/macos/Tests/MoldTests/RunQueueTests.swift:RunQueueTests",
-        "function:apps/macos/Tests/MoldTests/RunQueueTests.swift:aSecondGenerateWhileOneRunsIsAdmittedAndQueued"
+        "function:apps/macos/Tests/MoldTests/RunQueueTests.swift:aSecondGenerateWhileOneRunsIsAdmittedAndQueued",
+        "file:apps/macos/Sources/Mold/Library/CollectionsField.swift",
+        "file:apps/macos/Sources/Mold/Library/InspectorDetails.swift",
+        "file:apps/macos/Sources/Mold/Library/TagEditor.swift",
+        "file:apps/macos/Sources/Mold/Machines/MachineRow.swift",
+        "file:apps/macos/Sources/Mold/MoldApp.swift",
+        "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+        "file:apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+        "file:apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+        "file:apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+        "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+        "file:apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+        "file:apps/macos/Sources/Mold/Shell/SettingsView.swift"
       ]
     },
     {
@@ -520327,7 +520607,9 @@
         "file:ui/lib/stylePresets.ts",
         "file:ui/lib/useRootFocusOnOpen.ts",
         "file:ui/theme.ts",
-        "file:ui/tokens.css"
+        "file:ui/tokens.css",
+        "file:apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+        "file:apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift"
       ]
     },
     {

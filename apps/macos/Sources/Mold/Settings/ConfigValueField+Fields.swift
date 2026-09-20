@@ -28,7 +28,8 @@ extension ConfigValueField {
 
     var secretField: some View {
         HStack(spacing: 6) {
-            SecureField(entry.secretState, text: $text)
+            SecureField("", text: $text)
+                .accessibilityLabel(entry.key)
                 .focused($focused)
                 .onSubmit { commit(onBlur: false) }
             Text(entry.secretState).font(.caption).foregroundStyle(.secondary)

@@ -21,7 +21,7 @@ struct InspectorDetails: View {
                         // By POSITION, like `RowActionMenu`: two groups can
                         // hold a row of the same name.
                         ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
-                            line(row)
+                            line(row, showsProseLabel: group.rows.count != 1 || row.label != group.title)
                         }
                     }
                 }
@@ -33,11 +33,11 @@ struct InspectorDetails: View {
     /// Prose gets its own paragraph under its name and wraps; a figure sits on
     /// the baseline beside it. Both are selectable, because the point of
     /// showing a seed is that somebody copies it.
-    @ViewBuilder private func line(_ row: PrintDetailRow) -> some View {
+    @ViewBuilder private func line(_ row: PrintDetailRow, showsProseLabel: Bool) -> some View {
         Group {
             if row.isProse {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.label).foregroundStyle(.secondary)
+                    if showsProseLabel { Text(row.label).foregroundStyle(.secondary) }
                     value(row).font(.callout)
                 }
             } else {

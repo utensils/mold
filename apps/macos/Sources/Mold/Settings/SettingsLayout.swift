@@ -1,6 +1,6 @@
 import Foundation
 
-/// The Settings window's fixed size, and the rule that earns it.
+/// The Settings window's minimum size, and the rule that earns it.
 ///
 /// Nine tabs (`SettingsView`) must each have room for a `tabItem` label
 /// without SwiftUI collapsing the bar into an overflow chevron.

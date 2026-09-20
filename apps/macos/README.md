@@ -41,6 +41,12 @@ What a selection can do is in the **Library menu**, never in a bar that floats
 over the grid: the menu bar is what macOS searches from Help, what the keyboard
 reaches, and what VoiceOver reads.
 
+The native window keeps a minimum width of 1,080 points so its sidebar,
+canvas and inspector remain usable together. Long machine names truncate in
+sidebar rows with the full name available on hover; oversized tag and collection
+chips fit their inspector column. Machine-scoped Settings use the same labeled
+selector, and Advanced keeps source badges compact to leave room for values.
+
 ## Where the bytes go
 
 A print lives on the machine that made it, and Quick Look, sharing, saving and

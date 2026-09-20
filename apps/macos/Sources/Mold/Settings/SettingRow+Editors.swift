@@ -38,7 +38,9 @@ extension SettingRow {
     }
 
     var textField: some View {
-        TextField("", text: $text)
+        TextField("", text: $text, prompt: Text("Not set"))
+            .labelsHidden()
+            .textFieldStyle(.roundedBorder)
             .focused($focused)
             .onSubmit { commit(onBlur: false) }
             .onChange(of: focused) { was, is_ in if was, !is_ { commit(onBlur: true) } }

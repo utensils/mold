@@ -62,7 +62,7 @@ struct TagEditor: View {
 
     private func chip(_ tag: String) -> some View {
         HStack(spacing: 3) {
-            Button { filterBy(tag) } label: { Text(tag) }
+            Button { filterBy(tag) } label: { Text(tag).lineLimit(1).truncationMode(.middle) }
                 .buttonStyle(.plain)
                 .help("Show everything tagged \(tag)")
             Button { actions.setTag(tag, adding: false, on: entries) } label: {

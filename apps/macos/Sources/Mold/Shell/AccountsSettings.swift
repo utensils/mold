@@ -31,11 +31,7 @@ struct AccountsSettings: View {
                 Text("Add a machine in Settings ▸ Machines first.")
                     .foregroundStyle(.secondary)
             } else {
-                Picker("Machine", selection: selectedHostID) {
-                    ForEach(hosts.hosts) { host in
-                        Text(host.name).tag(MoldHost.ID?.some(host.id))
-                    }
-                }
+                SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
                 if let selected { machine(selected) }
             }
         }
@@ -62,12 +58,4 @@ struct AccountsSettings: View {
         }
     }
 
-    /// `selectedMachine` read and written the way `HostStore.machine(selected:)`
-    /// expects, the same binding `ModelsPane`'s toolbar builds.
-    private var selectedHostID: Binding<MoldHost.ID?> {
-        Binding(
-            get: { hosts.machine(selected: selectedMachine)?.id },
-            set: { selectedMachine = $0?.uuidString ?? "" }
-        )
-    }
 }

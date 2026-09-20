@@ -20,7 +20,7 @@ struct MachineRow: View {
         HStack(spacing: 8) {
             HostStatusDot(reachability: reachability)
             VStack(alignment: .leading, spacing: 1) {
-                Text(host.name)
+                Text(host.name).lineLimit(1).truncationMode(.middle).help(host.name)
                 if let detail = reachability.summary {
                     Text(detail)
                         .font(.caption)

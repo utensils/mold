@@ -70,6 +70,29 @@
       "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original global scan values.",
       "addedNodes": 116,
       "addedEdges": 126
+    },
+    {
+      "id": "macos-settings-responsive-layout",
+      "updatedAt": "2026-09-20T04:30:03.914380+00:00",
+      "baseCommit": "aa4fdb1a8b0661768cac6946fbea61641a089f05",
+      "scope": "Native macOS Settings host alignment, constrained window columns and oversized flow-layout children",
+      "files": [
+        "apps/macos/Packages/MoldStyle/Sources/MoldStyle/WrappingHStack.swift",
+        "apps/macos/Packages/MoldStyle/Tests/MoldStyleTests/WrappingHStackTests.swift",
+        "apps/macos/Sources/Mold/Library/CollectionsField.swift",
+        "apps/macos/Sources/Mold/Library/InspectorDetails.swift",
+        "apps/macos/Sources/Mold/Library/TagEditor.swift",
+        "apps/macos/Sources/Mold/Machines/MachineRow.swift",
+        "apps/macos/Sources/Mold/MoldApp.swift",
+        "apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
+        "apps/macos/Sources/Mold/Settings/ConfigValueField+Fields.swift",
+        "apps/macos/Sources/Mold/Settings/SettingRow+Editors.swift",
+        "apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
+        "apps/macos/Sources/Mold/Settings/SettingsPane.swift",
+        "apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
+        "apps/macos/Sources/Mold/Shell/SettingsView.swift"
+      ],
+      "note": "Scoped source-verified refresh; global analysis metadata remains unchanged."
     }
   ]
 }

@@ -31,8 +31,8 @@ struct SettingsMachineHeader: View {
                 Text(host.name).tag(MoldHost.ID?.some(host.id))
             }
         }
-        .labelsHidden()
-        .frame(width: 220)
+        .pickerStyle(.menu)
+        .help("Choose the machine whose settings you want to change.")
     }
 
     private var selectedHostID: Binding<MoldHost.ID?> {

@@ -43,7 +43,7 @@ struct CollectionsField: View {
 
     private func chip(_ shelf: CollectionShelf) -> some View {
         HStack(spacing: 3) {
-            Text(shelf.name)
+            Text(shelf.name).lineLimit(1).truncationMode(.middle).help(shelf.name)
             Button { actions.unfile(entries, from: shelf) } label: {
                 Image(systemName: "xmark")
             }

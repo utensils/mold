@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftUI
 
 @testable import MoldStyle
 
@@ -45,4 +46,22 @@ private func size(_ width: CGFloat) -> CGSize { CGSize(width: width, height: 26)
     #expect(WrappingHStack.rows(of: [], within: 300, spacing: 10).isEmpty)
     let rows = WrappingHStack.rows(of: [size(100)], within: 300, spacing: 10)
     #expect(rows.allSatisfy { !$0.isEmpty })
+}
+
+@MainActor
+@Test func oversizedChipUsesTheProposedWidth() throws {
+    let renderer = ImageRenderer(content:
+        WrappingHStack {
+            HStack {
+                Text(String(repeating: "long-tag-", count: 30)).lineLimit(1)
+                Image(systemName: "xmark")
+            }
+            .padding(7)
+            Text("Next tag")
+        }
+    )
+    renderer.proposedSize = ProposedViewSize(width: 180, height: nil)
+    let image = try #require(renderer.cgImage)
+    #expect(image.width <= 180)
+    #expect(image.height > 30, "The next tag should wrap onto its own row")
 }

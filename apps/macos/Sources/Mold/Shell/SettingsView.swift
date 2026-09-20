@@ -52,7 +52,8 @@ struct SettingsView: View {
                     .tag(tab)
             }
         }
-        .frame(width: CGFloat(SettingsLayout.width), height: CGFloat(SettingsLayout.height))
+        .frame(minWidth: CGFloat(SettingsLayout.width), idealWidth: CGFloat(SettingsLayout.width),
+               minHeight: CGFloat(SettingsLayout.height), idealHeight: CGFloat(SettingsLayout.height))
     }
 
     @ViewBuilder private func content(for tab: SettingsTab) -> some View {
