@@ -291,8 +291,8 @@ jobs:
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
 
-      - name: Package
-        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz -C target/release mold
+      - name: Package binary and shell completions
+        run: scripts/package-cuda-release-archive.sh target/release/mold mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
 
       - name: Verify embedded target PTX, loader, NVML, and archive
         run: scripts/verify-cuda-release-binary.sh target/release/mold 86 mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
@@ -398,8 +398,8 @@ jobs:
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
 
-      - name: Package
-        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
+      - name: Package binary and shell completions
+        run: scripts/package-cuda-release-archive.sh target/release/mold mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
 
       - name: Verify embedded target PTX, loader, NVML, and archive
         run: scripts/verify-cuda-release-binary.sh target/release/mold 89 mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
@@ -503,8 +503,8 @@ jobs:
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
 
-      - name: Package
-        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz -C target/release mold
+      - name: Package binary and shell completions
+        run: scripts/package-cuda-release-archive.sh target/release/mold mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
 
       - name: Verify embedded target PTX, loader, NVML, and archive
         run: scripts/verify-cuda-release-binary.sh target/release/mold 100 mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
@@ -614,8 +614,8 @@ jobs:
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build
 
-      - name: Package
-        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
+      - name: Package binary and shell completions
+        run: scripts/package-cuda-release-archive.sh target/release/mold mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
       - name: Verify embedded target PTX, loader, NVML, and archive
         run: scripts/verify-cuda-release-binary.sh target/release/mold 120 mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
@@ -1029,6 +1029,8 @@ jobs:
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz  # B200 / B300 (simulated)
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
+            # Shell completions generated from this binary ship beside it:
+            # completions/mold.bash, completions/_mold, completions/mold.fish
 
             # Windows PowerShell (CPU inference or remote client)
             Expand-Archive .\mold-x86_64-pc-windows-msvc-cpu.zip -DestinationPath .\mold

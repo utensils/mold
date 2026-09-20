@@ -10,7 +10,9 @@
 #   <version>  the release version without the leading `v` (e.g. 0.10.0)
 #
 # Side effects:
-#   - Mutates packaging/aur/<pkgname>/PKGBUILD in place.
+#   - Mutates packaging/aur/<pkgname>/PKGBUILD in place — or the copy named
+#     by $MOLD_AUR_PKGBUILD, which scripts/aur/test-in-docker.sh sets so a
+#     container run can target a released version without dirtying the tree.
 #   - Always resets `pkgrel` to 1 (a new upstream version implies a
 #     fresh package release).
 #
@@ -29,7 +31,7 @@ version="$2"
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkgdir="${repo_root}/packaging/aur/${pkgname}"
-pkgbuild="${pkgdir}/PKGBUILD"
+pkgbuild="${MOLD_AUR_PKGBUILD:-${pkgdir}/PKGBUILD}"
 
 if [ ! -f "${pkgbuild}" ]; then
   echo "error: ${pkgbuild} does not exist" >&2
