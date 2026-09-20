@@ -27,6 +27,7 @@ fn manifest_strings_are_stable() {
         (Family::Ltx2, "ltx2"),
         (Family::Wan, "wan"),
         (Family::QwenImage, "qwen-image"),
+        (Family::QwenImage21, "qwen-image21"),
         (Family::QwenImageEdit, "qwen-image-edit"),
         (Family::Wuerstchen, "wuerstchen"),
     ];

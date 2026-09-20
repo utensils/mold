@@ -961,6 +961,7 @@ fn family_from_hf_id_substring() {
         ("someone/qwen-image-edit-lightning", Family::QwenImageEdit),
         ("someone/QwenImageEdit2511", Family::QwenImageEdit),
         ("Qwen/Qwen-Image", Family::QwenImage),
+        ("Qwen/Qwen-Image-2.1", Family::QwenImage21),
     ];
     for (id, want) in cases {
         let (got, _role) =

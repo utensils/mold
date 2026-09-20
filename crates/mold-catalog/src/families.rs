@@ -19,6 +19,8 @@ pub enum Family {
     Wan,
     MinimaxH3,
     QwenImage,
+    #[serde(rename = "qwen-image21")]
+    QwenImage21,
     QwenImageEdit,
     Wuerstchen,
     Hunyuan3d,
@@ -36,6 +38,7 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::Wan,
     Family::MinimaxH3,
     Family::QwenImage,
+    Family::QwenImage21,
     Family::QwenImageEdit,
     Family::Wuerstchen,
     Family::Hunyuan3d,
@@ -75,6 +78,7 @@ impl Family {
             Family::Wan => "wan",
             Family::MinimaxH3 => "minimax-h3",
             Family::QwenImage => "qwen-image",
+            Family::QwenImage21 => "qwen-image21",
             Family::QwenImageEdit => "qwen-image-edit",
             Family::Wuerstchen => "wuerstchen",
             Family::Hunyuan3d => "hunyuan3d",
@@ -101,6 +105,7 @@ impl Family {
             | Family::Sd3
             | Family::ZImage
             | Family::QwenImage
+            | Family::QwenImage21
             | Family::QwenImageEdit
             | Family::Wuerstchen
             | Family::Hunyuan3d => false,
@@ -130,6 +135,7 @@ impl Family {
             | Family::Wan
             | Family::MinimaxH3
             | Family::QwenImage
+            | Family::QwenImage21
             | Family::QwenImageEdit
             | Family::Wuerstchen => false,
         }
@@ -149,6 +155,7 @@ impl Family {
             "wan" => Family::Wan,
             "minimax-h3" | "minimax_h3" | "minimaxh3" => Family::MinimaxH3,
             "qwen-image" => Family::QwenImage,
+            "qwen-image21" => Family::QwenImage21,
             "qwen-image-edit" | "qwen_image_edit" => Family::QwenImageEdit,
             "wuerstchen" => Family::Wuerstchen,
             "hunyuan3d" | "hunyuan-3d" => Family::Hunyuan3d,

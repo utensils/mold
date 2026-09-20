@@ -421,6 +421,9 @@ pub fn companions_for(
         // runnable companion graph. Its hidden core manifests own the exact
         // FL2VA/Ref2VA component layouts.
         Family::MinimaxH3 => {}
+        // The pinned native manifest owns 2.1's Qwen3-VL and 64-channel VAE;
+        // never attach the incompatible older Qwen runtime companion.
+        Family::QwenImage21 => {}
         Family::QwenImage => {
             push(&mut out, "qwen-image-runtime");
         }

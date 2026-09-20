@@ -152,6 +152,15 @@ pub fn runtime_defaults_for_family(
             frames: None,
             fps: None,
         },
+        "qwen-image21" => CatalogRuntimeDefaults {
+            width: 1024,
+            height: 1024,
+            steps: 40,
+            guidance: 1.0,
+            is_schnell: None,
+            frames: None,
+            fps: None,
+        },
         "qwen-image" | "qwen-image-edit" => CatalogRuntimeDefaults {
             width: 1328,
             height: 1328,

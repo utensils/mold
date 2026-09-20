@@ -45,6 +45,7 @@ pub fn seeds_for(family: Family) -> &'static [&'static str] {
         ],
         MinimaxH3 => &["MiniMaxAI/MiniMax-H3", "Comfy-Org/MiniMax-H3"],
         QwenImage => &["Qwen/Qwen-Image"],
+        QwenImage21 => &["Qwen/Qwen-Image-2.1"],
         QwenImageEdit => &["Qwen/Qwen-Image-Edit-2511"],
         Wuerstchen => &["warp-ai/wuerstchen"],
         // Tencent's own releases. `Hunyuan3D-2` carries the 1.1B shape

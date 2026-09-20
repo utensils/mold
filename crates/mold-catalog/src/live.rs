@@ -1215,6 +1215,7 @@ fn hf_family_search_term(family: Family) -> &'static str {
         Family::Wan => "wan2",
         Family::MinimaxH3 => "minimax-h3",
         Family::QwenImage => "qwen-image",
+        Family::QwenImage21 => "qwen-image-2.1",
         Family::QwenImageEdit => "qwen-image-edit",
         Family::Wuerstchen => "wuerstchen",
         Family::Hunyuan3d => "hunyuan3d",
@@ -1548,6 +1549,12 @@ pub fn family_from_hf(
         Family::Wan
     } else if id_lower.contains("z-image") || id_lower.contains("zimage") {
         Family::ZImage
+    } else if id_lower.contains("qwen-image-2.1")
+        || tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("diffusers:qwenimage21pipeline"))
+    {
+        Family::QwenImage21
     } else if qwen_edit_name
         || (qwen_image_name
             && qwen_edit_pipeline
@@ -2140,6 +2147,7 @@ mod tests {
             (Family::Wan, "wan2"),
             (Family::MinimaxH3, "minimax-h3"),
             (Family::QwenImage, "qwen-image"),
+            (Family::QwenImage21, "qwen-image-2.1"),
             (Family::QwenImageEdit, "qwen-image-edit"),
             (Family::Wuerstchen, "wuerstchen"),
             (Family::Hunyuan3d, "hunyuan3d"),

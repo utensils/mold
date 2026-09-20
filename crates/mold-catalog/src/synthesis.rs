@@ -107,6 +107,9 @@ pub enum SynthesisError {
     #[error("catalog entry {id} bundling={bundling:?} is not supported (single-file only)")]
     UnsupportedBundling { id: String, bundling: Bundling },
 
+    #[error("catalog entry {id} requires the pinned native recipe; use qwen-image-2.1:bf16")]
+    NativeRecipeRequired { id: String },
+
     /// A Wan 2.2 A14B checkpoint whose recipe carries only one of the two
     /// experts. The normalizer marks such entries unsupported; this is
     /// the fail-closed backstop so no install path (server intent cache,
@@ -129,6 +132,11 @@ pub fn synthesize_intent(
     entry: &CatalogEntry,
     models_dir: &Path,
 ) -> Result<CatalogModelIntent, SynthesisError> {
+    if entry.family == Family::QwenImage21 {
+        return Err(SynthesisError::NativeRecipeRequired {
+            id: entry.id.0.clone(),
+        });
+    }
     let primary =
         entry
             .download_recipe
@@ -288,7 +296,9 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         | Family::LtxVideo
         | Family::Wan
         | Family::MinimaxH3 => false,
-        Family::QwenImage | Family::QwenImageEdit | Family::Wuerstchen => false,
+        Family::QwenImage | Family::QwenImage21 | Family::QwenImageEdit | Family::Wuerstchen => {
+            false
+        }
         // Hunyuan3D bundles the shape VAE inside the single checkpoint under
         // the `vae.` prefix, unconditionally and across every published tier
         // (2.0, 2.0-turbo, 2.0-mini, 2mv, 2.1). There is nothing to probe for
@@ -462,6 +472,17 @@ mod tests {
         let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
         let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["qwen-image-runtime"]);
+    }
+
+    #[test]
+    fn qwen21_catalog_checkpoint_requires_the_native_recipe() {
+        let mut entry = flux_unet_only_entry();
+        entry.family = Family::QwenImage21;
+        assert!(matches!(
+            synthesize_intent(&entry, Path::new("/tmp")),
+            Err(SynthesisError::NativeRecipeRequired { .. })
+        ));
+        assert!(companions_for(Family::QwenImage21, None, entry.bundling, entry.kind).is_empty());
     }
 
     #[test]
