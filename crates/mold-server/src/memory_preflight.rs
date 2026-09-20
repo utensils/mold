@@ -644,7 +644,7 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
     } else {
         conservative_flux_offload
     };
-    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let qwen_family = hint.is_some_and(|h| h.family.is_qwen_image());
     let qwen_quantized = qwen_family
         && paths
             .transformer
@@ -1738,7 +1738,7 @@ pub(crate) fn select_server_load_strategy_for_budget(
     // transformer + text encoder + VAE, which is exactly what the admission
     // assumed would NOT happen. Without this branch, a BF16 qwen in the
     // 90–100%-of-free band was admitted and then handed the Eager strategy.
-    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let qwen_family = hint.is_some_and(|h| h.family.is_qwen_image());
     if qwen_family && eager_peak > hard_limit && sequential_peak <= available_bytes {
         return mold_inference::LoadStrategy::Sequential;
     }
@@ -2255,7 +2255,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     .saturating_add(fp8_widen_bytes);
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
-    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let qwen_family = hint.is_some_and(|h| h.family.is_qwen_image());
     // Wan joins Qwen-Image on the un-derated cap, for the same reason and now
     // with the evidence to back it.
     //

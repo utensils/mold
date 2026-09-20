@@ -244,6 +244,23 @@ impl SwiGlu {
     }
 }
 
+struct PrefixKv {
+    key: Tensor,
+    value: Tensor,
+}
+
+enum PrefixCache<'a> {
+    Disabled,
+    Extract(&'a mut Vec<PrefixKv>),
+    Reuse(&'a [PrefixKv]),
+}
+
+enum LayerCache<'a> {
+    Disabled,
+    Extract(&'a mut Vec<PrefixKv>),
+    Reuse(&'a PrefixKv),
+}
+
 struct Attention {
     to_q: Linear,
     to_k: Linear,
@@ -361,14 +378,20 @@ impl Attention {
         rope_cos: &Tensor,
         rope_sin: &Tensor,
         valid_tokens: &[Vec<bool>],
+        cache: LayerCache<'_>,
     ) -> Result<Tensor> {
         let (batch, sequence, inner) = hidden_states.dims3()?;
         let text_len = valid_tokens.first().map_or(0, Vec::len);
+        let cached = matches!(cache, LayerCache::Reuse(_));
         anyhow::ensure!(
-            text_len > 0 && text_len < sequence,
+            text_len > 0 && (cached || text_len < sequence),
             "Qwen Image 2.1 joint sequence needs non-empty text and target-image blocks"
         );
-        let target_tokens = sequence - text_len;
+        let target_tokens = if cached {
+            sequence
+        } else {
+            sequence - text_len
+        };
         anyhow::ensure!(
             inner == self.heads * self.head_dim,
             "Qwen Image 2.1 attention inner width mismatch"
@@ -395,6 +418,35 @@ impl Attention {
             .transpose(1, 2)?
             .contiguous()?;
         let v = v.contiguous()?;
+
+        match cache {
+            LayerCache::Extract(layers) => {
+                // A contiguous view can still retain the full joint allocation
+                // (notably with one head). Copy only the immutable prefix.
+                layers.push(PrefixKv {
+                    key: k.narrow(2, 0, text_len)?.force_contiguous()?,
+                    value: v.narrow(2, 0, text_len)?.force_contiguous()?,
+                });
+            }
+            LayerCache::Reuse(prefix) => {
+                let k = Tensor::cat(&[&prefix.key, &k], 2)?;
+                let v = Tensor::cat(&[&prefix.value, &v], 2)?;
+                let bias =
+                    Self::t2i_target_bias(valid_tokens, target_tokens, q.dtype(), q.device())?;
+                let context = crate::attention::attention_with_bias(
+                    &q,
+                    &k,
+                    &v,
+                    (1.0 / (self.head_dim as f64).sqrt()) as f32,
+                    bias.as_ref(),
+                )?;
+                return self
+                    .to_out
+                    .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
+                    .map_err(Into::into);
+            }
+            LayerCache::Disabled => {}
+        }
 
         // The prefix's own attention is causal, whereas target-image rows are
         // fully bidirectional within their block and see the complete prefix.
@@ -471,6 +523,7 @@ impl TransformerBlock {
         rope_cos: &Tensor,
         rope_sin: &Tensor,
         valid_tokens: &[Vec<bool>],
+        cache: LayerCache<'_>,
     ) -> Result<Tensor> {
         let dim = hidden_states.dim(D::Minus1)?;
         anyhow::ensure!(
@@ -483,7 +536,7 @@ impl TransformerBlock {
         let (normalized, gate) = Self::modulate(self.norm1.forward(hidden_states)?, &mod1)?;
         let attn = self
             .attn
-            .forward_t2i(&normalized, rope_cos, rope_sin, valid_tokens)?;
+            .forward_t2i(&normalized, rope_cos, rope_sin, valid_tokens, cache)?;
         let hidden_states = (hidden_states + (gate.tanh()? * attn)?)?;
 
         let (normalized, gate) = Self::modulate(self.norm2.forward(&hidden_states)?, &mod2)?;
@@ -537,7 +590,77 @@ pub(crate) struct QwenImage21Transformer {
     proj_out: Linear,
 }
 
+/// One conditioning branch of one denoise request. The borrow ties the cache
+/// to its exact transformer and immutable prompt; nothing survives the request.
+pub(crate) struct PreparedT2i<'a> {
+    transformer: &'a QwenImage21Transformer,
+    conditioning: &'a QwenImage21TextConditioning,
+    height: usize,
+    width: usize,
+    layers: Vec<PrefixKv>,
+}
+
+impl PreparedT2i<'_> {
+    pub(crate) fn forward(&mut self, latents: &Tensor, timestep: f64) -> Result<Tensor> {
+        // Keep the retained allocation within the admission budget. Longer
+        // prompts still render in full; they simply recompute their prefix.
+        if self.conditioning.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS {
+            return self.transformer.forward_with_cache(
+                latents,
+                timestep,
+                self.conditioning,
+                self.height,
+                self.width,
+                PrefixCache::Disabled,
+            );
+        }
+        if self.layers.is_empty() {
+            let mut layers = Vec::with_capacity(self.transformer.blocks.len());
+            let result = self.transformer.forward_with_cache(
+                latents,
+                timestep,
+                self.conditioning,
+                self.height,
+                self.width,
+                PrefixCache::Extract(&mut layers),
+            )?;
+            // Publish only a complete, successful prefill.
+            self.layers = layers;
+            Ok(result)
+        } else {
+            let key = &self.layers[0].key;
+            anyhow::ensure!(
+                key.dtype() == latents.dtype() && key.device().same_device(latents.device()),
+                "Qwen Image 2.1 cached denoise cannot change device or dtype"
+            );
+            self.transformer.forward_with_cache(
+                latents,
+                timestep,
+                self.conditioning,
+                self.height,
+                self.width,
+                PrefixCache::Reuse(&self.layers),
+            )
+        }
+    }
+}
+
 impl QwenImage21Transformer {
+    pub(crate) fn prepare_t2i<'a>(
+        &'a self,
+        conditioning: &'a QwenImage21TextConditioning,
+        height: usize,
+        width: usize,
+    ) -> PreparedT2i<'a> {
+        PreparedT2i {
+            transformer: self,
+            conditioning,
+            height,
+            width,
+            layers: Vec::new(),
+        }
+    }
+
     pub(crate) fn load(
         paths: &[PathBuf],
         device: &Device,
@@ -644,7 +767,8 @@ impl QwenImage21Transformer {
     ///
     /// `timestep` is normalized to `[0, 1]`, matching the Diffusers transformer's
     /// call (`scheduler_timestep / 1000`).
-    pub(crate) fn forward_t2i(
+    #[cfg(test)]
+    fn forward_t2i(
         &self,
         latents: &Tensor,
         timestep: f64,
@@ -652,6 +776,26 @@ impl QwenImage21Transformer {
         latent_height: usize,
         latent_width: usize,
     ) -> Result<Tensor> {
+        self.forward_with_cache(
+            latents,
+            timestep,
+            conditioning,
+            latent_height,
+            latent_width,
+            PrefixCache::Disabled,
+        )
+    }
+
+    fn forward_with_cache(
+        &self,
+        latents: &Tensor,
+        timestep: f64,
+        conditioning: &QwenImage21TextConditioning,
+        latent_height: usize,
+        latent_width: usize,
+        mut cache: PrefixCache<'_>,
+    ) -> Result<Tensor> {
+        let cached = matches!(cache, PrefixCache::Reuse(_));
         let (batch, target_tokens, latent_channels) = latents.dims3()?;
         anyhow::ensure!(
             latent_channels == self.cfg.in_channels,
@@ -674,6 +818,14 @@ impl QwenImage21Transformer {
 
         let text_len = conditioning.sequence_length();
         anyhow::ensure!(text_len > 0, "Qwen Image 2.1 text conditioning is empty");
+        anyhow::ensure!(
+            conditioning.valid_tokens.len() == batch
+                && conditioning
+                    .valid_tokens
+                    .iter()
+                    .all(|row| row.len() == text_len && row[0]),
+            "Qwen Image 2.1 requires a right-padded text mask with a valid first token"
+        );
         let text = conditioning
             .embeddings
             .to_device(latents.device())?
@@ -687,8 +839,11 @@ impl QwenImage21Transformer {
         );
 
         let target = self.img_in.forward(latents)?;
-        let text = self.txt_in.forward(&text)?;
-        let mut hidden_states = Tensor::cat(&[&text, &target], 1)?;
+        let mut hidden_states = if cached {
+            target
+        } else {
+            Tensor::cat(&[&self.txt_in.forward(&text)?, &target], 1)?
+        };
         let (rope_cos, rope_sin) = self.t2i_rope(
             text_len,
             latent_height,
@@ -696,6 +851,14 @@ impl QwenImage21Transformer {
             latents.dtype(),
             latents.device(),
         )?;
+        let (rope_cos, rope_sin) = if cached {
+            (
+                rope_cos.narrow(0, text_len, target_tokens)?.contiguous()?,
+                rope_sin.narrow(0, text_len, target_tokens)?.contiguous()?,
+            )
+        } else {
+            (rope_cos, rope_sin)
+        };
 
         // `causal_condition`: text positions take a dedicated t=0 modulation
         // row, while target image positions take each sample's real timestep.
@@ -716,18 +879,29 @@ impl QwenImage21Transformer {
             .narrow(0, batch, 1)?
             .unsqueeze(1)?
             .broadcast_as((batch, text_len, 4 * inner))?;
-        let per_token_modulation = Tensor::cat(&[&zero, &real], 1)?;
+        let per_token_modulation = if cached {
+            real
+        } else {
+            Tensor::cat(&[&zero, &real], 1)?
+        };
 
-        for block in &self.blocks {
+        for (index, block) in self.blocks.iter().enumerate() {
+            let layer_cache = match &mut cache {
+                PrefixCache::Extract(layers) => LayerCache::Extract(layers),
+                PrefixCache::Reuse(layers) => LayerCache::Reuse(&layers[index]),
+                PrefixCache::Disabled => LayerCache::Disabled,
+            };
             hidden_states = block.forward_t2i(
                 &hidden_states,
                 &per_token_modulation,
                 &rope_cos,
                 &rope_sin,
                 &conditioning.valid_tokens,
+                layer_cache,
             )?;
         }
-        let target_hidden = hidden_states.narrow(1, text_len, target_tokens)?;
+        let target_hidden =
+            hidden_states.narrow(1, if cached { 0 } else { text_len }, target_tokens)?;
         let target_temb = temb.narrow(0, 0, batch)?;
         self.proj_out
             .forward(&self.norm_out.forward(&target_hidden, &target_temb)?)
@@ -771,7 +945,13 @@ mod tests {
     }
 
     fn tiny_transformer() -> QwenImage21Transformer {
-        let cfg = tiny_config();
+        tiny_transformer_on(tiny_config(), &Device::Cpu)
+    }
+
+    fn tiny_transformer_on(
+        cfg: QwenImage21TransformerConfig,
+        device: &Device,
+    ) -> QwenImage21Transformer {
         let inner = cfg.inner_dim();
         let mut map = HashMap::new();
         add_tensor(&mut map, "img_in.weight", (inner, cfg.in_channels));
@@ -835,7 +1015,11 @@ mod tests {
                 (inner, inner * cfg.mlp_ratio),
             );
         }
-        let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+        let map = map
+            .into_iter()
+            .map(|(name, value)| (name, value.to_device(device).unwrap()))
+            .collect();
+        let vb = VarBuilder::from_tensors(map, DType::F32, device);
         QwenImage21Transformer::from_var_builder(cfg, vb).unwrap()
     }
 
@@ -850,6 +1034,270 @@ mod tests {
         assert_eq!(cfg.num_layers, 32);
         assert_eq!(cfg.axes_dims_rope, [16, 56, 56]);
         cfg.validate().unwrap();
+    }
+
+    fn assert_close(actual: &Tensor, expected: &Tensor) {
+        let error = (actual - expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let peak = expected
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        // Metal may select a different GEMM kernel for the shorter sequence;
+        // the one-head fixture measures up to 4.52e-5 (CPU is exact).
+        assert!(
+            error < 1e-4,
+            "cached prediction max error {error}, peak {peak}"
+        );
+    }
+
+    fn cache_parity(device: &Device, heads: usize) {
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        cfg.num_attention_heads = heads;
+        let transformer = tiny_transformer_on(cfg, device);
+        let make_conditioning = |length, seed| QwenImage21TextConditioning {
+            embeddings: crate::engine::seeded_randn(seed, &[2, length, 8], device, DType::F32)
+                .unwrap(),
+            valid_tokens: vec![
+                (0..length).map(|i| i < length - 1).collect(),
+                vec![true; length],
+            ],
+            image_slots: vec![vec![false; length]; 2],
+        };
+        let positive = make_conditioning(3, 21);
+        let negative = make_conditioning(5, 22);
+        let mut positive_cache = transformer.prepare_t2i(&positive, 2, 2);
+        let mut negative_cache = transformer.prepare_t2i(&negative, 2, 2);
+        let mut first_keys = Vec::new();
+        for (step, time) in [1.0, 0.7, 0.3, 0.01].iter().enumerate() {
+            let latents =
+                crate::engine::seeded_randn(23 + step as u64, &[2, 4, 4], device, DType::F32)
+                    .unwrap();
+            for (conditioning, cache) in [
+                (&positive, &mut positive_cache),
+                (&negative, &mut negative_cache),
+            ] {
+                let expected = transformer
+                    .forward_t2i(&latents, *time, conditioning, 2, 2)
+                    .unwrap();
+                let actual = cache.forward(&latents, *time).unwrap();
+                assert_close(&actual, &expected);
+                assert_eq!(cache.layers.len(), 3);
+                for layer in &cache.layers {
+                    assert_eq!(
+                        layer.key.dims(),
+                        &[2, heads, conditioning.sequence_length(), 8]
+                    );
+                    assert!(layer.key.is_contiguous());
+                    assert!(layer.value.is_contiguous());
+                }
+            }
+            let keys: Vec<_> = positive_cache
+                .layers
+                .iter()
+                .map(|layer| layer.key.id())
+                .collect();
+            if step == 0 {
+                first_keys = keys;
+            } else {
+                assert_eq!(keys, first_keys);
+            }
+        }
+        assert!(transformer.prepare_t2i(&positive, 2, 2).layers.is_empty());
+        let invalid = Tensor::zeros((2, 5, 4), DType::F32, device).unwrap();
+        let mut fresh = transformer.prepare_t2i(&positive, 2, 2);
+        assert!(fresh.forward(&invalid, 1.0).is_err());
+        assert!(fresh.layers.is_empty());
+        assert!(positive_cache.forward(&invalid, 1.0).is_err());
+    }
+
+    #[test]
+    fn prefix_cache_matches_full_forward_across_steps_and_cfg_branches() {
+        for heads in [1, 2] {
+            cache_parity(&Device::Cpu, heads);
+        }
+    }
+
+    #[test]
+    fn single_head_cache_owns_only_prefix_storage() {
+        let transformer = tiny_transformer();
+        let conditioning = QwenImage21TextConditioning {
+            embeddings: Tensor::ones((1, 3, 8), DType::F32, &Device::Cpu).unwrap(),
+            valid_tokens: vec![vec![true; 3]],
+            image_slots: vec![vec![false; 3]],
+        };
+        let latents = Tensor::ones((1, 4, 4), DType::F32, &Device::Cpu).unwrap();
+        let mut cache = transformer.prepare_t2i(&conditioning, 2, 2);
+        cache.forward(&latents, 1.0).unwrap();
+        for tensor in [&cache.layers[0].key, &cache.layers[0].value] {
+            let (storage, layout) = tensor.storage_and_layout();
+            let candle_core::Storage::Cpu(storage) = &*storage else {
+                panic!("expected CPU")
+            };
+            assert_eq!(storage.as_slice::<f32>().unwrap().len(), 3 * 8);
+            assert_eq!(layout.start_offset(), 0);
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn prefix_cache_matches_full_forward_on_metal() {
+        let device = Device::new_metal(0).unwrap();
+        for heads in [1, 2] {
+            cache_parity(&device, heads);
+        }
+    }
+
+    #[test]
+    fn long_prefix_falls_back_without_truncation_or_retention() {
+        let transformer = tiny_transformer();
+        let length = super::super::PREFIX_CACHE_MAX_TOKENS + 1;
+        let conditioning = QwenImage21TextConditioning {
+            embeddings: crate::engine::seeded_randn(21, &[1, length, 8], &Device::Cpu, DType::F32)
+                .unwrap(),
+            valid_tokens: vec![vec![true; length]],
+            image_slots: vec![vec![false; length]],
+        };
+        let latents = Tensor::ones((1, 4, 4), DType::F32, &Device::Cpu).unwrap();
+        let mut cache = transformer.prepare_t2i(&conditioning, 2, 2);
+        assert_close(
+            &cache.forward(&latents, 0.5).unwrap(),
+            &transformer
+                .forward_t2i(&latents, 0.5, &conditioning, 2, 2)
+                .unwrap(),
+        );
+        assert!(cache.layers.is_empty());
+    }
+
+    #[test]
+    fn prefix_cache_budget_is_additive_and_bounds_both_float32_cfg_branches() {
+        use crate::device::{activation_bytes, ActivationFamily};
+        let bound = super::super::prefix_cache_budget_bytes(1);
+        assert_eq!(bound, 1_073_741_824);
+        for size in [32, 1024, 2048] {
+            for dtype_bytes in [2, 4] {
+                for batch in [1, 2] {
+                    let before = activation_bytes(
+                        size,
+                        size,
+                        batch,
+                        dtype_bytes,
+                        ActivationFamily::QwenImageDit,
+                    );
+                    let after = activation_bytes(
+                        size,
+                        size,
+                        batch,
+                        dtype_bytes,
+                        ActivationFamily::QwenImage21Dit,
+                    );
+                    assert_eq!(after - before, bound * u64::from(batch));
+                }
+            }
+        }
+    }
+
+    /// Opt-in real-checkpoint parity and timing probe. No downloads or writes.
+    /// QWEN_IMAGE21_MODEL_ROOT points at an existing mold models directory.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "requires installed Qwen Image 2.1 weights and an idle Metal GPU"]
+    fn official_prefix_cache_metal_parity_and_timing() -> Result<()> {
+        use crate::progress::ProgressReporter;
+        use std::time::Instant;
+        let root = PathBuf::from(std::env::var("QWEN_IMAGE21_MODEL_ROOT")?);
+        let device = Device::new_metal(0)?;
+        let progress = ProgressReporter::default();
+        let shared = root.join("shared/qwen-image21");
+        let text_paths = (1..=4)
+            .map(|i| shared.join(format!("text_encoder/model-{i:05}-of-00004.safetensors")))
+            .collect::<Vec<_>>();
+        let mut encoder = crate::encoders::qwen3::Qwen3Encoder::load_bf16(
+            &text_paths,
+            &shared.join("processor/tokenizer.json"),
+            &device,
+            DType::F32,
+            &crate::encoders::qwen3_bf16::Qwen3BF16Config::qwen3_image_21_text_encoder(),
+            &progress,
+        )?;
+        let prompt = "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows";
+        let repeats =
+            std::env::var("QWEN_IMAGE21_BENCH_REPEAT").map_or(Ok(1usize), |s| s.parse())?;
+        let prompt = std::iter::repeat_n(prompt, repeats)
+            .collect::<Vec<_>>()
+            .join(". ");
+        let conditioning = super::super::encode_t2i_prompts(&mut encoder, &[prompt])?;
+        anyhow::ensure!(
+            conditioning.sequence_length() <= super::super::PREFIX_CACHE_MAX_TOKENS,
+            "benchmark prompt exceeds cache retention bound"
+        );
+        drop(encoder);
+        let paths = (1..=2).map(|i| root.join(format!("qwen-image-2.1-bf16/transformer/diffusion_pytorch_model-{i:05}-of-00002.safetensors"))).collect::<Vec<_>>();
+        let transformer = QwenImage21Transformer::load(&paths, &device, DType::F32, &progress)?;
+        let mut cache = transformer.prepare_t2i(&conditioning, 64, 64);
+        let mut scheduler = super::super::scheduler::QwenImage21Scheduler::new(
+            40,
+            4096,
+            super::super::scheduler::QwenShiftPolicy::DynamicResolution,
+        );
+        let mut latents = crate::engine::seeded_randn(210001, &[1, 4096, 64], &device, DType::F32)?;
+        let mut uncached_seconds = 0.0;
+        let mut cached_seconds = 0.0;
+        for step in 0..4 {
+            let time = scheduler.current_timestep() / 1000.0;
+            // Reverse the pair order on alternate steps to reduce order bias.
+            let mut uncached = None;
+            let mut cached = None;
+            for cached_first in [step % 2 == 0, step % 2 != 0] {
+                device.synchronize()?;
+                let start = Instant::now();
+                let output = if cached_first {
+                    cache.forward(&latents, time)?
+                } else {
+                    transformer.forward_t2i(&latents, time, &conditioning, 64, 64)?
+                };
+                device.synchronize()?;
+                let elapsed = start.elapsed().as_secs_f64();
+                eprintln!("step={step} cached={cached_first} elapsed_seconds={elapsed:.4}");
+                if step > 0 {
+                    if cached_first {
+                        cached_seconds += elapsed;
+                    } else {
+                        uncached_seconds += elapsed;
+                    }
+                }
+                if cached_first {
+                    cached = Some(output);
+                } else {
+                    uncached = Some(output);
+                }
+            }
+            let expected = uncached.unwrap();
+            let actual = cached.unwrap();
+            let diff = (&actual - &expected)?;
+            let max_error = diff.abs()?.max_all()?.to_scalar::<f32>()?;
+            let relative_rms = (diff.sqr()?.mean_all()?.to_scalar::<f32>()?
+                / expected.sqr()?.mean_all()?.to_scalar::<f32>()?)
+            .sqrt();
+            eprintln!("step={step} max_error={max_error} relative_rms={relative_rms}");
+            anyhow::ensure!(
+                max_error < 1e-3 && relative_rms < 1e-4,
+                "cached real-checkpoint prediction diverged"
+            );
+            latents = scheduler.step(&expected, &latents)?;
+        }
+        eprintln!("prefix_tokens={} steady_uncached_seconds={uncached_seconds:.4} steady_cached_seconds={cached_seconds:.4} speedup={:.4}", conditioning.sequence_length(), uncached_seconds/cached_seconds);
+        Ok(())
     }
 
     #[test]

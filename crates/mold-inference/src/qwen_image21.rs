@@ -18,6 +18,21 @@ pub(crate) mod vae;
 
 pub use pipeline::QwenImage21Engine;
 
+/// Bound request-local retention without truncating the authored prompt.
+pub(crate) const PREFIX_CACHE_MAX_TOKENS: usize = 512;
+
+/// Both CFG branches at the maximum retained length, in the widest supported
+/// working dtype (F32 on Metal/CPU). Added outside the activation area estimate.
+pub(crate) fn prefix_cache_budget_bytes(batch: u32) -> u64 {
+    let cfg = transformer::QwenImage21TransformerConfig::official();
+    2 * 2
+        * PREFIX_CACHE_MAX_TOKENS as u64
+        * cfg.num_layers as u64
+        * (cfg.num_attention_heads * cfg.attention_head_dim) as u64
+        * 4
+        * u64::from(batch.max(1))
+}
+
 /// The fixed system message from the upstream `QwenImage21Pipeline`.
 pub(crate) const QWEN_IMAGE_21_SYSTEM_PROMPT: &str = "Comprehend and analyze the provided prompt.";
 

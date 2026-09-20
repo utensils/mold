@@ -813,8 +813,10 @@ pub enum ActivationFamily {
     Sd3Mmdit,
     /// SDXL UNet (CFG-batched + cross-attn KV cache).
     SdxlUnet,
-    /// Qwen Image family DiT, including Qwen Image 2.1.
+    /// Qwen Image family DiT.
     QwenImageDit,
+    /// Qwen Image 2.1, including its bounded request-local prefix KV cache.
+    QwenImage21Dit,
     /// Z-Image dit.
     ZImageDit,
     /// Wuerstchen v2 cascade (Stage C/B decoder).
@@ -847,6 +849,10 @@ pub enum ActivationFamily {
 }
 
 impl ActivationFamily {
+    pub fn is_qwen_image(self) -> bool {
+        matches!(self, Self::QwenImageDit | Self::QwenImage21Dit)
+    }
+
     /// Whether this family loads its transformer in a block-streaming mode
     /// (only a few blocks GPU-resident at a time, the rest mmap'd / paged).
     /// The preflight uses this to bypass the file-size-based transformer
@@ -930,7 +936,7 @@ pub fn activation_bytes(
         // when CFG is active, so this factor covers per-batch overhead.
         ActivationFamily::SdxlUnet => 173.0,
         // Qwen-Image dit: similar dual-stream structure to SDXL.
-        ActivationFamily::QwenImageDit => 173.0,
+        ActivationFamily::QwenImageDit | ActivationFamily::QwenImage21Dit => 173.0,
         // Wuerstchen v2: cascade Stage B has a chunky conv stack — ~67%
         // above FLUX.
         ActivationFamily::Wuerstchen => 217.0,
@@ -961,7 +967,12 @@ pub fn activation_bytes(
     /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
     /// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
     const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
-    raw.max(ACTIVATION_FLOOR_BYTES)
+    let prefix_cache = if family == ActivationFamily::QwenImage21Dit {
+        crate::qwen_image21::prefix_cache_budget_bytes(batch)
+    } else {
+        0
+    };
+    raw.max(ACTIVATION_FLOOR_BYTES).saturating_add(prefix_cache)
 }
 
 /// Scale a FLUX.2 activation budget by how much longer the sequence becomes
@@ -2312,7 +2323,8 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "sd3" => ActivationFamily::Sd3Mmdit,
         "sdxl" | "sd15" | "hunyuan3d-delight" => ActivationFamily::SdxlUnet,
         "hunyuan3d-matting" => ActivationFamily::SmallTransformer,
-        "qwen-image" | "qwen-image-edit" | "qwen-image21" => ActivationFamily::QwenImageDit,
+        "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
+        "qwen-image21" => ActivationFamily::QwenImage21Dit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
         "hunyuan3d" | "hunyuan-3d" => ActivationFamily::Hunyuan3dShape,
@@ -5522,7 +5534,7 @@ mod tests {
         );
         assert_eq!(
             activation_family_for("qwen-image21"),
-            ActivationFamily::QwenImageDit
+            ActivationFamily::QwenImage21Dit
         );
         assert_eq!(
             activation_family_for("wuerstchen"),

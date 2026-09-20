@@ -326,27 +326,27 @@ impl QwenImage21Engine {
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
         let denoise_start = Instant::now();
+        let mut conditional = transformer.prepare_t2i(conditioning, latent_height, latent_width);
+        let mut negative = negative_conditioning
+            .map(|conditioning| transformer.prepare_t2i(conditioning, latent_height, latent_width));
+        if conditioning.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS
+            || negative_conditioning
+                .is_some_and(|c| c.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS)
+        {
+            progress.info(
+                "Long text prefixes render in full without KV caching (512-token retention limit).",
+            );
+        }
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
             // The diffusion transformer takes normalized `[0, 1]` time;
             // the packaged scheduler exposes the usual `[0, 1000]` values.
             let timestep = scheduler.current_timestep() / 1000.0;
-            let conditional_prediction = transformer.forward_t2i(
-                &latents,
-                timestep,
-                conditioning,
-                latent_height,
-                latent_width,
-            )?;
-            let prediction = if let Some(negative_conditioning) = negative_conditioning {
-                let negative_prediction = transformer.forward_t2i(
-                    &latents,
-                    timestep,
-                    negative_conditioning,
-                    latent_height,
-                    latent_width,
-                )?;
+            let conditional_prediction = conditional.forward(&latents, timestep)?;
+            let prediction = if let Some(negative) = &mut negative {
+                progress.checkpoint()?;
+                let negative_prediction = negative.forward(&latents, timestep)?;
                 (&negative_prediction
                     + ((&conditional_prediction - &negative_prediction)? * req.guidance)?)?
             } else {
