@@ -134,6 +134,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
 	@cd Packages/MoldClient && swift test
+	@cd Packages/MoldStyle && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
 	@# Every failing test and its issue, then the verdict -- `tail -5` alone
