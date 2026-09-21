@@ -294,6 +294,7 @@ if wants contracts; then
   for contract in release-sync-pr crates-publish-contract ci-coverage-disk-guard \
                   docker-web-context desktop-candle-lock-sync \
                   desktop-candle-nix-source-hash desktop-dmg-packaging \
+                  desktop-linuxdeploy-pins \
                   cuda-distribution-contract \
                   install-cuda-arch cuda-qualification-contract \
                   minimax-h3-attention-release-contract bench-qwen-parse \
@@ -308,6 +309,7 @@ if wants contracts; then
       step "contracts: ${contract}" bash "$script"
     fi
   done
+  step "contracts: cfg-arm visibility" python3 scripts/tests/cfg-arm-visibility.py
   step "contracts: CUDA PTX parser" python3 scripts/tests/cuda-ptx-parser-contract.py
   step "contracts: Hunyuan3D CUDA capture" python3 scripts/tests/hunyuan3d_cuda_capture_test.py
   step "contracts: local multi-GPU qualification" \
