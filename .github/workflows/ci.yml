@@ -87,6 +87,7 @@ jobs:
               - 'docs/qualification/local-multi-gpu-report.schema.json'
               - 'scripts/minimax-h3-conformance.py'
               - 'scripts/tests/minimax-h3-conformance-contract.py'
+              - 'scripts/tests/cfg-arm-visibility.py'
               - 'scripts/run-minimax-h3-gpu-conformance.py'
               - 'scripts/tests/minimax-h3-gpu-conformance-contract.py'
               - 'scripts/capture-minimax-h3-conditioner.py'
@@ -275,6 +276,8 @@ jobs:
               - 'scripts/tests/desktop-candle-lock-sync.sh'
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/desktop-dmg-packaging.sh'
+              - 'scripts/prepare-desktop-linuxdeploy.sh'
+              - 'scripts/tests/desktop-linuxdeploy-pins.sh'
               - 'scripts/tests/android-apk-distribution.sh'
               - 'scripts/tests/windows-self-signing.sh'
               - 'scripts/tests/release-sync-pr.sh'
@@ -519,6 +522,7 @@ jobs:
           bash scripts/tests/desktop-candle-lock-sync.sh
           bash scripts/tests/desktop-candle-nix-source-hash.sh
           bash scripts/tests/desktop-dmg-packaging.sh
+          bash scripts/tests/desktop-linuxdeploy-pins.sh
           bash scripts/tests/android-apk-distribution.sh
           bash scripts/tests/windows-self-signing.sh
           bash scripts/tests/cuda-distribution-contract.sh
@@ -623,6 +627,11 @@ jobs:
           cargo nextest run --profile pr ${{ steps.affected.outputs.packages }}
           --features "${{ steps.affected.outputs.features }}"
           -E "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)"
+      # Source-level, so it answers for the cfg arms this runner never compiles
+      # (the Linux `dev-bins,h3-private-uat` clippy below is push-only).
+      - name: Check cfg arms of one function share one visibility
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/cfg-arm-visibility.py
       - name: Test local multi-GPU qualification contract
         if: env.RUN_RUST_SUITE == 'true'
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh

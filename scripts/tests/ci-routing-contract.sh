@@ -636,6 +636,25 @@ grep -Fxq "              - 'scripts/tests/desktop-dmg-packaging.sh'" <<< "$relea
 grep -Fq "'.github/workflows/**'" <<< "$release_filter" \
   || fail "workflow changes do not reach protected actionlint and routing contracts"
 
+# Both guards below exist because the defect they catch is invisible to every
+# PR check: the Linux AppImage prep and the Linux `dev-bins,h3-private-uat`
+# clippy are push-only, so each reddened `main` after a green PR (2026-09-21).
+require_text "$ci" \
+  "bash scripts/tests/desktop-linuxdeploy-pins.sh" \
+  "release CI does not verify that the desktop linuxdeploy downloads are commit-pinned"
+grep -Fxq "              - 'scripts/prepare-desktop-linuxdeploy.sh'" <<< "$release_filter" \
+  || fail "release classifier omits the desktop linuxdeploy preparer"
+grep -Fxq "              - 'scripts/tests/desktop-linuxdeploy-pins.sh'" <<< "$release_filter" \
+  || fail "release classifier omits the desktop linuxdeploy pin contract"
+rust_filter="$(extract_filter "$ci" rust)"
+grep -Fxq "              - 'scripts/tests/cfg-arm-visibility.py'" <<< "$rust_filter" \
+  || fail "rust classifier omits the cfg-arm visibility contract"
+grep -Fq 'run: python3 ../scripts/tests/cfg-arm-visibility.py' <<< "$(extract_job "$desktop" desktop-rust)" \
+  || fail "desktop native PRs compile macOS arms only and do not check the others from source"
+cfg_arm_step="$(grep -F -B2 'run: python3 scripts/tests/cfg-arm-visibility.py' "$ci" || true)"
+grep -Fxq "        if: env.RUN_RUST_SUITE == 'true'" <<< "$cfg_arm_step" \
+  || fail "the cfg-arm visibility contract must run on pull requests, not only on push"
+
 nix_filter="$(extract_filter "$ci" nix)"
 if grep -Fq 'desktop/**' <<< "$nix_filter"; then
   fail "desktop-only changes still start the mold-web Nix build"

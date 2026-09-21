@@ -132,10 +132,14 @@ prepare_plugin() {
   mv "$download" "$destination"
 }
 
+# Each plugin is fetched at the COMMIT its sha256 was taken from, never a
+# branch: this job is push-only, so a checksum on `master` reddens `main` the
+# day upstream commits (2026-08-26, gtk). To move a pin, change the commit and
+# the sha256 together; scripts/tests/desktop-linuxdeploy-pins.sh enforces it.
 # shellcheck disable=SC2016
 prepare_plugin \
   "linuxdeploy-plugin-gtk.sh" \
-  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh" \
+  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef/linuxdeploy-plugin-gtk.sh" \
   "cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a" \
   '"$LINUXDEPLOY" --appdir="$APPDIR"' \
   '"$LINUXDEPLOY" --exclude-library='\''libcuda.so*'\'' --appdir="$APPDIR"'
@@ -143,7 +147,7 @@ prepare_plugin \
 # shellcheck disable=SC2016
 prepare_plugin \
   "linuxdeploy-plugin-gstreamer.sh" \
-  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh" \
+  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/2a2e67491c32995a3f279ad0ecbe77abd512b42a/linuxdeploy-plugin-gstreamer.sh" \
   "c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94" \
   '"$LINUXDEPLOY" --appdir "$APPDIR"' \
   '"$LINUXDEPLOY" --exclude-library='\''libcuda.so*'\'' --appdir "$APPDIR"'

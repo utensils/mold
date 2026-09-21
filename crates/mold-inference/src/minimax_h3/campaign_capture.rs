@@ -236,7 +236,7 @@ pub(crate) fn kernel_pressure_level() -> Result<u32> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn kernel_pressure_level() -> Result<u32> {
+pub(crate) fn kernel_pressure_level() -> Result<u32> {
     bail!("campaign capture kernel pressure sampling requires macOS")
 }
 
@@ -310,7 +310,23 @@ struct CampaignCaptureCore {
 /// campaign variables must fail closed rather than mix evidence.
 static ACTIVE_CAPTURE: OnceLock<Arc<CampaignCaptureCore>> = OnceLock::new();
 
+// In a test binary the capture belongs to the thread that activated it.
+// Production runs one campaign case per cold process, so process-wide is the
+// contract there; under `cargo test` every other pipeline test is a thread of
+// the SAME process whose `observe_event` reaches this static, and one of them
+// completing a generation closed the capture under the activation test. That
+// only ever failed in the coverage job, because nextest gives each test its
+// own process.
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_ACTIVATED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn active_capture() -> Option<&'static Arc<CampaignCaptureCore>> {
+    #[cfg(test)]
+    if !CAPTURE_ACTIVATED_HERE.with(std::cell::Cell::get) {
+        return None;
+    }
     ACTIVE_CAPTURE.get()
 }
 
@@ -482,6 +498,8 @@ fn prepare_capture_with(
             ACTIVE_CAPTURE.get().expect("just set").case_id
         );
     }
+    #[cfg(test)]
+    CAPTURE_ACTIVATED_HERE.with(|activated| activated.set(true));
 
     // The budget sidecar is the allocation-free authority export for this
     // exact prepared request; the binding row names the phase the unified
@@ -889,6 +907,31 @@ mod tests {
         };
         prepare_capture_with(&config, &"a".repeat(64), &fake_budget())
             .expect("activation succeeds");
+
+        // `cargo test` (the coverage job) runs the crate's tests as threads of
+        // ONE process, so every other pipeline test's `observe_event` reaches
+        // this process-global. One of them completing a generation used to
+        // close the capture before `attach` below and drop every later row;
+        // nextest's process-per-test never showed it. Another test is exactly
+        // this: a foreign thread reporting completion.
+        std::thread::spawn(|| {
+            observe_pipeline_event(H3PipelineEvent {
+                phase: H3PipelinePhase::Complete,
+                completed: 1,
+                total: 1,
+            });
+            record_memory_sample();
+        })
+        .join()
+        .expect("the foreign test thread finishes");
+        assert!(
+            !rows_has_event(&path, EVENT_ATTEMPT_COMPLETE) && !rows_has_event(&path, EVENT_SAMPLE),
+            "another test's thread must not write into, or close, this test's capture"
+        );
+        // The same call from the activating thread does land, so the negative
+        // above is the thread gate and not a sampler that never writes.
+        record_memory_sample();
+        assert!(rows_has_event(&path, EVENT_SAMPLE));
 
         // A second activation in the same process refuses and creates nothing.
         let second = CampaignConfig {
