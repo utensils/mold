@@ -11,6 +11,61 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-21
+
+- **AUR packages no longer execute the CUDA-linked binary to generate shell
+  completions.** `mold-ai-bin 0.30.1` failed inside `package()` with
+  `libcudart.so.12: cannot open shared object file` because the recipe ran
+  `mold completions` under fakeroot. The Linux CUDA release archives now ship
+  the bash, zsh and fish completion scripts beside the binary
+  (`completions/mold.bash`, `completions/_mold`, `completions/mold.fish`),
+  generated at release time from that exact binary and verified against it;
+  `mold-ai-bin` installs those files, the source recipes generate theirs in
+  `build()` against the toolkit's library directory, and
+  `scripts/aur/test-in-docker.sh` now creates the `mold-ai-bin` package with
+  no CUDA library present before installing anything. The prebuilt archive
+  still links the CUDA 12 runtime while Arch's `extra/cuda` ships CUDA 13, so
+  the installed binary needs a CUDA 12 runtime to load
+  ([#1742](https://github.com/utensils/mold/issues/1742)).
+- **Enabled MiniMax H3 across shipped Apple Silicon surfaces.** Promoted the
+  compact Metal runtime to supported, taught the shared web/desktop/mobile
+  capability parser and inventory UI to accept the server's `cuda-or-metal`
+  contract, and retained exact per-request memory admission for shapes that do
+  not fit safely.
+- **Made MiniMax H3 Metal qualification fail closed.** Added opt-in
+  machine-readable phase and memory capture, exact prepared-request budget
+  sidecars, a required native-allocation ceiling, allocation-free preflight,
+  macOS process probes, and an external watchdog enforcing the campaign's
+  availability, swap, pressure, deadline, lock, and cleanup gates. The
+  instrumentation is inactive outside a campaign.
+- **Reduced MiniMax H3 Metal attention residency.** Chunked dense attention now
+  converts only the active query slice, transposes keys directly into their
+  consumed layout, releases the fused QKV projection before attention, bounds
+  each F32 score matrix at 768 MiB, and uses the fused last-dimension softmax so
+  runtime retains the single probability matrix its workspace prices. CUDA
+  dispatch and attention arithmetic remain unchanged.
+- **Generate images with Qwen Image 2.1.** Add the official BF16 checkpoint,
+  native Qwen3-VL text conditioning, 32-block transformer and 64-channel VAE,
+  with request-local prefix KV caching across denoising steps. Text-to-image
+  is supported; reference-image editing and block offload remain unavailable.
+  Prefixes above 512 tokens render in full without cache retention.
+- **Keep native macOS settings and window columns aligned.** Machine-scoped settings now use a labeled, consistently aligned selector, text defaults have visible editing fields, and Advanced gives values more room without repeating secret placeholders. The main window preserves enough room for its sidebar, canvas, and inspector; long machine, tag, and collection names no longer push content outside their columns. The Library inspector also avoids repeating its Prompt heading.
+- **Honor native macOS generation capabilities and image actions.** Submit fixed
+  strength for recipes without a denoise-strength control, including MiniMax H3,
+  and enable audio by default on capable video recipes while preserving explicit
+  choices. Use Library pictures as source images or references from the grid,
+  full-size viewer, and Library menu, with authenticated loading and protection
+  against attaching a late download to a different draft.
+- **Mold for macOS installs as `Mold Studio.app` and carries its icon.** The native app used to install as `Mold.app`, on top of the Tauri desktop app of the same name; it is now `Mold Studio.app` (executable and bundle id unchanged). The first nightly shipped with a generic app icon and a generic disk-image icon because the icon set's images were gitignored; they are tracked now, a release refuses to sign a bundle with no icon, and the mounted DMG shows the app's icon.
+- **Mold for macOS, a native app.** A Swift app under `apps/macos` for
+  Macs on macOS 26: every machine's Library, Queue, Models and Machines in
+  one window, a Generate pane whose controls come from the chosen model's
+  own generation profile, a native Metal viewer for 3-D prints, Reuse with
+  retained source media, upscaling, Sparkle updates on the same stable and
+  nightly channels as the desktop app, and an embedded engine on This Mac
+  behind a minted API key. Ships as `Mold-native-<version>.dmg` beside the
+  Tauri DMG ([#1728](https://github.com/utensils/mold/pull/1728)).
+
 ## [0.30.1] - 2026-09-18
 
 - **Build Nix release dependencies with valid Cargo sources.** Keep static crate
@@ -5877,7 +5932,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.30.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/utensils/mold/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0
