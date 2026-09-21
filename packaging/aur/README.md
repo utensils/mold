@@ -106,20 +106,66 @@ pushed manually whenever someone edits it here.
    After this first push, CI takes over for `mold-ai-bin` and `mold-ai`.
    `mold-ai-git` is hand-pushed only.
 
+## Shell completions never run the payload
+
+`package()` runs under `fakeroot` with whatever loader state the builder
+happens to have, and the release binary links the CUDA runtime. Generating
+the completions there by executing `mold completions <shell>` is how
+`mold-ai-bin 0.30.1` failed with `libcudart.so.12: cannot open shared object
+file` before pacman ever saw the package
+([#1742](https://github.com/utensils/mold/issues/1742)). No recipe executes
+the binary inside `package()` any more:
+
+- `mold-ai-bin` installs the completion files the release archive ships
+  beside the binary (`completions/mold.bash`, `completions/_mold`,
+  `completions/mold.fish`), generated at release time from that exact binary
+  by `scripts/package-cuda-release-archive.sh` and checked by
+  `scripts/verify-cuda-release-binary.sh`. The recipe never runs the
+  prebuilt payload; it refuses an archive without `completions/`, which is
+  every archive up to and including v0.30.1.
+- `mold-ai` and `mold-ai-git` generate them in `build()` from the binary they
+  just compiled, with `/opt/cuda/lib64` named on `LD_LIBRARY_PATH` because the
+  toolkit is a makedepend at a known path; `package()` only installs files.
+
+`scripts/tests/cuda-distribution-contract.sh` pins all of this.
+
+**Known runtime gap.** The prebuilt archive is built against CUDA 12.8 and
+links `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`,
+`libcurand.so.10` and `libcudnn.so.9`, while `extra/cuda` ships CUDA 13
+(`libcudart.so.13`) and `extra/cudnn` requires `cuda>=13`. `depends=('cuda')`
+therefore installs a toolkit the binary cannot load; `ldd /usr/bin/mold`
+names what is missing. A CUDA 12 runtime has to come from elsewhere (the AUR
+`cuda-12.9` + `cudnn9.10-cuda12.9` pair provides one) until the package's
+dependencies or the release toolchain change — tracked in #1742.
+
 ## Local PKGBUILD smoke test (macOS / non-Arch hosts)
 
 ```bash
 scripts/aur/test-in-docker.sh mold-ai-bin    # prebuilt tarball — fastest
 scripts/aur/test-in-docker.sh mold-ai        # source build (very slow under emulation; pulls 5GB of CUDA)
 scripts/aur/test-in-docker.sh mold-ai-git    # VCS build
+scripts/aur/test-in-docker.sh --version 0.31.0 mold-ai-bin   # target one release
+scripts/aur/test-in-docker.sh --as-is mold-ai-bin            # keep the in-tree pkgver
 scripts/aur/test-in-docker.sh --rebuild      # force image rebuild
 scripts/aur/test-in-docker.sh --shell mold-ai-bin   # drop into a shell after the build
 ```
 
-Each invocation builds the PKGBUILD inside an Arch container (Rosetta /
-qemu-user under amd64), installs it via `pacman -U`, and runs `mold
---version` as a smoke test. Note: smoke tests do not exercise GPU codepaths
-— they only confirm the binary links and parses CLI args.
+`mold-ai-bin` and `mold-ai` are published per release with `pkgver` and the
+checksums rewritten by CI, so the in-tree values are placeholders: the test
+points its copy of the recipe at the latest GitHub release (or `--version`)
+through `scripts/aur/update-pkgbuild.sh` before building, and `--as-is`
+keeps the in-tree values. `mold-ai-git` is never bumped.
+
+For `mold-ai-bin` the run has two phases. The package is **created first
+with `makepkg --nodeps`**, before any dependency is installed, on an image
+that carries no CUDA library at all, and the built package is checked for
+the three completion files — so a recipe that needs a CUDA loader path to
+package fails right there. Only then are the runtime dependencies pulled in
+for `pacman -U` and the `mold --version` smoke, which prints the unresolved
+libraries from `ldd` when the installed binary cannot load. The source
+recipes keep the single `makepkg -si` flow, since their `build()` needs the
+toolkit. Smoke tests do not exercise GPU codepaths — they only confirm the
+binary links and parses CLI args.
 
 ## Editing a PKGBUILD locally (Arch host)
 

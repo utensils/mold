@@ -45,6 +45,30 @@ def has_build_bound_kernel_manifest(probe: dict[str, Any]) -> bool:
     )
 
 
+# The members of a Linux CUDA release archive, mirroring
+# scripts/lib/cuda-release-archive.sh: the binary and the shell completion
+# scripts generated from it at release time. An archive that predates the
+# completions holds `mold` alone, which is still one exact binary.
+RELEASE_ARCHIVE_MEMBERS = {
+    "mold",
+    "completions/mold.bash",
+    "completions/_mold",
+    "completions/mold.fish",
+}
+
+
+def release_archive_layout_error(members: list[tarfile.TarInfo]) -> str | None:
+    names = [member.name for member in members]
+    if (
+        "mold" not in names
+        or len(set(names)) != len(names)
+        or not set(names) <= RELEASE_ARCHIVE_MEMBERS
+        or not all(member.isfile() for member in members)
+    ):
+        return "archive must contain exactly mold and its shell completions"
+    return None
+
+
 SUPPORTED_SCHEMA_KEYWORDS = {
     "$schema",
     "$id",
@@ -316,9 +340,10 @@ def validate_artifact(
     try:
         with tarfile.open(archive_path, "r:gz") as archive:
             members = archive.getmembers()
-            if len(members) != 1 or members[0].name != "mold" or not members[0].isfile():
-                raise ValidationFailure(f"{key}: archive must contain exactly mold")
-            member = archive.extractfile(members[0])
+            layout_error = release_archive_layout_error(members)
+            if layout_error is not None:
+                raise ValidationFailure(f"{key}: {layout_error}")
+            member = archive.extractfile(next(m for m in members if m.name == "mold"))
             if member is None or hashlib.sha256(member.read()).hexdigest() != actual_binary:
                 raise ValidationFailure(f"{key}: archive member is not the exact binary")
     except (tarfile.TarError, OSError) as error:

@@ -308,6 +308,49 @@ validator="$repo_root/scripts/validate-cuda-qualification-report.py"
 "$validator" "$valid_report" >/dev/null \
   || { echo "validator rejected fully bound qualification evidence" >&2; exit 1; }
 
+# A release archive carries the binary and its shell completions
+# (scripts/lib/cuda-release-archive.sh); an older one carries the binary
+# alone. Anything else beside the binary is not a release archive.
+python3 - "$validator" <<'PYTHON'
+import importlib.util
+import io
+import sys
+import tarfile
+
+spec = importlib.util.spec_from_file_location("validator", sys.argv[1])
+validator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(validator)
+
+
+def members(*names, directory=None):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name in names:
+            info = tarfile.TarInfo(name)
+            payload = f"{name} bytes".encode()
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        if directory is not None:
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r:gz") as archive:
+        return archive.getmembers()
+
+
+check = validator.release_archive_layout_error
+assert check(members("mold")) is None, "binary-only archive rejected"
+assert check(members(
+    "mold", "completions/mold.bash", "completions/_mold", "completions/mold.fish",
+)) is None, "archive with shell completions rejected"
+assert check(members("mold", "completions/mold.bash")) is None, "partial completions rejected"
+assert check(members("completions/mold.bash")) is not None, "archive without mold accepted"
+assert check(members("mold", "README.md")) is not None, "stray member accepted"
+assert check(members("mold", "mold")) is not None, "duplicate binary accepted"
+assert check(members("mold", directory="completions")) is not None, "directory entry accepted"
+PYTHON
+
 report_backup="$test_root/report.backup"
 cp "$valid_report" "$report_backup"
 expect_report_rejection() {

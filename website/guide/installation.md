@@ -192,6 +192,15 @@ CUDA_COMPUTE_CAP=120 paru -S mold-ai  # RTX 50-series
 
 There is no `mold-ai-bin-sm100` package before real B200 qualification.
 
+::: warning CUDA 12 runtime
+The prebuilt `mold-ai-bin` archive is built against CUDA 12.8 and links
+`libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`, `libcurand.so.10`
+and `libcudnn.so.9`. Arch's `extra/cuda` ships CUDA 13, so the installed
+binary cannot load until a CUDA 12 runtime is present; `ldd /usr/bin/mold`
+names the missing libraries. This is tracked in
+[#1742](https://github.com/utensils/mold/issues/1742).
+:::
+
 To upgrade: `paru -Syu mold-ai-bin` (or `mold-ai` / `mold-ai-git`). `mold update`
 will detect a pacman-managed install and direct you here instead of attempting
 to overwrite the binary.
@@ -340,3 +349,8 @@ source <(mold completions bash)    # bash
 source <(mold completions zsh)     # zsh
 mold completions fish | source     # fish
 ```
+
+The Linux CUDA release archives also ship these scripts pre-generated beside
+the binary, as `completions/mold.bash`, `completions/_mold` and
+`completions/mold.fish`, so a packager never has to execute the CUDA-linked
+binary to obtain them. The AUR packages install them system-wide.
