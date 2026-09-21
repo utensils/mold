@@ -17,6 +17,13 @@ if [[ -z "$raw_urls" ]]; then
   exit 1
 fi
 
+# The other spellings of "a file from a branch" carry the ref somewhere else in
+# the path; none is in use, so refuse them rather than parse them.
+if grep -nE 'https://(github\.com/[^/"]+/[^/"]+/(raw|archive)/|codeload\.github\.com/)' "$script" >&2; then
+  echo "FAIL: fetch repository files through raw.githubusercontent.com/<owner>/<repo>/<commit>/ so the pin is checkable" >&2
+  exit 1
+fi
+
 failed=0
 while IFS= read -r url; do
   # https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>
@@ -36,4 +43,5 @@ if [[ "$plugin_calls" -eq 0 || "$plugin_calls" -ne "$plugin_hashes" ]]; then
   failed=1
 fi
 
-exit "$failed"
+[[ "$failed" -eq 0 ]] || exit 1
+echo "PASS: desktop-linuxdeploy-pins"

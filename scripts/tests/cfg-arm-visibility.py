@@ -13,6 +13,12 @@ This reads the source instead of compiling it, so it answers on any host and
 for every feature combination at once. Only VISIBILITY is compared: a fallback
 arm legitimately renames its parameters to `_name` and a fallback `main` drops
 its return type, but no caller can be meant to reach one arm and not the other.
+
+Limits, so nobody over-trusts it: only a function carrying its OWN `#[cfg]` is
+compared. A `#[cfg]` on the enclosing `mod`/`impl`, `cfg_if!` and other macro
+arms, and `#[cfg_attr(.., cfg(..))]` are not followed. CI runs it on the `rust`
+route (crates/) and in the desktop native job (desktop/src-tauri); the mobile
+root is covered by `ci-local` only.
 """
 
 from __future__ import annotations
@@ -83,6 +89,18 @@ impl Sampler {
 }
 """
 SELF_TEST_AGREEMENT = SELF_TEST_MISMATCH.replace("    fn level", "    pub(crate) fn level")
+# The same name in two sibling scopes is two functions, not two arms of one.
+SELF_TEST_SIBLING_SCOPES = """
+impl Metal {
+    #[cfg(feature = "metal")]
+    pub fn new() -> Self { Self }
+}
+
+impl Cuda {
+    #[cfg(feature = "cuda")]
+    fn new() -> Self { Self }
+}
+"""
 
 
 def visibilities(source: str) -> list[set[str]]:
@@ -98,6 +116,8 @@ def self_test() -> None:
         raise SystemExit("FAIL: the scanner no longer sees a visibility mismatch across cfg arms")
     if visibilities(SELF_TEST_AGREEMENT) != [{"pub(crate)"}]:
         raise SystemExit("FAIL: the scanner reports a mismatch between identical cfg arms")
+    if sorted(map(sorted, visibilities(SELF_TEST_SIBLING_SCOPES))) != [["private"], ["pub"]]:
+        raise SystemExit("FAIL: the scanner merges same-named functions from sibling scopes")
 
 
 def main() -> int:

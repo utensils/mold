@@ -649,6 +649,8 @@ grep -Fxq "              - 'scripts/tests/desktop-linuxdeploy-pins.sh'" <<< "$re
 rust_filter="$(extract_filter "$ci" rust)"
 grep -Fxq "              - 'scripts/tests/cfg-arm-visibility.py'" <<< "$rust_filter" \
   || fail "rust classifier omits the cfg-arm visibility contract"
+grep -Fq 'run: python3 ../scripts/tests/cfg-arm-visibility.py' <<< "$(extract_job "$desktop" desktop-rust)" \
+  || fail "desktop native PRs compile macOS arms only and do not check the others from source"
 cfg_arm_step="$(grep -F -B2 'run: python3 scripts/tests/cfg-arm-visibility.py' "$ci" || true)"
 grep -Fxq "        if: env.RUN_RUST_SUITE == 'true'" <<< "$cfg_arm_step" \
   || fail "the cfg-arm visibility contract must run on pull requests, not only on push"

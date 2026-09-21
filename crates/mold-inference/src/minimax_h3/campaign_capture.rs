@@ -928,6 +928,10 @@ mod tests {
             !rows_has_event(&path, EVENT_ATTEMPT_COMPLETE) && !rows_has_event(&path, EVENT_SAMPLE),
             "another test's thread must not write into, or close, this test's capture"
         );
+        // The same call from the activating thread does land, so the negative
+        // above is the thread gate and not a sampler that never writes.
+        record_memory_sample();
+        assert!(rows_has_event(&path, EVENT_SAMPLE));
 
         // A second activation in the same process refuses and creates nothing.
         let second = CampaignConfig {

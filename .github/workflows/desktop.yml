@@ -214,6 +214,10 @@ jobs:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v4
+      # This job compiles the macOS cfg arms only; the Linux desktop build is
+      # push-only, so the arms it would compile are checked from source here.
+      - name: Check cfg arms of one function share one visibility
+        run: python3 ../scripts/tests/cfg-arm-visibility.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
