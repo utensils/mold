@@ -300,10 +300,15 @@ describe("MiniMax H3 inventory presentation", () => {
 
     const metal = h3Capability();
     Object.assign(metal.qualification, {
-      backend: "metal",
+      backend: "cuda-or-metal",
       metal_supported: true,
     });
-    expect(presentMiniMaxH3Host(host("render-a", metal))).toBeNull();
+    expect(
+      presentMiniMaxH3Host(host("render-a", metal))?.qualification,
+    ).toMatchObject({
+      backend: "cuda-or-metal",
+      metal_supported: true,
+    });
 
     const malformed = h3Capability();
     malformed.components = malformed.components.filter(

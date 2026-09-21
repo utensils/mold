@@ -82,8 +82,8 @@ export function authenticatedMiniMaxH3Capabilities(): MiniMaxH3CapabilityRecord 
     minimax_h3: {
       runtime_available: true,
       qualification: {
-        backend: "cuda",
-        metal_supported: false,
+        backend: "cuda-or-metal",
+        metal_supported: true,
         minimum_host_ram_bytes: 1,
         minimum_vram_bytes: 1,
         attention_profile: "reviewed attention",

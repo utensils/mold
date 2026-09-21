@@ -2697,6 +2697,13 @@ pub fn effective_device_ref(
 struct MacOSMemInfo {
     free: u64,
     inactive: u64,
+    /// Wired-down pages. These cannot back a new allocation at all.
+    wired: u64,
+    /// Pages currently held (compressed) inside the memory compressor.
+    compressor: u64,
+    /// Anonymous resident pages (active + inactive). File-backed pages are
+    /// deliberately NOT here: clean file cache is evictable on demand.
+    anonymous: u64,
 }
 
 /// Query macOS VM statistics using host_statistics64 FFI.
@@ -2740,10 +2747,19 @@ fn macos_vm_stats() -> Option<MacOSMemInfo> {
             return None;
         }
         let page_size = page_size as u64;
-        // Layout: [0]=free_count, [1]=active_count, [2]=inactive_count (all natural_t = u32)
+        // Layout (libc vm_statistics64, no padding before the u64 tail):
+        // [0]=free_count, [1]=active_count, [2]=inactive_count,
+        // [3]=wire_count, then u64 counters; after them natural_t
+        // [22]=purgeable_count, [23]=speculative_count, then u64 fields,
+        // then [32]=compressor_page_count, [33]=throttled_count,
+        // [34]=external_page_count (file-backed), [35]=internal_page_count
+        // (anonymous). The old indices 0/2 are unaffected by this reading.
         Some(MacOSMemInfo {
             free: buf[0] as u32 as u64 * page_size,
             inactive: buf[2] as u32 as u64 * page_size,
+            wired: buf[3] as u32 as u64 * page_size,
+            compressor: buf[32] as u32 as u64 * page_size,
+            anonymous: buf[35] as u32 as u64 * page_size,
         })
     }
 }
@@ -2758,14 +2774,45 @@ pub fn free_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free)
 }
 
-/// Total available system memory on macOS (free + inactive pages).
+// `os_proc_available_memory` is documented as the kernel's availability
+// answer, but on macOS it reports 0 (an iOS behavior); measured directly on
+// Darwin 25. Do not switch this to it.
+
+/// Host memory a new allocation can have, on macOS unified memory.
 ///
-/// Inactive pages are trivially reclaimable by the OS (no I/O for anonymous pages).
-/// Used for both memory budget checks and variant selection on unified-memory systems,
-/// where free-only is too conservative (often ~1-2GB on a busy 16GB Mac).
+/// This used to sum `free + inactive` vm_stat pages. That sum collapses while
+/// a H3 attempt streams its mmap'd checkpoints: reading the mapped 19.5 GB
+/// DiT and 14.6 GB conditioner files turns their clean file-cache pages
+/// ACTIVE, the sum drops by far more than the attempt's real demand, and the
+/// swap file and kernel pressure stay flat the whole time — the system is not
+/// in distress. Four measured campaign launches (starting at 20.1, 22.9,
+/// 25.25 and 30.75 GiB) all dipped to ~11 GiB, and the memory returned while
+/// the killed process was NOT running; see the H3 Metal campaign violation
+/// log.
+///
+/// The answer is now Activity Monitor's own arithmetic: installed RAM minus
+/// what genuinely cannot back an allocation — wired pages, compressor-held
+/// pages, and anonymous resident pages. File-backed cache (the mmap'd
+/// checkpoints) is evictable by the kernel on demand and is deliberately
+/// NOT subtracted; the kernel pressure level and swap growth remain the
+/// distress signals layered on top.
 #[cfg(target_os = "macos")]
 pub fn available_system_memory_bytes() -> Option<u64> {
-    macos_vm_stats().map(|s| s.free + s.inactive)
+    let stats = macos_vm_stats()?;
+    let total = total_system_memory_bytes()?;
+    let unavailable = stats
+        .wired
+        .checked_add(stats.compressor)?
+        .checked_add(stats.anonymous)?;
+    if unavailable > total {
+        return None;
+    }
+    let available = total - unavailable;
+    if available > 0 {
+        Some(available)
+    } else {
+        None
+    }
 }
 
 /// Currently used macOS swap bytes.

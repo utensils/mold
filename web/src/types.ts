@@ -312,8 +312,9 @@ export interface ServerCapabilities {
       authorization_url: string;
     }>;
   };
-  /** Host-authored, presentation-only H3 inventory. Current servers omit it;
-   * model_access and runtime_available remain independent hard gates. */
+  /** Host-authored H3 inventory and exact request-envelope facts. Absent on
+   * older, non-H3, or incomplete hosts; model_access and runtime_available
+   * remain independent hard gates. */
   minimax_h3?: MiniMaxH3Capability | null;
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected

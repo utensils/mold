@@ -419,7 +419,7 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         aliases: &["minimax_h3", "minimaxh3"],
         backends: BackendApplicability {
             cuda: BackendQualification::Supported,
-            metal: BackendQualification::CorrectnessOnly,
+            metal: BackendQualification::Supported,
             cpu: BackendQualification::Unsupported,
         },
         placement: ComponentPlacementCapability {

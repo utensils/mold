@@ -22,7 +22,7 @@ community checkpoints and LoRAs. See the
 | SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 512x512 default (1024x1024 presets)          |
 | **LTX Video**       | `ltx-video-0.9.6-distilled:bf16`      | Broad text-to-video default; LTX-2.x adds joint audio |
 | **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support   |
-| **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build |
+| **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; CUDA or Metal   |
 
 ## Choosing a Video Family
 
@@ -30,12 +30,12 @@ community checkpoints and LoRAs. See the
 | -------------------------------- | ------------------------------------ | ----------------------------------------------------- | -------------------------------------------------------- |
 | [LTX Video](/models/ltx2)        | `ltx-video-0.9.6-distilled:bf16`     | Text-to-video plus joint audio-video on LTX-2.x       | Legacy models have no generated audio; newer packs gated |
 | [Wan Video](/models/wan)         | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences | CUDA-qualified; Metal/CPU correctness-only               |
-| [MiniMax H3](/models/minimax-h3) | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video          | 42.482 GB base pull; runtime is build-scoped             |
+| [MiniMax H3](/models/minimax-h3) | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video          | SM89 CUDA/Apple Metal; exact live-memory admission       |
 
 MiniMax H3's pull size is disk/download size, not peak VRAM. Its compact
-runtime is available on H3-enabled SM89 CUDA builds; Metal is shipped as an
-unqualified correctness-only route, and CPU is unsupported. Check the model
-row's `runtime_available` reason before downloading on another target.
+runtime is supported on H3-enabled SM89 CUDA and Apple Silicon Metal builds;
+CPU is unsupported. Every request still has to pass exact device and host-memory
+admission, so check the model row's `runtime_available` reason before download.
 
 ## Image VRAM Guide
 
@@ -180,6 +180,6 @@ Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
 CUDA-only; Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
 are downloadable everywhere, and both reviewed routes (FL2VA's boundary frame
 and Ref2VA's ordered image/video/audio references) execute on supported SM89
-CUDA builds; the CPU path is unsupported, and the Apple Metal route is admitted
-and shipped but correctness-only and not yet hardware-qualified.
+CUDA and Apple Silicon Metal builds; the CPU path is unsupported, and every
+request remains subject to exact live-memory admission.
 :::

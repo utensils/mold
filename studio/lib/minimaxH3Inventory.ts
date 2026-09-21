@@ -61,19 +61,27 @@ export interface MiniMaxH3RequestCapability {
   generation_profile_sha256: string;
 }
 
-export interface MiniMaxH3QualificationCapability {
-  backend: "cuda";
-  metal_supported: false;
+export type MiniMaxH3QualificationCapability = (
+  | {
+      backend: "cuda";
+      metal_supported: false;
+    }
+  | {
+      backend: "cuda-or-metal";
+      metal_supported: true;
+    }
+) & {
   minimum_host_ram_bytes: number;
   minimum_vram_bytes: number;
   attention_profile: string;
   quantization_profile: string;
-}
+};
 
 /**
- * Additive, host-authored presentation facts for a future authorized H3
- * runtime. Current servers omit this field. It is deliberately not a model
- * manifest or catalog recipe and therefore cannot authorize a download.
+ * Host-authored presentation and request-envelope facts for the reviewed H3
+ * runtime on one machine. H3-enabled servers emit it when the exact compact
+ * partition graph is known; absence keeps older, non-H3, or malformed hosts
+ * fail closed. Catalog manifests remain the download authority.
  */
 export interface MiniMaxH3Capability {
   runtime_available: boolean;
@@ -362,8 +370,6 @@ function parseQualification(
 ): MiniMaxH3QualificationCapability | null {
   if (
     !isRecord(value) ||
-    value.backend !== "cuda" ||
-    value.metal_supported !== false ||
     !byteCount(value.minimum_host_ram_bytes) ||
     value.minimum_host_ram_bytes === 0 ||
     !byteCount(value.minimum_vram_bytes) ||
@@ -373,14 +379,19 @@ function parseQualification(
   ) {
     return null;
   }
-  return {
-    backend: "cuda",
-    metal_supported: false,
+  const facts = {
     minimum_host_ram_bytes: value.minimum_host_ram_bytes,
     minimum_vram_bytes: value.minimum_vram_bytes,
     attention_profile: value.attention_profile.trim(),
     quantization_profile: value.quantization_profile.trim(),
   };
+  if (value.backend === "cuda" && value.metal_supported === false) {
+    return { backend: "cuda", metal_supported: false, ...facts };
+  }
+  if (value.backend === "cuda-or-metal" && value.metal_supported === true) {
+    return { backend: "cuda-or-metal", metal_supported: true, ...facts };
+  }
+  return null;
 }
 
 function readiness(
@@ -409,11 +420,11 @@ function sumUnique(
 
 /**
  * Validate and present one exact host's H3 facts. This is the #831/#841
- * authority boundary: absence, disabled runtime, Metal support, or a malformed
- * component graph all return null, so no surface can tease support. The
- * additive partition is intentionally narrower than the legacy family-wide
- * model-access denial, which remains present for clients that do not understand
- * this exact private capability.
+ * authority boundary: absence, disabled runtime, an unrecognized backend
+ * qualification, or a malformed component graph all return null, so no
+ * surface can tease support. The additive partition is intentionally narrower
+ * than the legacy family-wide model-access denial, which remains present for
+ * clients that do not understand this exact private capability.
  */
 export function presentMiniMaxH3Host(
   host: MiniMaxH3HostInput,

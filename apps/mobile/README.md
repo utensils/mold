@@ -589,6 +589,9 @@ authoritative plan cannot exist until those media bytes are staged. The shared
 image picker supports an ordered multi-select from every connected host plus
 local files for Ref2VA, while ordinary source and keyframe wells keep their
 single-image mode.
+Apple Silicon hosts advertise `qualification.backend = cuda-or-metal`; mobile
+accepts that Metal qualification and shows the same installed H3 inventory as
+web and desktop instead of discarding it as a CUDA-only capability.
 Create generation queues and stale reasons resolve opaque catalog IDs through
 the selected host's inventory for display, while requests and saved provenance
 retain the stable ID.

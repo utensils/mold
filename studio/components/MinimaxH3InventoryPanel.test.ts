@@ -116,6 +116,31 @@ describe("MinimaxH3InventoryPanel", () => {
     ).toHaveLength(6);
   });
 
+  it("shows the server's shared CUDA and Metal qualification", () => {
+    const available = capability();
+    available.qualification = {
+      ...available.qualification,
+      backend: "cuda-or-metal",
+      metal_supported: true,
+    };
+    const wrapper = mount(MinimaxH3InventoryPanel, {
+      props: {
+        hosts: [
+          {
+            id: "render-a",
+            label: "Render A",
+            capabilities: { minimax_h3: available },
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("CUDA + Metal");
+    expect(wrapper.text()).toContain("MetalSupported");
+    expect(wrapper.text()).not.toContain("CUDA only");
+    expect(wrapper.text()).not.toContain("MetalUnsupported");
+  });
+
   it("labels a host that advertises only qualified FL2VA", () => {
     const available = capability();
     available.partitions = available.partitions.filter(

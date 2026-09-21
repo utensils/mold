@@ -1,6 +1,11 @@
 # H3 Metal memory audit — 2026-09-05
 
 Status: **attention and INT8 regressions fixed; reduced-size Metal FL2VA render retained**.
+
+Historical snapshot: the
+[2026-09-20 campaign](minimax-h3-metal-next-campaign.md) supersedes this tier
+verdict and promotes the exact-request-memory-gated Apple Metal path to
+`Supported`.
 Tracks [#1164](https://github.com/utensils/mold/issues/1164) and
 [#1542](https://github.com/utensils/mold/issues/1542). Audited base:
 `e1bf871c799fd6dc88628dc69fcbb98fbd43c692`; Candle:

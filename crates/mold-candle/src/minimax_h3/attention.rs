@@ -1,11 +1,11 @@
 //! Lossless, fail-closed attention authority for MiniMax H3.
 //!
 //! H3 packs every text, reference, generated-video, and generated-audio row
-//! into one full non-causal self-attention document. Released shapes make an
-//! `N x N` score tensor non-viable. This module therefore keeps dense F32
-//! attention behind a small synthetic bound and gives the optional Candle
-//! FlashAttention v2 primitive a separate, source- and hardware-qualified
-//! authority.
+//! into one full non-causal self-attention document. Released shapes make a
+//! full `N x N` score tensor non-viable. The CPU reference is therefore kept
+//! behind a small synthetic bound; Metal preserves the same dense arithmetic
+//! with bounded query chunks; and the optional Candle FlashAttention v2
+//! primitive has a separate, source- and hardware-qualified authority.
 //!
 //! The optional kernel is deliberately not a shipping claim. The dedicated
 //! `h3-flash-attn-rc` feature is reachable only from a synthetic qualification
@@ -17,7 +17,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-use candle::{DType, Device, Tensor, D};
+use candle::{DType, Device, Tensor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
@@ -25,12 +25,13 @@ use std::time::Instant;
 pub const H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS: u64 = 4 * 1024 * 1024;
 /// Largest F32 score matrix one Metal chunk may materialize, in elements.
 ///
-/// 256 Mi elements is 1 GiB at F32 — comfortably inside every Apple Silicon
-/// `maxBufferLength` while keeping the chunk count low enough that the loop
-/// overhead does not dominate. The unchunked matrix at released geometry is
-/// `56 x 40k x 40k` elements (~358 GB), so the bound is what makes the path
-/// exist at all rather than a tuning preference.
-pub const H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS: u64 = 256 * 1024 * 1024;
+/// 192 Mi elements is 768 MiB at F32. Together with direct key transposition
+/// and query-slice conversion, that keeps the 768-square campaign shape below
+/// its independently larger FFN workspace instead of letting two 1 GiB
+/// score/probability buffers bind the phase. The unchunked matrix at released
+/// geometry is `56 x 40k x 40k` elements (~358 GB), so the bound is what makes
+/// the path exist at all rather than a tuning preference.
+pub const H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS: u64 = 192 * 1024 * 1024;
 /// Upper bound on one Metal query chunk, mirroring `crate::attention`'s
 /// `CUDA_AUTO_QUERY_CHUNK` so short sequences behave like every other family.
 pub const H3_METAL_DENSE_MAX_QUERY_CHUNK_ROWS: usize = 512;
@@ -290,9 +291,9 @@ impl H3AttentionKernel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionActivation {
     SyntheticCorrectnessOnly,
-    /// Apple Silicon's shipping tier: real production shapes execute, and the
-    /// tier claims correctness only — throughput is deliberately unqualified,
-    /// matching the Wan #800 / LTX-2 Metal precedent.
+    /// Apple Silicon's production chunked-dense route. The historical variant
+    /// name and stable id are part of the frozen execution fingerprint; they
+    /// do not describe the public backend support tier.
     MetalCorrectnessOnly,
     ReleaseCandidateQualificationOnly,
 }
@@ -715,14 +716,14 @@ impl H3AttentionRuntimeAuthority {
         ))
     }
 
-    /// Apple Silicon's correctness route.
+    /// Apple Silicon's supported chunked-dense route.
     ///
     /// The bounded synthetic path exists to prove the dense arithmetic on a
     /// toy shape; it cannot freeze a production sequence, because one
     /// `N x N` score matrix at released geometry is ~358 GB. Metal has no
     /// FlashAttention kernel to escape to, so this backend keeps the identical
     /// arithmetic and executes it over query chunks — the same answer, in
-    /// slices that fit a Metal buffer. Throughput is deliberately unqualified.
+    /// slices that fit a Metal buffer.
     pub fn metal_chunked_dense(contract: H3AttentionModelContract) -> InspectionResult<Self> {
         validate_backend_contract(
             H3AttentionBackend::MetalChunkedDenseMath,
@@ -1144,7 +1145,7 @@ fn validate_backend_contract(
             {
                 return Err(failure(
                     H3AttentionErrorCode::RuntimePlanMismatch,
-                    "MiniMax H3 Metal chunked math has an unqualified kernel/activation tuple",
+                    "MiniMax H3 Metal chunked math has an unexpected kernel/activation tuple",
                     vec![H3AttentionRequirement::UntamperedFrozenPlan],
                 ));
             }
@@ -1392,9 +1393,10 @@ fn workspace_for(
             )
         })?;
     match backend {
-        // Both dense arms run the identical arithmetic and hold the identical
-        // F32 Q/K/V copies; only the score/probability pair narrows, which
-        // `score_elements` above already accounts for.
+        // Both dense arms run the identical arithmetic. The unchunked path
+        // materializes full F32 Q/K/V. The Metal path retains full F32 keys
+        // and values plus the active F32 query slice and its BF16 conversion
+        // staging buffer.
         H3AttentionBackend::BoundedDenseMath | H3AttentionBackend::MetalChunkedDenseMath => {
             let one_vector_f32 = vector_elements.checked_mul(4).ok_or_else(|| {
                 failure(
@@ -1403,13 +1405,45 @@ fn workspace_for(
                     Vec::new(),
                 )
             })?;
-            let qkv_compute_bytes = one_vector_f32.checked_mul(3).ok_or_else(|| {
-                failure(
-                    H3AttentionErrorCode::ArithmeticOverflow,
-                    "MiniMax H3 dense QKV byte accounting overflows",
-                    Vec::new(),
-                )
-            })?;
+            let qkv_compute_bytes = if backend == H3AttentionBackend::MetalChunkedDenseMath {
+                let query_chunk_elements = checked_product(
+                    "Metal attention query chunk elements",
+                    &[batch, heads, query_chunk_rows.min(rows), head_dim],
+                )?;
+                let query_chunk_f32 = query_chunk_elements.checked_mul(4).ok_or_else(|| {
+                    failure(
+                        H3AttentionErrorCode::ArithmeticOverflow,
+                        "MiniMax H3 Metal query chunk byte accounting overflows",
+                        Vec::new(),
+                    )
+                })?;
+                let query_chunk_bf16 = query_chunk_elements.checked_mul(2).ok_or_else(|| {
+                    failure(
+                        H3AttentionErrorCode::ArithmeticOverflow,
+                        "MiniMax H3 Metal query staging byte accounting overflows",
+                        Vec::new(),
+                    )
+                })?;
+                one_vector_f32
+                    .checked_mul(2)
+                    .and_then(|bytes| bytes.checked_add(query_chunk_f32))
+                    .and_then(|bytes| bytes.checked_add(query_chunk_bf16))
+                    .ok_or_else(|| {
+                        failure(
+                            H3AttentionErrorCode::ArithmeticOverflow,
+                            "MiniMax H3 chunked QKV byte accounting overflows",
+                            Vec::new(),
+                        )
+                    })?
+            } else {
+                one_vector_f32.checked_mul(3).ok_or_else(|| {
+                    failure(
+                        H3AttentionErrorCode::ArithmeticOverflow,
+                        "MiniMax H3 dense QKV byte accounting overflows",
+                        Vec::new(),
+                    )
+                })?
+            };
             let score_matrix_bytes = score_elements.checked_mul(4).ok_or_else(|| {
                 failure(
                     H3AttentionErrorCode::ArithmeticOverflow,
@@ -1726,38 +1760,60 @@ fn dense_attention(
     query_chunk_rows: Option<usize>,
 ) -> InspectionResult<Tensor> {
     let output_dtype = q.dtype();
-    let q = q
-        .transpose(1, 2)
-        .and_then(|tensor| tensor.contiguous())
-        .and_then(|tensor| tensor.to_dtype(DType::F32))
-        .map_err(|error| kernel_error("dense query preparation", error))?;
-    let k = k
-        .transpose(1, 2)
-        .and_then(|tensor| tensor.contiguous())
-        .and_then(|tensor| tensor.to_dtype(DType::F32))
-        .map_err(|error| kernel_error("dense key preparation", error))?;
-    let v = v
-        .transpose(1, 2)
-        .and_then(|tensor| tensor.contiguous())
-        .and_then(|tensor| tensor.to_dtype(DType::F32))
-        .map_err(|error| kernel_error("dense value preparation", error))?;
-    let keys = k
-        .transpose(2, 3)
-        .and_then(|tensor| tensor.contiguous())
-        .map_err(|error| kernel_error("dense key transpose", error))?;
-    let rows = q
-        .dim(2)
-        .map_err(|error| kernel_error("dense rows", error))?;
+    let (batch, rows, heads, head_dim) = q
+        .dims4()
+        .map_err(|error| kernel_error("dense query shape", error))?;
     let chunk = query_chunk_rows.map_or(rows, |chunk| chunk.clamp(1, rows.max(1)));
     let attended = if chunk >= rows {
+        let q = q
+            .transpose(1, 2)
+            .and_then(|tensor| tensor.contiguous())
+            .and_then(|tensor| tensor.to_dtype(DType::F32))
+            .map_err(|error| kernel_error("dense query preparation", error))?;
+        let k = k
+            .transpose(1, 2)
+            .and_then(|tensor| tensor.contiguous())
+            .and_then(|tensor| tensor.to_dtype(DType::F32))
+            .map_err(|error| kernel_error("dense key preparation", error))?;
+        let v = v
+            .transpose(1, 2)
+            .and_then(|tensor| tensor.contiguous())
+            .and_then(|tensor| tensor.to_dtype(DType::F32))
+            .map_err(|error| kernel_error("dense value preparation", error))?;
+        let keys = k
+            .transpose(2, 3)
+            .and_then(|tensor| tensor.contiguous())
+            .map_err(|error| kernel_error("dense key transpose", error))?;
         dense_attention_pass(&q, &keys, &v, scale)?
     } else {
+        // Put K directly into the layout the matmul consumes. Building a full
+        // F32 [B,H,N,D] K and then another [B,H,D,N] copy retained one whole
+        // sequence vector across the first score allocation.
+        let keys = k
+            .transpose(1, 2)
+            .and_then(|tensor| tensor.transpose(2, 3))
+            .and_then(|tensor| tensor.contiguous())
+            .and_then(|tensor| tensor.to_dtype(DType::F32))
+            .map_err(|error| kernel_error("dense key preparation", error))?;
+        let values = v
+            .transpose(1, 2)
+            .and_then(|tensor| tensor.contiguous())
+            .and_then(|tensor| tensor.to_dtype(DType::F32))
+            .map_err(|error| kernel_error("dense value preparation", error))?;
+        // The transpose/conversion commands may retain their BF16 staging
+        // buffers after the Tensor handles die. Retire them before allocating
+        // the output and the first score/probability pair.
+        if q.device().is_metal() {
+            q.device()
+                .synchronize()
+                .map_err(|error| kernel_error("dense preparation completion", error))?;
+        }
         // Allocate the Metal result before any score buffers exist. A small
         // chunk result can reuse a large pooled score allocation; retaining
         // those results in `parts` would keep one oversized buffer per chunk.
         let metal_output = if q.device().is_metal() {
             Some(
-                Tensor::zeros(q.shape(), DType::F32, q.device())
+                Tensor::zeros((batch, heads, rows, head_dim), DType::F32, q.device())
                     .map_err(|error| kernel_error("dense output allocation", error))?,
             )
         } else {
@@ -1767,11 +1823,15 @@ fn dense_attention(
         let mut start = 0usize;
         while start < rows {
             let height = chunk.min(rows - start);
-            let slice = q
-                .narrow(2, start, height)
+            // Convert only the active query slice to F32. Each slice sees the
+            // complete key axis, so this changes lifetime, not arithmetic.
+            let query = q
+                .narrow(1, start, height)
+                .and_then(|tensor| tensor.transpose(1, 2))
                 .and_then(|tensor| tensor.contiguous())
+                .and_then(|tensor| tensor.to_dtype(DType::F32))
                 .map_err(|error| kernel_error("dense query chunk", error))?;
-            let part = dense_attention_pass(&slice, &keys, &v, scale)?;
+            let part = dense_attention_pass(&query, &keys, &values, scale)?;
             if let Some(output) = &metal_output {
                 output
                     .slice_set(&part, 2, start)
@@ -1780,7 +1840,7 @@ fn dense_attention(
                 parts.push(part.clone());
             }
             drop(part);
-            drop(slice);
+            drop(query);
             // Metal command buffers retain the score/softmax temporaries even
             // after their Tensor handles die. Complete each bounded pass before
             // enqueueing another, or the chunks accumulate into an unbounded
@@ -1805,6 +1865,14 @@ fn dense_attention(
         .map_err(|error| kernel_error("dense output", error))
 }
 
+fn dense_attention_softmax(scores: &Tensor) -> candle::Result<Tensor> {
+    // The generic decomposition keeps two additional score-sized tensors
+    // submitted beside its output. The fused last-dimension kernel preserves
+    // the same softmax while matching the workspace's one-probability-matrix
+    // lifetime.
+    candle_nn::ops::softmax_last_dim(scores)
+}
+
 /// One `[b, h, rows, kv]` score pass, already in F32 and already transposed.
 fn dense_attention_pass(
     q: &Tensor,
@@ -1816,8 +1884,8 @@ fn dense_attention_pass(
         .matmul(keys)
         .and_then(|tensor| tensor.affine(f64::from(scale), 0.0))
         .map_err(|error| kernel_error("dense score", error))?;
-    let probabilities = candle_nn::ops::softmax(&scores, D::Minus1)
-        .map_err(|error| kernel_error("dense softmax", error))?;
+    let probabilities =
+        dense_attention_softmax(&scores).map_err(|error| kernel_error("dense softmax", error))?;
     probabilities
         .matmul(v)
         .map_err(|error| kernel_error("dense value projection", error))
@@ -1841,6 +1909,7 @@ fn flash_attention(_: &Tensor, _: &Tensor, _: &Tensor, _: f32) -> InspectionResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle::D;
 
     fn exact_flash_candidate() -> H3AttentionRuntimeAuthority {
         qualify_flash_attention_v2_with_availability(
@@ -2418,6 +2487,40 @@ mod tests {
         assert!(next > H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS);
     }
 
+    /// The first default-campaign shape must price the buffers the chunked
+    /// executor actually keeps live: one query slice and its BF16 conversion
+    /// staging plus full F32 key/value storage. Its score slice is capped
+    /// below the old 1 GiB allocation that crossed the retained host floor.
+    #[test]
+    fn the_metal_workspace_matches_the_bounded_chunk_lifetimes() {
+        let rows = 21_844usize;
+        let authority = H3AttentionRuntimeAuthority::metal_chunked_dense(
+            H3AttentionModelContract::released_bf16(),
+        )
+        .unwrap();
+        let plan = authority
+            .freeze_execution(1, 3, rows)
+            .unwrap()
+            .packed_transformer;
+        let workspace = plan.workspace();
+        let full_f32 = (rows * H3_RELEASE_HEADS * H3_RELEASE_HEAD_DIM * 4) as u64;
+        let query_chunk_f32 =
+            (plan.query_chunk_rows() * H3_RELEASE_HEADS * H3_RELEASE_HEAD_DIM * 4) as u64;
+        let query_chunk_bf16 = query_chunk_f32 / 2;
+
+        assert_eq!(
+            workspace.qkv_compute_bytes,
+            full_f32 * 2 + query_chunk_f32 + query_chunk_bf16
+        );
+        assert!(workspace.score_matrix_bytes <= 768 << 20);
+        let kernel_peak =
+            workspace.input_output_tensor_bytes + workspace.peak_auxiliary_bytes_upper_bound;
+        assert!(
+            kernel_peak <= (9_u64 << 29),
+            "B campaign attention peak {kernel_peak} exceeds the 4.5 GiB denoise workspace"
+        );
+    }
+
     /// A single row past the budget must still execute: the smallest slice the
     /// loop can express is one row, and refusing it would refuse the render
     /// for an accounting bound rather than a device limit.
@@ -2578,6 +2681,31 @@ mod tests {
             .to_scalar::<f32>()
             .unwrap();
         assert!(max <= 1e-4, "metal chunked max difference {max}");
+    }
+
+    /// Run alone: this observes the process-wide Metal allocation counter
+    /// before the submitted softmax commands retire. The dense workspace
+    /// prices one score and one probability matrix, so softmax itself may add
+    /// only the probability matrix plus its row reductions.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "exclusive Metal allocation qualification"]
+    fn metal_dense_softmax_stays_inside_one_probability_matrix() {
+        let metal = Device::new_metal(0).unwrap();
+        let native = metal.as_metal_device().unwrap().device();
+        let scores = Tensor::zeros((1, 4, 512, 2048), DType::F32, &metal).unwrap();
+        metal.synchronize().unwrap();
+        let baseline = native.current_allocated_size();
+        let probabilities = dense_attention_softmax(&scores).unwrap();
+        let submitted = native.current_allocated_size().saturating_sub(baseline);
+        let probability_bytes = 4_usize * 512 * 2048 * 4;
+        eprintln!("H3_METAL_SOFTMAX_SUBMITTED_BYTES={submitted}");
+        assert!(
+            submitted <= probability_bytes + (1 << 20),
+            "softmax submitted {submitted} bytes beyond its {probability_bytes}-byte output"
+        );
+        metal.synchronize().unwrap();
+        drop(probabilities);
     }
 
     /// Run alone: native allocation accounting is process-wide. This bounded

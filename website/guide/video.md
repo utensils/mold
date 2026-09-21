@@ -125,11 +125,11 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 \
   --first-frame lantern.png --duration 5
 ```
 
-Generation is available on H3-enabled SM89 CUDA builds. The shipped Apple
-Metal route is correctness-only and not yet hardware-qualified; CPU is
-unsupported. H3 does not participate in the sequence workflow below. See
-[MiniMax H3](/models/minimax-h3) for Ref2VA uploads, Turbo tags, download-only
-layouts, and exact request limits.
+Generation is available on H3-enabled SM89 CUDA builds and the shipped Apple
+Metal build. Metal streams the compact stack and applies exact per-request
+unified-memory admission; CPU is unsupported. H3 does not participate in the
+sequence workflow below. See [MiniMax H3](/models/minimax-h3) for Ref2VA
+uploads, Turbo tags, download-only layouts, and exact request limits.
 
 ## Resolution and spatial tiling
 

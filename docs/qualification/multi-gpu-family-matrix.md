@@ -50,6 +50,7 @@ noise transferred to the execution device.
 | `qwen-image-edit` | — | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; ordered edit references, LoRA |
 | `qwen-image21` | — | supported / supported / supported | Qwen3-VL text encoder, VAE | no | no | `[1]` / cooperative | image; text-to-image only; no source, edit references, or LoRA |
 | `ltx-video` | `ltx_video` | supported / supported / supported | none | no | no | `[1]` / cooperative | video; independent-clip chains; no source/audio/LoRA |
+| `minimax-h3` | `minimax_h3`, `minimaxh3` | supported / supported / unsupported | text encoder | yes | native temporal chunks | `[1]` / cooperative | video; first-frame or ordered task references, LoRA, generated audio; no chain |
 | `ltx2` | `ltx-2`, `ltx2.3` | supported / supported / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
 | `wan` | — | supported / supported / correctness-only | UMT5 text encoder | yes | no | `[1]` / cooperative | video; source, LoRA, chain and extend — both per checkpoint, since only an image-conditioned one carries context across a seam or accepts a continuation; no generated audio |
 | `wuerstchen` | `wuerstchen-v2` | supported / supported / supported | none | no | no | `[1]` / cooperative | image; source and inpaint; no LoRA |
@@ -81,6 +82,7 @@ yet, so they carry the same Tier-1 caveat as the rest of the wan row.
 | `qwen-image-edit` | runtime qualification | `scripts/qwen-edit-parity-smoke.sh`, explicit source-edit CUDA smoke |
 | `qwen-image21` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base case |
 | `ltx-video` | runtime qualification | `scripts/regression-matrix.sh`, video and independent-chain cases |
+| `minimax-h3` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base case; Apple Metal forced-local/cold-server UAT and exact memory evidence in `minimax-h3-metal-next-campaign.md` |
 | `ltx2` | runtime qualification | `scripts/regression-matrix.sh`, video/source/audio/durable-chain cases |
 | `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video, image-to-video, first/last-frame, and single-frame-still cases across every installed tier (no hardware campaign recorded yet); admission memory is `mold-server/src/wan_admission.rs`, calibrated against four measured RTX 4090 peaks |
 | `wuerstchen` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source cases |
@@ -108,6 +110,7 @@ model artifact, command, output validation, and logs.
 | Qwen-Image-Edit | `mold-inference` | `qwen_image/pipeline.rs::qwen_image_edit_accepts_quantized_text_with_bf16_vision_sidecar` and `qwen_quantized_edit_always_uses_split_cfg_on_high_vram_cuda` |
 | Qwen Image 2.1 text-to-image | `mold-inference` | `qwen_image21/pipeline.rs::text_to_image_contract_accepts_native_canvas` |
 | LTX-Video video/chain | `mold-inference` | `ltx_video/pipeline.rs::decode_apng_round_trips_rgb_frames` and `chain/capability.rs::ltx_video_is_independent_clips_without_audio` |
+| MiniMax H3 streamed core | `mold-inference` | `minimax_h3/private_fl2va_runtime.rs::streamed_core_requires_the_bound_backend`; Apple Metal attention allocation and parity tests are retained in `mold-candle/src/minimax_h3/attention.rs` |
 | LTX-2 source image/video/keyframes | `mold-inference` | `ltx2/conditioning.rs::stage_conditioning_stages_source_image_as_frame_zero_replacement`, `stage_conditioning_keeps_audio_and_reference_video_paths`, and `stage_conditioning_preserves_keyframe_targets` |
 | LTX-2 audio supported/unsupported | `mold-inference` | `ltx2/runtime.rs::runtime_prepare_tracks_audio_and_video_latent_shapes` and `ltx2/pipeline.rs::audio_request_is_rejected_before_runtime_for_video_only_checkpoint_assets` |
 | LTX-2 external assets | `mold-inference` | `ltx2/pipeline.rs::from_transformer_only_single_file_preserves_external_vae_for_chains` |

@@ -127,20 +127,20 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA             | Metal                         | CPU              |
-| --------------- | ---------------- | ----------------------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes              | Yes                           | Yes (slow)       |
-| SDXL / SD 1.5   | Yes              | Yes                           | Yes              |
-| SD 3.5          | Yes              | Yes                           | Yes              |
-| Z-Image         | Yes              | Yes                           | Yes              |
-| Wuerstchen v2   | Yes              | Yes                           | Yes              |
-| Qwen-Image      | Yes              | Yes                           | Yes              |
-| Qwen-Image-Edit | Yes              | Yes                           | Yes              |
-| LTX Video       | Yes              | Yes                           | Yes              |
-| **LTX-2**       | Yes              | Yes                           | Correctness-only |
-| Wan Video       | Yes              | Yes                           | Correctness-only |
-| MiniMax H3      | SM89 H3 builds   | Correctness-only, unqualified | No               |
-| Hunyuan3D       | Correctness-only | Yes                           | Correctness-only |
+| Family          | CUDA             | Metal                     | CPU              |
+| --------------- | ---------------- | ------------------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes              | Yes                       | Yes (slow)       |
+| SDXL / SD 1.5   | Yes              | Yes                       | Yes              |
+| SD 3.5          | Yes              | Yes                       | Yes              |
+| Z-Image         | Yes              | Yes                       | Yes              |
+| Wuerstchen v2   | Yes              | Yes                       | Yes              |
+| Qwen-Image      | Yes              | Yes                       | Yes              |
+| Qwen-Image-Edit | Yes              | Yes                       | Yes              |
+| LTX Video       | Yes              | Yes                       | Yes              |
+| **LTX-2**       | Yes              | Yes                       | Correctness-only |
+| Wan Video       | Yes              | Yes                       | Correctness-only |
+| MiniMax H3      | SM89 H3 builds   | Yes, request-memory gated | No               |
+| Hunyuan3D       | Correctness-only | Yes                       | Correctness-only |
 
 ::: tip Hunyuan3D Metal qualification
 Metal is qualified on real weights: `hunyuan3d-mini-turbo:fp16` on an M4 Max at
@@ -167,11 +167,12 @@ Q8 text-to-video plus 5B FP16 image-to-video at 1280x704, with one cold and
 three warm 17-frame runs per workload. The path uses family-scoped BF16 and
 chunked attention; fp8-scaled Wan checkpoints remain refused on Metal.
 
-MiniMax H3's Metal route is shipped but has not completed hardware
-qualification; the compact stack needs a 64 GB-class Apple Silicon host. H3
-generation is otherwise limited to binaries built with the H3 engine, including
-the Linux SM89 release. Other release targets can still download and verify the
-registered models and report why generation is unavailable.
+MiniMax H3's compact runtime is supported in the shipped Apple Metal build and
+the Linux SM89 release. Metal streams Qwen and DiT blocks and admits each
+request against exact phase budgets plus live unified-memory headroom, so a
+supported 48 GiB Mac can still refuse a shape that does not fit safely. Other
+release targets can download and verify the registered models and report why
+generation is unavailable.
 
 ## Native app surfaces
 

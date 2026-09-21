@@ -826,8 +826,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             // per-attempt budget regardless; this tier is advisory.
             minimum_vram_bytes: 24 * 1024 * 1024 * 1024,
             attention_profile:
-                "FlashAttention v2 BF16 on CUDA SM89; chunked dense BF16 correctness on Metal"
-                    .into(),
+                "FlashAttention v2 BF16 on CUDA SM89; bounded chunked dense BF16 on Metal".into(),
             quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),
         },
         partitions: vec![mold_core::MiniMaxH3PartitionCapability {
@@ -835,7 +834,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             model: mold_core::minimax_h3::FL2VA_COMFY.into(),
             display_name: "MiniMax H3 FL2VA".into(),
             runtime_available: true,
-            tier: "Compact 24 GiB VRAM".into(),
+            tier: "Compact 24 GiB GPU memory".into(),
             component_ids,
             request: Some(mold_core::MiniMaxH3RequestCapability {
                 width: mold_core::minimax_h3::DEFAULT_WIDTH,

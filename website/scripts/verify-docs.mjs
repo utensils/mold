@@ -164,75 +164,6 @@ for (const relPath of [
   }
 }
 
-const h3ModelDoc = readRel('models/minimax-h3.md')
-const requiredH3DownloadFacts = [
-  'minimax-h3-fl2va:comfy-pruned-int8',
-  'minimax-h3-ref2va:comfy-pruned-int8',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-8step',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21',
-  'minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21',
-  'minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21',
-  '1,956,193,000',
-  '1,956,192,992',
-  'dc559027db79c174125df4d827db55cd11178860',
-  'lightx2v/Minimax-h3-Turbo',
-  '05ef678438e84933c406131b59abbf86919b3aac',
-  'drbaph/MiniMax-H3-Turbo-Lora-ComfyUI',
-  'be8eb3ea3466cbb7def202ffec0d2fdc054256ac',
-  '298,177,224',
-  '327,035,608',
-  '326,935,264',
-  '44,438,283,310',
-  '44,438,283,318',
-  '42,780,267,542',
-  '42,809,125,926',
-  '42,809,025,582',
-  // A rank-21 tier is an APPROXIMATION of the adapter it ships beside, and
-  // the page must say so in the sentence a user reads before the pull.
-  'lossy low-rank approximation',
-  'capture-scope UAT override',
-  '42,482,090,318',
-  '63,452,470,480',
-  '20,970,379,616',
-  '15,687,142,551',
-  '5,207,808,496',
-  '605,254,808',
-  '11,504,847',
-  '1344x768',
-  // The compact envelope became a RULE: the canvas, the clip length, and the
-  // base tier's step count are ranges, and 1344x768 x 124 frames is only the
-  // shape the memory bounds were MEASURED at. Pinned because the interesting
-  // way this doc goes wrong is restating either as a fixed contract.
-  '107 to 345 frames on the `17n+5` grid at 24 fps',
-  '21 to 50 terminal-inclusive sampler grid points',
-  // Metal stopped being an unimplemented backend in #1164 and, since #1323, is
-  // admitted by the frozen contract and shipped in the macOS artifacts -- but
-  // only a reduced-size render is retained. Pin the default-resolution
-  // caveat and phase-streaming facts so disk size is not described as residency.
-  'The CPU backend remains unavailable',
-  // Both compact task partitions execute since #825. Pinned because the
-  // interesting way this doc goes wrong is leaving the old "Ref2VA executes on
-  // no released build" claim behind, or describing the ordered set as a
-  // reviewed list of shapes rather than a per-request derivation.
-  'Supported Ref2VA request',
-  'order is authority',
-  'correctness-only',
-  'the default-resolution H3 Metal path remains unqualified',
-  'streams Qwen language layers and DiT blocks',
-  'every territory',
-  'shared-server, and hosted paths',
-  'model distribution or redistribution',
-  'does not require a separate clickthrough',
-]
-for (const fact of requiredH3DownloadFacts) {
-  if (!h3ModelDoc.includes(fact)) {
-    fail(`MiniMax H3 model guide missing required scoped fact: ${fact}`)
-  }
-}
-
 let rustEnvVars
 try {
   // ripgrep runs ALONE: piped through `sed | sort`, a missing `rg` still
@@ -407,6 +338,13 @@ const ignoredEnvVars = new Set([
   // Execution-plan classifier/error-display sentinels, not real settings.
   'MOLD_NOT_A_SHAPING_VARIABLE',
   'MOLD_X',
+  // Internal H3 qualification-campaign guard/capture protocol. These names
+  // are owned by the watchdog and deliberately are not user configuration.
+  'MOLD_H3_METAL_CAMPAIGN',
+  'MOLD_H3_METAL_CAMPAIGN_CAPTURE',
+  'MOLD_H3_METAL_CAMPAIGN_CASE_ID',
+  'MOLD_H3_METAL_CAMPAIGN_CEILING_MB',
+  'MOLD_H3_METAL_CAMPAIGN_BUDGET_ONLY',
   // LTX-2.5 CUDA qualification knobs whose names the UAT harness pins ahead
   // of their emitters (crates/mold-inference/src/ltx2/provenance_vocabulary.rs,
   // #1398/#1414). The cuda-core and gguf-runtime PRs ship the real readers

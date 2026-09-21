@@ -1554,32 +1554,21 @@ impl H3ComfyInt8Attention {
                 false,
                 native_cuda,
             )?;
-            let qkv_width = self
-                .inner_dim
-                .checked_mul(3)
-                .ok_or_else(|| candle::Error::Msg("MiniMax H3 QKV width overflows".into()))?;
-            let qkv_output = u64::try_from(
-                rows.checked_mul(qkv_width)
-                    .and_then(|value| value.checked_mul(dtype.size_in_bytes()))
-                    .ok_or_else(|| {
-                        candle::Error::Msg("MiniMax H3 QKV output size overflows".into())
-                    })?,
-            )
-            .map_err(|_| candle::Error::Msg("MiniMax H3 QKV output exceeds u64".into()))?;
             let plan = attention_plan.workspace();
-            let live_qkv = qkv_output
-                .checked_add(plan.input_output_tensor_bytes)
-                .ok_or_else(|| {
-                    candle::Error::Msg("MiniMax H3 live attention tensors overflow".into())
-                })?;
-            let kernel_peak = live_qkv
+            // The fused projection is released once Q/K/V have their owned
+            // contiguous storage below. Its load workspace is priced by
+            // `qkv_workspace`; carrying the fused output into `kernel_peak`
+            // would describe a buffer the executor no longer retains.
+            let live_attention = plan.input_output_tensor_bytes;
+            let kernel_peak = live_attention
                 .checked_add(plan.peak_auxiliary_bytes_upper_bound)
                 .ok_or_else(|| {
                     candle::Error::Msg("MiniMax H3 attention kernel workspace overflows".into())
                 })?;
-            let output_projection_peak = live_qkv.checked_add(out_workspace).ok_or_else(|| {
-                candle::Error::Msg("MiniMax H3 attention output workspace overflows".into())
-            })?;
+            let output_projection_peak =
+                live_attention.checked_add(out_workspace).ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 attention output workspace overflows".into())
+                })?;
             super::private_runtime_observation::observe_attention(
                 qkv_workspace.max(kernel_peak).max(output_projection_peak),
             );
@@ -1606,6 +1595,9 @@ impl H3ComfyInt8Attention {
         let v = v
             .reshape((batch, seq_len, self.heads, self.head_dim))?
             .contiguous()?;
+        // `contiguous()` above gives each view owned storage. End the fused
+        // projection's lifetime before the dense Metal workspace is allocated.
+        drop(qkv);
         q = self.q_norm.forward(&q)?;
         k = self.k_norm.forward(&k)?;
         q = apply_h3_rotary(&q, rotary.0, rotary.1, rotary.2)?;

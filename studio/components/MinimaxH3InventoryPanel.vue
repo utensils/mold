@@ -80,7 +80,9 @@ function percentage(done: number, total: number): number {
             </template>
           </p>
         </div>
-        <span class="h3-state h3-state--installed">CUDA only</span>
+        <span class="h3-state h3-state--installed">{{
+          host.qualification.metal_supported ? "CUDA + Metal" : "CUDA only"
+        }}</span>
       </header>
 
       <dl class="h3-qualification" data-test="h3-qualification">
@@ -94,7 +96,7 @@ function percentage(done: number, total: number): number {
           </dd>
         </div>
         <div>
-          <dt>VRAM</dt>
+          <dt>GPU memory</dt>
           <dd>
             {{ formatMiniMaxH3Bytes(host.qualification.minimum_vram_bytes) }}
             minimum
@@ -110,7 +112,11 @@ function percentage(done: number, total: number): number {
         </div>
         <div>
           <dt>Metal</dt>
-          <dd>Unsupported</dd>
+          <dd>
+            {{
+              host.qualification.metal_supported ? "Supported" : "Unsupported"
+            }}
+          </dd>
         </div>
       </dl>
 

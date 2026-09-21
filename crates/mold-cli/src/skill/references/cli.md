@@ -149,6 +149,9 @@ attempt. Local batches and chains are refused before preparation. Ref2VA
 reference uploads use the server route. The same limits apply to local
 fallback when the server is unavailable; never retry a refused local batch
 by reusing its first request's prepared authority.
+The released runtime accepts qualified NVIDIA CUDA and Apple Metal devices.
+Admission uses the selected request's exact device and host-memory budget, so
+do not replace its answer with a blanket system-RAM threshold.
 
 ```bash
 mold server status
