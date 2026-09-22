@@ -187,6 +187,26 @@
         "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
         "apps/macos/Tests/MoldTests/FakeBackend.swift"
       ]
+    },
+    {
+      "id": "gpu-free-cli-install",
+      "updatedAt": "2026-09-22T17:19:56.531613+00:00",
+      "baseCommit": "cb01bf3edca76680da5eae5db914d0bf09d09c02",
+      "scope": "Source-verified CPU Linux distribution, installer/updater backend selection, AUR migration and runtime validation; global baseline unchanged.",
+      "files": [
+        "install.sh",
+        "crates/mold-cli/src/commands/update.rs",
+        ".github/workflows/linux-cpu.yml",
+        ".github/workflows/release.yml",
+        "packaging/aur/mold-ai-bin/PKGBUILD",
+        "scripts/aur/update-pkgbuild.sh",
+        "scripts/aur/test-in-docker.sh",
+        "scripts/package-cpu-release-archive.sh",
+        "scripts/verify-cpu-release-binary.sh",
+        "scripts/tests/cpu-release-smoke.py",
+        "scripts/tests/install-cpu.sh",
+        "website/guide/installation.md"
+      ]
     }
   ]
 }

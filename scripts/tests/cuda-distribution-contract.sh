@@ -607,7 +607,26 @@ require_text "crates/mold-server/Cargo.toml" \
 require_text "desktop/src-tauri/Cargo.toml" 'nvml = ["mold-server/nvml"]'
 require_text "desktop/src-tauri/Cargo.toml" '"nvml"'
 
-require_text "packaging/aur/mold-ai-bin/PKGBUILD" 'cuda-sm89.tar.gz'
+require_text "packaging/aur/mold-ai-bin/PKGBUILD" 'cpu.tar.gz'
+# CPU distribution is a real shipping recipe, reused by PR validation.
+require_text ".github/workflows/linux-cpu.yml" 'cargo build --locked --release -p mold-ai --no-default-features --features preview,discord,expand,webp,mp4,metrics,mdns,pulid'
+require_text ".github/workflows/ci.yml" 'uses: ./.github/workflows/linux-cpu.yml'
+require_text ".github/workflows/release.yml" 'uses: ./.github/workflows/linux-cpu.yml'
+require_release_job_need release-latest build-linux-cpu
+require_release_job_need release-native build-linux-cpu
+for job in release-latest release-native; do
+  require_release_job_text "$job" 'artifacts/mold-x86_64-unknown-linux-gnu-cpu.tar.gz'
+done
+require_text ".github/workflows/linux-cpu.yml" 'scripts/verify-cpu-release-binary.sh'
+require_text ".github/workflows/linux-cpu.yml" 'scripts/aur/test-in-docker.sh --archive'
+require_text "scripts/aur/update-pkgbuild.sh" 'mold-x86_64-unknown-linux-gnu-cpu.tar.gz'
+require_ci_release_path 'scripts/*cpu-release*'
+require_ci_release_path 'scripts/tests/cpu-*'
+require_ci_release_path 'scripts/tests/install-cpu.sh'
+if grep -E "^depends=|^optdepends=|^[[:space:]]+'nvidia" "$repo_root/packaging/aur/mold-ai-bin/PKGBUILD" | grep -Ei 'cuda|cudnn|nvidia'; then
+  fail 'GPU-free AUR binary package must not install CUDA dependencies'
+fi
+
 # No AUR recipe executes the CUDA-linked binary inside package(): it runs under
 # fakeroot with whatever loader state the builder has, and `mold completions`
 # there is how mold-ai-bin 0.30.1 failed with `libcudart.so.12: cannot open

@@ -14,6 +14,7 @@
 #   MOLD_VERSION      — release tag to install (default: resolved from the
 #                       GitHub "latest release" redirect). Pin to a specific
 #                       tag like "v0.8.0" to reproduce an older install.
+#   MOLD_BACKEND      — Linux backend: auto, cpu, cuda (default: auto)
 #   MOLD_CUDA_ARCH    — force GPU architecture: sm86, sm89, sm100, or sm120
 #                       (default: auto-detect)
 
@@ -30,6 +31,19 @@ INSTALL_DIR="${MOLD_INSTALL_DIR:-$HOME/.local/bin}"
 # Detect platform
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+BACKEND="${MOLD_BACKEND:-auto}"
+case "${BACKEND}" in
+    auto|cpu|cuda) ;;
+    *) echo "Error: MOLD_BACKEND must be auto, cpu, or cuda." >&2; exit 1 ;;
+esac
+if [ "${BACKEND}" = cpu ] && [ -n "${MOLD_CUDA_ARCH:-}" ]; then
+    echo "Error: MOLD_BACKEND=cpu conflicts with MOLD_CUDA_ARCH." >&2
+    exit 1
+fi
+if [ "${OS}" != Linux ] && [ "${BACKEND}" != auto ]; then
+    echo "Error: MOLD_BACKEND is only supported on Linux; macOS builds include Metal." >&2
+    exit 1
+fi
 
 # Resolve MOLD_VERSION=latest (the default) to the tag GitHub currently
 # considers the latest release. We follow the redirect from
@@ -293,7 +307,7 @@ detect_cuda_arch() {
     if command -v nvidia-smi >/dev/null 2>&1; then
         INVENTORY="$(nvidia-smi \
             --query-gpu=index,uuid,compute_cap \
-            --format=csv,noheader,nounits 2>/dev/null || true)"
+            --format=csv,noheader,nounits 2>/dev/null)" || INVENTORY=""
         MIG_LISTING="$(nvidia-smi -L 2>/dev/null || true)"
     fi
 
@@ -301,6 +315,11 @@ detect_cuda_arch() {
         if [ -n "${MOLD_CUDA_ARCH:-}" ]; then
             echo "Warning: nvidia-smi inventory is unavailable; trusting explicit MOLD_CUDA_ARCH=${MOLD_CUDA_ARCH}." >&2
             echo "${MOLD_CUDA_ARCH}"
+            return
+        fi
+        if [ "${BACKEND}" = auto ]; then
+            echo "No NVIDIA inventory available; installing the GPU-free CLI." >&2
+            echo cpu
             return
         fi
         echo "Error: could not inspect NVIDIA GPUs with nvidia-smi." >&2
@@ -312,6 +331,11 @@ detect_cuda_arch() {
     if [ -z "${CAPS}" ] && [ -n "${MOLD_CUDA_ARCH:-}" ]; then
         echo "Warning: CUDA_VISIBLE_DEVICES exposes no GPU; trusting explicit MOLD_CUDA_ARCH=${MOLD_CUDA_ARCH} for another machine." >&2
         echo "${MOLD_CUDA_ARCH}"
+        return
+    fi
+    if [ -z "${CAPS}" ] && [ "${BACKEND}" = auto ]; then
+        echo "No visible NVIDIA GPU; installing the GPU-free CLI." >&2
+        echo cpu
         return
     fi
     SELECTED="$(select_cuda_arch_for_caps "${CAPS}")" || exit 1
@@ -328,8 +352,16 @@ case "${OS}" in
     Linux)
         case "${ARCH}" in
             x86_64)
-                CUDA_ARCH="$(detect_cuda_arch)"
-                ASSET="mold-x86_64-unknown-linux-gnu-cuda-${CUDA_ARCH}.tar.gz"
+                if [ "${BACKEND}" = cpu ]; then
+                    CUDA_ARCH=cpu
+                else
+                    CUDA_ARCH="$(detect_cuda_arch)"
+                fi
+                if [ "${CUDA_ARCH}" = cpu ]; then
+                    ASSET="mold-x86_64-unknown-linux-gnu-cpu.tar.gz"
+                else
+                    ASSET="mold-x86_64-unknown-linux-gnu-cuda-${CUDA_ARCH}.tar.gz"
+                fi
                 ;;
             *)
                 echo "Error: unsupported Linux architecture: ${ARCH}" >&2
@@ -408,6 +440,9 @@ if [ "${DOWNLOAD_STATUS}" -eq 44 ]; then
     fi
 fi
 if [ "${DOWNLOAD_STATUS}" -ne 0 ]; then
+    if [ "${DOWNLOAD_STATUS}" -eq 44 ] && [ "${CUDA_ARCH:-}" = cpu ]; then
+        echo "Error: ${VERSION} has no GPU-free Linux CLI archive. Choose a newer published release or build from source without GPU features." >&2
+    fi
     echo "Error: failed to download a compatible ${VERSION} release archive." >&2
     exit 1
 fi

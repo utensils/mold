@@ -110,7 +110,7 @@ fn detect_asset_name() -> Result<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let cuda_arch = match (os, arch) {
-        ("linux", "x86_64") => Some(detect_cuda_arch()?),
+        ("linux", "x86_64") if cfg!(feature = "cuda") => Some(detect_cuda_arch()?),
         _ => None,
     };
     detect_asset_name_for_platform(os, arch, cuda_arch.as_deref())
@@ -120,8 +120,9 @@ fn detect_asset_name_for_platform(os: &str, arch: &str, cuda_arch: Option<&str>)
     match (os, arch) {
         ("macos", "aarch64") => Ok("mold-aarch64-apple-darwin.tar.gz".to_string()),
         ("linux", "x86_64") => {
-            let cuda_arch = cuda_arch
-                .context("Linux x86_64 release selection requires an injected CUDA architecture")?;
+            let Some(cuda_arch) = cuda_arch else {
+                return Ok("mold-x86_64-unknown-linux-gnu-cpu.tar.gz".to_string());
+            };
             if !is_release_arch(cuda_arch) {
                 bail!("unsupported CUDA release architecture: {cuda_arch}");
             }
@@ -896,12 +897,28 @@ mod tests {
     }
 
     #[test]
-    fn linux_asset_detection_is_hermetic_and_requires_an_injected_arch() {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "cuda")))]
+    fn cpu_build_update_does_not_require_a_gpu_inventory() {
+        assert_eq!(
+            detect_asset_name().unwrap(),
+            "mold-x86_64-unknown-linux-gnu-cpu.tar.gz"
+        );
+    }
+
+    #[test]
+    fn linux_asset_detection_preserves_cpu_and_cuda_backends() {
         assert_eq!(
             detect_asset_name_for_platform("linux", "x86_64", Some("sm86")).unwrap(),
             "mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz"
         );
-        assert!(detect_asset_name_for_platform("linux", "x86_64", None).is_err());
+        let cpu = detect_asset_name_for_platform("linux", "x86_64", None).unwrap();
+        assert_eq!(cpu, "mold-x86_64-unknown-linux-gnu-cpu.tar.gz");
+        let legacy = vec![GitHubAsset {
+            name: "mold-x86_64-unknown-linux-gnu-cuda.tar.gz".into(),
+            browser_download_url: "unused".into(),
+            size: 1,
+        }];
+        assert!(select_release_asset(&legacy, &cpu, true).is_none());
     }
 
     // ── Tarball extraction ──────────────────────────────────────────────

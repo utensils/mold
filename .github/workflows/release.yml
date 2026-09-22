@@ -20,6 +20,13 @@ env:
   MOLD_BUILD_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'nightly' }}
 
 jobs:
+  build-linux-cpu:
+    if: github.event_name != 'schedule'
+    uses: ./.github/workflows/linux-cpu.yml
+    with:
+      channel: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'nightly' }}
+      image-version: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
+
   build-macos:
     if: github.event_name != 'schedule'
     runs-on: macos-14
@@ -935,6 +942,7 @@ jobs:
     needs:
       [
         build-macos,
+        build-linux-cpu,
         build-linux-sm86,
         build-linux-sm89,
         build-linux-sm100,
@@ -994,6 +1002,7 @@ jobs:
           make_latest: false
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cpu.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
@@ -1013,6 +1022,7 @@ jobs:
             | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
             | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
             | Android 7.0+ | Remote client | `Mold-android.apk` |
+            | Linux x86_64 | GPU-free remote CLI | `mold-x86_64-unknown-linux-gnu-cpu.tar.gz` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
@@ -1222,6 +1232,7 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
             | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
+            | Linux x86_64 | GPU-free remote CLI | `mold-x86_64-unknown-linux-gnu-cpu.tar.gz` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
@@ -1309,6 +1320,7 @@ jobs:
       [
         release-version,
         build-windows,
+        build-linux-cpu,
         build-linux-sm86,
         build-linux-sm89,
         build-linux-sm100,
@@ -1337,6 +1349,7 @@ jobs:
             sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer *.apk > SHA256SUMS
           )
           gh release upload "$GITHUB_REF_NAME" \
+            artifacts/mold-x86_64-unknown-linux-gnu-cpu.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz \

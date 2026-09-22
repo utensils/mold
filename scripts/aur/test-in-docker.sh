@@ -12,6 +12,7 @@
 #                                                   # GitHub release; the
 #                                                   # in-tree pkgver is a
 #                                                   # placeholder CI rewrites)
+#   scripts/aur/test-in-docker.sh --archive /path/to/cpu.tar.gz mold-ai-bin
 #   scripts/aur/test-in-docker.sh --as-is [pkg]     # keep the in-tree pkgver
 #   scripts/aur/test-in-docker.sh --rebuild [pkg]   # force image rebuild
 #   scripts/aur/test-in-docker.sh --shell [pkg]     # drop into a shell
@@ -48,6 +49,7 @@ fi
 
 pkgname=""
 version=""
+archive=""
 as_is=false
 rebuild=false
 shell_after=false
@@ -57,6 +59,11 @@ while [ "$#" -gt 0 ]; do
     --rebuild) rebuild=true ;;
     --shell)   shell_after=true ;;
     --as-is)   as_is=true ;;
+    --archive)
+      [ "$#" -ge 2 ] || { echo "error: --archive needs a path" >&2; exit 64; }
+      archive="$2"
+      shift
+      ;;
     --version)
       [ "$#" -ge 2 ] || { echo "error: --version needs a value" >&2; exit 64; }
       version="${2#v}"
@@ -87,7 +94,27 @@ pkgname="${pkgname:-mold-ai-bin}"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 cp -a "${REPO_ROOT}/packaging/aur/${pkgname}/." "$stage/"
-if [ "$pkgname" != mold-ai-git ] && ! "$as_is"; then
+if [ -n "$archive" ]; then
+  [ "$pkgname" = mold-ai-bin ] || { echo '--archive requires mold-ai-bin' >&2; exit 64; }
+  if [ -n "$version" ] || "$as_is"; then echo '--archive conflicts with --version/--as-is' >&2; exit 64; fi
+  cp "$archive" "$stage/mold-x86_64-unknown-linux-gnu-cpu.tar.gz"
+  cp "$REPO_ROOT/LICENSE" "$stage/LICENSE"
+  python3 - "$stage" <<'PYARCH'
+import hashlib
+from pathlib import Path
+import re
+import sys
+stage = Path(sys.argv[1])
+s = (stage / "PKGBUILD").read_text()
+for field, filename in (("source", "LICENSE"), ("source_x86_64", "mold-x86_64-unknown-linux-gnu-cpu.tar.gz")):
+    s = re.sub(rf"^{field}=.*$", f"{field}=('{filename}')", s, flags=re.M)
+    checksum = hashlib.sha256((stage / filename).read_bytes()).hexdigest()
+    sums = "sha256sums" if field == "source" else "sha256sums_x86_64"
+    s = re.sub(rf"^{sums}=.*$", f"{sums}=('{checksum}')", s, flags=re.M)
+s = s.replace('LICENSE-${pkgver}', 'LICENSE')
+(stage / "PKGBUILD").write_text(s)
+PYARCH
+elif [ "$pkgname" != mold-ai-git ] && ! "$as_is"; then
   if [ -z "$version" ]; then
     version="$(
       curl --silent --show-error --fail --location \
@@ -149,7 +176,7 @@ for member in \\
     exit 1
   fi
 done
-echo "✓ ${pkgname} package created without executing the CUDA-linked binary"
+echo "✓ ${pkgname} package created without executing the payload"
 
 echo "==> phase 2: install with runtime dependencies, then smoke"
 sudo pacman -Syu --noconfirm
@@ -160,7 +187,13 @@ if ! mold --version; then
   ldd /usr/bin/mold | grep 'not found' >&2 || true
   exit 1
 fi
-echo "✓ ${pkgname} builds, installs, runs"
+if sudo pacman -Qq | grep -Ei '^(cuda|cudnn|nvidia)(-|$)'; then
+  echo "error: GPU-free package installed NVIDIA dependencies" >&2
+  exit 1
+fi
+bash /workspace/scripts/verify-cpu-release-binary.sh "\$workdir/mold-x86_64-unknown-linux-gnu-cpu.tar.gz"
+python3 /workspace/scripts/tests/cpu-release-smoke.py /usr/bin/mold
+echo "✓ ${pkgname} builds, installs, runs without CUDA"
 INNER
 )
 else
@@ -186,7 +219,9 @@ if "$shell_after"; then
   build_cmd="${build_cmd}"$'\n''echo "==> dropping into shell (the built workdir is \$workdir)"; exec bash'
 fi
 
-exec "$runtime" run --rm -it --init \
+tty_args=()
+if [[ -t 0 && -t 1 ]]; then tty_args=(-it); fi
+exec "$runtime" run --rm "${tty_args[@]}" --init \
   -v "${REPO_ROOT}:/workspace:rw" \
   -v "${stage}:/pkgbuild:ro" \
   "$IMAGE" \

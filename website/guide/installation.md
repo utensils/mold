@@ -68,11 +68,24 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 
 Downloads the **latest tagged release** from
 [github.com/utensils/mold/releases/latest](https://github.com/utensils/mold/releases/latest)
-and installs it to `~/.local/bin/mold`. On Linux, the installer queries every
-GPU visible through `CUDA_VISIBLE_DEVICES` and selects a compatible release
+and installs it to `~/.local/bin/mold`. On Linux x86_64, automatic selection
+installs a GPU-free CPU/remote CLI when `nvidia-smi` is missing, fails, returns
+no inventory, or no GPU is visible. Otherwise it queries every GPU visible through `CUDA_VISIBLE_DEVICES` and selects a compatible release
 binary independent of device order. It supports any homogeneous device count,
 including RTX 3050/30-series, RTX 50-series, and named RTX PRO variants.
 macOS builds include Metal support.
+
+A client needs no GPU, NVIDIA driver, or CUDA toolkit. Force that build even on
+a GPU machine with `MOLD_BACKEND=cpu`, then set `MOLD_HOST=http://gpu-server:7680`
+(or pass `--host`) to generate remotely. The CPU archive does not support local
+GPU generation; it still supports model management, host commands and completions.
+Automatic selection does not check CUDA user-space libraries: on a GPU machine
+missing those libraries, choose CPU explicitly for remote use.
+
+GPU-free archives become available on nightly after the first successful main
+publication containing this change, and on stable/AUR with the next tagged
+release. Older tags have no CPU archive: installation fails with guidance to
+use a newer published release or build from source without GPU features.
 
 The installer downloads the exact release's `SHA256SUMS` and verifies the
 selected archive before extraction. Missing sm86, sm100, or sm120
@@ -108,6 +121,12 @@ curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
 # Install the latest rolling build from main
 curl -fsSL ... | MOLD_CHANNEL=nightly sh
 
+# Force the GPU-free remote CLI (Linux x86_64)
+curl -fsSL ... | MOLD_BACKEND=cpu sh
+
+# Require CUDA rather than falling back to CPU when no GPU can be inspected
+curl -fsSL ... | MOLD_BACKEND=cuda sh
+
 # Force a GPU architecture (default: auto-detect on Linux)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm86  sh   # Ampere (RTX 3090 / A40)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm89  sh   # Ada (RTX 40-series)
@@ -118,6 +137,15 @@ curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Consumer Blackwell (RTX 50-series)
 > **Note:** the env var has to be on the `sh` side of the pipe; with
 > `VAR=value curl ... | sh`, the variable only applies to `curl` and the
 > installer itself still sees the default.
+
+`MOLD_BACKEND` accepts `auto` (default), `cpu`, or `cuda` on Linux.
+`cpu` skips all GPU probing and conflicts with a nonempty `MOLD_CUDA_ARCH`.
+`auto` with a nonempty architecture override means explicit CUDA intent;
+`cuda` without an override requires an inspectable compatible GPU. An explicit
+architecture can target another machine when the inventory is unavailable or
+all GPUs are hidden. Malformed inventories, invalid visibility selectors and
+unsupported/mixed fleets still fail; select `cpu` explicitly for a remote client.
+Non-auto backend values are rejected on macOS, whose archive includes Metal.
 
 An explicit `MOLD_CUDA_ARCH` must equal the target selected for every visible
 GPU. Homogeneous 8.6 and 8.9 fleets use sm86 and sm89 respectively. A mixed
@@ -142,6 +170,11 @@ points at.
 
 ## Updating
 
+`mold update` preserves the compiled backend: the GPU-free Linux CLI downloads
+only the CPU archive without probing NVIDIA; CUDA builds retain architecture
+selection. To change backend, rerun the installer with `MOLD_BACKEND` set.
+A missing CPU archive never falls back to CUDA or a different release.
+
 ```bash
 mold update                       # Update to latest release
 mold update --nightly             # Install latest rolling build from main
@@ -160,7 +193,7 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 Three packages on the [AUR](https://aur.archlinux.org/):
 
 ```bash
-paru -S mold-ai-bin     # Prebuilt binary, CUDA sm_89 (RTX 40-series). Fastest.
+paru -S mold-ai-bin     # Prebuilt GPU-free CLI for remote hosts; no CUDA required.
 paru -S mold-ai         # Builds from source; set CUDA_COMPUTE_CAP for other GPUs
 paru -S mold-ai-git     # Builds from main HEAD
 ```
@@ -181,10 +214,14 @@ have both installed simultaneously. If you need the linker for your build
 toolchain, install mold via Nix or the one-line installer (which targets
 `~/.local/bin`) instead.
 
-The existing `mold-ai-bin` package deliberately remains on sm_89. Use the
-source PKGBUILD with an explicit compute capability for other families:
+**Migration:** `mold-ai-bin` now installs the GPU-free CPU archive instead of
+SM89 CUDA. Existing users who generate locally must switch to `mold-ai` or
+`mold-ai-git`, or install a matching CUDA release archive. Source packages build
+against Arch's installed CUDA runtime and still require an NVIDIA GPU for local
+generation. Use an explicit compute capability:
 
 ```bash
+CUDA_COMPUTE_CAP=89 paru -S mold-ai   # RTX 40-series
 CUDA_COMPUTE_CAP=86 paru -S mold-ai   # RTX 3090 / A40
 CUDA_COMPUTE_CAP=100 paru -S mold-ai  # B200 / B300
 CUDA_COMPUTE_CAP=120 paru -S mold-ai  # RTX 50-series
@@ -192,14 +229,10 @@ CUDA_COMPUTE_CAP=120 paru -S mold-ai  # RTX 50-series
 
 There is no `mold-ai-bin-sm100` package before real B200 qualification.
 
-::: warning CUDA 12 runtime
-The prebuilt `mold-ai-bin` archive is built against CUDA 12.8 and links
-`libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`, `libcurand.so.10`
-and `libcudnn.so.9`. Arch's `extra/cuda` ships CUDA 13, so the installed
-binary cannot load until a CUDA 12 runtime is present; `ldd /usr/bin/mold`
-names the missing libraries. This is tracked in
-[#1742](https://github.com/utensils/mold/issues/1742).
-:::
+The GPU-free binary package has no CUDA runtime dependency, fixing the
+`libcudart.so.12` loader failure on client machines. CUDA release archives still
+need their matching CUDA 12 user-space libraries; installing Arch's CUDA 13
+toolkit alone does not satisfy those archives.
 
 To upgrade: `paru -Syu mold-ai-bin` (or `mold-ai` / `mold-ai-git`). `mold update`
 will detect a pacman-managed install and direct you here instead of attempting
@@ -322,6 +355,7 @@ assets from the [releases page](https://github.com/utensils/mold/releases):
 | ------------------------------------------------ | ------------------------------------------------- |
 | macOS Apple Silicon                              | `mold-aarch64-apple-darwin.tar.gz`                |
 | Linux x86_64 (Ampere, RTX 3090 / A40)            | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz`  |
+| Linux x86_64 (GPU-free remote CLI)               | `mold-x86_64-unknown-linux-gnu-cpu.tar.gz`        |
 | Linux x86_64 (Ada, RTX 4090 / 40-series)         | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
 | Linux x86_64 (datacenter Blackwell, B200 / B300) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
 | Linux x86_64 (consumer Blackwell, RTX 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
