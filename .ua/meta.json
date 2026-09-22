@@ -142,7 +142,9 @@
         ".github/workflows/macos-native.yml",
         ".github/workflows/macos-native-distribution.yml",
         "apps/macos/Sources/Mold/Resources/Info.plist",
-        "apps/macos/Sources/Mold/Resources/Credits.html"
+        "apps/macos/Sources/Mold/Resources/Credits.html",
+        "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+        "apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
       ]
     }
   ]

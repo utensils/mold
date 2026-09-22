@@ -9,9 +9,13 @@ import Foundation
 enum AppStorageSuite {
     static let name = "io.utensils.mold.native.fresh"
 
+    // Notifications are scoped by object identity. Recreating this on each
+    // access makes a store observe a different object from the reset action.
+    private static let scratch = UserDefaults(suiteName: name)
+
     static var defaults: UserDefaults {
         guard NativeUAT.fresh.isSet(),
-              let scratch = UserDefaults(suiteName: name)
+              let scratch
         else { return .standard }
         return scratch
     }

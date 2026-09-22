@@ -192,7 +192,9 @@
           ".github/workflows/macos-native.yml",
           ".github/workflows/macos-native-distribution.yml",
           "apps/macos/Sources/Mold/Resources/Info.plist",
-          "apps/macos/Sources/Mold/Resources/Credits.html"
+          "apps/macos/Sources/Mold/Resources/Credits.html",
+          "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+          "apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
         ]
       }
     ]
@@ -293042,6 +293044,30 @@
       ],
       "complexity": "simple",
       "summary": "Native About metadata matches Tauri contributor credits for James Brink and Jeffrey Dilley; standard AppKit About panel presents version, description, MIT license and project link."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+      "type": "file",
+      "name": "PreferencesReset.swift",
+      "filePath": "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+      "tags": [
+        "native-macos",
+        "settings"
+      ],
+      "complexity": "simple",
+      "summary": "Clears per-Mac UI preferences while preserving machine setup and updater preferences; immediately notifies defaults observers so the in-memory default machine cannot outlive reset."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/AppStorageSuite.swift",
+      "type": "file",
+      "name": "AppStorageSuite.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/AppStorageSuite.swift",
+      "tags": [
+        "native-macos",
+        "settings"
+      ],
+      "complexity": "simple",
+      "summary": "Selects standard or isolated UAT preferences with one retained scratch UserDefaults instance, preserving NotificationCenter observer object identity."
     }
   ],
   "edges": [
@@ -520357,7 +520383,9 @@
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
         "file:apps/macos/Sources/Mold/Resources/Info.plist",
-        "file:apps/macos/Sources/Mold/Resources/Credits.html"
+        "file:apps/macos/Sources/Mold/Resources/Credits.html",
+        "file:apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+        "file:apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
       ]
     },
     {

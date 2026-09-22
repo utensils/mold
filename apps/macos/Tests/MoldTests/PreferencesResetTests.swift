@@ -14,6 +14,10 @@ import Testing
 /// `AppStorageSuite.defaults` must be named by one list or the other.
 @MainActor
 struct PreferencesResetTests {
+    @Test func preferencesKeepOneObjectIdentityForTheirObservers() {
+        #expect(AppStorageSuite.defaults === AppStorageSuite.defaults)
+    }
+
     @Test func everyPersistedPreferenceIsEitherResetOrDeliberatelyKept() throws {
         let written = try Self.persistedKeys()
         #expect(written.count > 20, "the scan found almost nothing -- it has stopped working")

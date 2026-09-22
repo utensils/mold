@@ -1,2 +1,3 @@
 - **Align native versions and load albums at startup.** Native macOS builds now share the workspace release version and desktop nightly numbering. Every main commit schedules a nightly candidate so a stale build cannot leave the channel without a replacement. Library albums load independently of slow image and trash listings, including when the app opens on Models.
 - **Credit native app contributors.** The native About panel now credits James Brink and Jeffrey Dilley and includes the same description, license, and project link as the Tauri desktop app.
+- **Apply preference resets immediately.** Resetting native preferences now clears the in-memory default machine before the action returns.

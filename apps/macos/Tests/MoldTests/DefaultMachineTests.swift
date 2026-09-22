@@ -107,7 +107,7 @@ struct DefaultMachineTests {
     /// default the person just reset.
     ///
     /// **Fails today**: the observed copy is never told.
-    @Test func aPreferencesResetClearsTheDefaultInTheStoreToo() async {
+    @Test func aPreferencesResetClearsTheDefaultInTheStoreToo() {
         reset()
         let workstation = machine("workstation")
         let hosts = HostStore(hosts: [workstation]) { self.fake($0, up: true) }
@@ -115,7 +115,6 @@ struct DefaultMachineTests {
 
         PreferencesReset.reset(in: AppStorageSuite.defaults)
 
-        await settle { hosts.defaultMachine == nil }
         #expect(hosts.defaultMachine == nil)
     }
 
