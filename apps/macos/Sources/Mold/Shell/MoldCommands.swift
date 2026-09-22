@@ -27,10 +27,11 @@ struct MoldCommands: Commands {
     @FocusedValue(\.findAction) private var findAction
     @FocusedValue(\.thumbnailScale) private var thumbnailScale
     @Environment(\.openURL) private var openURL
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Image") { destination = .generate }
+            Button("New Image") { navigate(to: .generate) }
                 .keyboardShortcut("n")
         }
 
@@ -66,7 +67,7 @@ struct MoldCommands: Commands {
 
         CommandGroup(after: .toolbar) {
             ForEach(Array(Destination.allCases.enumerated()), id: \.element) { index, item in
-                Button(item.title) { destination = item }
+                Button(item.title) { navigate(to: item) }
                     .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
             }
             Divider()
@@ -100,5 +101,12 @@ struct MoldCommands: Commands {
                 openURL(URL(string: "https://utensils.io/mold/")!)
             }
         }
+    }
+
+    /// Navigation is an application action: closing the only window must
+    /// not turn File and View menu commands into invisible state changes.
+    private func navigate(to target: Destination) {
+        destination = target
+        openWindow(id: "main")
     }
 }

@@ -48,8 +48,8 @@ struct GeneralSettings: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            // Absent in a build with no updater, which is every Debug build
-            // and every UAT run (`SoftwareUpdates`).
+            // Release builds offer channel selection and a quick check;
+            // development builds explain why updates are unavailable.
             UpdatesSettings()
             Section {
                 Picker("Media cache", selection: $capMegabytes) {

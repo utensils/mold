@@ -13,6 +13,7 @@ extension LibraryStore {
         let live = Set(hostList.map(\.id))
         guard perHost.contains(where: { !live.contains($0.key) })
             || trashPerHost.contains(where: { !live.contains($0.key) })
+            || collectionsPerHost.contains(where: { !live.contains($0.key) })
         else { return }
         perHost = perHost.filter { live.contains($0.key) }
         trashPerHost = trashPerHost.filter { live.contains($0.key) }

@@ -154,11 +154,12 @@ struct QueueRowActionsTests {
             let row = QueueRowActions.resolve(entry(state), on: modern)
             let selection = QueueSelection(
                 job: QueueSelection.Job(
+                    target: .init(host: UUID(), entry: state),
                     canPause: row.pause, canResume: row.resume, canRetry: row.retry,
                     canMoveUp: true, canMoveDown: true, canCancel: row.cancel,
                     moveToDestinations: [], pause: {}, resume: {}, retry: {},
                     moveUp: {}, moveDown: {}, cancel: {}, moveTo: { _ in }),
-                emptyQueue: nil)
+                emptyQueues: [])
             #expect(selection.offeredTitles
                 == row.offered(canMoveUp: true, canMoveDown: true).map(\.title),
                 "\(state)")

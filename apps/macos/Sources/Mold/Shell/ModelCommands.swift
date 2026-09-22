@@ -22,14 +22,22 @@ struct ModelCommands: Commands {
 /// What the Models pane's current selection can do, and how to do it --
 /// resolved once per body pass the same way `LibrarySelection` is.
 ///
-/// Equatable on the ITEMS only, never `perform`: a closure is never equal to
-/// itself, and the menu needs to redraw when what applies changes, not on
-/// every rebuild of the pane (`LibraryCommands.swift`'s own rule).
+/// Equatable on the target and items, never `perform`: a closure is never
+/// equal to itself, but two models with the same actions still need distinct
+/// focused values or the menu can keep acting on the previous row.
 struct ModelSelection: Equatable {
+    struct Target: Equatable {
+        let host: MoldHost.ID
+        let model: Model.ID
+    }
+
+    let target: Target
     let items: [ModelActions.Item]
     let perform: (ModelActions.Kind) -> Void
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.items == rhs.items }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.target == rhs.target && lhs.items == rhs.items
+    }
 }
 
 struct ModelSelectionKey: FocusedValueKey {

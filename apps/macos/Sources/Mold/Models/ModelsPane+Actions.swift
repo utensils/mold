@@ -47,6 +47,7 @@ extension ModelsPane {
     var modelSelection: ModelSelection? {
         guard let host, let selectedModel = candidates.first(where: { $0.id == selection }) else { return nil }
         return ModelSelection(
+            target: .init(host: host.id, model: selectedModel.id),
             items: menuItems(for: selectedModel),
             perform: { actions.perform($0, on: selectedModel, host: host) }
         )

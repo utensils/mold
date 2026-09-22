@@ -143,6 +143,41 @@
           "apps/macos/Sources/Mold/Shell/SettingsView.swift"
         ],
         "note": "Scoped source-verified refresh; global analysis metadata remains unchanged."
+      },
+      {
+        "id": "macos-menu-update-settings",
+        "updatedAt": "2026-09-22T01:37:05.448051+00:00",
+        "baseCommit": "4d316f72afe0b9dc9a413112d7671849e11b0105",
+        "scope": "Native menu target identity across queue, model and library actions; machine choices, navigation window activation, and discoverable General update controls. Other graph areas retain their prior freshness.",
+        "files": [
+          "apps/macos/Sources/Mold/MoldApp.swift",
+          "apps/macos/Sources/Mold/Shell/MoldCommands.swift",
+          "apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+          "apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+          "apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+          "apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+          "apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+          "apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+          "apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+          "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+          "apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+          "apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift"
+        ]
+      },
+      {
+        "id": "macos-library-sidebar-startup",
+        "updatedAt": "2026-09-22T02:00:50.362903+00:00",
+        "baseCommit": "6d6fd56a53e553de4a05db02f279e535291c64cd",
+        "scope": "Source-verified shell-owned sidebar loading and cancellation on host topology changes; global baseline unchanged.",
+        "files": [
+          "apps/macos/Sources/Mold/Shell/RootView.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
+        ]
       }
     ]
   },
@@ -291040,7 +291075,7 @@
       "type": "file",
       "name": "LibraryPane+Chrome.swift",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
-      "summary": "Passes the current Library scope and menu context into the full-size viewer.",
+      "summary": "Library pane owns presentation tasks and attachment preparation; initial gallery, trash and collection loading belongs to RootView.",
       "tags": [
         "swift",
         "native-macos",
@@ -291054,7 +291089,7 @@
       "type": "file",
       "name": "LibraryPane+Menu.swift",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-      "summary": "Publishes the same attachment eligibility to the macOS menu-bar selection model.",
+      "summary": "Publishes Library and File menu actions with concrete selected print identities.",
       "tags": [
         "swift",
         "native-macos",
@@ -291110,7 +291145,7 @@
       "type": "file",
       "name": "LibrarySelection.swift",
       "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
-      "summary": "Carries Library menu capability state through focused values into application commands.",
+      "summary": "Library menu action selection includes ordered print identities as well as offered actions.",
       "tags": [
         "swift",
         "native-macos",
@@ -292620,7 +292655,7 @@
         "layout"
       ],
       "complexity": "moderate",
-      "summary": "Native app scenes with a 1080-point main window minimum preserving sidebar, canvas and inspector space."
+      "summary": "Composes native app scenes and passes application navigation into the Queue menu."
     },
     {
       "id": "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
@@ -292712,6 +292747,201 @@
       ],
       "complexity": "moderate",
       "summary": "Nine native settings tabs with minimum and ideal window dimensions."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/MoldCommands.swift",
+      "type": "file",
+      "name": "MoldCommands.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/MoldCommands.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Native File and View navigation updates the destination and opens the main window; focused commands retain pane-specific actions."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+      "type": "file",
+      "name": "QueueCommands.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Always offers Show Queue with main-window activation; renders selected-row and per-machine queue actions from the focused QueueSelection."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+      "type": "file",
+      "name": "QueueSelection.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Queue menu action plan includes host and entry identity in equality and retains a separately named Empty Queue action for each eligible machine."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+      "type": "file",
+      "name": "QueuePane+Commands.swift",
+      "filePath": "apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Publishes the selected queue entry with host identity and all eligible machine cancellation targets using the same gates as the toolbar."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+      "type": "file",
+      "name": "GeneralSettings.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "settings"
+      ],
+      "complexity": "moderate",
+      "summary": "Native General preferences include appearance, notifications, visible Updates section, cache budget, and preference reset."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+      "type": "file",
+      "name": "UpdatesSettings.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "settings"
+      ],
+      "complexity": "moderate",
+      "summary": "General Updates presents Stable/Nightly and Check Now through Sparkle; development and test builds show explicit unavailable controls without constructing the updater."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+      "type": "file",
+      "name": "SoftwareUpdates.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "settings"
+      ],
+      "complexity": "moderate",
+      "summary": "Gated observable Sparkle controller owns channel selection, manual checks, automatic settings, and live availability; absent in development and tests."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+      "type": "file",
+      "name": "ModelCommands.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Model menu focused actions include machine and model identity so same-action selections refresh their closures."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+      "type": "file",
+      "name": "MoldCommands+LibraryFile.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "File menu Save and Export focused values include ordered print identities, counts and formats."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
+      "type": "file",
+      "name": "ModelsPane+Actions.swift",
+      "filePath": "apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "menus"
+      ],
+      "complexity": "moderate",
+      "summary": "Publishes Model menu actions with the selected machine and model identity."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+      "type": "file",
+      "name": "RootView.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/RootView.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Owns initial sidebar library loading independent of destination and host status probes; host-list changes cancel and restart the shell load."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "type": "file",
+      "name": "LibraryStore.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Shared gallery store listens from initialization; shell-driven reload guards cancellation between phases and refuses obsolete host replies."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+      "type": "file",
+      "name": "LibraryStore+Mutations.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Loads trash with cancellation and host identity checks; exposes gallery mutations and trash operations."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+      "type": "file",
+      "name": "LibraryStore+Organization.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Loads collection shelves and tags per host, rejecting cancelled or obsolete host replies."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
+      "type": "file",
+      "name": "LibraryStore+Rows.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Builds merged library rows and prunes removed hosts, including collection-only caches."
     }
   ],
   "edges": [
@@ -518676,6 +518906,69 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/MoldApp.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
     }
   ],
   "layers": [
@@ -519926,7 +520219,22 @@
         "file:apps/macos/Sources/Mold/Settings/SettingsLayout.swift",
         "file:apps/macos/Sources/Mold/Settings/SettingsPane.swift",
         "file:apps/macos/Sources/Mold/Shell/AccountsSettings.swift",
-        "file:apps/macos/Sources/Mold/Shell/SettingsView.swift"
+        "file:apps/macos/Sources/Mold/Shell/SettingsView.swift",
+        "file:apps/macos/Sources/Mold/Shell/MoldCommands.swift",
+        "file:apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+        "file:apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+        "file:apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+        "file:apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+        "file:apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+        "file:apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+        "file:apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+        "file:apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+        "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
+        "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
       ]
     },
     {

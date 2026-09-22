@@ -259,31 +259,61 @@ struct QueuePaneTests {
 
     /// **Fails today**: `QueueSelection` does not exist yet.
     @Test func theQueueMenuOffersOnlyWhatApplies() {
-        let nothing = QueueSelection(job: nil, emptyQueue: nil)
+        let nothing = QueueSelection(job: nil, emptyQueues: [])
         #expect(nothing.offeredTitles.isEmpty)
 
         let runningJob = QueueSelection.Job(
+            target: .init(host: UUID(), entry: "running"),
             canPause: true, canResume: false, canRetry: false, canMoveUp: false, canMoveDown: true,
             canCancel: true, moveToDestinations: [], pause: {}, resume: {}, retry: {}, moveUp: {},
             moveDown: {}, cancel: {}, moveTo: { _ in })
-        let running = QueueSelection(job: runningJob, emptyQueue: nil)
+        let running = QueueSelection(job: runningJob, emptyQueues: [])
         #expect(running.offeredTitles == ["Pause Job", "Move Down", "Cancel Job"])
 
         let held = QueueSelection.Job(
+            target: .init(host: UUID(), entry: "held"),
             canPause: false, canResume: false, canRetry: true, canMoveUp: false, canMoveDown: false,
             canCancel: true, moveToDestinations: [], pause: {}, resume: {}, retry: {}, moveUp: {},
             moveDown: {}, cancel: {}, moveTo: { _ in })
-        #expect(QueueSelection(job: held, emptyQueue: {}).offeredTitles == ["Try Again", "Cancel Job", "Empty Queue…"])
+        let empty = QueueSelection.EmptyQueue(id: UUID(), name: "workstation", run: {})
+        #expect(QueueSelection(job: held, emptyQueues: [empty]).offeredTitles
+            == ["Try Again", "Cancel Job", "Empty Queue…"])
     }
 
     /// **Fails today**: `Job.moveToDestinations` does not exist yet.
     @Test func aHeldSelectionWithAMachineToSendToOffersMoveTo() {
         let destination = TransferStore.TransferDestination(id: UUID(), name: "hal9000", queueDepth: 2)
         let held = QueueSelection.Job(
+            target: .init(host: UUID(), entry: "held"),
             canPause: false, canResume: false, canRetry: true, canMoveUp: false, canMoveDown: false,
             canCancel: true, moveToDestinations: [destination], pause: {}, resume: {}, retry: {},
             moveUp: {}, moveDown: {}, cancel: {}, moveTo: { _ in })
-        #expect(QueueSelection(job: held, emptyQueue: nil).offeredTitles == ["Try Again", "Move to", "Cancel Job"])
+        #expect(QueueSelection(job: held, emptyQueues: []).offeredTitles
+            == ["Try Again", "Move to", "Cancel Job"])
+    }
+
+    @Test func queueSelectionIdentityChangesWithTheSelectedRow() {
+        let host = UUID()
+        func job(_ entry: String) -> QueueSelection.Job {
+            QueueSelection.Job(
+                target: .init(host: host, entry: entry),
+                canPause: true, canResume: false, canRetry: false,
+                canMoveUp: false, canMoveDown: true, canCancel: true,
+                moveToDestinations: [], pause: {}, resume: {}, retry: {},
+                moveUp: {}, moveDown: {}, cancel: {}, moveTo: { _ in })
+        }
+
+        #expect(job("first") != job("second"))
+    }
+
+    @Test func severalEmptyQueuesAreNamedInsteadOfPickingTheFirst() {
+        let first = QueueSelection.EmptyQueue(id: UUID(), name: "workstation", run: {})
+        let second = QueueSelection.EmptyQueue(id: UUID(), name: "hal9000", run: {})
+        let selection = QueueSelection(job: nil, emptyQueues: [first, second])
+
+        #expect(selection.offeredTitles == [
+            "Empty Queue on workstation…", "Empty Queue on hal9000…",
+        ])
     }
 
     // MARK: - Fixture

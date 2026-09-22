@@ -184,8 +184,9 @@ the scheduler reads those) and the last-checked date.
 
 **A dev build never offers to replace itself.** `UpdaterActivation` is the one
 gate: no updater in a Debug build, none under `MOLD_NATIVE_FRESH`, none in the
-unit-test host. The menu item and the Settings group are then **absent**, not
-greyed out.
+unit-test host. The menu command is absent; General keeps an Updates section
+with an explanation of why this build cannot update. Release builds offer
+Stable/Nightly selection and Check Now alongside the automatic-update toggles.
 
 ### The one-time owner step (done 2026-09-17)
 
@@ -375,6 +376,15 @@ re-read after a reset says `db` again -- a listing cannot tell a stored value
 from a default (`routes_config.rs:48-53`).
 
 ## Running it
+
+The Library sidebar loads its collections and counts when the main window
+opens, including when Generate is the initial destination. Opening All Prints
+is not required and does not start a second full listing.
+
+Queue ▸ Show Queue opens the queue from any pane. Queue actions keep the
+selected job and its machine together; Empty Queue names each eligible
+machine in a fleet. File ▸ New Image and View destinations also reopen the
+main window when Settings is the remaining window.
 
 Library pictures can be used as a source image or added as a reference from
 the tile menu, full-size viewer, or Library menu. These actions preserve the

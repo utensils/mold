@@ -13,6 +13,35 @@ struct LibraryStoreHostsTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
+    @Test func cancelledStartupCannotApplyAnOldListingOrStartTheNextRequests() async {
+        let machine = host("startup")
+        let fake = FakeBackend(host: machine)
+        fake.prints = [FakeFixtures.print("late.png")]
+        fake.delays["gallery"] = .seconds(10)
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        let load = Task { await library.reload() }
+        await settle { fake.calls.contains("gallery") }
+        load.cancel()
+        await load.value
+
+        #expect(library.items.isEmpty)
+        #expect(!fake.calls.contains("trashedPrints"))
+        #expect(!fake.calls.contains("collections"))
+        #expect(!library.isLoading)
+    }
+
+    @Test func removingAMachineAlsoRemovesItsShelvesWithoutAnyCachedPrints() {
+        let machine = host("empty-gallery")
+        let hosts = HostStore(hosts: []) { FakeBackend(host: $0) }
+        let library = LibraryStore(hosts: hosts)
+        library.collectionsPerHost[machine.id] = [
+            Collection(id: "empty", name: "Empty collection", slug: "empty", count: 0),
+        ]
+        library.prune(to: [])
+        #expect(library.shelves.isEmpty)
+    }
+
     /// **Fails without the `insert(_:on:)` fix**: it used to read the new
     /// row's host name off an EXISTING entry for that machine
     /// (`perHost[host]?.first?.hostName`), so a machine with nothing in

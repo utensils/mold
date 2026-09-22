@@ -11,6 +11,10 @@ import SwiftUI
 /// to itself, and the menu needs to redraw when the words on its items change,
 /// not on every rebuild of the pane.
 struct LibrarySelection: Equatable {
+    /// The concrete prints every closure below acts on. Count and menu state
+    /// are insufficient: selecting another same-shaped print must replace the
+    /// focused value's action closures too.
+    let targets: [PrintID]
     let count: Int
     let allFavorite: Bool
     let scope: LibraryScope
@@ -66,7 +70,8 @@ struct LibrarySelection: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
+        lhs.targets == rhs.targets
+            && lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf
             && lhs.isEditingText == rhs.isEditingText

@@ -9,6 +9,9 @@ import SwiftUI
 /// `actions.export`, so the menu bar item and the right-click item are the
 /// same call (design S6).
 struct LibraryFile: Equatable {
+    /// The concrete prints `save` and `export` captured. Two selections can
+    /// have the same count and formats while naming different files.
+    let targets: [PrintID]
     let count: Int
     /// What the SINGLE selected print can also be saved as -- empty when
     /// more than one print is selected or it has no other form
@@ -34,7 +37,8 @@ struct LibraryFile: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.count == rhs.count && lhs.exportFormats == rhs.exportFormats
+        lhs.targets == rhs.targets
+            && lhs.count == rhs.count && lhs.exportFormats == rhs.exportFormats
             && lhs.meshExports == rhs.meshExports
     }
 }

@@ -15,10 +15,10 @@ import Testing
 /// editor sees it, so typing "my cat" as a title fires Quick Look at the space.
 @MainActor
 struct LibrarySelectionTests {
-    private func selection(count: Int, editing: Bool,
+    private func selection(count: Int, editing: Bool, targets: [PrintID] = [],
                            performed: Performed = Performed()) -> LibrarySelection {
         LibrarySelection(
-            count: count, allFavorite: false, scope: .all, shelves: [],
+            targets: targets, count: count, allFavorite: false, scope: .all, shelves: [],
             enclosingShelf: nil, isEditingText: editing, exportFormats: [],
             meshExports: nil, trashCount: 0, name: nil, canReuse: count == 1,
             canUseAsSource: false, canAddReference: false,
@@ -61,5 +61,28 @@ struct LibrarySelectionTests {
     /// them is enabled.
     @Test func aCaretChangeIsAChangeTheMenuHasToSee() {
         #expect(selection(count: 2, editing: false) != selection(count: 2, editing: true))
+    }
+
+    @Test func sameShapedPrintSelectionsStillReplaceTheirActionClosures() {
+        let host = UUID()
+        let first = PrintID(host: host, filename: "first.png")
+        let second = PrintID(host: host, filename: "second.png")
+
+        #expect(selection(count: 1, editing: false, targets: [first])
+            != selection(count: 1, editing: false, targets: [second]))
+    }
+
+    @Test func sameShapedFileSelectionsStillReplaceTheirActionClosures() {
+        let host = UUID()
+        let first = PrintID(host: host, filename: "first.png")
+        let second = PrintID(host: host, filename: "second.png")
+        let firstFile = LibraryFile(
+            targets: [first], count: 1, exportFormats: ["png"], meshExports: nil,
+            save: {}, export: { _ in })
+        let secondFile = LibraryFile(
+            targets: [second], count: 1, exportFormats: ["png"], meshExports: nil,
+            save: {}, export: { _ in })
+
+        #expect(firstFile != secondFile)
     }
 }
