@@ -33,7 +33,17 @@ Nightly CLI from the latest published `main` build:
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
 ```
 
-The installer selects a compatible build and verifies its checksum. See the
+The installer selects a compatible build and verifies its checksum. Linux x86_64
+clients without a visible NVIDIA GPU receive a GPU-free CLI. To use only remote
+GPU hosts, including from a machine with NVIDIA hardware:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_BACKEND=cpu sh
+MOLD_HOST=http://gpu-server:7680 mold run "a cat"
+```
+
+The CPU archive needs no NVIDIA driver or CUDA libraries. Local GPU generation
+requires a CUDA build (or Metal on macOS). See the
 [installation guide](https://utensils.io/mold/guide/installation) for Nix,
 Arch, Windows, Android, and source builds.
 GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.

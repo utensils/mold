@@ -83,12 +83,8 @@ case "${pkgname}" in
   mold-ai-bin)
     base="https://github.com/utensils/mold/releases/download/v${version}"
     license_url="https://github.com/utensils/mold/raw/v${version}/LICENSE"
-    # mold ships sm86/sm89/sm100/sm120 Linux variants. The existing -bin
-    # package deliberately remains on sm89 so upgrades never switch users'
-    # machine code silently. Other architectures build from source until
-    # separately qualified binary AUR packages are approved.
-    echo "==> fetching sha256 for sm_89 tarball"
-    sha_x86_64="$(fetch_sha "${base}/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz")"
+    echo "==> fetching sha256 for GPU-free CPU tarball"
+    sha_x86_64="$(fetch_sha "${base}/mold-x86_64-unknown-linux-gnu-cpu.tar.gz")"
     echo "==> fetching sha256 for LICENSE"
     sha_license="$(fetch_sha "${license_url}")"
 

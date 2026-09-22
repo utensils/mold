@@ -1,0 +1,49 @@
+name: GPU-free Linux CLI
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: development
+      image-version:
+        type: string
+        default: latest
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      MOLD_BUILD_CHANNEL: ${{ inputs.channel }}
+      MOLD_DISTRIBUTION_IMAGE_VERSION: ${{ inputs.image-version }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check generated Arch smoke script
+        run: bash scripts/tests/aur-smoke-script.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld pkg-config libssl-dev protobuf-compiler nasm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cpu-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
+      - name: Build GPU-free CLI
+        run: cargo build --locked --release -p mold-ai --no-default-features --features preview,discord,expand,webp,mp4,metrics,mdns,pulid
+      - name: Package CPU archive
+        run: scripts/package-cpu-release-archive.sh target/release/mold mold-x86_64-unknown-linux-gnu-cpu.tar.gz
+      - name: Verify in a runtime without CUDA
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work ubuntu:22.04 bash -c '
+            apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates libgcc-s1 libstdc++6 libssl3 &&
+            bash scripts/verify-cpu-release-binary.sh mold-x86_64-unknown-linux-gnu-cpu.tar.gz'
+      - name: Build and install Arch package without CUDA
+        run: scripts/aur/test-in-docker.sh --archive "$PWD/mold-x86_64-unknown-linux-gnu-cpu.tar.gz" mold-ai-bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-x86_64-unknown-linux-gnu-cpu
+          path: mold-x86_64-unknown-linux-gnu-cpu.tar.gz

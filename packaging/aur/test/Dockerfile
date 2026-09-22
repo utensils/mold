@@ -4,10 +4,7 @@
 # /workspace and runs `makepkg -si` against one of the in-tree
 # PKGBUILDs, then sanity-checks the installed binary.
 #
-# Note for mold: the `-bin` PKGBUILD declares `depends=('cuda')`, which
-# pulls in the full CUDA toolkit (~5 GB) on first install. Smoke tests
-# install the package but `mold --version` works without a real GPU, so
-# the build proves linkage without exercising CUDA at runtime.
+# The binary package must build, install and execute without CUDA libraries.
 
 # Pin linux/amd64 so the image runs under Rosetta on Apple Silicon and
 # qemu-user elsewhere. Arch upstream only publishes amd64 to Docker Hub
@@ -36,7 +33,8 @@ RUN pacman -Sy --noconfirm archlinux-keyring && \
         sudo \
         rust \
         cargo \
-        pkgconf && \
+        pkgconf \
+        python && \
     rm -rf /var/cache/pacman/pkg/*
 
 # makepkg refuses to run as root. Create a `builder` user with

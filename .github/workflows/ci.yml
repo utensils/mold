@@ -33,6 +33,11 @@ concurrency:
 # branch protection while retaining its established status-check name.
 
 jobs:
+  linux-cpu:
+    needs: changes
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.release == 'true' || needs.changes.outputs.rust == 'true')
+    uses: ./.github/workflows/linux-cpu.yml
+
   changes:
     runs-on: ubuntu-latest
     permissions:
@@ -167,6 +172,8 @@ jobs:
               - 'Dockerfile'
               - 'flake.nix'
               - 'install.sh'
+              - 'scripts/*cpu-release*'
+              - 'scripts/tests/cpu-*'
               - 'nix/**'
               - 'packaging/**'
               - 'crates/mold-cli/Cargo.toml'
@@ -227,6 +234,8 @@ jobs:
               - 'scripts/tests/cuda-distribution-contract.sh'
               - 'scripts/tests/cuda-ptx-parser-contract.py'
               - 'scripts/tests/install-cuda-arch.sh'
+              - 'scripts/tests/install-cpu.sh'
+              - 'scripts/tests/aur-smoke-script.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/tests/minimax-h3-attention-release-contract.sh'
               - 'scripts/bench-qwen.sh'
@@ -531,6 +540,8 @@ jobs:
           bash scripts/tests/nix-crate-downloads.sh
           python3 scripts/tests/cuda-ptx-parser-contract.py
           bash scripts/tests/install-cuda-arch.sh
+          bash scripts/tests/install-cpu.sh
+          bash scripts/tests/aur-smoke-script.sh
           bash scripts/tests/cuda-qualification-contract.sh
           bash scripts/tests/minimax-h3-attention-release-contract.sh
           bash scripts/tests/bench-qwen-parse.sh

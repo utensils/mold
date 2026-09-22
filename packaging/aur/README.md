@@ -6,11 +6,11 @@ linker by rui314) — to avoid collision, the AUR packages are namespaced as
 `mold-ai*` and each declares `conflicts=('mold')`. You cannot install both the
 linker and these packages simultaneously.
 
-| Package | Source | Update cadence | Audience |
-|---|---|---|---|
-| [`mold-ai-bin`](./mold-ai-bin/PKGBUILD) | Repackages the upstream `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` (RTX 40-series / Ada Lovelace) from GitHub Releases | Every tagged release (automatic via CI) | Most users — fastest install, no compile |
-| [`mold-ai`](./mold-ai/PKGBUILD) | Builds from the release tarball with CUDA features | Every tagged release (automatic via CI) | Users who need a different `CUDA_COMPUTE_CAP` (for example sm_86, sm_100, or sm_120) |
-| [`mold-ai-git`](./mold-ai-git/PKGBUILD) | Builds from `main` HEAD | Pushed manually when the build recipe changes | Bleeding-edge users tracking `main` |
+| Package                                 | Source                                                                                                        | Update cadence                                | Audience                                                                             |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------ |
+| [`mold-ai-bin`](./mold-ai-bin/PKGBUILD) | Repackages the upstream `mold-x86_64-unknown-linux-gnu-cpu.tar.gz` (GPU-free remote CLI) from GitHub Releases | Every tagged release (automatic via CI)       | Remote clients — no CUDA or compilation                                              |
+| [`mold-ai`](./mold-ai/PKGBUILD)         | Builds from the release tarball with CUDA features                                                            | Every tagged release (automatic via CI)       | Users who need a different `CUDA_COMPUTE_CAP` (for example sm_86, sm_100, or sm_120) |
+| [`mold-ai-git`](./mold-ai-git/PKGBUILD) | Builds from `main` HEAD                                                                                       | Pushed manually when the build recipe changes | Bleeding-edge users tracking `main`                                                  |
 
 The PKGBUILDs here are the source of truth. The AUR git repos
 (`ssh://aur@aur.archlinux.org/<pkgname>.git`) are downstream mirrors
@@ -18,12 +18,13 @@ that CI force-publishes to on every release.
 
 ## Choosing a GPU variant
 
-The `mold-ai-bin` package ships the **sm_89 (Ada Lovelace)** tarball by
-default — that targets RTX 40-series cards. RTX 3090/A40, B200/B300, and RTX
-50-series users install the source PKGBUILD with an explicit compute
-capability:
+`mold-ai-bin` ships the GPU-free remote CLI. For local CUDA generation,
+install a source package with the compute capability of your GPU:
 
 ```bash
+# RTX 40-series (Ada)
+CUDA_COMPUTE_CAP=89 paru -S mold-ai
+
 # B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified)
 CUDA_COMPUTE_CAP=100 paru -S mold-ai
 
@@ -35,10 +36,8 @@ CUDA_COMPUTE_CAP=86 paru -S mold-ai
 ```
 
 `paru` forwards env vars to `makepkg`. With vanilla `makepkg`, run
-`CUDA_COMPUTE_CAP=100 makepkg -si` directly. The existing `mold-ai-bin`
-package stays on sm_89. A separate sm_86 package waits for the real RTX 3090
-artifact gate, and an sm_100 binary package will not be published until the
-deferred real B200 qualification campaign passes.
+`CUDA_COMPUTE_CAP=100 makepkg -si` directly. Architecture-specific binary
+packages remain separate qualification work; `mold-ai-bin` is the remote client.
 
 ## Release flow
 
@@ -119,8 +118,8 @@ the binary inside `package()` any more:
 - `mold-ai-bin` installs the completion files the release archive ships
   beside the binary (`completions/mold.bash`, `completions/_mold`,
   `completions/mold.fish`), generated at release time from that exact binary
-  by `scripts/package-cuda-release-archive.sh` and checked by
-  `scripts/verify-cuda-release-binary.sh`. The recipe never runs the
+  by `scripts/package-cpu-release-archive.sh` and checked by
+  `scripts/verify-cpu-release-binary.sh`. The recipe never runs the
   prebuilt payload; it refuses an archive without `completions/`, which is
   every archive up to and including v0.30.1.
 - `mold-ai` and `mold-ai-git` generate them in `build()` from the binary they
@@ -129,14 +128,18 @@ the binary inside `package()` any more:
 
 `scripts/tests/cuda-distribution-contract.sh` pins all of this.
 
-**Known runtime gap.** The prebuilt archive is built against CUDA 12.8 and
-links `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`,
-`libcurand.so.10` and `libcudnn.so.9`, while `extra/cuda` ships CUDA 13
-(`libcudart.so.13`) and `extra/cudnn` requires `cuda>=13`. `depends=('cuda')`
-therefore installs a toolkit the binary cannot load; `ldd /usr/bin/mold`
-names what is missing. A CUDA 12 runtime has to come from elsewhere (the AUR
-`cuda-12.9` + `cudnn9.10-cuda12.9` pair provides one) until the package's
-dependencies or the release toolchain change — tracked in #1742.
+**Migration to GPU-free clients.** `mold-ai-bin` now uses the CPU archive and
+no longer installs CUDA. Its pacman install/upgrade hook explains the migration
+and names the local CUDA alternatives. Set `MOLD_HOST=http://gpu-host:7680` for remote work.
+Existing SM89 users needing local generation should switch to `mold-ai` or
+`mold-ai-git` with `CUDA_COMPUTE_CAP=89`, or install the matching CUDA archive.
+Other supported GPU families use their matching `CUDA_COMPUTE_CAP`.
+
+CUDA archives still link CUDA 12 libraries, which Arch's CUDA 13 toolkit does
+not satisfy. Source packages build against Arch's own toolkit. The GPU-free
+package avoids that mismatch entirely. It publishes only after the next tagged
+CPU archive is uploaded; the publisher fetches its real checksum with CDN
+retries. Old release tags cannot be used with this CPU recipe.
 
 ## Local PKGBUILD smoke test (macOS / non-Arch hosts)
 
@@ -144,7 +147,7 @@ dependencies or the release toolchain change — tracked in #1742.
 scripts/aur/test-in-docker.sh mold-ai-bin    # prebuilt tarball — fastest
 scripts/aur/test-in-docker.sh mold-ai        # source build (very slow under emulation; pulls 5GB of CUDA)
 scripts/aur/test-in-docker.sh mold-ai-git    # VCS build
-scripts/aur/test-in-docker.sh --version 0.31.0 mold-ai-bin   # target one release
+scripts/aur/test-in-docker.sh --archive /path/to/mold-x86_64-unknown-linux-gnu-cpu.tar.gz mold-ai-bin # test an unpublished archive
 scripts/aur/test-in-docker.sh --as-is mold-ai-bin            # keep the in-tree pkgver
 scripts/aur/test-in-docker.sh --rebuild      # force image rebuild
 scripts/aur/test-in-docker.sh --shell mold-ai-bin   # drop into a shell after the build
@@ -164,8 +167,10 @@ package fails right there. Only then are the runtime dependencies pulled in
 for `pacman -U` and the `mold --version` smoke, which prints the unresolved
 libraries from `ldd` when the installed binary cannot load. The source
 recipes keep the single `makepkg -si` flow, since their `build()` needs the
-toolkit. Smoke tests do not exercise GPU codepaths — they only confirm the
-binary links and parses CLI args.
+toolkit. Binary-package smoke verifies there are still no NVIDIA libraries or
+packages after installation, runs help and all completions, and proves a model
+listing round trip to a mock HTTP host. `--archive` tests the just-built release
+payload with locally computed checksums, before it is published.
 
 ## Editing a PKGBUILD locally (Arch host)
 
