@@ -91,3 +91,11 @@ Independent GPT-5.6 Sol review completed before implementation. Accepted:
 The review reported no graph, but direct verification found the tracked `.ua/`
 graph in this worktree. Its global baseline is stale; scoped source-verified
 updates follow the repository's existing scopedUpdates convention.
+
+## Implementation review resolution
+
+Claude Sonnet reviewed the implementation before PR creation. Addressed its
+coverage and migration findings with an injected-probe updater test (both CPU
+and CUDA, including propagated CUDA errors), both Darwin backend rejection
+cases, and a pacman install/upgrade notice shipped through the AUR publisher's
+assets input. Existing CUDA feature compilation remains on the CI route.

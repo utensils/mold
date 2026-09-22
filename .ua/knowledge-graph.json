@@ -255,7 +255,8 @@
           "scripts/verify-cpu-release-binary.sh",
           "scripts/tests/cpu-release-smoke.py",
           "scripts/tests/install-cpu.sh",
-          "website/guide/installation.md"
+          "website/guide/installation.md",
+          "packaging/aur/mold-ai-bin/mold-ai-bin.install"
         ]
       }
     ]
@@ -293393,6 +293394,18 @@
         "gpu-free-cli"
       ],
       "complexity": "moderate"
+    },
+    {
+      "id": "file:packaging/aur/mold-ai-bin/mold-ai-bin.install",
+      "type": "file",
+      "name": "mold-ai-bin.install",
+      "filePath": "packaging/aur/mold-ai-bin/mold-ai-bin.install",
+      "summary": "Pacman install and upgrade notice explains CPU-only migration and local CUDA alternatives. Published with the AUR recipe.",
+      "tags": [
+        "distribution",
+        "gpu-free-cli"
+      ],
+      "complexity": "simple"
     }
   ],
   "edges": [
@@ -519595,6 +519608,13 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:packaging/aur/mold-ai-bin/PKGBUILD",
+      "target": "file:packaging/aur/mold-ai-bin/mold-ai-bin.install",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
     }
   ],
   "layers": [
@@ -521899,7 +521919,8 @@
         "file:scripts/package-cpu-release-archive.sh",
         "file:scripts/verify-cpu-release-binary.sh",
         "file:scripts/tests/cpu-release-smoke.py",
-        "file:scripts/tests/install-cpu.sh"
+        "file:scripts/tests/install-cpu.sh",
+        "file:packaging/aur/mold-ai-bin/mold-ai-bin.install"
       ]
     },
     {

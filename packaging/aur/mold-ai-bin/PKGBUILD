@@ -10,6 +10,7 @@ pkgdesc="AI image/video CLI for remote GPU hosts (prebuilt GPU-free client)"
 arch=('x86_64')
 url="https://github.com/utensils/mold"
 license=('MIT')
+install=mold-ai-bin.install
 
 # GPU-free release: no NVIDIA driver or CUDA runtime required.
 depends=('gcc-libs' 'glibc')

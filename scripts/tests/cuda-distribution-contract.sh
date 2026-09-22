@@ -620,6 +620,10 @@ done
 require_text ".github/workflows/linux-cpu.yml" 'scripts/verify-cpu-release-binary.sh'
 require_text ".github/workflows/linux-cpu.yml" 'scripts/aur/test-in-docker.sh --archive'
 require_text "scripts/aur/update-pkgbuild.sh" 'mold-x86_64-unknown-linux-gnu-cpu.tar.gz'
+require_text "packaging/aur/mold-ai-bin/PKGBUILD" 'install=mold-ai-bin.install'
+require_text ".github/workflows/release.yml" 'packaging/aur/mold-ai-bin/mold-ai-bin.install'
+require_text "packaging/aur/mold-ai-bin/mold-ai-bin.install" 'post_upgrade()'
+
 require_ci_release_path 'scripts/*cpu-release*'
 require_ci_release_path 'scripts/tests/cpu-*'
 require_ci_release_path 'scripts/tests/install-cpu.sh'

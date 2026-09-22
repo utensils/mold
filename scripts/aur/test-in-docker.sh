@@ -157,6 +157,8 @@ echo "==> makepkg --noconfirm --nodeps (pkg: ${pkgname})"
 makepkg --noconfirm --nodeps
 pkgfile=\$(ls -1 ./*.pkg.tar.* | head -n 1)
 echo "==> built \$pkgfile without a CUDA runtime present"
+bsdtar -xOf "\$pkgfile" .INSTALL | grep -F 'GPU-free CLI' >/dev/null \
+  || { echo "error: missing CPU migration install notice" >&2; exit 1; }
 for member in \\
   usr/bin/mold \\
   usr/share/bash-completion/completions/mold \\

@@ -129,7 +129,8 @@ the binary inside `package()` any more:
 `scripts/tests/cuda-distribution-contract.sh` pins all of this.
 
 **Migration to GPU-free clients.** `mold-ai-bin` now uses the CPU archive and
-no longer installs CUDA. Set `MOLD_HOST=http://gpu-host:7680` for remote work.
+no longer installs CUDA. Its pacman install/upgrade hook explains the migration
+and names the local CUDA alternatives. Set `MOLD_HOST=http://gpu-host:7680` for remote work.
 Existing SM89 users needing local generation should switch to `mold-ai` or
 `mold-ai-git` with `CUDA_COMPUTE_CAP=89`, or install the matching CUDA archive.
 Other supported GPU families use their matching `CUDA_COMPUTE_CAP`.

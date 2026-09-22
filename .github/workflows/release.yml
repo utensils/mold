@@ -1483,6 +1483,7 @@ jobs:
         with:
           pkgname: ${{ matrix.pkgname }}
           pkgbuild: packaging/aur/${{ matrix.pkgname }}/PKGBUILD
+          assets: ${{ matrix.pkgname == 'mold-ai-bin' && 'packaging/aur/mold-ai-bin/mold-ai-bin.install' || '' }}
           commit_username: "mold Release Bot"
           commit_email: "brink.james@gmail.com"
           commit_message: "Update to ${{ github.ref_name }}"
