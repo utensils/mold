@@ -377,6 +377,10 @@ from a default (`routes_config.rs:48-53`).
 
 ## Running it
 
+The Library sidebar loads its collections and counts when the main window
+opens, including when Generate is the initial destination. Opening All Prints
+is not required and does not start a second full listing.
+
 Queue ▸ Show Queue opens the queue from any pane. Queue actions keep the
 selected job and its machine together; Empty Queue names each eligible
 machine in a fleet. File ▸ New Image and View destinations also reopen the

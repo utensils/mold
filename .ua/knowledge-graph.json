@@ -164,6 +164,20 @@
           "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
           "apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift"
         ]
+      },
+      {
+        "id": "macos-library-sidebar-startup",
+        "updatedAt": "2026-09-22T02:00:50.362903+00:00",
+        "baseCommit": "6d6fd56a53e553de4a05db02f279e535291c64cd",
+        "scope": "Source-verified shell-owned sidebar loading and cancellation on host topology changes; global baseline unchanged.",
+        "files": [
+          "apps/macos/Sources/Mold/Shell/RootView.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
+        ]
       }
     ]
   },
@@ -291061,7 +291075,7 @@
       "type": "file",
       "name": "LibraryPane+Chrome.swift",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
-      "summary": "Passes the current Library scope and menu context into the full-size viewer.",
+      "summary": "Library pane owns presentation tasks and attachment preparation; initial gallery, trash and collection loading belongs to RootView.",
       "tags": [
         "swift",
         "native-macos",
@@ -292863,6 +292877,71 @@
       ],
       "complexity": "moderate",
       "summary": "Publishes Model menu actions with the selected machine and model identity."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+      "type": "file",
+      "name": "RootView.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/RootView.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Owns initial sidebar library loading independent of destination and host status probes; host-list changes cancel and restart the shell load."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "type": "file",
+      "name": "LibraryStore.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Shared gallery store listens from initialization; shell-driven reload guards cancellation between phases and refuses obsolete host replies."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+      "type": "file",
+      "name": "LibraryStore+Mutations.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Loads trash with cancellation and host identity checks; exposes gallery mutations and trash operations."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+      "type": "file",
+      "name": "LibraryStore+Organization.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Loads collection shelves and tags per host, rejecting cancelled or obsolete host replies."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
+      "type": "file",
+      "name": "LibraryStore+Rows.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
+      "tags": [
+        "swift",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate",
+      "summary": "Builds merged library rows and prunes removed hosts, including collection-only caches."
     }
   ],
   "edges": [
@@ -518883,6 +518962,13 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
     }
   ],
   "layers": [
@@ -520143,7 +520229,12 @@
         "file:apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
         "file:apps/macos/Sources/Mold/Shell/ModelCommands.swift",
         "file:apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
-        "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift"
+        "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
+        "file:apps/macos/Sources/Mold/Shell/RootView.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
       ]
     },
     {

@@ -114,6 +114,20 @@
         "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
         "apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift"
       ]
+    },
+    {
+      "id": "macos-library-sidebar-startup",
+      "updatedAt": "2026-09-22T02:00:50.362903+00:00",
+      "baseCommit": "6d6fd56a53e553de4a05db02f279e535291c64cd",
+      "scope": "Source-verified shell-owned sidebar loading and cancellation on host topology changes; global baseline unchanged.",
+      "files": [
+        "apps/macos/Sources/Mold/Shell/RootView.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
+      ]
     }
   ]
 }

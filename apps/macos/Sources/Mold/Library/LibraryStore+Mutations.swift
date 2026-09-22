@@ -20,6 +20,7 @@ extension LibraryStore {
                 }
             }
             for await (host, result) in group {
+                guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
                 switch result {
                 case let .success(.fresh(prints, etag)):
                     trashPerHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }

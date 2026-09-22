@@ -9,12 +9,8 @@ extension LibraryPane {
     /// when the machines or the shelves change under it.
     func watched(_ showing: LibraryShowing) -> some View {
         chrome(showing)
-            // Its own data, and nothing else: `HostStore` reconciles its own
-            // event streams, and the library listens from the moment it is
-            // built. What still belongs here is the first LISTING, because
-            // the events are deltas and a client that has read nothing has
-            // nothing to apply them to.
-            .task { await actions.reload() }
+            // The shell loads the library for its sidebar before this pane
+            // opens; navigation must not start another full listing.
             // Library can be the launch destination. Read models here too so
             // attachment actions do not depend on Generate having appeared.
             .task(id: attachmentModelKey) { await prepareAttachmentModels() }

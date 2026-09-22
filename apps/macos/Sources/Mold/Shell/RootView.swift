@@ -8,6 +8,7 @@ import SwiftUI
 /// second copy of it arguing with the first.
 struct RootView: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(LibraryStore.self) private var library
     @Environment(DownloadStore.self) private var downloads
     @Environment(\.openSettings) private var openSettings
     /// Reopening where you left off is what every Mac app does. The env
@@ -33,6 +34,10 @@ struct RootView: View {
         }
         .navigationTitle("Mold Studio")
         .task { await hosts.refreshAll() }
+        // Shelves and their counts belong to the shell, regardless of which
+        // destination opens first. Keep this independent of host probes so
+        // an unreachable machine cannot postpone reading reachable ones.
+        .task(id: hosts.hosts) { await library.reload() }
         .task { openSettingsIfRequested() }
         // `HostStore` cannot reach `DownloadStore` -- it is the root every
         // store is built from, not a peer. So the machine list is watched

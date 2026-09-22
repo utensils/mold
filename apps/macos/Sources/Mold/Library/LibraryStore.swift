@@ -58,9 +58,8 @@ final class LibraryStore {
         // Listening starts with the store, not with a pane. The Library used
         // to register on appearing, so a print made while Generate was showing
         // reached nobody and the timeline only caught up on the next ⌘R.
-        // What still waits for a pane is the first LISTING -- these are
-        // deltas, and a client that has read nothing has nothing to apply
-        // them to. See `GalleryLive`.
+        // RootView starts the first listing independently of the destination,
+        // so sidebar shelves and counts do not wait for Library to open.
         hosts.onEvent { [weak self] host, event in
             guard let self else { return }
             live.apply(event, from: host, in: self)
@@ -85,6 +84,7 @@ final class LibraryStore {
                 }
             }
             for await (host, result) in group {
+                guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
                 apply(result, for: host)
             }
         }
@@ -96,7 +96,9 @@ final class LibraryStore {
     /// collection still reading its old name.
     func reload() async {
         await refresh()
+        guard !Task.isCancelled else { return }
         await refreshTrash()
+        guard !Task.isCancelled else { return }
         await refreshOrganization()
     }
 

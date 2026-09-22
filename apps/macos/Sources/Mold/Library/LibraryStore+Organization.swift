@@ -19,7 +19,7 @@ extension LibraryStore {
     func shelf(slug: String) -> CollectionShelf? { shelves.first { $0.slug == slug } }
 
     func refreshOrganization() async {
-        await withTaskGroup(of: (MoldHost.ID, Result<[Collection], Error>, Result<[TagCount], Error>).self) { group in
+        await withTaskGroup(of: (MoldHost, Result<[Collection], Error>, Result<[TagCount], Error>).self) { group in
             for host in hosts.hosts {
                 let client = hosts.backend(for: host)
                 group.addTask {
@@ -34,10 +34,12 @@ extension LibraryStore {
                         do { return .success(try await client.tags()) }
                         catch { return .failure(error) }
                     }()
-                    return (host.id, await collections, await counts)
+                    return (host, await collections, await counts)
                 }
             }
-            for await (id, collectionsResult, tagsResult) in group {
+            for await (host, collectionsResult, tagsResult) in group {
+                guard !Task.isCancelled, hosts.host(host.id) == host else { continue }
+                let id = host.id
                 if case let .success(collections) = collectionsResult { collectionsPerHost[id] = collections }
                 if case let .success(counts) = tagsResult { tags.perHost[id] = counts }
                 switch (collectionsResult, tagsResult) {
