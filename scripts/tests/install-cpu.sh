@@ -10,7 +10,7 @@ for cmd in awk sed grep mkdir mktemp rm tar install sha256sum tr; do
 done
 cat > "$scratch/bin/uname" <<'STUB'
 #!/bin/sh
-case "$1" in -s) echo "${TEST_OS:-Linux}" ;; -m) echo x86_64 ;; esac
+case "$1" in -s) echo "${TEST_OS:-Linux}" ;; -m) echo "${TEST_ARCH:-x86_64}" ;; esac
 STUB
 cat > "$scratch/payload/mold" <<'STUB'
 #!/bin/sh
@@ -78,7 +78,7 @@ done
 : > "$scratch/probes"
 run_install TEST_PROBE=gpu MOLD_BACKEND=cpu MOLD_VERSION=v-pinned
 [[ ! -s "$scratch/probes" ]]
-for args in 'MOLD_BACKEND=invalid' 'MOLD_BACKEND=cpu MOLD_CUDA_ARCH=sm89' 'MOLD_BACKEND=cuda TEST_PROBE=fail' 'MOLD_BACKEND=cuda TEST_OS=Darwin' 'MOLD_BACKEND=cpu TEST_OS=Darwin'; do
+for args in 'MOLD_BACKEND=invalid' 'MOLD_BACKEND=cpu MOLD_CUDA_ARCH=sm89' 'MOLD_BACKEND=cuda TEST_PROBE=fail' 'MOLD_BACKEND=cuda TEST_OS=Darwin TEST_ARCH=arm64' 'MOLD_BACKEND=cpu TEST_OS=Darwin TEST_ARCH=arm64'; do
   # Intentional word splitting: fixed test inputs, one assignment per word.
   # shellcheck disable=SC2086
   if run_install MOLD_VERSION=v-test $args; then echo "accepted $args" >&2; exit 1; fi
