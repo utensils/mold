@@ -16,6 +16,9 @@ struct MoldApp: App {
     var body: some Scene {
         Window("Mold Studio", id: "main") {
             RootView(destination: $destination)
+                .modifier(NotificationWindowRouting(
+                    responses: delegate.notificationResponses, destination: $destination,
+                    navigation: stores.libraryNavigation))
                 .task { ClickModifiers.startObserving() }
                 // Whether a caret owns the keyboard, asked once for the whole
                 // app -- what stands the Library's bare-space shortcut down.
@@ -67,13 +70,5 @@ struct MoldApp: App {
         // composition root that did not move into `AppStores`, and the one a
         // lane re-applying its work would otherwise miss (review F5#4).
         if NSApp.isActive { stores.heartbeat.start(); stores.activity.start() }
-        // A notification click reaches the delegate, not a view -- this is
-        // where it meets the destination binding and the Library's own
-        // navigation.
-        let navigation = stores.libraryNavigation
-        let destination = $destination
-        delegate.onNotificationRoute = { route in
-            applyNotificationRoute(route, destination: destination, navigation: navigation)
-        }
     }
 }

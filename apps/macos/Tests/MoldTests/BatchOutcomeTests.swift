@@ -238,7 +238,8 @@ struct BatchOutcomeTests {
         controller.draft.media.sourceImage = "SOURCEBYTES"
 
         controller.refreshPlacement(on: workstation)
-        await settle { backend.callCount("placementPreview") == 1 }
+        // Call entry precedes argument capture; inspect only a captured request.
+        await settle { !backend.placementRequests.isEmpty }
 
         let sent = backend.placementRequests.last
         #expect(sent?.prompt == "")

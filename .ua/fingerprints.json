@@ -283801,6 +283801,2111 @@
       ],
       "totalLines": 774,
       "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/MoldApp.swift": {
+      "filePath": "apps/macos/Sources/Mold/MoldApp.swift",
+      "contentHash": "f4ab151f8b4a59e39f8d6c2a631d819631c73a338927015688c123ae038de6a0",
+      "functions": [
+        {
+          "name": "handOverToTheDelegate",
+          "params": [],
+          "exported": false,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "MoldApp",
+          "methods": [
+            "handOverToTheDelegate"
+          ],
+          "properties": [
+            "stores",
+            "destination",
+            "delegate",
+            "body"
+          ],
+          "exported": true,
+          "lineCount": 65
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "body",
+        "MoldApp"
+      ],
+      "totalLines": 75,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+      "contentHash": "5360cbcd9f09eeab5286ac3b30079080102ffc2687d87e33b9ea642f569c6372",
+      "functions": [
+        {
+          "name": "applicationWillFinishLaunching",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "applicationDidFinishLaunching",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "applicationDidBecomeActive",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "applicationDidResignActive",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "applicationShouldTerminate",
+          "params": [
+            "sender"
+          ],
+          "returnType": "NSApplication.TerminateReply",
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "userNotificationCenter",
+          "params": [
+            "center",
+            "response",
+            "completionHandler"
+          ],
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "classes": [
+        {
+          "name": "MoldAppDelegate",
+          "methods": [
+            "applicationWillFinishLaunching",
+            "applicationDidFinishLaunching",
+            "applicationDidBecomeActive",
+            "applicationDidResignActive",
+            "applicationShouldTerminate"
+          ],
+          "properties": [
+            "engine",
+            "materializer",
+            "thumbnails",
+            "landedPrints",
+            "heartbeat",
+            "dockBadge",
+            "quit",
+            "notificationResponses"
+          ],
+          "exported": true,
+          "lineCount": 85
+        },
+        {
+          "name": "extension MoldAppDelegate",
+          "methods": [
+            "userNotificationCenter"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 20
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "engine",
+        "materializer",
+        "thumbnails",
+        "landedPrints",
+        "heartbeat",
+        "dockBadge",
+        "quit",
+        "notificationResponses",
+        "applicationWillFinishLaunching",
+        "applicationDidFinishLaunching",
+        "applicationDidBecomeActive",
+        "applicationDidResignActive",
+        "applicationShouldTerminate",
+        "MoldAppDelegate",
+        "userNotificationCenter"
+      ],
+      "totalLines": 116,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationResponses.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "contentHash": "9562e34c739303fcb8c85a6d51bdc0c551a0fa3c029fc5850ca83b5829d51153",
+      "functions": [
+        {
+          "name": "install",
+          "params": [
+            "handler"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "receive",
+          "params": [
+            "action",
+            "userInfo",
+            "completion"
+          ],
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationResponses",
+          "methods": [
+            "install",
+            "receive"
+          ],
+          "properties": [
+            "pending",
+            "handler"
+          ],
+          "exported": true,
+          "lineCount": 22
+        }
+      ],
+      "imports": [
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "install",
+        "receive",
+        "NotificationResponses"
+      ],
+      "totalLines": 27,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "contentHash": "2b3f89d09390a0a444f03a97f787ce2086ed357121b56eff62d3946b0d8f4be6",
+      "functions": [
+        {
+          "name": "body",
+          "params": [
+            "content"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationWindowRouting",
+          "methods": [
+            "body"
+          ],
+          "properties": [
+            "openWindow",
+            "responses",
+            "destination",
+            "navigation"
+          ],
+          "exported": true,
+          "lineCount": 16
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "responses",
+        "destination",
+        "navigation",
+        "body",
+        "NotificationWindowRouting"
+      ],
+      "totalLines": 23,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationRouting.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "contentHash": "55802f09ad7a6853e256ff64925bbc22c60f19cc82366998eb0a735b40405068",
+      "functions": [
+        {
+          "name": "route",
+          "params": [
+            "userInfo"
+          ],
+          "returnType": "NotificationRoute?",
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "applyNotificationRoute",
+          "params": [
+            "route",
+            "destination",
+            "navigation"
+          ],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationRoute",
+          "methods": [
+            "route"
+          ],
+          "properties": [
+            "openPrint",
+            "openQueue"
+          ],
+          "exported": true,
+          "lineCount": 23
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "route",
+        "NotificationRoute",
+        "applyNotificationRoute"
+      ],
+      "totalLines": 50,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/UATScript.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/UATScript.swift",
+      "contentHash": "e41b3b277c210465e2ba7a8e27e2cfc5f66689104f17de859bbcc782e9171c93",
+      "functions": [
+        {
+          "name": "runIfRequested",
+          "params": [
+            "environment",
+            "responses"
+          ],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "steps",
+          "params": [
+            "script"
+          ],
+          "returnType": "[String]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "run",
+          "params": [
+            "steps",
+            "log",
+            "responses"
+          ],
+          "exported": false,
+          "lineCount": 24
+        },
+        {
+          "name": "split",
+          "params": [
+            "step"
+          ],
+          "returnType": "(String, String)",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "perform",
+          "params": [
+            "menuPath"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "perform",
+          "params": [
+            "titles",
+            "menu"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 12
+        },
+        {
+          "name": "snapshot",
+          "params": [
+            "path"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 14
+        },
+        {
+          "name": "write",
+          "params": [
+            "lines",
+            "log"
+          ],
+          "exported": false,
+          "lineCount": 3
+        }
+      ],
+      "classes": [
+        {
+          "name": "UATScript",
+          "methods": [
+            "runIfRequested",
+            "steps",
+            "run",
+            "split",
+            "perform",
+            "perform",
+            "snapshot",
+            "write"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 91
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        }
+      ],
+      "exports": [
+        "runIfRequested",
+        "steps",
+        "UATScript"
+      ],
+      "totalLines": 111,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/UATNotification.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "contentHash": "d8233b005be0bb2f3b17a6a9013a24b88fa4fca0c1d27bf60bc3369a71c2b647",
+      "functions": [
+        {
+          "name": "payload",
+          "params": [
+            "argument"
+          ],
+          "returnType": "[String: String]?",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "deliver",
+          "params": [
+            "argument",
+            "responses"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "post",
+          "params": [
+            "argument"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 16
+        }
+      ],
+      "classes": [
+        {
+          "name": "UATNotification",
+          "methods": [
+            "payload",
+            "deliver",
+            "post"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 32
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "payload",
+        "deliver",
+        "post",
+        "UATNotification"
+      ],
+      "totalLines": 41,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/NotificationActivationTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "contentHash": "71b2d275fb2e9fafd672f5d6002737570de2e67707b714b5f2a949ad4cb12e0b",
+      "functions": [
+        {
+          "name": "theBuiltAppProhibitsMultipleInstances",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+          "params": [],
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+          "params": [],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity",
+          "params": [],
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationActivationTests",
+          "methods": [
+            "theBuiltAppProhibitsMultipleInstances",
+            "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+            "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+            "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+            "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 68
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "theBuiltAppProhibitsMultipleInstances",
+        "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+        "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+        "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+        "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity",
+        "NotificationActivationTests"
+      ],
+      "totalLines": 77,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/ModelActionsTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "contentHash": "0351489d0221c271fb30b5512dc4fbd05a74afcaeacd283fa8dd8ad4cc164acf",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "actions",
+          "params": [
+            "hosts",
+            "models",
+            "downloads",
+            "licenses",
+            "confirmDestruction"
+          ],
+          "returnType": "ModelActions",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+          "params": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "showLicenceAppearsOnlyForAGatedModel",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+          "params": [],
+          "exported": true,
+          "lineCount": 29
+        },
+        {
+          "name": "aRemovalThatKeptSomethingSaysWhatAndWhy",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "theComponentsRowsNeverExpandOptions",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "theMenuAndTheContextualMenuCallTheSameThing",
+          "params": [],
+          "exported": true,
+          "lineCount": 23
+        }
+      ],
+      "classes": [
+        {
+          "name": "ModelActionsTests",
+          "methods": [
+            "machine",
+            "actions",
+            "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+            "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+            "showLicenceAppearsOnlyForAGatedModel",
+            "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+            "aRemovalThatKeptSomethingSaysWhatAndWhy",
+            "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+            "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+            "theComponentsRowsNeverExpandOptions",
+            "theMenuAndTheContextualMenuCallTheSameThing"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 162
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+        "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+        "showLicenceAppearsOnlyForAGatedModel",
+        "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+        "aRemovalThatKeptSomethingSaysWhatAndWhy",
+        "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+        "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+        "theComponentsRowsNeverExpandOptions",
+        "theMenuAndTheContextualMenuCallTheSameThing",
+        "ModelActionsTests"
+      ],
+      "totalLines": 172,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "contentHash": "0f610a8f32390e5103d71ff0cc29e4f9b47e64db9b30866d62dd8480dcaafc05",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "makeController",
+          "params": [
+            "backend",
+            "host"
+          ],
+          "returnType": "GenerateController",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "aBatchOfFourIsSubmittedAsFourChildren",
+          "params": [],
+          "exported": true,
+          "lineCount": 19
+        },
+        {
+          "name": "aBatchOfOneIsUnchanged",
+          "params": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "everyChildThatMadeSomethingIsInTheOutcome",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "aFinishedRunRemembersTheMachineItRanOn",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+          "params": [],
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "aBatchWhereNothingFinishedIsAFailure",
+          "params": [],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "theFenceIsHeldUntilTheWholeBatchSettles",
+          "params": [],
+          "exported": true,
+          "lineCount": 26
+        },
+        {
+          "name": "thePreviewFollowsAChildThatIsStillRunning",
+          "params": [],
+          "exported": true,
+          "lineCount": 28
+        },
+        {
+          "name": "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "aPlacementPreviewSendsARedactedRequest",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        }
+      ],
+      "classes": [
+        {
+          "name": "BatchOutcomeTests",
+          "methods": [
+            "machine",
+            "makeController",
+            "aBatchOfFourIsSubmittedAsFourChildren",
+            "aBatchOfOneIsUnchanged",
+            "everyChildThatMadeSomethingIsInTheOutcome",
+            "aFinishedRunRemembersTheMachineItRanOn",
+            "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+            "aBatchWhereNothingFinishedIsAFailure",
+            "theFenceIsHeldUntilTheWholeBatchSettles",
+            "thePreviewFollowsAChildThatIsStillRunning",
+            "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+            "aPlacementPreviewSendsARedactedRequest"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 238
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "aBatchOfFourIsSubmittedAsFourChildren",
+        "aBatchOfOneIsUnchanged",
+        "everyChildThatMadeSomethingIsInTheOutcome",
+        "aFinishedRunRemembersTheMachineItRanOn",
+        "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+        "aBatchWhereNothingFinishedIsAFailure",
+        "theFenceIsHeldUntilTheWholeBatchSettles",
+        "thePreviewFollowsAChildThatIsStillRunning",
+        "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+        "aPlacementPreviewSendsARedactedRequest",
+        "BatchOutcomeTests"
+      ],
+      "totalLines": 250,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/FakeBackend.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "contentHash": "a2600a357336843134fbabff9bcc265a23b0bec8de68463ebe6d7f78711f7efe",
+      "functions": [
+        {
+          "name": "settle",
+          "params": [
+            "condition"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "raise",
+          "params": [],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "emit",
+          "params": [
+            "event"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "callCount",
+          "params": [
+            "route"
+          ],
+          "returnType": "Int",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "FakeBackend.init",
+          "params": [
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "pause",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "countLocked",
+          "params": [
+            "route"
+          ],
+          "returnType": "Int",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "entered",
+          "params": [
+            "route",
+            "count",
+            "limit"
+          ],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "giveUpWaiting",
+          "params": [
+            "id"
+          ],
+          "returnType": "Bool",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "noteEntered",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "record",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "notPlanted",
+          "params": [],
+          "returnType": "Error",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "mutated",
+          "params": [
+            "device",
+            "enabled"
+          ],
+          "returnType": "DeviceInfo",
+          "exported": false,
+          "lineCount": 10
+        },
+        {
+          "name": "releaseStatus",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "status",
+          "params": [],
+          "returnType": "ServerStatus",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "capabilities",
+          "params": [],
+          "returnType": "Capabilities",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "models",
+          "params": [],
+          "returnType": "[Model]",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "placementPreview",
+          "params": [
+            "request",
+            "copies"
+          ],
+          "returnType": "PlacementPreview",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "submit",
+          "params": [
+            "admission"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 32
+        },
+        {
+          "name": "releaseSubmit",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "batchStatus",
+          "params": [
+            "id"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "batchStatus",
+          "params": [
+            "clientBatchId"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "jobPreview",
+          "params": [
+            "jobId"
+          ],
+          "returnType": "JobProgress?",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelBatch",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "releaseChainCreate",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "chainGate",
+          "params": [],
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "createChainJob",
+          "params": [
+            "request",
+            "operationId"
+          ],
+          "returnType": "CreateChainJobResponse",
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "chainLimits",
+          "params": [
+            "model",
+            "fps"
+          ],
+          "returnType": "ChainLimits",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "chainJob",
+          "params": [
+            "id"
+          ],
+          "returnType": "ChainJobDetail",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelChainJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "resumeChainJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "chainJobEvents",
+          "params": [
+            "id"
+          ],
+          "returnType": "AsyncThrowingStream<ChainJobEvent, Error>",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "emitChainEvent",
+          "params": [
+            "event",
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "failChainEvents",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "expand",
+          "params": [
+            "request"
+          ],
+          "returnType": "ExpandResponse",
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "releaseExpand",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "remix",
+          "params": [
+            "request"
+          ],
+          "returnType": "RemixResponse",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "history",
+          "params": [
+            "limit"
+          ],
+          "returnType": "HistoryListing",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "clearHistory",
+          "params": [
+            "keep"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "loras",
+          "params": [
+            "model"
+          ],
+          "returnType": "[LoraInfo]",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "queue",
+          "params": [],
+          "returnType": "QueueListing",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "queueJob",
+          "params": [
+            "id"
+          ],
+          "returnType": "QueueJobDetail",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "pauseJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "resumeJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "reorderJob",
+          "params": [
+            "id",
+            "position"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "retryJob",
+          "params": [
+            "authority"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "cancelAllQueued",
+          "params": [],
+          "returnType": "QueueCancelResult",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "batchStatuses",
+          "params": [
+            "batchIds"
+          ],
+          "returnType": "BatchStatusListing",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "exportHeldJob",
+          "params": [
+            "authority"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "admitTransfer",
+          "params": [
+            "clientBatchId",
+            "portable",
+            "destinationInstance"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "completeTransfer",
+          "params": [
+            "authority"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "startDownload",
+          "params": [
+            "request"
+          ],
+          "returnType": "DownloadTicket",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "cancelDownload",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "licenses",
+          "params": [],
+          "returnType": "[ThirdPartyLicense]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "acceptLicenses",
+          "params": [
+            "acceptances"
+          ],
+          "returnType": "[ThirdPartyLicense]",
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "devices",
+          "params": [],
+          "returnType": "DeviceState",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "setDevice",
+          "params": [
+            "id",
+            "enabled"
+          ],
+          "returnType": "DeviceInfo",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "resources",
+          "params": [],
+          "returnType": "ResourceSnapshot",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "resourceStream",
+          "params": [],
+          "returnType": "AsyncThrowingStream<ResourceSnapshot, Error>",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "peers",
+          "params": [],
+          "returnType": "[DiscoveryPeer]",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "gallery",
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "trashedPrints",
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "patch",
+          "params": [
+            "filename",
+            "patch"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "mutate",
+          "params": [
+            "mutation"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "trash",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "restoreFromTrash",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "deleteForever",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "importPrint",
+          "params": [
+            "item",
+            "filename"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "media",
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "thumbnail",
+          "params": [
+            "filename",
+            "size",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "exportOptions",
+          "params": [],
+          "returnType": "ExportOptions",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "export",
+          "params": [
+            "filename",
+            "format"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "export",
+          "params": [
+            "filename",
+            "request"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "playableURL",
+          "params": [
+            "filename"
+          ],
+          "returnType": "URL",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "collections",
+          "params": [],
+          "returnType": "[Collection]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "createCollection",
+          "params": [
+            "name",
+            "description"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "updateCollection",
+          "params": [
+            "id",
+            "change"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "deleteCollection",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "tags",
+          "params": [],
+          "returnType": "[TagCount]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "renameTag",
+          "params": [
+            "name",
+            "newName"
+          ],
+          "returnType": "TagCount",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "deleteTag",
+          "params": [
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "emptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "events",
+          "params": [],
+          "returnType": "AsyncThrowingStream<MoldEvent, Error>",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "batchEvents",
+          "params": [
+            "id"
+          ],
+          "returnType": "AsyncThrowingStream<BatchStatus, Error>",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "emitBatchEvent",
+          "params": [
+            "status",
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "finishBatchEvents",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "downloadEvents",
+          "params": [],
+          "returnType": "AsyncThrowingStream<DownloadEvent, Error>",
+          "exported": true,
+          "lineCount": 7
+        }
+      ],
+      "classes": [
+        {
+          "name": "Flag",
+          "methods": [
+            "raise"
+          ],
+          "properties": [
+            "lock",
+            "raised",
+            "isRaised"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "FakeBackend",
+          "methods": [
+            "emit",
+            "callCount",
+            "init",
+            "pause",
+            "countLocked",
+            "entered",
+            "giveUpWaiting",
+            "noteEntered",
+            "record",
+            "notPlanted",
+            "mutated",
+            "releaseStatus",
+            "status",
+            "capabilities",
+            "models",
+            "placementPreview",
+            "submit",
+            "releaseSubmit",
+            "batchStatus",
+            "batchStatus",
+            "jobPreview",
+            "cancelBatch",
+            "releaseChainCreate",
+            "chainGate",
+            "createChainJob",
+            "chainLimits",
+            "chainJob",
+            "cancelChainJob",
+            "resumeChainJob",
+            "chainJobEvents",
+            "emitChainEvent",
+            "failChainEvents",
+            "expand",
+            "releaseExpand",
+            "remix",
+            "history",
+            "clearHistory",
+            "loras",
+            "queue",
+            "queueJob",
+            "cancelJob",
+            "pauseJob",
+            "resumeJob",
+            "reorderJob",
+            "retryJob",
+            "cancelAllQueued",
+            "batchStatuses",
+            "exportHeldJob",
+            "admitTransfer",
+            "completeTransfer",
+            "startDownload",
+            "cancelDownload",
+            "licenses",
+            "acceptLicenses",
+            "devices",
+            "setDevice",
+            "resources",
+            "resourceStream",
+            "peers",
+            "gallery",
+            "trashedPrints",
+            "patch",
+            "mutate",
+            "trash",
+            "restoreFromTrash",
+            "deleteForever",
+            "importPrint",
+            "media",
+            "thumbnail",
+            "exportOptions",
+            "export",
+            "export",
+            "playableURL",
+            "collections",
+            "createCollection",
+            "updateCollection",
+            "deleteCollection",
+            "tags",
+            "renameTag",
+            "deleteTag",
+            "emptyTrash",
+            "events",
+            "batchEvents",
+            "emitBatchEvent",
+            "finishBatchEvents",
+            "downloadEvents"
+          ],
+          "properties": [
+            "host",
+            "calls",
+            "recorded",
+            "callsLock",
+            "refuses",
+            "plantedErrors",
+            "prints",
+            "trashedRows",
+            "tagRows",
+            "collectionRows",
+            "queueListing",
+            "serverStatus",
+            "capabilityBlock",
+            "exportBlock",
+            "thumbnailAnswer",
+            "exportRequests",
+            "downloadTicket",
+            "startedDownloads",
+            "modelRows",
+            "retainedInventories",
+            "retainedInventoryRequests",
+            "retainedMemberBytes",
+            "retainedMemberRequests",
+            "retainedSession",
+            "retainedSessionFailures",
+            "retainedSessionRequests",
+            "componentRows",
+            "removalAnswers",
+            "deletedModels",
+            "loadedModels",
+            "unloadedModels",
+            "downloadsListing",
+            "catalogPages",
+            "catalogInstallAnswer",
+            "catalogInstalls",
+            "credentialStatus",
+            "credentialWrites",
+            "credentialClears",
+            "submittedAdmissions",
+            "submitAnswer",
+            "submitAnswers",
+            "cancelledBatchIds",
+            "holdsSubmit",
+            "submitGate",
+            "submitReleased",
+            "submitLock",
+            "batchStatusAnswers",
+            "batchEventsHeldOpen",
+            "batchEventsContinuations",
+            "jobPreviewCalls",
+            "mediaAnswer",
+            "deviceState",
+            "resourceSnapshot",
+            "peerRows",
+            "resourceStreamContinuation",
+            "patchedDevices",
+            "setDeviceAnswer",
+            "resourceStreamEnded",
+            "eventStream",
+            "downloadStream",
+            "downloadStreamEnded",
+            "delays",
+            "entryWaiters",
+            "statusHeldOpen",
+            "statusWaiters",
+            "statusReleased",
+            "placementCopiesRequested",
+            "placementRequests",
+            "chainJobAnswer",
+            "chainJobRequests",
+            "recordedChainCreates",
+            "cancelledChainJobIds",
+            "chainJobDetails",
+            "chainEventsHeldOpen",
+            "chainEventContinuations",
+            "holdsChainCreate",
+            "chainGates",
+            "chainCreatesWaiting",
+            "chainLimitRows",
+            "resumedChainJobIds",
+            "expandAnswer",
+            "expandRequests",
+            "remixRequests",
+            "holdsExpand",
+            "expandGate",
+            "expandReleased",
+            "expandLock",
+            "remixAnswer",
+            "historyRows",
+            "historyCleared",
+            "loraRows",
+            "loraErrors",
+            "loraModelsRequested",
+            "configListing",
+            "configWrites",
+            "configResets",
+            "profilesAnswer",
+            "pairingSessions",
+            "pairedClientsAnswer",
+            "revokedClients",
+            "queueJobDetails",
+            "batchStatusByClientId",
+            "batchListings",
+            "reorders",
+            "cancelAllAnswer",
+            "cancelledAll",
+            "retriedAuthorities",
+            "batchStatusQueries",
+            "batchStatusesYields",
+            "exportBodies",
+            "transferAdmissions",
+            "admitAnswer",
+            "completedTransfers",
+            "queueYields",
+            "extras",
+            "licenseRows",
+            "acceptedLicenses",
+            "importedNames"
+          ],
+          "exported": true,
+          "lineCount": 949
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "settle",
+        "isRaised",
+        "raise",
+        "Flag",
+        "host",
+        "calls",
+        "refuses",
+        "plantedErrors",
+        "prints",
+        "trashedRows",
+        "tagRows",
+        "collectionRows",
+        "queueListing",
+        "serverStatus",
+        "capabilityBlock",
+        "exportBlock",
+        "thumbnailAnswer",
+        "exportRequests",
+        "downloadTicket",
+        "startedDownloads",
+        "modelRows",
+        "retainedInventories",
+        "retainedInventoryRequests",
+        "retainedMemberBytes",
+        "retainedMemberRequests",
+        "retainedSession",
+        "retainedSessionFailures",
+        "retainedSessionRequests",
+        "componentRows",
+        "removalAnswers",
+        "deletedModels",
+        "loadedModels",
+        "unloadedModels",
+        "downloadsListing",
+        "catalogPages",
+        "catalogInstallAnswer",
+        "catalogInstalls",
+        "credentialStatus",
+        "credentialWrites",
+        "credentialClears",
+        "submittedAdmissions",
+        "submitAnswer",
+        "submitAnswers",
+        "cancelledBatchIds",
+        "holdsSubmit",
+        "batchStatusAnswers",
+        "batchEventsHeldOpen",
+        "batchEventsContinuations",
+        "jobPreviewCalls",
+        "mediaAnswer",
+        "deviceState",
+        "resourceSnapshot",
+        "peerRows",
+        "resourceStreamContinuation",
+        "patchedDevices",
+        "setDeviceAnswer",
+        "resourceStreamEnded",
+        "eventStream",
+        "downloadStream",
+        "downloadStreamEnded",
+        "emit",
+        "callCount",
+        "FakeBackend.init",
+        "delays",
+        "pause",
+        "entered",
+        "noteEntered",
+        "record",
+        "notPlanted",
+        "statusHeldOpen",
+        "releaseStatus",
+        "status",
+        "capabilities",
+        "models",
+        "placementCopiesRequested",
+        "placementRequests",
+        "placementPreview",
+        "submit",
+        "releaseSubmit",
+        "batchStatus",
+        "batchStatus",
+        "jobPreview",
+        "cancelBatch",
+        "chainJobAnswer",
+        "chainJobRequests",
+        "cancelledChainJobIds",
+        "chainJobDetails",
+        "chainEventsHeldOpen",
+        "chainEventContinuations",
+        "holdsChainCreate",
+        "chainCreatesWaiting",
+        "releaseChainCreate",
+        "createChainJob",
+        "chainLimitRows",
+        "chainLimits",
+        "chainJob",
+        "cancelChainJob",
+        "resumedChainJobIds",
+        "resumeChainJob",
+        "chainJobEvents",
+        "emitChainEvent",
+        "failChainEvents",
+        "expandAnswer",
+        "expandRequests",
+        "remixRequests",
+        "holdsExpand",
+        "remixAnswer",
+        "historyRows",
+        "historyCleared",
+        "expand",
+        "releaseExpand",
+        "remix",
+        "history",
+        "clearHistory",
+        "loraRows",
+        "loraErrors",
+        "loraModelsRequested",
+        "loras",
+        "configListing",
+        "configWrites",
+        "configResets",
+        "profilesAnswer",
+        "pairingSessions",
+        "pairedClientsAnswer",
+        "revokedClients",
+        "queueJobDetails",
+        "batchStatusByClientId",
+        "batchListings",
+        "reorders",
+        "cancelAllAnswer",
+        "cancelledAll",
+        "retriedAuthorities",
+        "batchStatusQueries",
+        "batchStatusesYields",
+        "exportBodies",
+        "transferAdmissions",
+        "admitAnswer",
+        "completedTransfers",
+        "queueYields",
+        "queue",
+        "queueJob",
+        "cancelJob",
+        "pauseJob",
+        "resumeJob",
+        "reorderJob",
+        "retryJob",
+        "cancelAllQueued",
+        "batchStatuses",
+        "exportHeldJob",
+        "admitTransfer",
+        "completeTransfer",
+        "extras",
+        "startDownload",
+        "cancelDownload",
+        "licenseRows",
+        "acceptedLicenses",
+        "licenses",
+        "acceptLicenses",
+        "devices",
+        "setDevice",
+        "resources",
+        "resourceStream",
+        "peers",
+        "gallery",
+        "trashedPrints",
+        "patch",
+        "mutate",
+        "trash",
+        "restoreFromTrash",
+        "deleteForever",
+        "importedNames",
+        "importPrint",
+        "media",
+        "thumbnail",
+        "exportOptions",
+        "export",
+        "export",
+        "playableURL",
+        "collections",
+        "createCollection",
+        "updateCollection",
+        "deleteCollection",
+        "tags",
+        "renameTag",
+        "deleteTag",
+        "emptyTrash",
+        "events",
+        "batchEvents",
+        "emitBatchEvent",
+        "finishBatchEvents",
+        "downloadEvents",
+        "FakeBackend"
+      ],
+      "totalLines": 996,
+      "hasStructuralAnalysis": true
     }
   }
 }

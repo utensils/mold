@@ -8,6 +8,8 @@ nightly channels, and installs as **Mold Studio.app** -- the Tauri app is
 in /Applications (the bundle id was already its own, `io.utensils.mold.native`).
 The executable inside keeps the short name `Mold`.
 
+Mold Studio declares a single-instance Launch Services policy, so notification clicks and repeated app opens reuse the running application. A notification brings the main window forward on the finished print or Queue; clicks received during startup wait until navigation is ready.
+
 It is a candidate replacement for the Tauri `desktop/` app on macOS, scoped to
 generation and the library. No 3-D studio.
 

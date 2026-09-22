@@ -209,6 +209,34 @@
           "apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
           "apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
         ]
+      },
+      {
+        "id": "macos-notification-single-instance",
+        "updatedAt": "2026-09-22T17:14:22.380762+00:00",
+        "baseCommit": "cb01bf3edca76680da5eae5db914d0bf09d09c02",
+        "scope": "Native notification launch policy, response acceptance and window activation; global baseline unchanged.",
+        "files": [
+          "apps/macos/Sources/Mold/MoldApp.swift",
+          "apps/macos/Sources/Mold/Resources/Info.plist",
+          "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+          "apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+          "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+          "apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+          "apps/macos/Sources/Mold/Support/UATScript.swift",
+          "apps/macos/Sources/Mold/Support/UATNotification.swift",
+          "apps/macos/Tests/MoldTests/NotificationActivationTests.swift"
+        ]
+      },
+      {
+        "id": "macos-notification-ci-observed-state",
+        "updatedAt": "2026-09-22T17:33:11.365492+00:00",
+        "baseCommit": "9a2d7ece7bfc3243f70e5db4927028f2e8c66949",
+        "scope": "Observed-state waits for two CI failures encountered during notification fix validation; global baseline unchanged.",
+        "files": [
+          "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+          "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+          "apps/macos/Tests/MoldTests/FakeBackend.swift"
+        ]
       }
     ]
   },
@@ -292686,7 +292714,7 @@
         "layout"
       ],
       "complexity": "moderate",
-      "summary": "Composes native app scenes and passes application navigation into the Queue menu."
+      "summary": "Composes a singleton main Window and installs notification routing with app-owned navigation and the retained delegate."
     },
     {
       "id": "file:apps/macos/Sources/Mold/Settings/AdvancedSettings.swift",
@@ -293044,7 +293072,7 @@
         "about"
       ],
       "complexity": "simple",
-      "summary": "Native About metadata matches Tauri contributor credits for James Brink and Jeffrey Dilley; standard AppKit About panel presents version, description, MIT license and project link."
+      "summary": "Native bundle metadata declares LSMultipleInstancesProhibited so Launch Services reuses the existing process for notifications and repeated opens."
     },
     {
       "id": "file:apps/macos/Sources/Mold/Resources/Credits.html",
@@ -293139,6 +293167,126 @@
       "tags": [
         "native-macos",
         "navigation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+      "type": "file",
+      "name": "MoldAppDelegate.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+      "summary": "Registers the notification delegate before launch completes and accepts responses on MainActor before completing the system callback.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "type": "file",
+      "name": "NotificationResponses.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "summary": "Buffers default-action notification routes during cold launch, drains once in order when the handler is installed, and ignores dismissals or unknown actions.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "type": "file",
+      "name": "NotificationWindowRouting.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "summary": "Connects retained notification responses to navigation, SwiftUI openWindow(main), and application activation without starting a new process.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "type": "file",
+      "name": "NotificationRouting.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "summary": "Decodes print host/filename and failure payloads, applies Library reveal or Queue navigation.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/UATScript.swift",
+      "type": "file",
+      "name": "UATScript.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/UATScript.swift",
+      "summary": "Runs Debug-only scripted native verification, including separate actual-notification posting and injected-response operations.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "type": "file",
+      "name": "UATNotification.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "summary": "Debug-only verification posts a real OS notification or independently injects its response to validate window lifecycle; unavailable in Release.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "type": "file",
+      "name": "NotificationActivationTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "summary": "Tests built bundle single-instance policy, buffered routes, callback ordering, action filtering, and print navigation identity.",
+      "tags": [
+        "native-macos",
+        "notifications"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "type": "file",
+      "name": "ModelActionsTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "summary": "Verifies model menu and contextual actions; waits for captured loaded-model arguments before asserting two loads, not call-entry counts.",
+      "tags": [
+        "native-macos",
+        "tests"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "type": "file",
+      "name": "BatchOutcomeTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "summary": "Verifies batch outcomes and redacted placement previews; waits for captured placement arguments before inspecting redaction.",
+      "tags": [
+        "native-macos",
+        "tests"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "file",
+      "name": "FakeBackend.swift",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "summary": "Native test backend records calls before capturing arguments; settle conditions must wait for the state being asserted rather than call entry.",
+      "tags": [
+        "native-macos",
+        "tests"
       ],
       "complexity": "simple"
     }
@@ -519210,6 +519358,90 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/MoldApp.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/UATScript.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "target": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "target": "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Resources/Info.plist",
+      "target": "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "target": "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "target": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "target": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
     }
   ],
   "layers": [
@@ -520484,7 +520716,17 @@
         "file:apps/macos/Sources/Mold/Shell/SidebarRows.swift",
         "file:apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
         "file:apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
-        "file:apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
+        "file:apps/macos/Sources/Mold/Machines/MachinesDestination.swift",
+        "file:apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+        "file:apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+        "file:apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+        "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+        "file:apps/macos/Sources/Mold/Support/UATScript.swift",
+        "file:apps/macos/Sources/Mold/Support/UATNotification.swift",
+        "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+        "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+        "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+        "file:apps/macos/Tests/MoldTests/FakeBackend.swift"
       ]
     },
     {

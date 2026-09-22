@@ -19,12 +19,13 @@ import AppKit
 @MainActor
 enum UATScript {
     static func runIfRequested(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        responses: NotificationResponses? = nil
     ) {
         guard let path = NativeUAT.script.value(in: environment),
               let script = try? String(contentsOfFile: path, encoding: .utf8)
         else { return }
-        Task { await run(steps(in: script), log: URL(fileURLWithPath: path + ".log")) }
+        Task { await run(steps(in: script), log: URL(fileURLWithPath: path + ".log"), responses: responses) }
     }
 
     /// Blank lines and `#` comments are not steps.
@@ -34,7 +35,7 @@ enum UATScript {
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 
-    private static func run(_ steps: [String], log: URL) async {
+    private static func run(_ steps: [String], log: URL, responses: NotificationResponses?) async {
         var lines: [String] = []
         for step in steps {
             let (verb, argument) = split(step)
@@ -46,6 +47,8 @@ enum UATScript {
             case "menu": outcome = perform(menuPath: argument)
             case "snapshot": outcome = snapshot(to: argument)
             case "windows": outcome = NSApp.windows.filter(\.isVisible).map(\.title).joined(separator: " | ")
+            case "notify": outcome = await UATNotification.post(argument)
+            case "notification-response": outcome = UATNotification.deliver(argument, to: responses)
             case "quit":
                 write(lines + ["quit: ok"], to: log)
                 NSApp.terminate(nil)

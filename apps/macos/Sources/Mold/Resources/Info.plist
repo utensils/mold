@@ -22,6 +22,10 @@
 	<string>public.app-category.graphics-design</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<!-- A SwiftUI Window limits windows, not processes. Notification activation
+	     and other Launch Services opens must reuse the running application. -->
+	<key>LSMultipleInstancesProhibited</key>
+	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<!-- mold servers speak plain HTTP. They live on a LAN, on Tailscale, or on

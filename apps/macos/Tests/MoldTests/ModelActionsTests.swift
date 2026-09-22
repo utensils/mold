@@ -160,9 +160,11 @@ struct ModelActionsTests {
         // `ModelActions.perform` with the picked item's kind -- there is no
         // second copy of "what Load means" for either surface to drift from.
         acts.perform(.load, on: model, host: workstation)
-        await settle(until: { fake.callCount("loadModel") == 1 })
+        // The fake records entry before it captures the model. Wait for the
+        // result asserted below, not for an operation that has only begun.
+        await settle(until: { fake.loadedModels.count == 1 })
         acts.perform(.load, on: model, host: workstation)
-        await settle(until: { fake.callCount("loadModel") == 2 })
+        await settle(until: { fake.loadedModels.count == 2 })
 
         #expect(fake.loadedModels.map(\.model) == ["flux-dev:q4", "flux-dev:q4"])
     }

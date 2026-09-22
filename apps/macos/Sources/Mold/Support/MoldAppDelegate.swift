@@ -23,31 +23,33 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     let dockBadge = DockBadge()
     /// The "Finishing…" panel and the one-time reply to macOS.
     let quit = EngineQuit()
-    /// What a notification click should do, applied by the composition root
-    /// -- this delegate only decodes the payload (`MoldNotifications.swift`).
-    var onNotificationRoute: ((NotificationRoute) -> Void)?
+    /// Retains cold-launch clicks until the SwiftUI scene can apply them.
+    let notificationResponses = NotificationResponses()
 
     /// Sets the notification-centre delegate, behind the same bundle guard
     /// `MoldNotifications` posts behind -- installing a delegate touches
     /// `UNUserNotificationCenter` too, and outside a real `.app` that aborts
     /// the process just as posting would.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard MoldNotifications.isInsideBundle() else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Before the bundle guard below: the appearance is a plain AppKit
-        // call and must land outside a real `.app` too (the test host).
+        // Appearance is a plain AppKit call and applies outside a real
+        // `.app` too; only the notification-center setup needs a bundle.
         Appearance.stored(in: AppStorageSuite.defaults).apply()
         #if DEBUG
-        UATScript.runIfRequested()
+        UATScript.runIfRequested(responses: notificationResponses)
         #endif
         // Touching `shared` is what builds the updater; in a build with no
         // updater this is `nil` and nothing is constructed, scheduled or
-        // fetched. It is NOT behind the bundle guard below: `.commands` is
+        // fetched. It is NOT behind the notification bundle guard: `.commands` is
         // evaluated during scene construction and `UpdateCommands` reads
         // `shared` there, so a guard here would already be too late. The
         // bundle question is asked where it can hold instead, as the fourth
         // condition in `UpdaterActivation` (review F5#7).
         _ = SoftwareUpdates.shared
-        guard MoldNotifications.isInsideBundle() else { return }
-        UNUserNotificationCenter.current().delegate = self
     }
 
     /// Mirrors `NSApp.isActive` onto `LandedPrints`, which is what decides
@@ -98,15 +100,16 @@ extension MoldAppDelegate: UNUserNotificationCenterDelegate {
     /// from this.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
+        withCompletionHandler completionHandler: @escaping @Sendable () -> Void
     ) {
-        defer { completionHandler() }
         // AppKit does not promise the main thread here, so the hop is
         // explicit rather than `MainActor.assumeIsolated`, which would trap
         // if that promise is ever broken.
-        guard let userInfo = response.notification.request.content.userInfo as? [String: String],
-              let route = NotificationRoute.route(userInfo: userInfo)
-        else { return }
-        Task { @MainActor [weak self] in self?.onNotificationRoute?(route) }
+        let userInfo = response.notification.request.content.userInfo as? [String: String] ?? [:]
+        let action = response.actionIdentifier
+        Task { @MainActor [weak self] in
+            guard let self else { completionHandler(); return }
+            notificationResponses.receive(action: action, userInfo: userInfo, completion: completionHandler)
+        }
     }
 }
