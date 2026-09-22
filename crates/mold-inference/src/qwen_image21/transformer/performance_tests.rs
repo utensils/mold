@@ -92,7 +92,7 @@ fn official_metal_mode_benchmark() -> Result<()> {
     });
     let seed =
         std::env::var("QWEN_IMAGE21_BENCH_SEED").map_or(Ok(210001u64), |value| value.parse())?;
-    let device = Device::new_metal(0)?;
+    let device = crate::device::metal_device(0)?;
     let progress = ProgressReporter::default();
     let started = Instant::now();
     let mut phases = Map::new();

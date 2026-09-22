@@ -1221,7 +1221,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn prefix_cache_matches_full_forward_on_metal() {
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         for heads in [1, 2] {
             cache_parity(&device, heads);
         }
@@ -1279,7 +1279,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn compact_modulation_is_exact_across_cached_steps() {
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         let mut reference = tiny_transformer_on(tiny_config(), &device);
         reference.compact_modulation = false;
         let mut compact = tiny_transformer_on(tiny_config(), &device);
@@ -1311,7 +1311,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn fused_projection_and_rope_preserve_cached_forward() {
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         let mut cfg = tiny_config();
         cfg.num_layers = 3;
         let mut reference = tiny_transformer_on(cfg.clone(), &device);
@@ -1343,7 +1343,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn fused_target_attention_matches_math_with_rectangular_keys() {
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         let mut transformer = tiny_transformer_on(tiny_config(), &device);
         let attn = &mut transformer.blocks[0].attn;
         attn.head_dim = 128;
@@ -1407,7 +1407,7 @@ mod tests {
         use crate::progress::ProgressReporter;
         use std::time::Instant;
         let root = PathBuf::from(std::env::var("QWEN_IMAGE21_MODEL_ROOT")?);
-        let device = Device::new_metal(0)?;
+        let device = crate::device::metal_device(0)?;
         let progress = ProgressReporter::default();
         let shared = root.join("shared/qwen-image21");
         let text_paths = (1..=4)
@@ -1512,7 +1512,7 @@ mod tests {
     #[test]
     fn metal_rope_keeps_f32_tables_for_bf16_latents() {
         let transformer = tiny_transformer();
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         let (expected_cos, expected_sin) = transformer
             .t2i_rope(3, 2, 2, DType::F32, &Device::Cpu)
             .unwrap();
