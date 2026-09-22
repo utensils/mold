@@ -246,6 +246,13 @@ fn parse_backend_env(raw: Option<&str>) -> Option<AttentionBackend> {
     }
 }
 
+/// Metal families that opt into fused attention paths honor the shared override
+/// parser (including the retired `sdpa` alias). This does not change the CUDA
+/// Image/Math policy or make CUDA FlashAttention a dependency of Metal SDPA.
+pub(crate) fn metal_fast_path_enabled() -> bool {
+    requested_backend_env() != Some(AttentionBackend::Math)
+}
+
 pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
     static CACHED: OnceLock<AttentionChunkPolicy> = OnceLock::new();
     *CACHED.get_or_init(|| {

@@ -163,7 +163,7 @@ impl QwenImage21Engine {
 
         let (transformer_paths, text_paths, tokenizer, vae_path) = self.validate_paths()?;
         let (device, text_device, vae_device) = self.resolve_devices()?;
-        let dtype = crate::engine::gpu_dtype(&device);
+        let dtype = super::transformer_dtype(&device);
         let text_dtype = crate::engine::gpu_dtype(&text_device);
         let vae_dtype = crate::engine::gpu_dtype(&vae_device);
 
@@ -422,7 +422,7 @@ impl QwenImage21Engine {
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let (transformer_paths, text_paths, tokenizer, vae_path) = self.validate_paths()?;
         let (device, text_device, vae_device) = self.resolve_devices()?;
-        let dtype = crate::engine::gpu_dtype(&device);
+        let dtype = super::transformer_dtype(&device);
         let text_dtype = crate::engine::gpu_dtype(&text_device);
         let vae_dtype = crate::engine::gpu_dtype(&vae_device);
         let started = Instant::now();

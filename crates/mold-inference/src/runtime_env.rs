@@ -102,6 +102,8 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_QWEN2_TEXT_ENCODER_MODE",
     "MOLD_QWEN2_VARIANT",
     "MOLD_QWEN3_VARIANT",
+    // Qwen Image 2.1 Metal denoiser precision changes weights and latent storage.
+    "MOLD_QWEN_IMAGE21_DTYPE",
     // #1045: caching the widened BF16 FP8 weights trades VRAM for a per-forward
     // cast, so residency and step latency both change — a cached run must not
     // share a learned-timing bucket with one that widened every forward.
@@ -247,6 +249,7 @@ mod tests {
             // Selects whether FP8 weights are widened once at load or on every
             // forward; residency and step latency both differ.
             "MOLD_FLUX2_FP8_CACHE",
+            "MOLD_QWEN_IMAGE21_DTYPE",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),

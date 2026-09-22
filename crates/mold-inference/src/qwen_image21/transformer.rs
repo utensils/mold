@@ -262,6 +262,8 @@ enum LayerCache<'a> {
 }
 
 struct Attention {
+    fused_target: bool,
+    fused_ops: bool,
     to_q: Linear,
     to_k: Linear,
     to_v: Linear,
@@ -277,6 +279,8 @@ impl Attention {
     fn new(cfg: &QwenImage21TransformerConfig, vb: VarBuilder<'_>) -> Result<Self> {
         let inner = cfg.inner_dim();
         Ok(Self {
+            fused_target: crate::attention::metal_fast_path_enabled(),
+            fused_ops: crate::attention::metal_fast_path_enabled(),
             to_q: candle_nn::linear_no_bias(inner, inner, vb.pp("to_q"))?,
             to_k: candle_nn::linear_no_bias(inner, inner, vb.pp("to_k"))?,
             to_v: candle_nn::linear_no_bias(inner, inner, vb.pp("to_v"))?,
@@ -287,6 +291,36 @@ impl Attention {
             head_dim: cfg.attention_head_dim,
             eps: cfg.eps,
         })
+    }
+
+    /// Image queries are non-causal and usually unmasked. Keep the small
+    /// causal prefix and padded batches on math rather than expanding a mask
+    /// to the full score matrix or changing its negative-infinity semantics.
+    fn target_attention(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        bias: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let scale = (1.0 / (self.head_dim as f64).sqrt()) as f32;
+        if self.fused_target
+            && q.device().is_metal()
+            && bias.is_none()
+            && matches!(self.head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256)
+        {
+            return candle_nn::ops::sdpa(
+                &q.contiguous()?,
+                &k.contiguous()?,
+                &v.contiguous()?,
+                None,
+                false,
+                scale,
+                1.0,
+            )
+            .map_err(Into::into);
+        }
+        crate::attention::attention_with_bias(q, k, v, scale, bias).map_err(Into::into)
     }
 
     fn normalize_heads(&self, xs: &Tensor, weight: &Tensor) -> Result<Tensor> {
@@ -397,27 +431,61 @@ impl Attention {
             "Qwen Image 2.1 attention inner width mismatch"
         );
 
-        let project = |linear: &Linear| -> Result<Tensor> {
-            linear
-                .forward(hidden_states)?
+        let (q, k, v) = if self.fused_ops && hidden_states.device().is_metal() {
+            // Normalize while BSHD is contiguous; flattening BHSD first copies
+            // the whole projection. RoPE still accumulates in F32 as upstream.
+            let project = |linear: &Linear, weight: &Tensor| -> Result<Tensor> {
+                let xs = linear.forward(hidden_states)?;
+                let normalized = candle_nn::ops::rms_norm(
+                    &xs.reshape((batch * sequence * self.heads, self.head_dim))?,
+                    weight,
+                    self.eps as f32,
+                )?
                 .reshape((batch, sequence, self.heads, self.head_dim))?
-                .transpose(1, 2)
+                .transpose(1, 2)?
+                .contiguous()?;
+                candle_nn::rotary_emb::rope_i(
+                    &normalized.to_dtype(DType::F32)?,
+                    &rope_cos.to_dtype(DType::F32)?.contiguous()?,
+                    &rope_sin.to_dtype(DType::F32)?.contiguous()?,
+                )?
+                .to_dtype(hidden_states.dtype())
                 .map_err(Into::into)
-        };
-        let q = self.normalize_heads(&project(&self.to_q)?, &self.norm_q)?;
-        let k = self.normalize_heads(&project(&self.to_k)?, &self.norm_k)?;
-        let v = project(&self.to_v)?;
+            };
+            (
+                project(&self.to_q, &self.norm_q)?,
+                project(&self.to_k, &self.norm_k)?,
+                self.to_v
+                    .forward(hidden_states)?
+                    .reshape((batch, sequence, self.heads, self.head_dim))?
+                    .transpose(1, 2)?
+                    .contiguous()?,
+            )
+        } else {
+            let project = |linear: &Linear| -> Result<Tensor> {
+                linear
+                    .forward(hidden_states)?
+                    .reshape((batch, sequence, self.heads, self.head_dim))?
+                    .transpose(1, 2)
+                    .map_err(Into::into)
+            };
+            let q = self.normalize_heads(&project(&self.to_q)?, &self.norm_q)?;
+            let k = self.normalize_heads(&project(&self.to_k)?, &self.norm_k)?;
+            let v = project(&self.to_v)?;
 
-        // Wan's public RoPE helper has exactly the interleaved complex-pair
-        // layout that Qwen Image 2.1's `apply_rotary_emb_qwen(...,
-        // use_real=False)` uses.  Its input is BSHD; attention below is BHSD.
-        let q = crate::wan::model::rope::apply_rope(&q.transpose(1, 2)?, rope_cos, rope_sin)?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = crate::wan::model::rope::apply_rope(&k.transpose(1, 2)?, rope_cos, rope_sin)?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = v.contiguous()?;
+            // Wan's public RoPE helper has exactly the interleaved complex-pair
+            // layout that Qwen Image 2.1's `apply_rotary_emb_qwen(...,
+            // use_real=False)` uses.  Its input is BSHD; attention below is BHSD.
+            let q = crate::wan::model::rope::apply_rope(&q.transpose(1, 2)?, rope_cos, rope_sin)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let k = crate::wan::model::rope::apply_rope(&k.transpose(1, 2)?, rope_cos, rope_sin)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let v = v.contiguous()?;
+
+            (q, k, v)
+        };
 
         match cache {
             LayerCache::Extract(layers) => {
@@ -433,13 +501,7 @@ impl Attention {
                 let v = Tensor::cat(&[&prefix.value, &v], 2)?;
                 let bias =
                     Self::t2i_target_bias(valid_tokens, target_tokens, q.dtype(), q.device())?;
-                let context = crate::attention::attention_with_bias(
-                    &q,
-                    &k,
-                    &v,
-                    (1.0 / (self.head_dim as f64).sqrt()) as f32,
-                    bias.as_ref(),
-                )?;
+                let context = self.target_attention(&q, &k, &v, bias.as_ref())?;
                 return self
                     .to_out
                     .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
@@ -472,13 +534,7 @@ impl Attention {
         let target_q = q.narrow(2, text_len, target_tokens)?.contiguous()?;
         let target_bias =
             Self::t2i_target_bias(valid_tokens, target_tokens, q.dtype(), q.device())?;
-        let target = crate::attention::attention_with_bias(
-            &target_q,
-            &k,
-            &v,
-            (1.0 / (self.head_dim as f64).sqrt()) as f32,
-            target_bias.as_ref(),
-        )?;
+        let target = self.target_attention(&target_q, &k, &v, target_bias.as_ref())?;
         let context = Tensor::cat(&[&prefix, &target], 2)?;
         self.to_out
             .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
@@ -537,10 +593,13 @@ impl TransformerBlock {
         let attn = self
             .attn
             .forward_t2i(&normalized, rope_cos, rope_sin, valid_tokens, cache)?;
-        let hidden_states = (hidden_states + (gate.tanh()? * attn)?)?;
+        let hidden_states = (hidden_states + gate.tanh()?.broadcast_mul(&attn)?)?;
 
         let (normalized, gate) = Self::modulate(self.norm2.forward(&hidden_states)?, &mod2)?;
-        let hidden_states = (&hidden_states + (gate.tanh()? * self.mlp.forward(&normalized)?)?)?;
+        let hidden_states = (&hidden_states
+            + gate
+                .tanh()?
+                .broadcast_mul(&self.mlp.forward(&normalized)?)?)?;
         if hidden_states.dtype() == DType::F16 {
             return hidden_states
                 .clamp(-65_504.0f32, 65_504.0f32)
@@ -580,6 +639,7 @@ impl AdaFinalNorm {
 /// and is rejected by the engine rather than silently treating an image as
 /// text-only conditioning.
 pub(crate) struct QwenImage21Transformer {
+    compact_modulation: bool,
     cfg: QwenImage21TransformerConfig,
     img_in: Linear,
     time_text_embed: TimestepEmbedder,
@@ -698,6 +758,7 @@ impl QwenImage21Transformer {
         let norm_out = AdaFinalNorm::new(inner, cfg.eps, vb.pp("norm_out"))?;
         let proj_out = candle_nn::linear_no_bias(inner, cfg.out_channels, vb.pp("proj_out"))?;
         Ok(Self {
+            compact_modulation: crate::attention::metal_fast_path_enabled(),
             cfg,
             img_in,
             time_text_embed,
@@ -755,6 +816,9 @@ impl QwenImage21Transformer {
             }
         }
         let sequence = text_len + target_len;
+        // Qualify the Metal BF16 candidate with full-precision rotary tables.
+        // Other backends retain their existing rounding boundary.
+        let dtype = if device.is_metal() { DType::F32 } else { dtype };
         Ok((
             Tensor::from_vec(cos, (sequence, self.cfg.attention_head_dim / 2), device)?
                 .to_dtype(dtype)?,
@@ -871,16 +935,21 @@ impl QwenImage21Transformer {
             .modulation
             .forward(&candle_nn::Activation::Silu.forward(&temb)?)?;
         let inner = self.cfg.inner_dim();
-        let real = modulation
-            .narrow(0, 0, batch)?
-            .unsqueeze(1)?
-            .broadcast_as((batch, target_tokens, 4 * inner))?;
+        let real_row = modulation.narrow(0, 0, batch)?.unsqueeze(1)?;
+        let real = real_row.broadcast_as((batch, target_tokens, 4 * inner))?;
         let zero = modulation
             .narrow(0, batch, 1)?
             .unsqueeze(1)?
             .broadcast_as((batch, text_len, 4 * inner))?;
         let per_token_modulation = if cached {
-            real
+            // Every target position shares a timestep. Keep the row compact
+            // so each block's scale and tanh execute once per feature, rather
+            // than once per image token. Broadcast only at the residual ops.
+            if latents.device().is_metal() && self.compact_modulation {
+                real_row
+            } else {
+                real
+            }
         } else {
             Tensor::cat(&[&zero, &real], 1)?
         };
@@ -1152,7 +1221,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn prefix_cache_matches_full_forward_on_metal() {
-        let device = Device::new_metal(0).unwrap();
+        let device = crate::device::metal_device(0).unwrap();
         for heads in [1, 2] {
             cache_parity(&device, heads);
         }
@@ -1207,6 +1276,128 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn compact_modulation_is_exact_across_cached_steps() {
+        let device = crate::device::metal_device(0).unwrap();
+        let mut reference = tiny_transformer_on(tiny_config(), &device);
+        reference.compact_modulation = false;
+        let mut compact = tiny_transformer_on(tiny_config(), &device);
+        compact.compact_modulation = true;
+        let conditioning = QwenImage21TextConditioning {
+            embeddings: crate::engine::seeded_randn(31, &[2, 3, 8], &device, DType::F32).unwrap(),
+            valid_tokens: vec![vec![true, true, false], vec![true; 3]],
+            image_slots: vec![vec![false; 3]; 2],
+        };
+        let mut expected = reference.prepare_t2i(&conditioning, 2, 2);
+        let mut actual = compact.prepare_t2i(&conditioning, 2, 2);
+        for time in [1.0, 0.7, 0.3] {
+            let latents = crate::engine::seeded_randn(32, &[2, 4, 4], &device, DType::F32).unwrap();
+            let diff = (actual.forward(&latents, time).unwrap()
+                - expected.forward(&latents, time).unwrap())
+            .unwrap();
+            assert_eq!(
+                diff.abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap(),
+                0.0
+            );
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn fused_projection_and_rope_preserve_cached_forward() {
+        let device = crate::device::metal_device(0).unwrap();
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        let mut reference = tiny_transformer_on(cfg.clone(), &device);
+        for block in &mut reference.blocks {
+            block.attn.fused_ops = false;
+        }
+        let mut optimized = tiny_transformer_on(cfg, &device);
+        for block in &mut optimized.blocks {
+            block.attn.fused_ops = true;
+        }
+        let conditioning = QwenImage21TextConditioning {
+            embeddings: crate::engine::seeded_randn(25, &[2, 3, 8], &device, DType::F32).unwrap(),
+            valid_tokens: vec![vec![true, true, false], vec![true; 3]],
+            image_slots: vec![vec![false; 3]; 2],
+        };
+        let mut expected = reference.prepare_t2i(&conditioning, 2, 2);
+        let mut actual = optimized.prepare_t2i(&conditioning, 2, 2);
+        for (step, time) in [1.0, 0.7, 0.3].into_iter().enumerate() {
+            let latents =
+                crate::engine::seeded_randn(26 + step as u64, &[2, 4, 4], &device, DType::F32)
+                    .unwrap();
+            assert_close(
+                &actual.forward(&latents, time).unwrap(),
+                &expected.forward(&latents, time).unwrap(),
+            );
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn fused_target_attention_matches_math_with_rectangular_keys() {
+        let device = crate::device::metal_device(0).unwrap();
+        let mut transformer = tiny_transformer_on(tiny_config(), &device);
+        let attn = &mut transformer.blocks[0].attn;
+        attn.head_dim = 128;
+        attn.fused_target = true;
+        for dtype in [DType::F32, DType::BF16] {
+            let q = crate::engine::seeded_randn(21, &[2, 2, 17, 128], &device, dtype).unwrap();
+            let k = crate::engine::seeded_randn(22, &[2, 2, 29, 128], &device, dtype).unwrap();
+            let v = crate::engine::seeded_randn(23, &[2, 2, 29, 128], &device, dtype).unwrap();
+            let actual = attn.target_attention(&q, &k, &v, None).unwrap();
+            attn.fused_target = false;
+            let expected = attn.target_attention(&q, &k, &v, None).unwrap();
+            attn.fused_target = true;
+            let error = (actual.to_dtype(DType::F32).unwrap()
+                - expected.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+            assert!(
+                error < if dtype == DType::F32 { 1e-5 } else { 0.02 },
+                "{dtype:?}: {error}"
+            );
+            // A real padded batch must preserve the math mask semantics.
+            let bias = Tensor::from_vec(
+                (0..58)
+                    .map(|i| if i % 29 == 28 { f32::NEG_INFINITY } else { 0.0 })
+                    .collect::<Vec<_>>(),
+                (2, 1, 1, 29),
+                &device,
+            )
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+            let actual = attn.target_attention(&q, &k, &v, Some(&bias)).unwrap();
+            let expected =
+                crate::attention::attention_with_bias(&q, &k, &v, 1.0 / 128f32.sqrt(), Some(&bias))
+                    .unwrap();
+            let error = (actual - expected)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_eq!(error, 0.0);
+        }
+    }
+
     /// Opt-in real-checkpoint parity and timing probe. No downloads or writes.
     /// QWEN_IMAGE21_MODEL_ROOT points at an existing mold models directory.
     #[cfg(feature = "metal")]
@@ -1216,7 +1407,7 @@ mod tests {
         use crate::progress::ProgressReporter;
         use std::time::Instant;
         let root = PathBuf::from(std::env::var("QWEN_IMAGE21_MODEL_ROOT")?);
-        let device = Device::new_metal(0)?;
+        let device = crate::device::metal_device(0)?;
         let progress = ProgressReporter::default();
         let shared = root.join("shared/qwen-image21");
         let text_paths = (1..=4)
@@ -1317,6 +1508,33 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_rope_keeps_f32_tables_for_bf16_latents() {
+        let transformer = tiny_transformer();
+        let device = crate::device::metal_device(0).unwrap();
+        let (expected_cos, expected_sin) = transformer
+            .t2i_rope(3, 2, 2, DType::F32, &Device::Cpu)
+            .unwrap();
+        let (cos, sin) = transformer.t2i_rope(3, 2, 2, DType::BF16, &device).unwrap();
+        for (actual, expected) in [(cos, expected_cos), (sin, expected_sin)] {
+            assert_eq!(actual.dtype(), DType::F32);
+            assert_eq!(
+                actual
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap(),
+                expected.to_vec2::<f32>().unwrap()
+            );
+        }
+        let (cos, sin) = transformer
+            .t2i_rope(3, 2, 2, DType::BF16, &Device::Cpu)
+            .unwrap();
+        assert_eq!(cos.dtype(), DType::BF16);
+        assert_eq!(sin.dtype(), DType::BF16);
+    }
+
     #[test]
     fn tiny_t2i_forward_preserves_packed_latent_shape() {
         let transformer = tiny_transformer();
@@ -1362,3 +1580,6 @@ mod tests {
         assert!(rows[1].iter().all(|value| *value == 0.0));
     }
 }
+
+#[cfg(all(test, feature = "metal"))]
+mod performance_tests;
