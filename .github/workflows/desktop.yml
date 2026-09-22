@@ -265,6 +265,8 @@ jobs:
         shell: pwsh
         env:
           PROTOC_VERSION: "29.3"
+          NASM_VERSION: "2.16.03"
+          NASM_SHA256: "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6"
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -287,14 +289,29 @@ jobs:
           # nasm: `openh264-sys2` compiles x86_64 assembly when it is present
           # and silently drops to a slower C path when it is not, so pin the
           # fast path rather than letting the runner decide.
-          choco install --no-progress -y nasm
-          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          # nasm: `openh264-sys2` compiles x86_64 assembly when it is present and
+          # silently drops to a slower C path when it is not, so pin the fast path
+          # rather than letting the runner decide. Fetched from nasm's own release
+          # with a pinned digest, not Chocolatey: that feed answered 503 during the
+          # v0.31.0 release build and failed the Windows artifact after every other
+          # stage had passed (scripts/tests/windows-toolchain-pins.sh).
+          $nasmZip = "$env:RUNNER_TEMP\nasm.zip"
+          $nasmDest = "$env:RUNNER_TEMP\nasm"
+          $nasmUrl = "https://www.nasm.us/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $nasmUrl -OutFile $nasmZip
+          $nasmHash = (Get-FileHash -Algorithm SHA256 $nasmZip).Hash.ToLowerInvariant()
+          if ($nasmHash -ne $env:NASM_SHA256) {
+            throw "nasm archive sha256 $nasmHash does not match the pinned $env:NASM_SHA256"
+          }
+          Expand-Archive -Path $nasmZip -DestinationPath $nasmDest -Force
+          $nasmBin = "$nasmDest\nasm-$env:NASM_VERSION"
+          "$nasmBin" >> $env:GITHUB_PATH
 
           # Prove both landed. An installer that reports success without
           # producing the binary is exactly what happened here, so the check
           # is the point of the step, not decoration.
           & "$dest\bin\protoc.exe" --version
-          if (-not (Test-Path "$env:ProgramFiles\NASM\nasm.exe")) { throw "nasm was not installed" }
+          & "$nasmBin\nasm.exe" --version
       - uses: oven-sh/setup-bun@v2
       # The helper must answer identically under Windows PowerShell 5.1 and
       # pwsh 7 — a bare `.\scripts\windows.ps1` runs under whichever the

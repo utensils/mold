@@ -278,6 +278,7 @@ jobs:
               - 'scripts/tests/desktop-dmg-packaging.sh'
               - 'scripts/prepare-desktop-linuxdeploy.sh'
               - 'scripts/tests/desktop-linuxdeploy-pins.sh'
+              - 'scripts/tests/windows-toolchain-pins.sh'
               - 'scripts/tests/android-apk-distribution.sh'
               - 'scripts/tests/windows-self-signing.sh'
               - 'scripts/tests/release-sync-pr.sh'
@@ -523,6 +524,7 @@ jobs:
           bash scripts/tests/desktop-candle-nix-source-hash.sh
           bash scripts/tests/desktop-dmg-packaging.sh
           bash scripts/tests/desktop-linuxdeploy-pins.sh
+          bash scripts/tests/windows-toolchain-pins.sh
           bash scripts/tests/android-apk-distribution.sh
           bash scripts/tests/windows-self-signing.sh
           bash scripts/tests/cuda-distribution-contract.sh
