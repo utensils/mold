@@ -196,6 +196,19 @@
           "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
           "apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
         ]
+      },
+      {
+        "id": "macos-machines-sidebar-selection",
+        "updatedAt": "2026-09-22T16:39:32.439761+00:00",
+        "baseCommit": "aa2a9be469428a6ed3ea8b6f0519d3dbcd5e7d15",
+        "scope": "Native Machines sidebar selection and fleet navigation; global baseline unchanged.",
+        "files": [
+          "apps/macos/Sources/Mold/Shell/Sidebar.swift",
+          "apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+          "apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+          "apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
+          "apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
+        ]
       }
     ]
   },
@@ -293068,6 +293081,66 @@
       ],
       "complexity": "simple",
       "summary": "Selects standard or isolated UAT preferences with one retained scratch UserDefaults instance, preserving NotificationCenter observer object identity."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/Sidebar.swift",
+      "type": "file",
+      "name": "Sidebar.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/Sidebar.swift",
+      "summary": "Maps sidebar highlighting to the explicit MachineNavigation path. Empty, invalid or removed selection highlights Machines; selecting a machine opens its page.",
+      "tags": [
+        "native-macos",
+        "navigation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+      "type": "file",
+      "name": "SidebarRows.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+      "summary": "Resolves one highlighted destination, shelf or explicitly selected machine and maps sidebar picks to navigation state.",
+      "tags": [
+        "native-macos",
+        "navigation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+      "type": "file",
+      "name": "MachineLaunch.swift",
+      "filePath": "apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+      "summary": "MachineNavigation maps the persisted selection to an empty fleet path or one existing machine ID; Back clears the persisted selection.",
+      "tags": [
+        "native-macos",
+        "navigation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
+      "type": "file",
+      "name": "HostStore+Reachability.swift",
+      "filePath": "apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
+      "summary": "Resolves connectivity and preferred machine fallbacks for machine-scoped controls. Navigation uses the explicit path instead of this fallback.",
+      "tags": [
+        "native-macos",
+        "navigation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Machines/MachinesDestination.swift",
+      "type": "file",
+      "name": "MachinesDestination.swift",
+      "filePath": "apps/macos/Sources/Mold/Machines/MachinesDestination.swift",
+      "summary": "Binds the fleet overview and drill-in stack to MachineNavigation over the same persisted selection used by the sidebar.",
+      "tags": [
+        "native-macos",
+        "navigation"
+      ],
+      "complexity": "simple"
     }
   ],
   "edges": [
@@ -519116,6 +519189,27 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/Sidebar.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Shell/Sidebar.swift",
+      "target": "file:apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Machines/MachinesDestination.swift",
+      "target": "file:apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
     }
   ],
   "layers": [
@@ -520385,7 +520479,12 @@
         "file:apps/macos/Sources/Mold/Resources/Info.plist",
         "file:apps/macos/Sources/Mold/Resources/Credits.html",
         "file:apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
-        "file:apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
+        "file:apps/macos/Sources/Mold/Support/AppStorageSuite.swift",
+        "file:apps/macos/Sources/Mold/Shell/Sidebar.swift",
+        "file:apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+        "file:apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+        "file:apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
+        "file:apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
       ]
     },
     {
