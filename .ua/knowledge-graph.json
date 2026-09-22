@@ -178,6 +178,22 @@
           "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
           "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
         ]
+      },
+      {
+        "id": "macos-nightly-version-sidebar-delivery",
+        "updatedAt": "2026-09-22T14:45:33.028384+00:00",
+        "baseCommit": "fabdeb1081a019b2f4a88b6fdf060166286f719d",
+        "scope": "Native version parity, guaranteed replacement nightly candidates, and parallel sidebar hydration; global baseline unchanged.",
+        "files": [
+          "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+          "apps/macos/Makefile",
+          "apps/macos/project.yml",
+          "apps/macos/scripts/workspace-version.sh",
+          ".github/workflows/macos-native.yml",
+          ".github/workflows/macos-native-distribution.yml",
+          "apps/macos/Sources/Mold/Resources/Info.plist",
+          "apps/macos/Sources/Mold/Resources/Credits.html"
+        ]
       }
     ]
   },
@@ -292902,7 +292918,7 @@
         "library"
       ],
       "complexity": "moderate",
-      "summary": "Shared gallery store listens from initialization; shell-driven reload guards cancellation between phases and refuses obsolete host replies."
+      "summary": "Shell-owned reload starts images, trash and organization concurrently; slow image listing does not delay sidebar shelves, with cancellation and host identity guards."
     },
     {
       "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
@@ -292942,6 +292958,90 @@
       ],
       "complexity": "moderate",
       "summary": "Builds merged library rows and prunes removed hosts, including collection-only caches."
+    },
+    {
+      "id": "file:apps/macos/Makefile",
+      "type": "file",
+      "name": "Makefile",
+      "filePath": "apps/macos/Makefile",
+      "tags": [
+        "make",
+        "native-macos"
+      ],
+      "complexity": "moderate",
+      "summary": "Reads native marketing version from the workspace and writes generated Version.yml before XcodeGen; one override versions the bundle and artifact together."
+    },
+    {
+      "id": "file:apps/macos/project.yml",
+      "type": "file",
+      "name": "project.yml",
+      "filePath": "apps/macos/project.yml",
+      "tags": [
+        "yaml",
+        "native-macos"
+      ],
+      "complexity": "moderate",
+      "summary": "Native XcodeGen spec includes generated Version.yml rather than an independent marketing version literal."
+    },
+    {
+      "id": "file:apps/macos/scripts/workspace-version.sh",
+      "type": "file",
+      "name": "workspace-version.sh",
+      "filePath": "apps/macos/scripts/workspace-version.sh",
+      "tags": [
+        "shell",
+        "native-macos"
+      ],
+      "complexity": "moderate",
+      "summary": "Reads and validates root workspace.package.version as the native release base."
+    },
+    {
+      "id": "file:.github/workflows/macos-native.yml",
+      "type": "file",
+      "name": "macos-native.yml",
+      "filePath": ".github/workflows/macos-native.yml",
+      "tags": [
+        "yaml",
+        "native-macos"
+      ],
+      "complexity": "moderate",
+      "summary": "Tests native changes and schedules a signed nightly for every main push, ensuring stale-head publication refusals have replacement candidates."
+    },
+    {
+      "id": "file:.github/workflows/macos-native-distribution.yml",
+      "type": "file",
+      "name": "macos-native-distribution.yml",
+      "filePath": ".github/workflows/macos-native-distribution.yml",
+      "tags": [
+        "yaml",
+        "native-macos"
+      ],
+      "complexity": "moderate",
+      "summary": "Builds native stable from workspace version and nightly from shared desktop next-patch helper; retains monotonic Sparkle commit count."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Resources/Info.plist",
+      "type": "file",
+      "name": "Info.plist",
+      "filePath": "apps/macos/Sources/Mold/Resources/Info.plist",
+      "tags": [
+        "native-macos",
+        "about"
+      ],
+      "complexity": "simple",
+      "summary": "Native About metadata matches Tauri contributor credits for James Brink and Jeffrey Dilley; standard AppKit About panel presents version, description, MIT license and project link."
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Resources/Credits.html",
+      "type": "file",
+      "name": "Credits.html",
+      "filePath": "apps/macos/Sources/Mold/Resources/Credits.html",
+      "tags": [
+        "native-macos",
+        "about"
+      ],
+      "complexity": "simple",
+      "summary": "Native About metadata matches Tauri contributor credits for James Brink and Jeffrey Dilley; standard AppKit About panel presents version, description, MIT license and project link."
     }
   ],
   "edges": [
@@ -518969,6 +519069,27 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Makefile",
+      "target": "file:apps/macos/scripts/workspace-version.sh",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:.github/workflows/macos-native-distribution.yml",
+      "target": "file:scripts/create-desktop-nightly-version.sh",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:.github/workflows/macos-native-distribution.yml",
+      "target": "file:apps/macos/scripts/workspace-version.sh",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 1
     }
   ],
   "layers": [
@@ -520234,7 +520355,9 @@
         "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
+        "file:apps/macos/Sources/Mold/Resources/Info.plist",
+        "file:apps/macos/Sources/Mold/Resources/Credits.html"
       ]
     },
     {
@@ -521215,7 +521338,8 @@
         "config:web/tsconfig.app.json",
         "config:web/tsconfig.json",
         "config:web/tsconfig.node.json",
-        "config:website/package.json"
+        "config:website/package.json",
+        "file:apps/macos/project.yml"
       ]
     },
     {
@@ -521243,7 +521367,11 @@
         "service:Dockerfile:cuda",
         "service:Dockerfile:web-builder",
         "service:packaging/aur/test/Dockerfile",
-        "service:packaging/aur/test/Dockerfile:amd64"
+        "service:packaging/aur/test/Dockerfile:amd64",
+        "file:apps/macos/Makefile",
+        "file:apps/macos/scripts/workspace-version.sh",
+        "file:.github/workflows/macos-native.yml",
+        "file:.github/workflows/macos-native-distribution.yml"
       ]
     },
     {

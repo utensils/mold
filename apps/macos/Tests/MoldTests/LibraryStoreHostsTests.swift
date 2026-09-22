@@ -13,22 +13,65 @@ struct LibraryStoreHostsTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
-    @Test func cancelledStartupCannotApplyAnOldListingOrStartTheNextRequests() async {
+    @Test func cancelledStartupCannotApplyLateResults() async {
         let machine = host("startup")
         let fake = FakeBackend(host: machine)
         fake.prints = [FakeFixtures.print("late.png")]
-        fake.delays["gallery"] = .seconds(10)
+        fake.trashedRows = [FakeFixtures.print("trash.png")]
+        fake.collectionRows = [Collection(id: "late", name: "Late", slug: "late", count: 1)]
+        for route in ["gallery", "trashedPrints", "collections", "tags"] {
+            fake.delays[route] = .seconds(10)
+        }
         let hosts = HostStore(hosts: [machine]) { _ in fake }
         let library = LibraryStore(hosts: hosts)
         let load = Task { await library.reload() }
-        await settle { fake.calls.contains("gallery") }
+        await settle { fake.calls.contains("gallery") && fake.calls.contains("collections") }
         load.cancel()
         await load.value
 
         #expect(library.items.isEmpty)
-        #expect(!fake.calls.contains("trashedPrints"))
-        #expect(!fake.calls.contains("collections"))
+        #expect(library.trashed.isEmpty)
+        #expect(library.shelves.isEmpty)
         #expect(!library.isLoading)
+    }
+
+    @Test func collectionsLoadWhileTheImageAndTrashListingsAreStillWaiting() async {
+        let machine = host("slow-images")
+        let fake = FakeBackend(host: machine)
+        fake.collectionRows = [Collection(id: "album", name: "Album", slug: "album", count: 3)]
+        fake.delays["gallery"] = .seconds(10)
+        fake.delays["trashedPrints"] = .seconds(10)
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        let load = Task { await library.reload() }
+        await settle { !library.shelves.isEmpty }
+        #expect(library.shelves.first?.name == "Album")
+        #expect(library.isLoading)
+        load.cancel()
+        await load.value
+    }
+
+    @Test(arguments: [false, true])
+    func standaloneSidebarRefreshesDiscardResultsAfterMachineChanges(edit: Bool) async {
+        let machine = host("old")
+        let fake = FakeBackend(host: machine)
+        fake.trashedRows = [FakeFixtures.print("old-trash.png")]
+        fake.collectionRows = [Collection(id: "old", name: "Old", slug: "old", count: 1)]
+        for route in ["trashedPrints", "collections", "tags"] {
+            fake.delays[route] = .milliseconds(200)
+        }
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        async let trash: Void = library.refreshTrash()
+        async let organization: Void = library.refreshOrganization()
+        await settle { fake.calls.contains("collections") && fake.calls.contains("trashedPrints") }
+        var updated = machine
+        updated.baseURL = URL(string: "http://replacement")!
+        hosts.hosts = edit ? [updated] : []
+        _ = await (trash, organization)
+        #expect(library.trashed.isEmpty)
+        #expect(library.shelves.isEmpty)
+        #expect(library.tags.perHost.isEmpty)
     }
 
     @Test func removingAMachineAlsoRemovesItsShelvesWithoutAnyCachedPrints() {

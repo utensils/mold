@@ -43,6 +43,14 @@ ruby -ryaml -e '
   native = YAML.safe_load(File.read(ARGV[0]), aliases: true)
   release = YAML.safe_load(File.read(ARGV[1]), aliases: true)
   missing = []
+  trigger = native["on"] || native[true] # YAML 1.1 treats on as a boolean.
+  push = trigger.fetch("push")
+  if push.key?("paths") || push.key?("paths-ignore")
+    abort("native main pushes must always schedule a replacement for a stale nightly")
+  end
+  %w[Cargo.toml scripts/create-desktop-nightly-version.sh].each do |path|
+    abort("native PR checks omit #{path}") unless trigger.fetch("pull_request").fetch("paths").include?(path)
+  end
   %w[check macos-native-nightly publish-macos-native-nightly].each do |job|
     missing << "macos-native.yml:#{job}" unless native["jobs"].key?(job)
   end

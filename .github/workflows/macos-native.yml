@@ -11,23 +11,16 @@ name: macOS native app
 # there (`testflight-ios.yml`, `testflight-ios-verify.yml`), so it is a real
 # hosted image and this is a real check rather than a dispatch-only placeholder.
 
-# The two path lists are spelled out twice because GitHub Actions does not
-# support YAML anchors in workflow files. Keep them identical.
+# Every main commit needs a replacement candidate: publication refuses a
+# build once main advances. Path-filtering pushes could discard a good build
+# without ever scheduling its successor, leaving the update channel stale.
 on:
   push:
     branches: [main]
-    paths:
-      - "apps/macos/**"
-      - ".github/workflows/macos-native.yml"
-      # The reusable distribution workflow this one calls: a fix to it must
-      # rebuild the nightly, and #1736's did not.
-      - ".github/workflows/macos-native-distribution.yml"
-      # The app's contract tests PARSE these, so a change here can turn the
-      # macOS suite red without touching apps/macos.
-      - "crates/mold-core/src/config_keys.rs"
-      - "crates/mold-server/src/lib.rs"
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "scripts/create-desktop-nightly-version.sh"
       - "apps/macos/**"
       - ".github/workflows/macos-native.yml"
       # The reusable distribution workflow this one calls: a fix to it must

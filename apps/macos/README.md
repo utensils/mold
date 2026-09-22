@@ -253,13 +253,20 @@ anonymously by SHA-256, a re-check that `main` has not moved, **then** the
 appcast pointer, proved anonymously too, and only then a prune of this app's
 own nightly DMGs — never the Tauri app's, on the release the two share. It
 sits in the same concurrency group as the desktop publisher, because both
-clobber assets on that one release.
+clobber assets on that one release. Every push to `main` schedules a native
+nightly candidate, so a newer commit that invalidates an in-flight build also
+schedules its replacement.
 
 `Mold-native-<version>.dmg` carries `native` in its name for the same reason:
 three Molds on one release page is only confusing if they are not saying which.
 The artifact name and the bundle's own `CFBundleShortVersionString` both come
 from ONE variable — `MARKETING_VERSION`, exported by the workflow — so a
 nightly's DMG and the version Sparkle shows in its update alert always agree.
+The base version comes from `[workspace.package].version` in the root
+`Cargo.toml`, shared with the CLI. Nightlies use the desktop helper
+(`next-patch-nightly.<commit-count>`); Sparkle still orders builds by the
+monotonic commit count. `make gen` writes the resolved version into the ignored
+`Version.yml` include, so builds opened in Xcode report it too.
 `scripts/tests/release-names.sh` asks `make` what it would produce and greps
 the workflow for the same expression, because they once disagreed and nightly
 could not build at all.
@@ -378,8 +385,10 @@ from a default (`routes_config.rs:48-53`).
 ## Running it
 
 The Library sidebar loads its collections and counts when the main window
-opens, including when Generate is the initial destination. Opening All Prints
-is not required and does not start a second full listing.
+opens, including when Generate or Models is the initial destination. Collections,
+prints, and trash load concurrently, so albums can appear while a large image
+index is still loading. Opening All Prints is not required and does not start
+a second full listing.
 
 Queue ▸ Show Queue opens the queue from any pane. Queue actions keep the
 selected job and its machine together; Empty Queue names each eligible

@@ -883,6 +883,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> {
         try record("trashedPrints")
+        await pause("trashedPrints")
         return .fresh(trashedRows, etag: "fake-etag")
     }
     func patch(_ filename: String, with patch: GalleryPatch) async throws { try record("patch") }
@@ -934,7 +935,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Organization
 
-    func collections() async throws -> [Collection] { try record("collections"); return collectionRows }
+    func collections() async throws -> [Collection] {
+        try record("collections")
+        await pause("collections")
+        return collectionRows
+    }
     func createCollection(name: String, description: String?) async throws -> Collection {
         try record("createCollection"); throw notPlanted()
     }
@@ -942,7 +947,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("updateCollection"); throw notPlanted()
     }
     func deleteCollection(id: String) async throws { try record("deleteCollection") }
-    func tags() async throws -> [TagCount] { try record("tags"); return tagRows }
+    func tags() async throws -> [TagCount] {
+        try record("tags")
+        await pause("tags")
+        return tagRows
+    }
     @discardableResult
     func renameTag(_ name: String, to newName: String) async throws -> TagCount {
         try record("renameTag")

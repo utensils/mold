@@ -128,6 +128,22 @@
         "apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
         "apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift"
       ]
+    },
+    {
+      "id": "macos-nightly-version-sidebar-delivery",
+      "updatedAt": "2026-09-22T14:45:33.028384+00:00",
+      "baseCommit": "fabdeb1081a019b2f4a88b6fdf060166286f719d",
+      "scope": "Native version parity, guaranteed replacement nightly candidates, and parallel sidebar hydration; global baseline unchanged.",
+      "files": [
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Makefile",
+        "apps/macos/project.yml",
+        "apps/macos/scripts/workspace-version.sh",
+        ".github/workflows/macos-native.yml",
+        ".github/workflows/macos-native-distribution.yml",
+        "apps/macos/Sources/Mold/Resources/Info.plist",
+        "apps/macos/Sources/Mold/Resources/Credits.html"
+      ]
     }
   ]
 }

@@ -23,9 +23,11 @@ recipe() {
   ( cd "$MACOS" && make -n "$@" 2>/dev/null )
 }
 
-# 1. The stable case: the app's own version, straight from project.yml.
-marketing=$(awk -F'"' '/MARKETING_VERSION:/ { print $2; exit }' "$MACOS/project.yml")
-[ -n "$marketing" ] || { echo "FAIL: no MARKETING_VERSION in project.yml" >&2; exit 1; }
+# 1. Native and other interfaces share the release-plz workspace version.
+marketing=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$MACOS/../../Cargo.toml" | head -1)
+[ "$("$MACOS/scripts/workspace-version.sh")" = "$marketing" ] || {
+  echo "FAIL: native version differs from workspace" >&2; exit 1;
+}
 
 expected="Mold-native-$marketing.dmg"
 for target in dmg notarize; do
@@ -38,7 +40,7 @@ done
 
 # 2. The nightly case: ONE variable moves the bundle's version AND the
 #    artifact name together, because the workflow sets exactly one.
-nightly="$marketing-nightly.4271"
+nightly=$("$MACOS/../../scripts/create-desktop-nightly-version.sh" "$marketing" "$(git -C "$MACOS" rev-list --count HEAD)")
 expected_nightly="Mold-native-$nightly.dmg"
 for target in dmg notarize; do
   if ! recipe MARKETING_VERSION="$nightly" "$target" | grep -q "$expected_nightly"; then
@@ -80,3 +82,43 @@ for workflow in "$WORKFLOWS"/macos-native*.yml; do
 done
 
 echo "release names ok ($expected, $expected_nightly)"
+
+# Execute the actual workflow resolver, not a second implementation of it.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+for channel in stable nightly; do
+  ruby -ryaml -e '
+    doc = YAML.safe_load(File.read(ARGV[0]), aliases: true)
+    step = doc["jobs"]["distribution"]["steps"].find { |s| s["id"] == "release" }
+    puts step.fetch("run").gsub("${{ inputs.channel }}", ARGV[1])
+  ' "$distribution" "$channel" > "$work/resolve.sh"
+  (cd "$MACOS" && GITHUB_REF_TYPE=branch GITHUB_REF_NAME=main \
+    GITHUB_OUTPUT="$work/$channel" GITHUB_ENV="$work/$channel-env" bash "$work/resolve.sh")
+  expected_version="$marketing"
+  [ "$channel" = stable ] || expected_version="$nightly"
+  grep -Fx "version=$expected_version" "$work/$channel"
+  grep -Fx "dmg_name=Mold-native-$expected_version.dmg" "$work/$channel"
+done
+
+# Future release bumps flow through automatically; malformed or missing
+# workspace versions fail closed instead of creating an unnamed artifact.
+fixture="$work/repository"
+mkdir -p "$fixture/apps/macos/scripts"
+cp "$MACOS/scripts/workspace-version.sh" "$fixture/apps/macos/scripts/"
+printf '[workspace.package]\nversion = "9.8.7"\n' > "$fixture/Cargo.toml"
+[ "$(bash "$fixture/apps/macos/scripts/workspace-version.sh")" = "9.8.7" ]
+for bad in '' '0.31' '0.31.0-nightly.1' '01.2.3'; do
+  printf '[workspace.package]\nversion = "%s"\n' "$bad" > "$fixture/Cargo.toml"
+  if bash "$fixture/apps/macos/scripts/workspace-version.sh" > "$work/invalid-out" 2> "$work/invalid-error"; then
+    echo "FAIL: native version accepted invalid workspace version '$bad'" >&2
+    exit 1
+  fi
+  [ ! -s "$work/invalid-out" ]
+  grep -q 'must be a plain three-part SemVer' "$work/invalid-error"
+done
+printf '[package]\nversion = "1.2.3"\n' > "$fixture/Cargo.toml"
+if bash "$fixture/apps/macos/scripts/workspace-version.sh" > "$work/invalid-out" 2> "$work/invalid-error"; then
+  echo 'FAIL: native version accepted a manifest without workspace.package.version' >&2
+  exit 1
+fi
+echo 'native workspace version validation ok'
