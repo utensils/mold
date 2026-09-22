@@ -8,10 +8,10 @@ import SwiftUI
 extension QueuePane {
     var queueSelection: QueueSelection? {
         let job = selectedJob
-        let emptyQueue = emptyQueueAction
+        let emptyQueues = emptyQueueActions
         let gate = queueGate
-        guard job != nil || emptyQueue != nil || !gate.machines.isEmpty else { return nil }
-        return QueueSelection(job: job, gate: gate, emptyQueue: emptyQueue)
+        guard job != nil || !emptyQueues.isEmpty || !gate.machines.isEmpty else { return nil }
+        return QueueSelection(job: job, gate: gate, emptyQueues: emptyQueues)
     }
 
     /// The whole-queue gate, per machine that advertises it. The pane's own
@@ -38,6 +38,7 @@ extension QueuePane {
             // read, so this menu can never offer something they do not.
             let actions = QueueRowActions.resolve(entry, on: hosts.capabilities[host.id])
             return QueueSelection.Job(
+                target: .init(host: host.id, entry: entry.id),
                 canPause: actions.pause,
                 canResume: actions.resume,
                 // Narrower than `actions.retry` on purpose: this menu knows
@@ -68,11 +69,13 @@ extension QueuePane {
         return false
     }
 
-    /// The first machine that offers it -- the exact gate the toolbar's own
-    /// button reads (`emptyQueueTargets`), so the two can never disagree
-    /// about whether it is offered.
-    private var emptyQueueAction: (() -> Void)? {
-        guard let host = emptyQueueTargets.first else { return nil }
-        return { confirmEmptyQueue(on: host) }
+    /// Every machine the toolbar's own chooser names. The menu must retain
+    /// the same choice rather than silently acting on the first host.
+    private var emptyQueueActions: [QueueSelection.EmptyQueue] {
+        emptyQueueTargets.map { host in
+            QueueSelection.EmptyQueue(id: host.id, name: host.name) {
+                confirmEmptyQueue(on: host)
+            }
+        }
     }
 }

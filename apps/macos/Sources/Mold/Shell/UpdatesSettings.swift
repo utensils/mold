@@ -2,14 +2,47 @@ import SwiftUI
 
 /// Settings ▸ General ▸ Updates.
 ///
-/// Absent, not disabled, in a build with no updater (`SoftwareUpdates.shared`
-/// is `nil` in Debug, under the UAT suite and in the test host), so this is a
-/// `Section` that simply does not appear rather than one full of dead
-/// controls.
+/// The section remains visible in builds where the updater is deliberately
+/// gated. That makes the release feature discoverable while explaining why a
+/// Debug, UAT or test build must not check a feed or replace itself.
 struct UpdatesSettings: View {
     var body: some View {
         if let updates = SoftwareUpdates.shared {
             UpdatesGroup(updates: updates)
+        } else {
+            UnavailableUpdatesGroup()
+        }
+    }
+}
+
+private struct UnavailableUpdatesGroup: View {
+    private var channel: UpdateChannel {
+        UpdateChannel(
+            stored: AppStorageSuite.defaults.string(forKey: UpdateChannel.storageKey))
+    }
+
+    var body: some View {
+        Section {
+            Picker("Channel", selection: .constant(channel)) {
+                ForEach(UpdateChannel.allCases) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(true)
+            Button("Check Now") {}
+                .disabled(true)
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text(
+                """
+                Updates are unavailable in this build. Install and open a \
+                signed Release build to choose a channel, check for updates \
+                and install them.
+                """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -37,18 +70,25 @@ private struct UpdatesGroup: View {
 
     var body: some View {
         Section {
-            Picker("Updates", selection: $channel) {
+            Picker("Channel", selection: $channel) {
                 ForEach(UpdateChannel.allCases) { choice in
                     Text(choice.label).tag(choice)
                 }
             }
             .pickerStyle(.segmented)
+            // The feed for an interactive check has already been chosen.
+            // Keep the visible selection truthful until that check settles.
+            .disabled(!updates.canCheckForUpdates)
+            Button("Check Now") { updates.checkForUpdates() }
+                .disabled(!updates.canCheckForUpdates)
             Toggle("Automatically check for updates", isOn: $automaticallyChecks)
             Toggle("Automatically download updates", isOn: $automaticallyDownloads)
                 // Sparkle's scheduler only downloads on a check it made, so
                 // this means nothing on its own.
                 .disabled(!automaticallyChecks)
             LabeledContent("Last checked", value: lastCheckedDescription)
+        } header: {
+            Text("Updates")
         } footer: {
             Text("""
                  Stable updates arrive when a release is published. Nightly \

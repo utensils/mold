@@ -6,10 +6,9 @@ import Sparkle
 ///
 /// ABSENT, not disabled: in a Debug build, under the `MOLD_NATIVE_FRESH` UAT
 /// suite and in the unit-test host, `shared` is `nil`, no
-/// `SPUStandardUpdaterController` is ever constructed, and the menu item and
-/// the Settings group are simply not there. That is the honest shape -- a
-/// greyed-out "Check for Updates…" in a dev build would be a promise about a
-/// feed this build must never read.
+/// `SPUStandardUpdaterController` is ever constructed, and the app-menu
+/// command is simply not there. Settings still explains why this build cannot
+/// update, without constructing Sparkle or reading a feed.
 ///
 /// Sparkle's own settings are the single authority for the two toggles
 /// (`automaticallyChecksForUpdates`, `automaticallyDownloadsUpdates`): they

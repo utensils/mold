@@ -93,6 +93,27 @@
         "apps/macos/Sources/Mold/Shell/SettingsView.swift"
       ],
       "note": "Scoped source-verified refresh; global analysis metadata remains unchanged."
+    },
+    {
+      "id": "macos-menu-update-settings",
+      "updatedAt": "2026-09-22T01:37:05.448051+00:00",
+      "baseCommit": "4d316f72afe0b9dc9a413112d7671849e11b0105",
+      "scope": "Native menu target identity across queue, model and library actions; machine choices, navigation window activation, and discoverable General update controls. Other graph areas retain their prior freshness.",
+      "files": [
+        "apps/macos/Sources/Mold/MoldApp.swift",
+        "apps/macos/Sources/Mold/Shell/MoldCommands.swift",
+        "apps/macos/Sources/Mold/Shell/QueueCommands.swift",
+        "apps/macos/Sources/Mold/Shell/QueueSelection.swift",
+        "apps/macos/Sources/Mold/Queue/QueuePane+Commands.swift",
+        "apps/macos/Sources/Mold/Shell/GeneralSettings.swift",
+        "apps/macos/Sources/Mold/Shell/UpdatesSettings.swift",
+        "apps/macos/Sources/Mold/Support/SoftwareUpdates.swift",
+        "apps/macos/Sources/Mold/Shell/ModelCommands.swift",
+        "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+        "apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+        "apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift"
+      ]
     }
   ]
 }

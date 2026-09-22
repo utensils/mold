@@ -43,4 +43,15 @@ struct MenuBarTests {
         #expect(ThumbnailStep.apply(132, delta: 24) == 156)
         #expect(ThumbnailStep.apply(132, delta: -24) == 108)
     }
+
+    @Test func sameActionModelsStillReplaceTheirMenuClosures() {
+        let host = UUID()
+        let items = [RowAction(kind: ModelActions.Kind.load, title: "Load")]
+        let first = ModelSelection(
+            target: .init(host: host, model: "first:q4"), items: items, perform: { _ in })
+        let second = ModelSelection(
+            target: .init(host: host, model: "second:q4"), items: items, perform: { _ in })
+
+        #expect(first != second)
+    }
 }

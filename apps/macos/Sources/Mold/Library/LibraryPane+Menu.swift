@@ -16,6 +16,7 @@ extension LibraryPane {
         let entries = showing.inspected(viewing: viewing)
         let actions = self.actions
         return LibrarySelection(
+            targets: entries.map(\.id),
             count: entries.count,
             allFavorite: !entries.isEmpty && entries.allSatisfy(\.print.isFavorite),
             scope: navigation.scope,
@@ -57,6 +58,7 @@ extension LibraryPane {
         let entries = showing.inspected(viewing: viewing)
         let actions = self.actions
         return LibraryFile(
+            targets: entries.map(\.id),
             count: entries.count,
             exportFormats: entries.count == 1 ? actions.exportFormats(for: entries[0]) : [],
             meshExports: entries.count == 1 && entries[0].print.isMesh
