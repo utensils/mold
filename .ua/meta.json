@@ -159,6 +159,23 @@
         "apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
         "apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
       ]
+    },
+    {
+      "id": "macos-notification-single-instance",
+      "updatedAt": "2026-09-22T17:14:22.380762+00:00",
+      "baseCommit": "cb01bf3edca76680da5eae5db914d0bf09d09c02",
+      "scope": "Native notification launch policy, response acceptance and window activation; global baseline unchanged.",
+      "files": [
+        "apps/macos/Sources/Mold/MoldApp.swift",
+        "apps/macos/Sources/Mold/Resources/Info.plist",
+        "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+        "apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+        "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+        "apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+        "apps/macos/Sources/Mold/Support/UATScript.swift",
+        "apps/macos/Sources/Mold/Support/UATNotification.swift",
+        "apps/macos/Tests/MoldTests/NotificationActivationTests.swift"
+      ]
     }
   ]
 }

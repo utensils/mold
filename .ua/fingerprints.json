@@ -283801,6 +283801,632 @@
       ],
       "totalLines": 774,
       "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/MoldApp.swift": {
+      "filePath": "apps/macos/Sources/Mold/MoldApp.swift",
+      "contentHash": "f4ab151f8b4a59e39f8d6c2a631d819631c73a338927015688c123ae038de6a0",
+      "functions": [
+        {
+          "name": "handOverToTheDelegate",
+          "params": [],
+          "exported": false,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "MoldApp",
+          "methods": [
+            "handOverToTheDelegate"
+          ],
+          "properties": [
+            "stores",
+            "destination",
+            "delegate",
+            "body"
+          ],
+          "exported": true,
+          "lineCount": 65
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "body",
+        "MoldApp"
+      ],
+      "totalLines": 75,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/MoldAppDelegate.swift",
+      "contentHash": "5360cbcd9f09eeab5286ac3b30079080102ffc2687d87e33b9ea642f569c6372",
+      "functions": [
+        {
+          "name": "applicationWillFinishLaunching",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "applicationDidFinishLaunching",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "applicationDidBecomeActive",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "applicationDidResignActive",
+          "params": [
+            "notification"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "applicationShouldTerminate",
+          "params": [
+            "sender"
+          ],
+          "returnType": "NSApplication.TerminateReply",
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "userNotificationCenter",
+          "params": [
+            "center",
+            "response",
+            "completionHandler"
+          ],
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "classes": [
+        {
+          "name": "MoldAppDelegate",
+          "methods": [
+            "applicationWillFinishLaunching",
+            "applicationDidFinishLaunching",
+            "applicationDidBecomeActive",
+            "applicationDidResignActive",
+            "applicationShouldTerminate"
+          ],
+          "properties": [
+            "engine",
+            "materializer",
+            "thumbnails",
+            "landedPrints",
+            "heartbeat",
+            "dockBadge",
+            "quit",
+            "notificationResponses"
+          ],
+          "exported": true,
+          "lineCount": 85
+        },
+        {
+          "name": "extension MoldAppDelegate",
+          "methods": [
+            "userNotificationCenter"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 20
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "engine",
+        "materializer",
+        "thumbnails",
+        "landedPrints",
+        "heartbeat",
+        "dockBadge",
+        "quit",
+        "notificationResponses",
+        "applicationWillFinishLaunching",
+        "applicationDidFinishLaunching",
+        "applicationDidBecomeActive",
+        "applicationDidResignActive",
+        "applicationShouldTerminate",
+        "MoldAppDelegate",
+        "userNotificationCenter"
+      ],
+      "totalLines": 116,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationResponses.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationResponses.swift",
+      "contentHash": "9562e34c739303fcb8c85a6d51bdc0c551a0fa3c029fc5850ca83b5829d51153",
+      "functions": [
+        {
+          "name": "install",
+          "params": [
+            "handler"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "receive",
+          "params": [
+            "action",
+            "userInfo",
+            "completion"
+          ],
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationResponses",
+          "methods": [
+            "install",
+            "receive"
+          ],
+          "properties": [
+            "pending",
+            "handler"
+          ],
+          "exported": true,
+          "lineCount": 22
+        }
+      ],
+      "imports": [
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "install",
+        "receive",
+        "NotificationResponses"
+      ],
+      "totalLines": 27,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationWindowRouting.swift",
+      "contentHash": "2b3f89d09390a0a444f03a97f787ce2086ed357121b56eff62d3946b0d8f4be6",
+      "functions": [
+        {
+          "name": "body",
+          "params": [
+            "content"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationWindowRouting",
+          "methods": [
+            "body"
+          ],
+          "properties": [
+            "openWindow",
+            "responses",
+            "destination",
+            "navigation"
+          ],
+          "exported": true,
+          "lineCount": 16
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "responses",
+        "destination",
+        "navigation",
+        "body",
+        "NotificationWindowRouting"
+      ],
+      "totalLines": 23,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/NotificationRouting.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/NotificationRouting.swift",
+      "contentHash": "55802f09ad7a6853e256ff64925bbc22c60f19cc82366998eb0a735b40405068",
+      "functions": [
+        {
+          "name": "route",
+          "params": [
+            "userInfo"
+          ],
+          "returnType": "NotificationRoute?",
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "applyNotificationRoute",
+          "params": [
+            "route",
+            "destination",
+            "navigation"
+          ],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationRoute",
+          "methods": [
+            "route"
+          ],
+          "properties": [
+            "openPrint",
+            "openQueue"
+          ],
+          "exported": true,
+          "lineCount": 23
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "route",
+        "NotificationRoute",
+        "applyNotificationRoute"
+      ],
+      "totalLines": 50,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/UATScript.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/UATScript.swift",
+      "contentHash": "e41b3b277c210465e2ba7a8e27e2cfc5f66689104f17de859bbcc782e9171c93",
+      "functions": [
+        {
+          "name": "runIfRequested",
+          "params": [
+            "environment",
+            "responses"
+          ],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "steps",
+          "params": [
+            "script"
+          ],
+          "returnType": "[String]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "run",
+          "params": [
+            "steps",
+            "log",
+            "responses"
+          ],
+          "exported": false,
+          "lineCount": 24
+        },
+        {
+          "name": "split",
+          "params": [
+            "step"
+          ],
+          "returnType": "(String, String)",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "perform",
+          "params": [
+            "menuPath"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "perform",
+          "params": [
+            "titles",
+            "menu"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 12
+        },
+        {
+          "name": "snapshot",
+          "params": [
+            "path"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 14
+        },
+        {
+          "name": "write",
+          "params": [
+            "lines",
+            "log"
+          ],
+          "exported": false,
+          "lineCount": 3
+        }
+      ],
+      "classes": [
+        {
+          "name": "UATScript",
+          "methods": [
+            "runIfRequested",
+            "steps",
+            "run",
+            "split",
+            "perform",
+            "perform",
+            "snapshot",
+            "write"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 91
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        }
+      ],
+      "exports": [
+        "runIfRequested",
+        "steps",
+        "UATScript"
+      ],
+      "totalLines": 111,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Support/UATNotification.swift": {
+      "filePath": "apps/macos/Sources/Mold/Support/UATNotification.swift",
+      "contentHash": "d8233b005be0bb2f3b17a6a9013a24b88fa4fca0c1d27bf60bc3369a71c2b647",
+      "functions": [
+        {
+          "name": "payload",
+          "params": [
+            "argument"
+          ],
+          "returnType": "[String: String]?",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "deliver",
+          "params": [
+            "argument",
+            "responses"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "post",
+          "params": [
+            "argument"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 16
+        }
+      ],
+      "classes": [
+        {
+          "name": "UATNotification",
+          "methods": [
+            "payload",
+            "deliver",
+            "post"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 32
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        }
+      ],
+      "exports": [
+        "payload",
+        "deliver",
+        "post",
+        "UATNotification"
+      ],
+      "totalLines": 41,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/NotificationActivationTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+      "contentHash": "71b2d275fb2e9fafd672f5d6002737570de2e67707b714b5f2a949ad4cb12e0b",
+      "functions": [
+        {
+          "name": "theBuiltAppProhibitsMultipleInstances",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+          "params": [],
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+          "params": [],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity",
+          "params": [],
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "classes": [
+        {
+          "name": "NotificationActivationTests",
+          "methods": [
+            "theBuiltAppProhibitsMultipleInstances",
+            "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+            "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+            "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+            "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 68
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "UserNotifications",
+          "specifiers": [
+            "UserNotifications"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "theBuiltAppProhibitsMultipleInstances",
+        "coldLaunchClicksAreAcceptedThenDeliveredOnceInOrder",
+        "warmClicksAreDeliveredBeforeCompletionAndUseTheLatestHandler",
+        "dismissCustomAndMalformedResponsesCompleteWithoutNavigation",
+        "aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity",
+        "NotificationActivationTests"
+      ],
+      "totalLines": 77,
+      "hasStructuralAnalysis": true
     }
   }
 }
