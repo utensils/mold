@@ -100,10 +100,9 @@ extension HostStore {
 
     /// The machine a remembered `uuidString` names, or somewhere real.
     ///
-    /// The Machines pane and the sidebar each read the same `@AppStorage` key
-    /// and both resolve it HERE, because a stored id outlives the machine it
-    /// named: removing a machine must land you on another one rather than on
-    /// an empty page that cannot be got out of.
+    /// Machine-scoped controls use a fallback when the remembered id is absent
+    /// or removed. Navigation uses `MachineNavigation.path` instead: no explicit
+    /// selection means the fleet overview, not the preferred machine's page.
     func machine(selected stored: String?) -> MoldHost? {
         guard let stored, let id = UUID(uuidString: stored) else { return preferredHost }
         return host(id) ?? preferredHost

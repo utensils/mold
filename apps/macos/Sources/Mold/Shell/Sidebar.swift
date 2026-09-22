@@ -109,7 +109,8 @@ struct Sidebar: View {
         Binding(
             get: {
                 SidebarRows.selected(destination: destination, scope: navigation.scope,
-                                     machine: hosts.machine(selected: selectedMachine)?.id)
+                                     machine: MachineNavigation.path(selected: selectedMachine,
+                                                                     in: hosts.hosts).last)
             },
             set: { row in
                 guard let pick = SidebarRows.pick(row) else { return }

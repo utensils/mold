@@ -146,6 +146,19 @@
         "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
         "apps/macos/Sources/Mold/Support/AppStorageSuite.swift"
       ]
+    },
+    {
+      "id": "macos-machines-sidebar-selection",
+      "updatedAt": "2026-09-22T16:39:32.439761+00:00",
+      "baseCommit": "aa2a9be469428a6ed3ea8b6f0519d3dbcd5e7d15",
+      "scope": "Native Machines sidebar selection and fleet navigation; global baseline unchanged.",
+      "files": [
+        "apps/macos/Sources/Mold/Shell/Sidebar.swift",
+        "apps/macos/Sources/Mold/Shell/SidebarRows.swift",
+        "apps/macos/Sources/Mold/Machines/MachineLaunch.swift",
+        "apps/macos/Sources/Mold/Support/HostStore+Reachability.swift",
+        "apps/macos/Sources/Mold/Machines/MachinesDestination.swift"
+      ]
     }
   ]
 }
