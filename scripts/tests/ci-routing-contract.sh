@@ -646,6 +646,11 @@ grep -Fxq "              - 'scripts/prepare-desktop-linuxdeploy.sh'" <<< "$relea
   || fail "release classifier omits the desktop linuxdeploy preparer"
 grep -Fxq "              - 'scripts/tests/desktop-linuxdeploy-pins.sh'" <<< "$release_filter" \
   || fail "release classifier omits the desktop linuxdeploy pin contract"
+require_text "$ci" \
+  "bash scripts/tests/windows-toolchain-pins.sh" \
+  "release CI does not verify that the Windows build toolchain is release-pinned rather than Chocolatey-fed"
+grep -Fxq "              - 'scripts/tests/windows-toolchain-pins.sh'" <<< "$release_filter" \
+  || fail "release classifier omits the Windows toolchain pin contract"
 rust_filter="$(extract_filter "$ci" rust)"
 grep -Fxq "              - 'scripts/tests/cfg-arm-visibility.py'" <<< "$rust_filter" \
   || fail "rust classifier omits the cfg-arm visibility contract"

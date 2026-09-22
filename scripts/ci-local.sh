@@ -294,7 +294,7 @@ if wants contracts; then
   for contract in release-sync-pr crates-publish-contract ci-coverage-disk-guard \
                   docker-web-context desktop-candle-lock-sync \
                   desktop-candle-nix-source-hash desktop-dmg-packaging \
-                  desktop-linuxdeploy-pins \
+                  desktop-linuxdeploy-pins windows-toolchain-pins \
                   cuda-distribution-contract \
                   install-cuda-arch cuda-qualification-contract \
                   minimax-h3-attention-release-contract bench-qwen-parse \
