@@ -284427,6 +284427,1485 @@
       ],
       "totalLines": 77,
       "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/ModelActionsTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "contentHash": "0351489d0221c271fb30b5512dc4fbd05a74afcaeacd283fa8dd8ad4cc164acf",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "actions",
+          "params": [
+            "hosts",
+            "models",
+            "downloads",
+            "licenses",
+            "confirmDestruction"
+          ],
+          "returnType": "ModelActions",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+          "params": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "showLicenceAppearsOnlyForAGatedModel",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+          "params": [],
+          "exported": true,
+          "lineCount": 29
+        },
+        {
+          "name": "aRemovalThatKeptSomethingSaysWhatAndWhy",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "theComponentsRowsNeverExpandOptions",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "theMenuAndTheContextualMenuCallTheSameThing",
+          "params": [],
+          "exported": true,
+          "lineCount": 23
+        }
+      ],
+      "classes": [
+        {
+          "name": "ModelActionsTests",
+          "methods": [
+            "machine",
+            "actions",
+            "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+            "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+            "showLicenceAppearsOnlyForAGatedModel",
+            "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+            "aRemovalThatKeptSomethingSaysWhatAndWhy",
+            "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+            "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+            "theComponentsRowsNeverExpandOptions",
+            "theMenuAndTheContextualMenuCallTheSameThing"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 162
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "theMenuOffersUnloadOnlyForLoadedAndLoadOnlyForInstalled",
+        "deleteIsLastAndBehindADividerWhereverItIsDrawn",
+        "showLicenceAppearsOnlyForAGatedModel",
+        "deleteAsksFirstAndTheFakeRecordsNothingUntilPerform",
+        "aRemovalThatKeptSomethingSaysWhatAndWhy",
+        "aRemovalThatKeptNothingNamesOnlyWhatWasFreed",
+        "repairInstallsTheComponentTheMachineNamedNotTheModelWhoseSheetIsOpen",
+        "theComponentsRowsNeverExpandOptions",
+        "theMenuAndTheContextualMenuCallTheSameThing",
+        "ModelActionsTests"
+      ],
+      "totalLines": 172,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "contentHash": "0f610a8f32390e5103d71ff0cc29e4f9b47e64db9b30866d62dd8480dcaafc05",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "makeController",
+          "params": [
+            "backend",
+            "host"
+          ],
+          "returnType": "GenerateController",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "aBatchOfFourIsSubmittedAsFourChildren",
+          "params": [],
+          "exported": true,
+          "lineCount": 19
+        },
+        {
+          "name": "aBatchOfOneIsUnchanged",
+          "params": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "everyChildThatMadeSomethingIsInTheOutcome",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "aFinishedRunRemembersTheMachineItRanOn",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+          "params": [],
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "aBatchWhereNothingFinishedIsAFailure",
+          "params": [],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "theFenceIsHeldUntilTheWholeBatchSettles",
+          "params": [],
+          "exported": true,
+          "lineCount": 26
+        },
+        {
+          "name": "thePreviewFollowsAChildThatIsStillRunning",
+          "params": [],
+          "exported": true,
+          "lineCount": 28
+        },
+        {
+          "name": "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "aPlacementPreviewSendsARedactedRequest",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        }
+      ],
+      "classes": [
+        {
+          "name": "BatchOutcomeTests",
+          "methods": [
+            "machine",
+            "makeController",
+            "aBatchOfFourIsSubmittedAsFourChildren",
+            "aBatchOfOneIsUnchanged",
+            "everyChildThatMadeSomethingIsInTheOutcome",
+            "aFinishedRunRemembersTheMachineItRanOn",
+            "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+            "aBatchWhereNothingFinishedIsAFailure",
+            "theFenceIsHeldUntilTheWholeBatchSettles",
+            "thePreviewFollowsAChildThatIsStillRunning",
+            "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+            "aPlacementPreviewSendsARedactedRequest"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 238
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "aBatchOfFourIsSubmittedAsFourChildren",
+        "aBatchOfOneIsUnchanged",
+        "everyChildThatMadeSomethingIsInTheOutcome",
+        "aFinishedRunRemembersTheMachineItRanOn",
+        "aPartlyFinishedBatchShowsWhatItMadeAndSaysWhatItDidNot",
+        "aBatchWhereNothingFinishedIsAFailure",
+        "theFenceIsHeldUntilTheWholeBatchSettles",
+        "thePreviewFollowsAChildThatIsStillRunning",
+        "aPlacementPreviewOfFourAsksForFourCopiesOfOneOutput",
+        "aPlacementPreviewSendsARedactedRequest",
+        "BatchOutcomeTests"
+      ],
+      "totalLines": 250,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/FakeBackend.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "contentHash": "a2600a357336843134fbabff9bcc265a23b0bec8de68463ebe6d7f78711f7efe",
+      "functions": [
+        {
+          "name": "settle",
+          "params": [
+            "condition"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "raise",
+          "params": [],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "emit",
+          "params": [
+            "event"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "callCount",
+          "params": [
+            "route"
+          ],
+          "returnType": "Int",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "FakeBackend.init",
+          "params": [
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "pause",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "countLocked",
+          "params": [
+            "route"
+          ],
+          "returnType": "Int",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "entered",
+          "params": [
+            "route",
+            "count",
+            "limit"
+          ],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "giveUpWaiting",
+          "params": [
+            "id"
+          ],
+          "returnType": "Bool",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "noteEntered",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "record",
+          "params": [
+            "route"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "notPlanted",
+          "params": [],
+          "returnType": "Error",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "mutated",
+          "params": [
+            "device",
+            "enabled"
+          ],
+          "returnType": "DeviceInfo",
+          "exported": false,
+          "lineCount": 10
+        },
+        {
+          "name": "releaseStatus",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "status",
+          "params": [],
+          "returnType": "ServerStatus",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "capabilities",
+          "params": [],
+          "returnType": "Capabilities",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "models",
+          "params": [],
+          "returnType": "[Model]",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "placementPreview",
+          "params": [
+            "request",
+            "copies"
+          ],
+          "returnType": "PlacementPreview",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "submit",
+          "params": [
+            "admission"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 32
+        },
+        {
+          "name": "releaseSubmit",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "batchStatus",
+          "params": [
+            "id"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "batchStatus",
+          "params": [
+            "clientBatchId"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "jobPreview",
+          "params": [
+            "jobId"
+          ],
+          "returnType": "JobProgress?",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelBatch",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "releaseChainCreate",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "chainGate",
+          "params": [],
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "createChainJob",
+          "params": [
+            "request",
+            "operationId"
+          ],
+          "returnType": "CreateChainJobResponse",
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "chainLimits",
+          "params": [
+            "model",
+            "fps"
+          ],
+          "returnType": "ChainLimits",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "chainJob",
+          "params": [
+            "id"
+          ],
+          "returnType": "ChainJobDetail",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelChainJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "resumeChainJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "chainJobEvents",
+          "params": [
+            "id"
+          ],
+          "returnType": "AsyncThrowingStream<ChainJobEvent, Error>",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "emitChainEvent",
+          "params": [
+            "event",
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "failChainEvents",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "expand",
+          "params": [
+            "request"
+          ],
+          "returnType": "ExpandResponse",
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "releaseExpand",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "remix",
+          "params": [
+            "request"
+          ],
+          "returnType": "RemixResponse",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "history",
+          "params": [
+            "limit"
+          ],
+          "returnType": "HistoryListing",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "clearHistory",
+          "params": [
+            "keep"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "loras",
+          "params": [
+            "model"
+          ],
+          "returnType": "[LoraInfo]",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "queue",
+          "params": [],
+          "returnType": "QueueListing",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "queueJob",
+          "params": [
+            "id"
+          ],
+          "returnType": "QueueJobDetail",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "cancelJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "pauseJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "resumeJob",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "reorderJob",
+          "params": [
+            "id",
+            "position"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "retryJob",
+          "params": [
+            "authority"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "cancelAllQueued",
+          "params": [],
+          "returnType": "QueueCancelResult",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "batchStatuses",
+          "params": [
+            "batchIds"
+          ],
+          "returnType": "BatchStatusListing",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "exportHeldJob",
+          "params": [
+            "authority"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "admitTransfer",
+          "params": [
+            "clientBatchId",
+            "portable",
+            "destinationInstance"
+          ],
+          "returnType": "BatchStatus",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "completeTransfer",
+          "params": [
+            "authority"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "startDownload",
+          "params": [
+            "request"
+          ],
+          "returnType": "DownloadTicket",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "cancelDownload",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "licenses",
+          "params": [],
+          "returnType": "[ThirdPartyLicense]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "acceptLicenses",
+          "params": [
+            "acceptances"
+          ],
+          "returnType": "[ThirdPartyLicense]",
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "devices",
+          "params": [],
+          "returnType": "DeviceState",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "setDevice",
+          "params": [
+            "id",
+            "enabled"
+          ],
+          "returnType": "DeviceInfo",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "resources",
+          "params": [],
+          "returnType": "ResourceSnapshot",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "resourceStream",
+          "params": [],
+          "returnType": "AsyncThrowingStream<ResourceSnapshot, Error>",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "peers",
+          "params": [],
+          "returnType": "[DiscoveryPeer]",
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "gallery",
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "trashedPrints",
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "patch",
+          "params": [
+            "filename",
+            "patch"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "mutate",
+          "params": [
+            "mutation"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "trash",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "restoreFromTrash",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "deleteForever",
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "importPrint",
+          "params": [
+            "item",
+            "filename"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "media",
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "thumbnail",
+          "params": [
+            "filename",
+            "size",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "exportOptions",
+          "params": [],
+          "returnType": "ExportOptions",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "export",
+          "params": [
+            "filename",
+            "format"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "export",
+          "params": [
+            "filename",
+            "request"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "playableURL",
+          "params": [
+            "filename"
+          ],
+          "returnType": "URL",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "collections",
+          "params": [],
+          "returnType": "[Collection]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "createCollection",
+          "params": [
+            "name",
+            "description"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "updateCollection",
+          "params": [
+            "id",
+            "change"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "deleteCollection",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "tags",
+          "params": [],
+          "returnType": "[TagCount]",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "renameTag",
+          "params": [
+            "name",
+            "newName"
+          ],
+          "returnType": "TagCount",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "deleteTag",
+          "params": [
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "emptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "events",
+          "params": [],
+          "returnType": "AsyncThrowingStream<MoldEvent, Error>",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "batchEvents",
+          "params": [
+            "id"
+          ],
+          "returnType": "AsyncThrowingStream<BatchStatus, Error>",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "emitBatchEvent",
+          "params": [
+            "status",
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "finishBatchEvents",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "downloadEvents",
+          "params": [],
+          "returnType": "AsyncThrowingStream<DownloadEvent, Error>",
+          "exported": true,
+          "lineCount": 7
+        }
+      ],
+      "classes": [
+        {
+          "name": "Flag",
+          "methods": [
+            "raise"
+          ],
+          "properties": [
+            "lock",
+            "raised",
+            "isRaised"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "FakeBackend",
+          "methods": [
+            "emit",
+            "callCount",
+            "init",
+            "pause",
+            "countLocked",
+            "entered",
+            "giveUpWaiting",
+            "noteEntered",
+            "record",
+            "notPlanted",
+            "mutated",
+            "releaseStatus",
+            "status",
+            "capabilities",
+            "models",
+            "placementPreview",
+            "submit",
+            "releaseSubmit",
+            "batchStatus",
+            "batchStatus",
+            "jobPreview",
+            "cancelBatch",
+            "releaseChainCreate",
+            "chainGate",
+            "createChainJob",
+            "chainLimits",
+            "chainJob",
+            "cancelChainJob",
+            "resumeChainJob",
+            "chainJobEvents",
+            "emitChainEvent",
+            "failChainEvents",
+            "expand",
+            "releaseExpand",
+            "remix",
+            "history",
+            "clearHistory",
+            "loras",
+            "queue",
+            "queueJob",
+            "cancelJob",
+            "pauseJob",
+            "resumeJob",
+            "reorderJob",
+            "retryJob",
+            "cancelAllQueued",
+            "batchStatuses",
+            "exportHeldJob",
+            "admitTransfer",
+            "completeTransfer",
+            "startDownload",
+            "cancelDownload",
+            "licenses",
+            "acceptLicenses",
+            "devices",
+            "setDevice",
+            "resources",
+            "resourceStream",
+            "peers",
+            "gallery",
+            "trashedPrints",
+            "patch",
+            "mutate",
+            "trash",
+            "restoreFromTrash",
+            "deleteForever",
+            "importPrint",
+            "media",
+            "thumbnail",
+            "exportOptions",
+            "export",
+            "export",
+            "playableURL",
+            "collections",
+            "createCollection",
+            "updateCollection",
+            "deleteCollection",
+            "tags",
+            "renameTag",
+            "deleteTag",
+            "emptyTrash",
+            "events",
+            "batchEvents",
+            "emitBatchEvent",
+            "finishBatchEvents",
+            "downloadEvents"
+          ],
+          "properties": [
+            "host",
+            "calls",
+            "recorded",
+            "callsLock",
+            "refuses",
+            "plantedErrors",
+            "prints",
+            "trashedRows",
+            "tagRows",
+            "collectionRows",
+            "queueListing",
+            "serverStatus",
+            "capabilityBlock",
+            "exportBlock",
+            "thumbnailAnswer",
+            "exportRequests",
+            "downloadTicket",
+            "startedDownloads",
+            "modelRows",
+            "retainedInventories",
+            "retainedInventoryRequests",
+            "retainedMemberBytes",
+            "retainedMemberRequests",
+            "retainedSession",
+            "retainedSessionFailures",
+            "retainedSessionRequests",
+            "componentRows",
+            "removalAnswers",
+            "deletedModels",
+            "loadedModels",
+            "unloadedModels",
+            "downloadsListing",
+            "catalogPages",
+            "catalogInstallAnswer",
+            "catalogInstalls",
+            "credentialStatus",
+            "credentialWrites",
+            "credentialClears",
+            "submittedAdmissions",
+            "submitAnswer",
+            "submitAnswers",
+            "cancelledBatchIds",
+            "holdsSubmit",
+            "submitGate",
+            "submitReleased",
+            "submitLock",
+            "batchStatusAnswers",
+            "batchEventsHeldOpen",
+            "batchEventsContinuations",
+            "jobPreviewCalls",
+            "mediaAnswer",
+            "deviceState",
+            "resourceSnapshot",
+            "peerRows",
+            "resourceStreamContinuation",
+            "patchedDevices",
+            "setDeviceAnswer",
+            "resourceStreamEnded",
+            "eventStream",
+            "downloadStream",
+            "downloadStreamEnded",
+            "delays",
+            "entryWaiters",
+            "statusHeldOpen",
+            "statusWaiters",
+            "statusReleased",
+            "placementCopiesRequested",
+            "placementRequests",
+            "chainJobAnswer",
+            "chainJobRequests",
+            "recordedChainCreates",
+            "cancelledChainJobIds",
+            "chainJobDetails",
+            "chainEventsHeldOpen",
+            "chainEventContinuations",
+            "holdsChainCreate",
+            "chainGates",
+            "chainCreatesWaiting",
+            "chainLimitRows",
+            "resumedChainJobIds",
+            "expandAnswer",
+            "expandRequests",
+            "remixRequests",
+            "holdsExpand",
+            "expandGate",
+            "expandReleased",
+            "expandLock",
+            "remixAnswer",
+            "historyRows",
+            "historyCleared",
+            "loraRows",
+            "loraErrors",
+            "loraModelsRequested",
+            "configListing",
+            "configWrites",
+            "configResets",
+            "profilesAnswer",
+            "pairingSessions",
+            "pairedClientsAnswer",
+            "revokedClients",
+            "queueJobDetails",
+            "batchStatusByClientId",
+            "batchListings",
+            "reorders",
+            "cancelAllAnswer",
+            "cancelledAll",
+            "retriedAuthorities",
+            "batchStatusQueries",
+            "batchStatusesYields",
+            "exportBodies",
+            "transferAdmissions",
+            "admitAnswer",
+            "completedTransfers",
+            "queueYields",
+            "extras",
+            "licenseRows",
+            "acceptedLicenses",
+            "importedNames"
+          ],
+          "exported": true,
+          "lineCount": 949
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "settle",
+        "isRaised",
+        "raise",
+        "Flag",
+        "host",
+        "calls",
+        "refuses",
+        "plantedErrors",
+        "prints",
+        "trashedRows",
+        "tagRows",
+        "collectionRows",
+        "queueListing",
+        "serverStatus",
+        "capabilityBlock",
+        "exportBlock",
+        "thumbnailAnswer",
+        "exportRequests",
+        "downloadTicket",
+        "startedDownloads",
+        "modelRows",
+        "retainedInventories",
+        "retainedInventoryRequests",
+        "retainedMemberBytes",
+        "retainedMemberRequests",
+        "retainedSession",
+        "retainedSessionFailures",
+        "retainedSessionRequests",
+        "componentRows",
+        "removalAnswers",
+        "deletedModels",
+        "loadedModels",
+        "unloadedModels",
+        "downloadsListing",
+        "catalogPages",
+        "catalogInstallAnswer",
+        "catalogInstalls",
+        "credentialStatus",
+        "credentialWrites",
+        "credentialClears",
+        "submittedAdmissions",
+        "submitAnswer",
+        "submitAnswers",
+        "cancelledBatchIds",
+        "holdsSubmit",
+        "batchStatusAnswers",
+        "batchEventsHeldOpen",
+        "batchEventsContinuations",
+        "jobPreviewCalls",
+        "mediaAnswer",
+        "deviceState",
+        "resourceSnapshot",
+        "peerRows",
+        "resourceStreamContinuation",
+        "patchedDevices",
+        "setDeviceAnswer",
+        "resourceStreamEnded",
+        "eventStream",
+        "downloadStream",
+        "downloadStreamEnded",
+        "emit",
+        "callCount",
+        "FakeBackend.init",
+        "delays",
+        "pause",
+        "entered",
+        "noteEntered",
+        "record",
+        "notPlanted",
+        "statusHeldOpen",
+        "releaseStatus",
+        "status",
+        "capabilities",
+        "models",
+        "placementCopiesRequested",
+        "placementRequests",
+        "placementPreview",
+        "submit",
+        "releaseSubmit",
+        "batchStatus",
+        "batchStatus",
+        "jobPreview",
+        "cancelBatch",
+        "chainJobAnswer",
+        "chainJobRequests",
+        "cancelledChainJobIds",
+        "chainJobDetails",
+        "chainEventsHeldOpen",
+        "chainEventContinuations",
+        "holdsChainCreate",
+        "chainCreatesWaiting",
+        "releaseChainCreate",
+        "createChainJob",
+        "chainLimitRows",
+        "chainLimits",
+        "chainJob",
+        "cancelChainJob",
+        "resumedChainJobIds",
+        "resumeChainJob",
+        "chainJobEvents",
+        "emitChainEvent",
+        "failChainEvents",
+        "expandAnswer",
+        "expandRequests",
+        "remixRequests",
+        "holdsExpand",
+        "remixAnswer",
+        "historyRows",
+        "historyCleared",
+        "expand",
+        "releaseExpand",
+        "remix",
+        "history",
+        "clearHistory",
+        "loraRows",
+        "loraErrors",
+        "loraModelsRequested",
+        "loras",
+        "configListing",
+        "configWrites",
+        "configResets",
+        "profilesAnswer",
+        "pairingSessions",
+        "pairedClientsAnswer",
+        "revokedClients",
+        "queueJobDetails",
+        "batchStatusByClientId",
+        "batchListings",
+        "reorders",
+        "cancelAllAnswer",
+        "cancelledAll",
+        "retriedAuthorities",
+        "batchStatusQueries",
+        "batchStatusesYields",
+        "exportBodies",
+        "transferAdmissions",
+        "admitAnswer",
+        "completedTransfers",
+        "queueYields",
+        "queue",
+        "queueJob",
+        "cancelJob",
+        "pauseJob",
+        "resumeJob",
+        "reorderJob",
+        "retryJob",
+        "cancelAllQueued",
+        "batchStatuses",
+        "exportHeldJob",
+        "admitTransfer",
+        "completeTransfer",
+        "extras",
+        "startDownload",
+        "cancelDownload",
+        "licenseRows",
+        "acceptedLicenses",
+        "licenses",
+        "acceptLicenses",
+        "devices",
+        "setDevice",
+        "resources",
+        "resourceStream",
+        "peers",
+        "gallery",
+        "trashedPrints",
+        "patch",
+        "mutate",
+        "trash",
+        "restoreFromTrash",
+        "deleteForever",
+        "importedNames",
+        "importPrint",
+        "media",
+        "thumbnail",
+        "exportOptions",
+        "export",
+        "export",
+        "playableURL",
+        "collections",
+        "createCollection",
+        "updateCollection",
+        "deleteCollection",
+        "tags",
+        "renameTag",
+        "deleteTag",
+        "emptyTrash",
+        "events",
+        "batchEvents",
+        "emitBatchEvent",
+        "finishBatchEvents",
+        "downloadEvents",
+        "FakeBackend"
+      ],
+      "totalLines": 996,
+      "hasStructuralAnalysis": true
     }
   }
 }

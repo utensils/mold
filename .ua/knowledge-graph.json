@@ -226,6 +226,17 @@
           "apps/macos/Sources/Mold/Support/UATNotification.swift",
           "apps/macos/Tests/MoldTests/NotificationActivationTests.swift"
         ]
+      },
+      {
+        "id": "macos-notification-ci-observed-state",
+        "updatedAt": "2026-09-22T17:33:11.365492+00:00",
+        "baseCommit": "9a2d7ece7bfc3243f70e5db4927028f2e8c66949",
+        "scope": "Observed-state waits for two CI failures encountered during notification fix validation; global baseline unchanged.",
+        "files": [
+          "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+          "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+          "apps/macos/Tests/MoldTests/FakeBackend.swift"
+        ]
       }
     ]
   },
@@ -293242,6 +293253,42 @@
         "notifications"
       ],
       "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "type": "file",
+      "name": "ModelActionsTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "summary": "Verifies model menu and contextual actions; waits for captured loaded-model arguments before asserting two loads, not call-entry counts.",
+      "tags": [
+        "native-macos",
+        "tests"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "type": "file",
+      "name": "BatchOutcomeTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "summary": "Verifies batch outcomes and redacted placement previews; waits for captured placement arguments before inspecting redaction.",
+      "tags": [
+        "native-macos",
+        "tests"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "file",
+      "name": "FakeBackend.swift",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "summary": "Native test backend records calls before capturing arguments; settle conditions must wait for the state being asserted rather than call entry.",
+      "tags": [
+        "native-macos",
+        "tests"
+      ],
+      "complexity": "simple"
     }
   ],
   "edges": [
@@ -519381,6 +519428,20 @@
       "type": "tested_by",
       "direction": "forward",
       "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+      "target": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+      "target": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
     }
   ],
   "layers": [
@@ -520662,7 +520723,10 @@
         "file:apps/macos/Sources/Mold/Support/NotificationRouting.swift",
         "file:apps/macos/Sources/Mold/Support/UATScript.swift",
         "file:apps/macos/Sources/Mold/Support/UATNotification.swift",
-        "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift"
+        "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
+        "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
+        "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
+        "file:apps/macos/Tests/MoldTests/FakeBackend.swift"
       ]
     },
     {
