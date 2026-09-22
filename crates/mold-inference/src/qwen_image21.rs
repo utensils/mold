@@ -18,6 +18,31 @@ pub(crate) mod vae;
 
 pub use pipeline::QwenImage21Engine;
 
+/// Only this family's Metal denoiser uses the qualified BF16 path. Encoding
+/// and decoding retain `gpu_dtype`; other devices retain their existing policy.
+pub(crate) fn transformer_dtype(device: &Device) -> DType {
+    if device.is_metal() {
+        metal_transformer_dtype(crate::runtime_env::value("MOLD_QWEN_IMAGE21_DTYPE").as_deref())
+    } else {
+        crate::engine::gpu_dtype(device)
+    }
+}
+
+/// Shared precision parser for Metal loading and frozen execution identity.
+pub fn metal_transformer_dtype(value: Option<&str>) -> DType {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("" | "auto" | "bf16") => DType::BF16,
+        Some("f32" | "fp32") => DType::F32,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "MOLD_QWEN_IMAGE21_DTYPE must be auto/bf16/f32; using BF16"
+            );
+            DType::BF16
+        }
+    }
+}
+
 /// Bound request-local retention without truncating the authored prompt.
 pub(crate) const PREFIX_CACHE_MAX_TOKENS: usize = 512;
 
@@ -253,6 +278,18 @@ pub(crate) fn encode_t2i_prompts(
 mod tests {
     use super::*;
     use candle_core::Device;
+
+    #[test]
+    fn metal_denoiser_precision_has_an_explicit_f32_fallback() {
+        for value in [None, Some("auto"), Some("BF16"), Some("")] {
+            assert_eq!(metal_transformer_dtype(value), DType::BF16);
+        }
+        for value in [Some("f32"), Some(" FP32 ")] {
+            assert_eq!(metal_transformer_dtype(value), DType::F32);
+        }
+        assert_eq!(metal_transformer_dtype(Some("unsupported")), DType::BF16);
+        assert_eq!(transformer_dtype(&Device::Cpu), DType::F32);
+    }
 
     #[test]
     fn t2i_template_is_the_upstream_raw_processor_template() {

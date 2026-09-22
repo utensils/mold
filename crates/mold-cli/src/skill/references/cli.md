@@ -38,6 +38,14 @@ also changed the default PNG profile (`MOLD_PNG_ENCODING`, `fast` by default,
 `balanced` for the old one), which is lossless but a different deflate, so an
 unchanged picture saves to a different — and 6-11 % larger — file.
 
+Qwen Image 2.1 on Metal uses a BF16 denoiser, fused unmasked image attention,
+and compact cached-step operations. Its text encoder and VAE remain F32.
+`MOLD_QWEN_IMAGE21_DTYPE=f32` selects the full-precision denoiser; combine it
+with `MOLD_ATTN=math` to retain the original Metal computation path. Set these
+on the generating server before starting it, not only on a remote CLI client.
+BF16 can change image details for the same seed. These controls do not change
+other Qwen families or CPU/CUDA precision.
+
 The prompt is OPTIONAL, not absent, on a video render that already carries
 visual conditioning — a source image, keyframes, a clip to continue, or a
 reference set. LTX-2, Wan and MiniMax H3 all answer this way: what the user

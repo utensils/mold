@@ -395,6 +395,7 @@ pub enum RuntimeSemanticVariable {
     Qwen2TextEncoderMode,
     Qwen2Variant,
     Qwen3Variant,
+    QwenImage21Dtype,
     QwenFp8Cache,
     QwenQMatMul,
     ReserveVramMb,
@@ -1090,6 +1091,7 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_QWEN2_TEXT_ENCODER_MODE" => RuntimeSemanticVariable::Qwen2TextEncoderMode,
         "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
         "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
+        "MOLD_QWEN_IMAGE21_DTYPE" => RuntimeSemanticVariable::QwenImage21Dtype,
         "MOLD_QWEN_FP8_CACHE" => RuntimeSemanticVariable::QwenFp8Cache,
         "MOLD_QWEN_QMATMUL" => RuntimeSemanticVariable::QwenQMatMul,
         "MOLD_RESERVE_VRAM_MB" => RuntimeSemanticVariable::ReserveVramMb,
@@ -1128,6 +1130,12 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
 fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSemanticSetting> {
     let variable = runtime_semantic_variable(name)?;
     let value = match value {
+        value if variable == RuntimeSemanticVariable::QwenImage21Dtype => {
+            CanonicalRuntimeValue::Text(format!(
+                "{:?}",
+                mold_inference::qwen_image21::metal_transformer_dtype(value)
+            ))
+        }
         None => CanonicalRuntimeValue::Unset,
         Some(value)
             if matches!(
@@ -9078,6 +9086,18 @@ mod tests {
             // must accept any raw value without panicking.
             assert!(runtime_semantic_setting(name, Some("probe")).is_some());
         }
+    }
+
+    #[test]
+    fn qwen_image21_precision_identity_uses_the_engine_parser() {
+        let name = "MOLD_QWEN_IMAGE21_DTYPE";
+        let default = runtime_semantic_setting(name, None);
+        for value in ["auto", "bf16", " BF16 ", "", "invalid"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), default);
+        }
+        let f32 = runtime_semantic_setting(name, Some("f32"));
+        assert_ne!(f32, default);
+        assert_eq!(f32, runtime_semantic_setting(name, Some(" FP32 ")));
     }
 
     #[test]

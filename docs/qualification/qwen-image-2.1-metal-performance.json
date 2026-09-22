@@ -1,0 +1,382 @@
+{
+  "hardware": "Apple M5 Max, 40 GPU cores, 128 GiB unified memory",
+  "os": "macOS 27.0 (26A428)",
+  "date_utc": "2026-09-22",
+  "base_source": "bac5978129f60f22cc985185fb8b21d41e56e582 plus qualification patch",
+  "candle_revision": "bf2cd29a791dbc053df826b4377d092c3809d17f",
+  "profile": "dev-fast (release-derived, thin LTO, debug symbols)",
+  "artifact_directory": "/tmp/mold-qwen-performance-20260921/release",
+  "method": "Sequential single renders; GPU forwards synchronized; post-step allocations include allocator pools and are not peak memory. No concurrent builds or other agent GPU workload. Single samples, not cross-device speed guarantees.",
+  "cases": [
+    {
+      "prompt": "teapot",
+      "mode": "math",
+      "reference": "math",
+      "phases": {
+        "decoded_stats": {
+          "finite": true,
+          "max": 1.0,
+          "mean": 0.34307916857503623,
+          "min": -1.0,
+          "rms": 0.6875340117127559
+        },
+        "denoise_seconds": 453.060789917,
+        "encoder_load_seconds": 5.104940375,
+        "prompt_encode_seconds": 3.8251079580000003,
+        "total_seconds": 475.876244542,
+        "transformer_load_seconds": 2.279772375,
+        "vae_decode_seconds": 10.5346735,
+        "vae_load_seconds": 0.910204292
+      },
+      "steady_forward_seconds": 445.09875637400006,
+      "first_step_seconds": 7.08442775,
+      "post_step_metal_max_bytes": 35461742592,
+      "prediction_errors": {
+        "prediction_000": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_001": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_002": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_003": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        }
+      },
+      "final_latent_error": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "mean_abs": 0.0
+      },
+      "image_rgb_error": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "mean_abs": 0.0
+      },
+      "prompt_text": "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows",
+      "seed": 210001,
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "guidance": 1.0,
+      "finite": true,
+      "complete": true,
+      "step_forward_seconds": [
+        7.08442775, 7.450979708, 7.702799709, 7.883447667, 8.085929209,
+        8.121423667, 8.603113125, 8.642475917, 8.645945167, 8.625286083,
+        8.588851667, 8.628002417, 8.634987542, 8.652522375, 8.840664417,
+        8.970546542, 9.01826425, 9.339684666, 9.369515, 9.697179833,
+        10.35971775, 12.136983166, 15.649776666, 15.511833791, 15.141939708,
+        15.285399417, 14.6730615, 15.374281291, 15.777661292, 16.696852625,
+        16.139916208, 14.748661042, 13.760070625, 13.654939708, 13.049046917,
+        12.714917708, 12.597887917, 12.657252625, 12.592542916, 13.074394541
+      ]
+    },
+    {
+      "prompt": "teapot",
+      "mode": "optimized",
+      "reference": "math",
+      "phases": {
+        "decoded_stats": {
+          "finite": true,
+          "max": 1.0,
+          "mean": 0.343078993645756,
+          "min": -1.0,
+          "rms": 0.6875354956520958
+        },
+        "denoise_seconds": 378.110014209,
+        "encoder_load_seconds": 15.93872575,
+        "prompt_encode_seconds": 0.128598625,
+        "total_seconds": 420.437578083,
+        "transformer_load_seconds": 16.03362325,
+        "vae_decode_seconds": 9.943507417,
+        "vae_load_seconds": 0.120443292
+      },
+      "steady_forward_seconds": 366.312497956,
+      "first_step_seconds": 11.338059,
+      "post_step_metal_max_bytes": 42828513280,
+      "prediction_errors": {
+        "prediction_000": {
+          "max_abs": 0.00025773048400878906,
+          "relative_rms": 3.3676964258041257e-6,
+          "mean_abs": 4.478899867833494e-6
+        },
+        "prediction_001": {
+          "max_abs": 0.0007632970809936523,
+          "relative_rms": 7.290026539753941e-6,
+          "mean_abs": 8.52375944196404e-6
+        },
+        "prediction_002": {
+          "max_abs": 0.00015234947204589844,
+          "relative_rms": 8.076927121034894e-6,
+          "mean_abs": 8.5570240865359e-6
+        },
+        "prediction_003": {
+          "max_abs": 0.0003838539123535156,
+          "relative_rms": 2.7801963605103608e-5,
+          "mean_abs": 2.6273162712843576e-5
+        }
+      },
+      "final_latent_error": {
+        "max_abs": 0.009576380252838135,
+        "relative_rms": 0.0003009961869739929,
+        "mean_abs": 0.00013469022234466332
+      },
+      "image_rgb_error": {
+        "max_abs": 1.0,
+        "relative_rms": 0.0005254539216005412,
+        "mean_abs": 0.006911913553873698
+      },
+      "prompt_text": "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows",
+      "seed": 210001,
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "guidance": 1.0,
+      "finite": true,
+      "complete": true,
+      "step_forward_seconds": [
+        11.338059, 9.217825375, 9.249136875, 8.932440375, 9.2582345,
+        9.381952083, 9.36510025, 9.454971208, 8.647045292, 9.056762125,
+        8.80720225, 8.81938125, 8.873406291, 9.308518375, 9.349889, 8.902380542,
+        9.366622083, 9.640413167, 9.593235792, 9.7351755, 9.886698208,
+        9.693174709000001, 9.251847459, 9.131497125, 9.125474417, 9.173038625,
+        9.185620125, 9.438132541, 9.42456825, 9.367167834, 9.422518083,
+        10.034764333, 10.093468208, 9.896674166, 9.658938583, 9.862275499999999,
+        9.937056041, 9.4129235, 9.715814666, 9.64115325
+      ]
+    },
+    {
+      "prompt": "teapot",
+      "mode": "bf16-optimized",
+      "reference": "math",
+      "phases": {
+        "decoded_stats": {
+          "finite": true,
+          "max": 1.0,
+          "mean": 0.34021296011397406,
+          "min": -1.0,
+          "rms": 0.6889157870163698
+        },
+        "denoise_seconds": 309.446089375,
+        "encoder_load_seconds": 2.492615666,
+        "prompt_encode_seconds": 0.13013975,
+        "total_seconds": 323.573578917,
+        "transformer_load_seconds": 1.6681927079999999,
+        "vae_decode_seconds": 9.552700250000001,
+        "vae_load_seconds": 0.116854041
+      },
+      "steady_forward_seconds": 301.74673821199997,
+      "first_step_seconds": 7.295262083,
+      "post_step_metal_max_bytes": 18329436160,
+      "prediction_errors": {
+        "prediction_000": {
+          "max_abs": 0.2965550422668457,
+          "relative_rms": 0.013369025526329039,
+          "mean_abs": 0.018589646112004053
+        },
+        "prediction_001": {
+          "max_abs": 0.1873677372932434,
+          "relative_rms": 0.01362717275378812,
+          "mean_abs": 0.015940382434467798
+        },
+        "prediction_002": {
+          "max_abs": 0.2433631420135498,
+          "relative_rms": 0.02344869732249363,
+          "mean_abs": 0.02496396052847967
+        },
+        "prediction_003": {
+          "max_abs": 0.3154484033584595,
+          "relative_rms": 0.030796523697437295,
+          "mean_abs": 0.03138605791576036
+        }
+      },
+      "final_latent_error": {
+        "max_abs": 1.0060546398162842,
+        "relative_rms": 0.058387642470898254,
+        "mean_abs": 0.04010616646974964
+      },
+      "image_rgb_error": {
+        "max_abs": 140.0,
+        "relative_rms": 0.02829023051276183,
+        "mean_abs": 2.523901621500651
+      },
+      "prompt_text": "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows",
+      "seed": 210001,
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "guidance": 1.0,
+      "finite": true,
+      "complete": true,
+      "step_forward_seconds": [
+        7.295262083, 8.006741792, 7.609508833, 7.608244959, 7.5576852500000005,
+        7.791906584, 7.924574375, 8.209288417, 7.974804084, 8.4471535,
+        7.989994917, 7.885949125, 7.932462667, 8.12921175, 7.839938709,
+        8.130317083, 7.804366375, 8.05874925, 7.802873958, 7.802875,
+        7.621037417, 7.445536625, 7.476072833, 7.458307125, 7.425682834,
+        7.97076825, 7.715789583, 7.588217625, 7.60899275, 7.623614959,
+        7.863018417, 7.630650542, 7.432101625, 7.413644208, 7.472778791,
+        7.651985209, 7.501080458, 7.4356685, 7.46921725, 7.435926583
+      ]
+    },
+    {
+      "prompt": "sign",
+      "mode": "optimized",
+      "reference": "optimized",
+      "phases": {
+        "decoded_stats": {
+          "finite": true,
+          "max": 1.0,
+          "mean": -0.17098292049133124,
+          "min": -1.0,
+          "rms": 0.7834244279088268
+        },
+        "denoise_seconds": 387.373491208,
+        "encoder_load_seconds": 2.480199542,
+        "prompt_encode_seconds": 0.149710416,
+        "total_seconds": 402.723731583,
+        "transformer_load_seconds": 2.281076833,
+        "vae_decode_seconds": 10.143183875,
+        "vae_load_seconds": 0.11829
+      },
+      "steady_forward_seconds": 378.36125446000005,
+      "first_step_seconds": 8.498036916,
+      "post_step_metal_max_bytes": 42832183296,
+      "prediction_errors": {
+        "prediction_000": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_001": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_002": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        },
+        "prediction_003": {
+          "max_abs": 0.0,
+          "relative_rms": 0.0,
+          "mean_abs": 0.0
+        }
+      },
+      "final_latent_error": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "mean_abs": 0.0
+      },
+      "image_rgb_error": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "mean_abs": 0.0
+      },
+      "prompt_text": "A cozy coffee shop at dusk, a clean hand-painted sign above the door reads \"MOON CAFE\" in large legible cream letters. Two ceramic cups on a wooden outdoor table, warm window light, realistic editorial photograph.",
+      "seed": 210002,
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "guidance": 1.0,
+      "finite": true,
+      "complete": true,
+      "step_forward_seconds": [
+        8.498036916, 9.374369875, 9.982004417, 9.536452917, 9.194704792,
+        9.194102416, 9.288828542, 9.203744375, 9.405451375, 9.26328525,
+        9.481910416, 9.479450542, 9.71418575, 9.49304475, 9.415608125,
+        9.633173417, 9.937247958, 9.840985833, 9.49062475, 9.443103, 9.520539,
+        9.522681833, 9.900479541, 9.520006375, 9.625853082999999, 9.594095917,
+        10.380307209, 9.793010542, 9.776745125, 9.570401125, 9.965854415999999,
+        9.565168459, 9.597171584, 9.922433125, 10.543122083, 10.40787675,
+        9.865475875, 10.522674459, 10.736107459, 9.658972
+      ]
+    },
+    {
+      "prompt": "sign",
+      "mode": "bf16-optimized",
+      "reference": "optimized",
+      "phases": {
+        "decoded_stats": {
+          "finite": true,
+          "max": 1.0,
+          "mean": -0.16928620459747123,
+          "min": -1.0,
+          "rms": 0.7828558964956267
+        },
+        "denoise_seconds": 302.319331042,
+        "encoder_load_seconds": 2.495064,
+        "prompt_encode_seconds": 0.15028475,
+        "total_seconds": 316.535177167,
+        "transformer_load_seconds": 1.666048708,
+        "vae_decode_seconds": 9.606705167,
+        "vae_load_seconds": 0.12423275
+      },
+      "steady_forward_seconds": 294.748642879,
+      "first_step_seconds": 7.207096333,
+      "post_step_metal_max_bytes": 18331009024,
+      "prediction_errors": {
+        "prediction_000": {
+          "max_abs": 0.38718628883361816,
+          "relative_rms": 0.012614800370042041,
+          "mean_abs": 0.0163115970444892
+        },
+        "prediction_001": {
+          "max_abs": 0.19446063041687012,
+          "relative_rms": 0.01291502199990279,
+          "mean_abs": 0.014433353078010427
+        },
+        "prediction_002": {
+          "max_abs": 0.19963908195495605,
+          "relative_rms": 0.011545685551756679,
+          "mean_abs": 0.012797134656657907
+        },
+        "prediction_003": {
+          "max_abs": 0.1658940315246582,
+          "relative_rms": 0.014699248381283963,
+          "mean_abs": 0.015999793446383158
+        }
+      },
+      "final_latent_error": {
+        "max_abs": 2.1507848501205444,
+        "relative_rms": 0.09135753762996307,
+        "mean_abs": 0.05084098840699108
+      },
+      "image_rgb_error": {
+        "max_abs": 231.0,
+        "relative_rms": 0.11532914654079858,
+        "mean_abs": 3.056682268778483
+      },
+      "prompt_text": "A cozy coffee shop at dusk, a clean hand-painted sign above the door reads \"MOON CAFE\" in large legible cream letters. Two ceramic cups on a wooden outdoor table, warm window light, realistic editorial photograph.",
+      "seed": 210002,
+      "width": 1024,
+      "height": 1024,
+      "steps": 40,
+      "guidance": 1.0,
+      "finite": true,
+      "complete": true,
+      "step_forward_seconds": [
+        7.207096333, 7.658032916, 7.679516667, 7.976323625, 8.011780708,
+        7.994890709, 7.988755, 7.709909458, 7.525777416, 7.519425334, 7.507413,
+        7.500446875, 7.5000737090000005, 7.640896292, 7.779023125, 7.396774292,
+        7.476315208, 7.401510583, 7.466032125, 7.516427709, 7.526855875,
+        7.419375458, 7.515030542, 7.678996291, 7.586954834, 7.314798042,
+        7.32460625, 7.282889625, 7.320639167, 7.321710917, 7.324650458,
+        7.287203292, 7.378757167, 7.516065459, 7.793587125, 7.667067334,
+        7.646509375, 7.77792725, 7.576083167, 7.2396105
+      ]
+    }
+  ]
+}
