@@ -157,22 +157,12 @@ echo "==> makepkg --noconfirm --nodeps (pkg: ${pkgname})"
 makepkg --noconfirm --nodeps
 pkgfile=\$(ls -1 ./*.pkg.tar.* | head -n 1)
 echo "==> built \$pkgfile without a CUDA runtime present"
-bsdtar -xOf "\$pkgfile" .INSTALL | grep -F 'GPU-free CLI' >/dev/null \
-  || { echo "error: missing CPU migration install notice" >&2; exit 1; }
-for member in \\
-  usr/bin/mold \\
-  usr/share/bash-completion/completions/mold \\
-  usr/share/zsh/site-functions/_mold \\
-  usr/share/fish/vendor_completions.d/mold.fish; do
-  bsdtar -tf "\$pkgfile" | grep -qx "\$member" \\
-    || { echo "error: \$pkgfile is missing \$member" >&2; exit 1; }
+bsdtar -xOf "\$pkgfile" .INSTALL | grep -F 'GPU-free CLI' >/dev/null || { echo "error: missing CPU migration install notice" >&2; exit 1; }
+for member in    usr/bin/mold    usr/share/bash-completion/completions/mold    usr/share/zsh/site-functions/_mold    usr/share/fish/vendor_completions.d/mold.fish; do
+  bsdtar -tf "\$pkgfile" | grep -qx "\$member"      || { echo "error: \$pkgfile is missing \$member" >&2; exit 1; }
 done
-for member in \\
-  usr/share/bash-completion/completions/mold \\
-  usr/share/zsh/site-functions/_mold \\
-  usr/share/fish/vendor_completions.d/mold.fish; do
-  [ -n "\$(bsdtar -xOf "\$pkgfile" "\$member")" ] \\
-    || { echo "error: \$member is empty" >&2; exit 1; }
+for member in    usr/share/bash-completion/completions/mold    usr/share/zsh/site-functions/_mold    usr/share/fish/vendor_completions.d/mold.fish; do
+  [ -n "\$(bsdtar -xOf "\$pkgfile" "\$member")" ]      || { echo "error: \$member is empty" >&2; exit 1; }
   if bsdtar -xOf "\$pkgfile" "\$member" | grep -q "\$workdir"; then
     echo "error: \$member bakes in the build directory" >&2
     exit 1

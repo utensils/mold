@@ -20,6 +20,8 @@ jobs:
       MOLD_DISTRIBUTION_IMAGE_VERSION: ${{ inputs.image-version }}
     steps:
       - uses: actions/checkout@v6
+      - name: Check generated Arch smoke script
+        run: bash scripts/tests/aur-smoke-script.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
       - name: Install native build dependencies

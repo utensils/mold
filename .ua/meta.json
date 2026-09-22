@@ -206,7 +206,8 @@
         "scripts/tests/cpu-release-smoke.py",
         "scripts/tests/install-cpu.sh",
         "website/guide/installation.md",
-        "packaging/aur/mold-ai-bin/mold-ai-bin.install"
+        "packaging/aur/mold-ai-bin/mold-ai-bin.install",
+        "scripts/tests/aur-smoke-script.sh"
       ]
     }
   ]

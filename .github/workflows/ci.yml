@@ -235,6 +235,7 @@ jobs:
               - 'scripts/tests/cuda-ptx-parser-contract.py'
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/install-cpu.sh'
+              - 'scripts/tests/aur-smoke-script.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/tests/minimax-h3-attention-release-contract.sh'
               - 'scripts/bench-qwen.sh'
@@ -540,6 +541,7 @@ jobs:
           python3 scripts/tests/cuda-ptx-parser-contract.py
           bash scripts/tests/install-cuda-arch.sh
           bash scripts/tests/install-cpu.sh
+          bash scripts/tests/aur-smoke-script.sh
           bash scripts/tests/cuda-qualification-contract.sh
           bash scripts/tests/minimax-h3-attention-release-contract.sh
           bash scripts/tests/bench-qwen-parse.sh

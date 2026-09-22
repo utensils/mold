@@ -99,3 +99,10 @@ coverage and migration findings with an injected-probe updater test (both CPU
 and CUDA, including propagated CUDA errors), both Darwin backend rejection
 cases, and a pacman install/upgrade notice shipped through the AUR publisher's
 assets input. Existing CUDA feature compilation remains on the CI route.
+
+The shipping CPU executable passed clean Ubuntu execution in PR CI. The first
+Arch run built the package but exposed Bash 5.1 folding the smoke harness's
+heredoc continuations into escaped spaces. Removed those continuations and
+added an executable generated-script regression (valid package accepted,
+missing binary/empty completion/missing install notice refused), run on Bash
+5.1 before the release compile as well as the regular contract route.
