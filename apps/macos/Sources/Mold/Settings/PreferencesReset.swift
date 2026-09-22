@@ -78,5 +78,9 @@ enum PreferencesReset {
 
     static func reset(in defaults: UserDefaults) {
         for key in keys { defaults.removeObject(forKey: key) }
+        // UserDefaults may coalesce its own notification. Reconcile observers
+        // with the completed reset now, before a stale in-memory choice can
+        // continue routing work to the machine the person just cleared.
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
     }
 }

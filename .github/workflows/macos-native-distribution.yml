@@ -93,13 +93,8 @@ jobs:
             exit 1
           fi
 
-          # ONE source of truth for the marketing version -- the same line the
-          # Makefile reads, which is what the bundle actually reports.
-          marketing=$(awk -F'"' '/MARKETING_VERSION:/ { print $2; exit }' project.yml)
-          if [[ -z "$marketing" ]]; then
-            echo "::error::no MARKETING_VERSION in project.yml"
-            exit 1
-          fi
+          # The same base as every interface; no native-only version counter.
+          marketing=$(scripts/workspace-version.sh)
 
           # Sparkle compares CFBundleVersion, across both channels. The commit
           # count is monotonic and identical for a stable and a nightly cut
@@ -119,16 +114,10 @@ jobs:
             if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
               release_tag="$GITHUB_REF_NAME"
             else
-              repository_version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
-                ../../Cargo.toml | head -1)
-              if [[ -z "$repository_version" ]]; then
-                echo "::error::could not read the workspace version"
-                exit 1
-              fi
-              release_tag="v$repository_version"
+              release_tag="v$marketing"
             fi
           else
-            version="$marketing-nightly.$bundle_version"
+            version=$(../../scripts/create-desktop-nightly-version.sh "$marketing" "$bundle_version")
             release_tag="latest"
             appcast_name="mold-native-appcast-nightly.xml"
           fi

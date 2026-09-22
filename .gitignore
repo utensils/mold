@@ -119,6 +119,7 @@ apps/macos/**/build/
 apps/macos/**/.swiftpm/
 apps/macos/**/.build/
 apps/macos/Engine.xcconfig
+apps/macos/Version.yml
 apps/macos/dist/
 # `make engine`'s default cargo target dir (Makefile ENGINE_TARGET).
 apps/macos/rust/target/

@@ -55,7 +55,7 @@
 		<true/>
 	</dict>
 	<key>NSHumanReadableCopyright</key>
-	<string>Utensils</string>
+	<string>Copyright © 2026 James Brink and Jeffrey Dilley</string>
 	<!-- Sparkle. The feed here is the STABLE one and it is the default; the
 	     nightly feed is chosen at runtime by `UpdateFeedDelegate`, which is
 	     the supported way to move an app between channels (`SUFeedURL` on the

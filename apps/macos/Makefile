@@ -88,6 +88,8 @@ gen: ## Regenerate Mold.xcodeproj from project.yml
 	@# A fresh checkout has no Engine.xcconfig (it is generated, ignored), and
 	@# xcodegen refuses the spec without it -- remote-only until `make engine`.
 	@[ -f Engine.xcconfig ] || $(MAKE) engine-clean
+	@scripts/workspace-version.sh > /dev/null
+	@printf 'settings:\n  base:\n    MARKETING_VERSION: "%s"\n' "$(MARKETING_VERSION)" > Version.yml
 	@$(XCODEGEN) generate --spec project.yml --quiet
 
 build: gen ## Build the app
@@ -205,10 +207,8 @@ lint-a11y: ## Every file with a systemName image must name or opt out of it
 	if [ "$$fail" = 1 ]; then exit 1; fi
 	@echo "  a11y ok"
 
-# ONE source of truth, `project.yml`'s MARKETING_VERSION -- which is what the
-# bundle actually reports. It was duplicated here as a second literal, so
-# `make release` could name a DMG after a version the app inside it did not
-# claim (review 05-L4).
+# The workspace version is shared with the CLI and other interfaces.
+# `gen` writes it into the generated Xcode settings as well as the build.
 #
 # `?=`, so a nightly can override it -- and overriding it moves the BUNDLE's
 # version and the DMG's name together, which is the whole point: the
@@ -216,7 +216,7 @@ lint-a11y: ## Every file with a systemName image must name or opt out of it
 # xcodebuild through `XCB` below, so `CFBundleShortVersionString` is what the
 # artifact around it claims. `?=` also honours the environment, so exporting
 # it once covers `signed`, `dmg` and `notarize` in one go.
-MARKETING_VERSION ?= $(shell awk -F'"' '/MARKETING_VERSION:/ { print $$2; exit }' project.yml)
+MARKETING_VERSION ?= $(shell scripts/workspace-version.sh)
 VERSION ?= $(MARKETING_VERSION)
 # `native` in the name because this DMG shares a GitHub release with the Tauri
 # app's `Mold_<ver>_aarch64.dmg` and the CLI's `Mold-macos-arm64.dmg`. Three

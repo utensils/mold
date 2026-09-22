@@ -91,15 +91,14 @@ final class LibraryStore {
         rebuild()
     }
 
-    /// Lists, then re-lists the trash and the shelves. Shelves and tags travel
-    /// with the index: reloading one without the other leaves a renamed
-    /// collection still reading its old name.
+    /// Independent sidebar data starts together: a slow image index or trash
+    /// listing must not hold collections hostage on another destination.
     func reload() async {
-        await refresh()
         guard !Task.isCancelled else { return }
-        await refreshTrash()
-        guard !Task.isCancelled else { return }
-        await refreshOrganization()
+        async let prints: Void = refresh()
+        async let trash: Void = refreshTrash()
+        async let organization: Void = refreshOrganization()
+        _ = await (prints, trash, organization)
     }
 
     /// Not `private`: `LibraryStore+OneHost.swift` re-reads a single machine
