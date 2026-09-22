@@ -27,7 +27,10 @@ mod tests {
     use std::time::Duration;
     use tower::ServiceExt;
 
-    use crate::{routes::create_router, state::AppState};
+    use crate::{
+        routes::{create_router, queued_seed_position},
+        state::AppState,
+    };
 
     /// Serialize tests that mutate process-global mold env vars.
     /// Uses std::sync::Mutex (not tokio) so it works across independent
@@ -14590,6 +14593,27 @@ mod tests {
             first["position"], 1,
             "the seed must count the running job the registry counts"
         );
+    }
+
+    /// The seed must not count the job itself. The feeder runs concurrently
+    /// with the handler, and when it claims the durable row first the new job
+    /// is already IN the registry when the handler reads it: `len()` then
+    /// counted the job as a job ahead of itself, seeding 2 behind one running
+    /// generation. Coverage's shared-process load lost that race for real.
+    #[test]
+    fn the_queued_seed_never_counts_the_job_itself() {
+        let registry = crate::job_registry::JobRegistry::new();
+        registry.register("already-running", "flux-dev:q4");
+        registry.mark_running("already-running", Some(0));
+        // Handler wins: the row is admitted but not yet claimed.
+        assert_eq!(queued_seed_position(&registry, "new-job"), 1);
+        // Feeder wins: the job is registered before the handler reads.
+        registry.register("new-job", "flux-dev:q4");
+        assert_eq!(queued_seed_position(&registry, "new-job"), 1);
+        // A job registered behind it is not ahead of it either.
+        registry.register("later-job", "flux-dev:q4");
+        assert_eq!(queued_seed_position(&registry, "new-job"), 1);
+        assert_eq!(queued_seed_position(&registry, "later-job"), 2);
     }
 
     /// An idle host must still seed 0 — the CLI reads that as "no queue" and

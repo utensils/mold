@@ -4622,6 +4622,22 @@ pub(crate) fn requested_sse_completion_payload(
     }
 }
 
+/// The `queued` seed on the REGISTRY scale: the number of live jobs this
+/// admission sits behind, which is what `/api/queue`, `/api/activity` and the
+/// coordinator's re-announcements all report. The feeder claims the durable
+/// row concurrently with this handler, so the job may or may not be in the
+/// registry when we read — when it is, its own index is the answer, and
+/// counting the registry's length would count the job as a job ahead of
+/// itself.
+pub(crate) fn queued_seed_position(
+    registry: &crate::job_registry::JobRegistry,
+    job_id: &str,
+) -> usize {
+    registry
+        .entry(job_id)
+        .map_or_else(|| registry.len(), |entry| entry.position)
+}
+
 #[utoipa::path(
     post,
     path = "/api/generate/stream",
@@ -4709,11 +4725,9 @@ async fn generate_stream(
     let client_batch_id = status.client_batch_id.clone();
     // The first frame carries the position AND the server id, so a client can
     // say "#N in line" before anything renders and reconcile against
-    // `/api/queue` afterwards. Read on the REGISTRY scale — the count of live
-    // jobs this admission now sits behind — because the durable row has not
-    // been claimed by the feeder yet, so there is no dispatch position to
-    // read. Seeding 0 unconditionally told every caller it was next up.
-    let queued_position = state.job_registry.len();
+    // `/api/queue` afterwards. Seeding 0 unconditionally told every caller it
+    // was next up.
+    let queued_position = queued_seed_position(&state.job_registry, &job_id);
     let stream = async_stream::stream! {
         for warning in warnings.all() {
             yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
