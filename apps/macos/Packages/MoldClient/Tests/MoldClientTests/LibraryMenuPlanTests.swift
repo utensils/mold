@@ -127,6 +127,20 @@ import Testing
         #expect(plan(count: 3).items.first { $0.kind == .save }?.title == "Save 3 Copies…")
     }
 
+    @Test func aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave() {
+        let offer = LibraryMenuPlan(scope: .prints, count: 3, localSaveCount: 2)
+        #expect(offer.items.first { $0.kind == .saveLocally }?.title
+            == "Save 2 to This Mac’s Library")
+        #expect(offer.items.contains { $0.kind == .save })
+        #expect(!plan(scope: .trash).items.contains { $0.kind == .saveLocally })
+    }
+
+    @Test func aSingleMachineSelectionNamesWhereTrashGoes() {
+        let offer = LibraryMenuPlan(scope: .prints, count: 2,
+                                    trashLocationName: "hal9000")
+        #expect(offer.items.last?.title == "Move to Trash on hal9000")
+    }
+
     // MARK: - Dividers
 
     @Test func noMenuStartsOrEndsWithASeparatorOrDoublesOne() {

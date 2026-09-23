@@ -30,7 +30,9 @@ public extension GalleryPrint {
                 filename: base.filename, metadata: base.metadata, timestamp: base.timestamp,
                 format: base.format, sizeBytes: base.sizeBytes, mediaVersion: base.mediaVersion,
                 title: title, tags: tags, favorite: favorite, collections: collections,
-                trashedAt: base.trashedAt, purgeAt: base.purgeAt)
+                trashedAt: base.trashedAt, purgeAt: base.purgeAt,
+                metadataSynthetic: base.metadataSynthetic,
+                rawMetadataJSON: base.rawMetadataJSON)
         }
     }
 }

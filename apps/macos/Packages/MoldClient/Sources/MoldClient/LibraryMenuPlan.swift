@@ -32,6 +32,7 @@ public enum LibraryAction: Hashable, Sendable {
     case upscale(model: String?)
     case copy
     case save
+    case saveLocally
     case export(format: String)
     /// A mesh's animated containers share ONE entry, which opens the sheet
     /// that carries their frames, rate and size -- a turntable is a RENDER of
@@ -73,6 +74,9 @@ public struct LibraryMenuPlan: Sendable {
     /// onto a corridor.
     public let upscalers: [UpscalerOption]
     public let trashCount: Int
+    /// Supported remote pictures in this selection.
+    public let localSaveCount: Int
+    public let trashLocationName: String?
 
     public init(scope: LibraryScopeKind, count: Int, allFavorite: Bool = false,
                 name: String? = nil, shelves: [CollectionShelf] = [],
@@ -81,7 +85,8 @@ public struct LibraryMenuPlan: Sendable {
                 canOpen: Bool = true, canReuse: Bool = false,
                 canUseAsSource: Bool = false,
                 canAddReference: Bool = false, canUpscale: Bool = false,
-                upscalers: [UpscalerOption] = [], trashCount: Int = 0) {
+                upscalers: [UpscalerOption] = [], trashCount: Int = 0,
+                localSaveCount: Int = 0, trashLocationName: String? = nil) {
         self.meshExports = meshExports
         self.scope = scope
         self.count = count
@@ -97,6 +102,8 @@ public struct LibraryMenuPlan: Sendable {
         self.canUpscale = canUpscale
         self.upscalers = upscalers
         self.trashCount = trashCount
+        self.localSaveCount = localSaveCount
+        self.trashLocationName = trashLocationName
     }
 }
 

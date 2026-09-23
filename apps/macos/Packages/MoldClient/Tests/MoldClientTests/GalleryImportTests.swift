@@ -3,6 +3,13 @@ import Testing
 
 @testable import MoldClient
 
+private final class MirrorListingTransport: StubTransport {
+    override class func response(for path: String) -> (status: Int, body: Data)? {
+        guard path == "/api/gallery" else { return nil }
+        return (200, Data(#"[{"filename":"remote.png","timestamp":1700000000,"metadata_synthetic":true,"metadata":{"prompt":"a fox","model":"flux-dev:q8","seed":42,"steps":24,"guidance":3.5,"width":1024,"height":768,"version":"0.31.0","batch_id":"batch-1","true_cfg":2.75,"future_recipe_field":{"retain_me":true}}}]"#.utf8))
+    }
+}
+
 /// The body `PUT /api/gallery/import/:filename` expects.
 ///
 /// A length-prefixed frame rather than multipart, so a host can start writing
@@ -74,5 +81,41 @@ import Testing
                                     version: "0.29.0")
         #expect(import_.prompt == "Imported \u{2014} holiday.png")
         #expect(import_.model == "import")
+    }
+
+    @Test func mirroringKeepsTheOriginalRecipeAndItsProvenance() throws {
+        let source = #"{"filename":"remote.png","timestamp":1700000000,"metadata_synthetic":false,"metadata":{"prompt":"a fox","model":"flux-dev:q8","seed":42,"steps":24,"guidance":3.5,"width":1024,"height":768,"version":"0.31.0"}}"#
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(source.utf8))
+        let bytes = try body(GalleryImport(mirroring: print, file: Data([1, 2])))
+        let length = bytes[0..<4].reduce(0) { $0 << 8 | Int($1) }
+        let json = try #require(JSONSerialization.jsonObject(
+            with: Data(bytes[12..<(12 + length)])) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["prompt"] as? String == "a fox")
+        #expect(metadata["model"] as? String == "flux-dev:q8")
+        #expect(metadata["seed"] as? Int == 42)
+        #expect(metadata["steps"] as? Int == 24)
+        #expect(json["metadata_synthetic"] as? Bool == false)
+        #expect(json["timestamp"] as? UInt64 == 1_700_000_000)
+        #expect(Array(bytes.suffix(2)) == [1, 2])
+    }
+
+    @Test func fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits() async throws {
+        let fetched = try await MirrorListingTransport.backend().gallery(etag: nil)
+        guard case let .fresh(prints, _) = fetched else { Issue.record("expected listing"); return }
+        var editable = GalleryPrint.Mutable(try #require(prints.first))
+        editable.favorite = true
+        let print = editable.build()
+        #expect(print.metadataSynthetic == true)
+        #expect(print.rawMetadataAvailable)
+        let bytes = try body(GalleryImport(mirroring: print, file: Data([1])))
+        let length = bytes[0..<4].reduce(0) { $0 << 8 | Int($1) }
+        let json = try #require(JSONSerialization.jsonObject(
+            with: Data(bytes[12..<(12 + length)])) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["batch_id"] as? String == "batch-1")
+        #expect(metadata["true_cfg"] as? Double == 2.75)
+        #expect((metadata["future_recipe_field"] as? [String: Bool])?["retain_me"] == true)
+        #expect(json["metadata_synthetic"] as? Bool == true)
     }
 }

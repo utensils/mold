@@ -11,10 +11,11 @@ extension LibraryActions {
         let noun = entries.count == 1
             ? "“\(entries[0].print.title ?? entries[0].print.filename)”"
             : "\(entries.count.formatted()) prints"
+        let locations = Set(entries.map(\.hostName)).sorted().joined(separator: ", ")
         ask(Destruction(
             title: "Delete \(noun) immediately?",
-            message: "This cannot be undone. The machine that holds "
-                + (entries.count == 1 ? "it" : "them") + " will remove the file.",
+            message: "This cannot be undone. Delete from \(locations). "
+                + "Copies on other machines remain in their Libraries.",
             verb: "Delete Immediately"
         ) {
             Task {

@@ -56,8 +56,14 @@ public extension LibraryMenuPlan {
             Item(kind: .copy, title: "Copy"),
             Item(kind: .save, title: saveTitle),
         ]
+        if localSaveCount > 0 {
+            let title = localSaveCount == 1 ? "Save to This Mac’s Library"
+                : "Save \(localSaveCount.formatted()) to This Mac’s Library"
+            items.append(Item(kind: .saveLocally, title: title))
+        }
         if count == 1 { items.append(Item(title: "Export…", children: exportItems)) }
-        return items + [.separator, Item(kind: .trash, title: "Move to Trash", isDestructive: true)]
+        let trashTitle = trashLocationName.map { "Move to Trash on \($0)" } ?? "Move to Trash"
+        return items + [.separator, Item(kind: .trash, title: trashTitle, isDestructive: true)]
     }
 
     /// What Export… holds. A clip's containers are one entry each; a mesh's

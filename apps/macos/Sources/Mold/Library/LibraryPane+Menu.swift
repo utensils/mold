@@ -27,6 +27,8 @@ extension LibraryPane {
             meshExports: entries.count == 1 && entries[0].print.isMesh
                 ? actions.meshExports(for: entries[0]) : nil,
             trashCount: library.trashed.count,
+            localSaveCount: entries.filter(LibraryStore.canSaveLocally).count,
+            trashLocationName: Set(entries.map(\.hostID)).count == 1 ? entries.first?.hostName : nil,
             name: entries.count == 1 ? entries[0].print.displayName : nil,
             canReuse: entries.count == 1,
             canUseAsSource: entries.count == 1 && attachmentOffer.canUseAsSource

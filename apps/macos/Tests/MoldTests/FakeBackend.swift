@@ -897,11 +897,17 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Every import's filename, in order -- what a BATCH actually sent, which
     /// a call count cannot say.
     nonisolated(unsafe) var importedNames: [String] = []
+    nonisolated(unsafe) var importedItems: [GalleryImport] = []
+    nonisolated(unsafe) var importFailures: Set<String> = []
 
     @discardableResult
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String {
         try record("importPrint")
+        if importFailures.contains(filename) {
+            throw MoldClientError.http(status: 409, code: "NAME_COLLISION", message: "A different print owns that name.")
+        }
         importedNames.append(filename)
+        importedItems.append(item)
         return filename
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {
