@@ -50,7 +50,21 @@ public struct HTTPBackend: MoldBackend {
             // not a safe path component is dropped and logged rather than
             // losing the whole index over one of them.
             let listing = try MoldJSON.decoder.decode(GalleryListing.self, from: data)
-            return .fresh(listing.prints, etag: http.value(forHTTPHeaderField: "ETag"))
+            // GalleryPrint's typed metadata deliberately ignores newer recipe
+            // fields. Keep the original JSON for a byte-preserving mirror.
+            let rawRows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
+            var rawByName: [String: Data] = [:]
+            for row in rawRows {
+                guard let name = row["filename"] as? String,
+                      let metadata = row["metadata"] as? [String: Any] else { continue }
+                rawByName[name] = try JSONSerialization.data(withJSONObject: metadata)
+            }
+            let prints = listing.prints.map { print in
+                var print = print
+                print.rawMetadataJSON = rawByName[print.filename]
+                return print
+            }
+            return .fresh(prints, etag: http.value(forHTTPHeaderField: "ETag"))
         } catch {
             throw MoldClientError.malformedResponse
         }

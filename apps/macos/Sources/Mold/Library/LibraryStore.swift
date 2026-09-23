@@ -50,6 +50,11 @@ final class LibraryStore {
     /// pieces of memory that decision needs. See `GalleryLive`.
     let live = GalleryLive()
 
+    /// A Library import to the embedded host is a batch, not a Finder export.
+    var localSaveProgress: String?
+    var localSaveReport = ""
+    var localSaveAlertPresented = false
+
     /// How many times the rows have changed. See `LibraryRevision`.
     let rows = LibraryRevision()
 

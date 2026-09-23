@@ -284721,7 +284721,7 @@
     },
     "apps/macos/Tests/MoldTests/FakeBackend.swift": {
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "contentHash": "a2600a357336843134fbabff9bcc265a23b0bec8de68463ebe6d7f78711f7efe",
+      "contentHash": "acee9adbce973c13caac58fb9fe4686a1b0eeb3ccfd460ac31cb3c320ecb4e7b",
       "functions": [
         {
           "name": "settle",
@@ -285290,7 +285290,7 @@
           ],
           "returnType": "String",
           "exported": true,
-          "lineCount": 6
+          "lineCount": 10
         },
         {
           "name": "media",
@@ -285678,10 +285678,12 @@
             "extras",
             "licenseRows",
             "acceptedLicenses",
-            "importedNames"
+            "importedNames",
+            "importedItems",
+            "importFailures"
           ],
           "exported": true,
-          "lineCount": 949
+          "lineCount": 955
         }
       ],
       "imports": [
@@ -285882,6 +285884,8 @@
         "restoreFromTrash",
         "deleteForever",
         "importedNames",
+        "importedItems",
+        "importFailures",
         "importPrint",
         "media",
         "thumbnail",
@@ -285904,7 +285908,2000 @@
         "downloadEvents",
         "FakeBackend"
       ],
-      "totalLines": 996,
+      "totalLines": 1002,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "contentHash": "4338b8b43d9cae49cbcae277cb4fad8a58d98769a4d2e1c55cfc67620e37881c",
+      "functions": [
+        {
+          "name": "GalleryImport.init",
+          "params": [
+            "prompt",
+            "model",
+            "width",
+            "height",
+            "version",
+            "file",
+            "timestamp"
+          ],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "GalleryImport.init",
+          "params": [
+            "file",
+            "name",
+            "version",
+            "width",
+            "height",
+            "madeAt"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "GalleryImport.init",
+          "params": [
+            "print",
+            "file"
+          ],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "body",
+          "params": [],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 53
+        },
+        {
+          "name": "importPrint",
+          "params": [
+            "item",
+            "filename"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "GalleryImport",
+          "methods": [
+            "init",
+            "init",
+            "init",
+            "body"
+          ],
+          "properties": [
+            "prompt",
+            "model",
+            "width",
+            "height",
+            "version",
+            "file",
+            "timestamp",
+            "originalMetadata",
+            "originalMetadataJSON",
+            "metadataSynthetic",
+            "contentType"
+          ],
+          "exported": true,
+          "lineCount": 112
+        },
+        {
+          "name": "extension HTTPBackend",
+          "methods": [
+            "importPrint"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 20
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "prompt",
+        "model",
+        "width",
+        "height",
+        "version",
+        "file",
+        "timestamp",
+        "originalMetadata",
+        "originalMetadataJSON",
+        "metadataSynthetic",
+        "GalleryImport.init",
+        "GalleryImport.init",
+        "contentType",
+        "GalleryImport.init",
+        "body",
+        "GalleryImport",
+        "importPrint"
+      ],
+      "totalLines": 142,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+      "contentHash": "84bc50cc80942533751dd3cee106eae9e602060749542677b3d6a38f9caa7402",
+      "functions": [
+        {
+          "name": "Mutable.init",
+          "params": [
+            "print"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "build",
+          "params": [],
+          "returnType": "GalleryPrint",
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension GalleryPrint",
+          "methods": [],
+          "properties": [],
+          "exported": false,
+          "lineCount": 36
+        },
+        {
+          "name": "Mutable",
+          "methods": [
+            "init",
+            "build"
+          ],
+          "properties": [
+            "favorite",
+            "tags",
+            "title",
+            "collections",
+            "base"
+          ],
+          "exported": true,
+          "lineCount": 29
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "favorite",
+        "tags",
+        "title",
+        "collections",
+        "Mutable.init",
+        "build",
+        "Mutable"
+      ],
+      "totalLines": 39,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "contentHash": "26fd51a0017dd0f5acba1e914447c81b66462e68975436d29dd25b0edf512768",
+      "functions": [
+        {
+          "name": "GalleryPrint.init",
+          "params": [
+            "decoder"
+          ],
+          "exported": true,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "GalleryPrint",
+          "methods": [],
+          "properties": [
+            "filename",
+            "metadata",
+            "timestamp",
+            "format",
+            "sizeBytes",
+            "mediaVersion",
+            "title",
+            "tags",
+            "favorite",
+            "collections",
+            "trashedAt",
+            "purgeAt",
+            "metadataSynthetic",
+            "rawMetadataJSON",
+            "rawMetadataAvailable",
+            "createdAt",
+            "isFavorite",
+            "tagList",
+            "animatedFormats",
+            "isVideo",
+            "isMesh",
+            "kind",
+            "displayName",
+            "collectionList"
+          ],
+          "exported": true,
+          "lineCount": 90
+        },
+        {
+          "name": "CodingKeys",
+          "methods": [],
+          "properties": [
+            "filename",
+            "metadata",
+            "timestamp",
+            "format",
+            "sizeBytes",
+            "mediaVersion",
+            "title",
+            "tags",
+            "favorite",
+            "collections",
+            "trashedAt",
+            "purgeAt",
+            "metadataSynthetic"
+          ],
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "extension GalleryPrint",
+          "methods": [
+            "init"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 27
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "filename",
+        "metadata",
+        "timestamp",
+        "format",
+        "sizeBytes",
+        "mediaVersion",
+        "title",
+        "tags",
+        "favorite",
+        "collections",
+        "trashedAt",
+        "purgeAt",
+        "metadataSynthetic",
+        "rawMetadataJSON",
+        "rawMetadataAvailable",
+        "createdAt",
+        "isFavorite",
+        "tagList",
+        "isVideo",
+        "isMesh",
+        "kind",
+        "displayName",
+        "collectionList",
+        "GalleryPrint",
+        "GalleryPrint.init"
+      ],
+      "totalLines": 124,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "contentHash": "b0aba2cf88866d98bf88bf9207d9c1a5435c6306199adad9e2735691d301a2d8",
+      "functions": [
+        {
+          "name": "HTTPBackend.init",
+          "params": [
+            "host",
+            "session"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "status",
+          "params": [],
+          "returnType": "ServerStatus",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "capabilities",
+          "params": [],
+          "returnType": "Capabilities",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "models",
+          "params": [],
+          "returnType": "[Model]",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "queue",
+          "params": [],
+          "returnType": "QueueListing",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "gallery",
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "galleryListing",
+          "params": [
+            "view",
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 35
+        }
+      ],
+      "classes": [
+        {
+          "name": "HTTPBackend",
+          "methods": [
+            "init",
+            "status",
+            "capabilities",
+            "models",
+            "queue",
+            "gallery",
+            "galleryListing"
+          ],
+          "properties": [
+            "host",
+            "session"
+          ],
+          "exported": true,
+          "lineCount": 66
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "host",
+        "session",
+        "HTTPBackend.init",
+        "status",
+        "capabilities",
+        "models",
+        "queue",
+        "gallery",
+        "galleryListing",
+        "HTTPBackend"
+      ],
+      "totalLines": 73,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "contentHash": "710fdf8d0609507ee034323abd9e3a664bba3fc3c32062312c42bcf0ed2ac726",
+      "functions": [
+        {
+          "name": "saveTitle",
+          "params": [
+            "count"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 3
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryMenuPlan",
+          "methods": [
+            "saveTitle"
+          ],
+          "properties": [
+            "items",
+            "printItems",
+            "exportItems",
+            "trashItems",
+            "collectionItems",
+            "upscaleItem",
+            "quickLookTitle",
+            "favoriteTitle",
+            "saveTitle"
+          ],
+          "exported": false,
+          "lineCount": 147
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "items",
+        "saveTitle"
+      ],
+      "totalLines": 152,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "contentHash": "335481be40793f4dfeaf8e3aca942fa9a89c01d1ad078d4c0b220cad0493da00",
+      "functions": [
+        {
+          "name": "LibraryMenuPlan.init",
+          "params": [
+            "scope",
+            "count",
+            "allFavorite",
+            "name",
+            "shelves",
+            "enclosingShelf",
+            "exportFormats",
+            "meshExports",
+            "canOpen",
+            "canReuse",
+            "canUseAsSource",
+            "canAddReference",
+            "canUpscale",
+            "upscalers",
+            "trashCount",
+            "localSaveCount",
+            "trashLocationName"
+          ],
+          "exported": true,
+          "lineCount": 27
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryAction",
+          "methods": [],
+          "properties": [
+            "open",
+            "reuse",
+            "useAsSourceImage",
+            "addAsReference",
+            "quickLook",
+            "favorite",
+            "file",
+            "unfile",
+            "upscale",
+            "copy",
+            "save",
+            "saveLocally",
+            "export",
+            "exportTurntable",
+            "trash",
+            "putBack",
+            "deleteForever",
+            "emptyTrash",
+            "renameCollection",
+            "setCollectionHidden",
+            "deleteCollection"
+          ],
+          "exported": true,
+          "lineCount": 29
+        },
+        {
+          "name": "LibraryMenuPlan",
+          "methods": [
+            "init"
+          ],
+          "properties": [
+            "scope",
+            "count",
+            "allFavorite",
+            "name",
+            "shelves",
+            "enclosingShelf",
+            "exportFormats",
+            "meshExports",
+            "canOpen",
+            "canReuse",
+            "canUseAsSource",
+            "canAddReference",
+            "canUpscale",
+            "upscalers",
+            "trashCount",
+            "localSaveCount",
+            "trashLocationName"
+          ],
+          "exported": true,
+          "lineCount": 58
+        },
+        {
+          "name": "extension LibraryMenuPlan",
+          "methods": [],
+          "properties": [
+            "reuseTitle"
+          ],
+          "exported": false,
+          "lineCount": 6
+        },
+        {
+          "name": "LibraryScopeKind",
+          "methods": [],
+          "properties": [
+            "prints",
+            "collection",
+            "trash"
+          ],
+          "exported": true,
+          "lineCount": 5
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "LibraryAction",
+        "scope",
+        "count",
+        "allFavorite",
+        "name",
+        "shelves",
+        "enclosingShelf",
+        "exportFormats",
+        "meshExports",
+        "canOpen",
+        "canReuse",
+        "canUseAsSource",
+        "canAddReference",
+        "canUpscale",
+        "upscalers",
+        "trashCount",
+        "localSaveCount",
+        "trashLocationName",
+        "LibraryMenuPlan.init",
+        "LibraryMenuPlan",
+        "reuseTitle",
+        "LibraryScopeKind"
+      ],
+      "totalLines": 123,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "contentHash": "74064c54c088a24a060ae51f32f2488c4de3fc33d8964a913de0ea1eb7854a1f",
+      "functions": [
+        {
+          "name": "response",
+          "params": [
+            "path"
+          ],
+          "returnType": "(status: Int, body: Data)?",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "body",
+          "params": [
+            "import_"
+          ],
+          "returnType": "[UInt8]",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "theHeaderIsFourBytesOfDescriptorThenEightOfFile",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "theFileBytesRideAtTheEndUntouched",
+          "params": [],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "theDescriptorCarriesTheMetadataTheServerRequires",
+          "params": [],
+          "exported": true,
+          "lineCount": 22
+        },
+        {
+          "name": "aStatedDateTravelsWithIt",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "aPromptlessImportIsStillDescribedBySomething",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "mirroringKeepsTheOriginalRecipeAndItsProvenance",
+          "params": [],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits",
+          "params": [],
+          "exported": true,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "MirrorListingTransport",
+          "methods": [
+            "response"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 6
+        },
+        {
+          "name": "GalleryImportSuite",
+          "methods": [
+            "body",
+            "theHeaderIsFourBytesOfDescriptorThenEightOfFile",
+            "theFileBytesRideAtTheEndUntouched",
+            "theDescriptorCarriesTheMetadataTheServerRequires",
+            "aStatedDateTravelsWithIt",
+            "aPromptlessImportIsStillDescribedBySomething",
+            "mirroringKeepsTheOriginalRecipeAndItsProvenance",
+            "fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 103
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "theHeaderIsFourBytesOfDescriptorThenEightOfFile",
+        "theFileBytesRideAtTheEndUntouched",
+        "theDescriptorCarriesTheMetadataTheServerRequires",
+        "aStatedDateTravelsWithIt",
+        "aPromptlessImportIsStillDescribedBySomething",
+        "mirroringKeepsTheOriginalRecipeAndItsProvenance",
+        "fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits",
+        "GalleryImportSuite"
+      ],
+      "totalLines": 122,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "contentHash": "1560745bea9656f1cb9bd2eef0c289a0ee2d1cf896b39df57462e62fdd24b2ef",
+      "functions": [
+        {
+          "name": "shelf",
+          "params": [
+            "name",
+            "hidden"
+          ],
+          "returnType": "CollectionShelf",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "plan",
+          "params": [
+            "scope",
+            "count",
+            "allFavorite",
+            "shelves",
+            "enclosing",
+            "formats",
+            "canReuse",
+            "canSource",
+            "canReference",
+            "trashCount"
+          ],
+          "returnType": "LibraryMenuPlan",
+          "exported": false,
+          "lineCount": 11
+        },
+        {
+          "name": "titles",
+          "params": [
+            "plan"
+          ],
+          "returnType": "[String]",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "kinds",
+          "params": [
+            "plan"
+          ],
+          "returnType": "[LibraryAction]",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "oneSelectedPrintIsOfferedEverythingInOneOrder",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "whatDestroysSomethingComesLastAndSaysSo",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "nothingSelectedIsNoMenuAtAll",
+          "params": [],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "severalSelectedPrintsDropTheOnesThatOnlyMakeSenseForOne",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "oneRasterOffersOnlyTheSupportedDestinationAttachments",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "theTrashOffersItsOwnThings",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "showingACollectionOffersWhatToDoWithIt",
+          "params": [],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "favouriteIsSpeltTheWayTheSidebarSpellsIt",
+          "params": [],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "quickLookNamesWhatItIsAbout",
+          "params": [],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "savingSeveralSaysHowMany",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+          "params": [],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "aSingleMachineSelectionNamesWhereTrashGoes",
+          "params": [],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "noMenuStartsOrEndsWithASeparatorOrDoublesOne",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "aSubmenuIsOnlyOfferedWhenItHasEntries",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryMenuPlanSuite",
+          "methods": [
+            "shelf",
+            "plan",
+            "titles",
+            "kinds",
+            "oneSelectedPrintIsOfferedEverythingInOneOrder",
+            "whatDestroysSomethingComesLastAndSaysSo",
+            "nothingSelectedIsNoMenuAtAll",
+            "severalSelectedPrintsDropTheOnesThatOnlyMakeSenseForOne",
+            "oneRasterOffersOnlyTheSupportedDestinationAttachments",
+            "theTrashOffersItsOwnThings",
+            "showingACollectionOffersWhatToDoWithIt",
+            "aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle",
+            "favouriteIsSpeltTheWayTheSidebarSpellsIt",
+            "quickLookNamesWhatItIsAbout",
+            "savingSeveralSaysHowMany",
+            "aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+            "aSingleMachineSelectionNamesWhereTrashGoes",
+            "noMenuStartsOrEndsWithASeparatorOrDoublesOne",
+            "aSubmenuIsOnlyOfferedWhenItHasEntries"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 152
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "oneSelectedPrintIsOfferedEverythingInOneOrder",
+        "whatDestroysSomethingComesLastAndSaysSo",
+        "nothingSelectedIsNoMenuAtAll",
+        "severalSelectedPrintsDropTheOnesThatOnlyMakeSenseForOne",
+        "oneRasterOffersOnlyTheSupportedDestinationAttachments",
+        "theTrashOffersItsOwnThings",
+        "showingACollectionOffersWhatToDoWithIt",
+        "aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle",
+        "favouriteIsSpeltTheWayTheSidebarSpellsIt",
+        "quickLookNamesWhatItIsAbout",
+        "savingSeveralSaysHowMany",
+        "aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+        "aSingleMachineSelectionNamesWhereTrashGoes",
+        "noMenuStartsOrEndsWithASeparatorOrDoublesOne",
+        "aSubmenuIsOnlyOfferedWhenItHasEntries",
+        "LibraryMenuPlanSuite"
+      ],
+      "totalLines": 165,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+      "contentHash": "3176bbce2d91ed32f6528d1a97efb007ea508470ea91f50cac170c17acc89ecb",
+      "functions": [
+        {
+          "name": "deleteForever",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "emptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryActions",
+          "methods": [
+            "deleteForever",
+            "emptyTrash"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 44
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "deleteForever",
+        "emptyTrash"
+      ],
+      "totalLines": 50,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "contentHash": "947748c5e1689e7240157ecf0a879a04b31c4cc239b2e8a34239bb04bc8a3838",
+      "functions": [
+        {
+          "name": "perform",
+          "params": [
+            "action",
+            "targets",
+            "scope",
+            "open"
+          ],
+          "exported": true,
+          "lineCount": 50
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryActions",
+          "methods": [
+            "perform"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 54
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "perform"
+      ],
+      "totalLines": 61,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryMenu.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "contentHash": "f97a8fc1116a6a8f5c76fe3e00a4159fd861dcd62148986e09a202085d4220f6",
+      "functions": [
+        {
+          "name": "perform",
+          "params": [
+            "action"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "canAttach",
+          "params": [
+            "action"
+          ],
+          "returnType": "Bool",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "libraryMenu",
+          "params": [
+            "menu"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 7
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryMenu",
+          "methods": [
+            "perform",
+            "canAttach"
+          ],
+          "properties": [
+            "targets",
+            "scope",
+            "actions",
+            "shelves",
+            "enclosingShelf",
+            "trashCount",
+            "open",
+            "items",
+            "share",
+            "plan"
+          ],
+          "exported": true,
+          "lineCount": 52
+        },
+        {
+          "name": "extension View",
+          "methods": [
+            "libraryMenu"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 10
+        },
+        {
+          "name": "extension LibraryScope",
+          "methods": [],
+          "properties": [
+            "menuKind"
+          ],
+          "exported": false,
+          "lineCount": 10
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "targets",
+        "scope",
+        "actions",
+        "shelves",
+        "enclosingShelf",
+        "trashCount",
+        "open",
+        "items",
+        "perform",
+        "share",
+        "LibraryMenu",
+        "libraryMenu",
+        "menuKind"
+      ],
+      "totalLines": 87,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "contentHash": "0d72bb4f3546fb2856a8a2769b9991d928b89d7a466d39d4355a0017183b9897",
+      "functions": [
+        {
+          "name": "watched",
+          "params": [
+            "showing"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "chrome",
+          "params": [
+            "showing"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 23
+        },
+        {
+          "name": "content",
+          "params": [
+            "showing"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 20
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryPane",
+          "methods": [
+            "watched",
+            "chrome",
+            "content"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 71
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "watched",
+        "chrome",
+        "content"
+      ],
+      "totalLines": 78,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "contentHash": "c5ff2255125d7e8a08ad0099f5dd6c38b310bdcdfc2dd5444e4b2338dad64731",
+      "functions": [
+        {
+          "name": "subtitle",
+          "params": [
+            "showing"
+          ],
+          "returnType": "String",
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "empty",
+          "params": [
+            "showing"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 22
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryPane",
+          "methods": [
+            "subtitle",
+            "empty"
+          ],
+          "properties": [
+            "pool",
+            "retentionSentence"
+          ],
+          "exported": false,
+          "lineCount": 49
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "subtitle",
+        "pool",
+        "empty",
+        "retentionSentence"
+      ],
+      "totalLines": 55,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "contentHash": "62a1d70b48970c91167b39a846445e6841c3b24f270e281bdd57e087198b8dbb",
+      "functions": [
+        {
+          "name": "menuSelection",
+          "params": [
+            "showing"
+          ],
+          "returnType": "LibrarySelection",
+          "exported": true,
+          "lineCount": 34
+        },
+        {
+          "name": "menuFile",
+          "params": [
+            "showing"
+          ],
+          "returnType": "LibraryFile",
+          "exported": true,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryPane",
+          "methods": [
+            "menuSelection",
+            "menuFile"
+          ],
+          "properties": [
+            "menuImport",
+            "isEditingText",
+            "enclosingShelf"
+          ],
+          "exported": false,
+          "lineCount": 92
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "menuSelection",
+        "menuImport",
+        "menuFile",
+        "isEditingText",
+        "enclosingShelf"
+      ],
+      "totalLines": 97,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "contentHash": "2f017119f44d444ebf07a1a1aa6d330325fd4071e8f99e53ccb5ec6099a54d38",
+      "functions": [
+        {
+          "name": "commitTypedToken",
+          "params": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "chooseMachine",
+          "params": [
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 8
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryPane",
+          "methods": [
+            "commitTypedToken",
+            "chooseMachine"
+          ],
+          "properties": [
+            "toolbar",
+            "suggestedTokens",
+            "selectedMachines",
+            "machineFilterTitle",
+            "searchableMachines"
+          ],
+          "exported": false,
+          "lineCount": 115
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "toolbar",
+        "suggestedTokens",
+        "commitTypedToken",
+        "selectedMachines",
+        "machineFilterTitle",
+        "chooseMachine"
+      ],
+      "totalLines": 123,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "contentHash": "4106b2adb2d8596e25ccedd79d66b7c647288adf364a717053043305b6c502d4",
+      "functions": [],
+      "classes": [
+        {
+          "name": "LibraryPane",
+          "methods": [],
+          "properties": [
+            "hosts",
+            "library",
+            "navigation",
+            "generate",
+            "drafts",
+            "models",
+            "reuseStore",
+            "materializer",
+            "upscales",
+            "undoManager",
+            "destination",
+            "selection",
+            "viewing",
+            "attachmentVersion",
+            "isSearchFocused",
+            "editingText",
+            "showsInspector",
+            "pendingDestruction",
+            "index",
+            "renamingShelf",
+            "meshExport",
+            "actions",
+            "body"
+          ],
+          "exported": true,
+          "lineCount": 97
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "hosts",
+        "library",
+        "navigation",
+        "generate",
+        "drafts",
+        "models",
+        "reuseStore",
+        "materializer",
+        "upscales",
+        "undoManager",
+        "destination",
+        "selection",
+        "viewing",
+        "attachmentVersion",
+        "isSearchFocused",
+        "editingText",
+        "showsInspector",
+        "renamingShelf",
+        "actions",
+        "body",
+        "LibraryPane"
+      ],
+      "totalLines": 106,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "contentHash": "03818df681341342fadf4b71a6bfd2f46c3f7b5ddb41f410ca97591ffbd0329b",
+      "functions": [
+        {
+          "name": "canSaveLocally",
+          "params": [
+            "entry"
+          ],
+          "returnType": "Bool",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "saveLocally",
+          "params": [
+            "selection"
+          ],
+          "exported": true,
+          "lineCount": 60
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryStore",
+          "methods": [
+            "canSaveLocally",
+            "saveLocally"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 74
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "canSaveLocally",
+        "saveLocally"
+      ],
+      "totalLines": 81,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "contentHash": "57514acf6ad024f3a2d431a75491b754f36594763f3e0ac9ca4d66c67c66b034",
+      "functions": [
+        {
+          "name": "LibraryStore.init",
+          "params": [
+            "hosts"
+          ],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "refresh",
+          "params": [],
+          "exported": true,
+          "lineCount": 23
+        },
+        {
+          "name": "reload",
+          "params": [],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "apply",
+          "params": [
+            "result",
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 19
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryStore",
+          "methods": [
+            "init",
+            "refresh",
+            "reload",
+            "apply"
+          ],
+          "properties": [
+            "hosts",
+            "items",
+            "loads",
+            "isLoading",
+            "trashed",
+            "perHost",
+            "trashPerHost",
+            "etags",
+            "trashEtags",
+            "collectionsPerHost",
+            "tags",
+            "undo",
+            "mutations",
+            "live",
+            "localSaveProgress",
+            "localSaveReport",
+            "localSaveAlertPresented",
+            "rows"
+          ],
+          "exported": true,
+          "lineCount": 121
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "hosts",
+        "items",
+        "isLoading",
+        "trashed",
+        "perHost",
+        "trashPerHost",
+        "etags",
+        "trashEtags",
+        "collectionsPerHost",
+        "tags",
+        "undo",
+        "mutations",
+        "live",
+        "localSaveProgress",
+        "localSaveReport",
+        "localSaveAlertPresented",
+        "rows",
+        "LibraryStore.init",
+        "refresh",
+        "reload",
+        "apply",
+        "LibraryStore"
+      ],
+      "totalLines": 131,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Shell/LibrarySelection.swift": {
+      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "contentHash": "fe5399b3057ed5844f6ca8505f6b3218046dee5fd16beaa5ff06437e25296ab1",
+      "functions": [
+        {
+          "name": "==",
+          "params": [
+            "lhs",
+            "rhs"
+          ],
+          "returnType": "Bool",
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "==",
+          "params": [
+            "lhs",
+            "rhs"
+          ],
+          "returnType": "Bool",
+          "exported": true,
+          "lineCount": 1
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibrarySelection",
+          "methods": [
+            "=="
+          ],
+          "properties": [
+            "targets",
+            "count",
+            "allFavorite",
+            "scope",
+            "shelves",
+            "enclosingShelf",
+            "isEditingText",
+            "exportFormats",
+            "meshExports",
+            "trashCount",
+            "localSaveCount",
+            "trashLocationName",
+            "name",
+            "canReuse",
+            "canUseAsSource",
+            "canAddReference",
+            "canUpscale",
+            "upscalers",
+            "share",
+            "perform",
+            "isEmpty",
+            "canQuickLook",
+            "plan"
+          ],
+          "exported": true,
+          "lineCount": 78
+        },
+        {
+          "name": "LibraryImport",
+          "methods": [
+            "=="
+          ],
+          "properties": [
+            "machines",
+            "run"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "LibraryImportKey",
+          "methods": [],
+          "properties": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "LibrarySelectionKey",
+          "methods": [],
+          "properties": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "extension FocusedValues",
+          "methods": [],
+          "properties": [
+            "librarySelection",
+            "libraryImport"
+          ],
+          "exported": false,
+          "lineCount": 11
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "targets",
+        "count",
+        "allFavorite",
+        "scope",
+        "shelves",
+        "enclosingShelf",
+        "isEditingText",
+        "exportFormats",
+        "meshExports",
+        "trashCount",
+        "localSaveCount",
+        "trashLocationName",
+        "name",
+        "canReuse",
+        "canUseAsSource",
+        "canAddReference",
+        "canUpscale",
+        "upscalers",
+        "share",
+        "perform",
+        "isEmpty",
+        "canQuickLook",
+        "plan",
+        "==",
+        "LibrarySelection",
+        "machines",
+        "run",
+        "==",
+        "LibraryImport",
+        "LibraryImportKey",
+        "LibrarySelectionKey",
+        "librarySelection",
+        "libraryImport"
+      ],
+      "totalLines": 119,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "contentHash": "5e20b2dc36788d19becce4215ec4089c6fce1dba1eab69b6ebd091166b36777f",
+      "functions": [
+        {
+          "name": "host",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+          "params": [],
+          "exported": true,
+          "lineCount": 26
+        },
+        {
+          "name": "anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "aFailedImportReportsOneFailureAndContinuesTheBatch",
+          "params": [],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "remoteTrashDoesNotSendALocalCopyToTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 21
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryLocalSaveTests",
+          "methods": [
+            "host",
+            "savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+            "anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+            "aFailedImportReportsOneFailureAndContinuesTheBatch",
+            "remoteTrashDoesNotSendALocalCopyToTrash"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 94
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+        "anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+        "aFailedImportReportsOneFailureAndContinuesTheBatch",
+        "remoteTrashDoesNotSendALocalCopyToTrash",
+        "LibraryLocalSaveTests"
+      ],
+      "totalLines": 101,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "contentHash": "49f88c35f625b8bde08f052448ac4be93e852be8187be2b6da104c22b21d97c4",
+      "functions": [
+        {
+          "name": "selection",
+          "params": [
+            "count",
+            "editing",
+            "targets",
+            "performed"
+          ],
+          "returnType": "LibrarySelection",
+          "exported": false,
+          "lineCount": 11
+        },
+        {
+          "name": "quickLookIsOfferedForASelectionWithNoCaretInTheWindow",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "quickLookStandsDownWhileTextIsBeingEdited",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "quickLookIsNotOfferedForNothing",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "theMenuBarOffersThePlanAndNothingOfItsOwn",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "aCaretChangeIsAChangeTheMenuHasToSee",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "sameShapedPrintSelectionsStillReplaceTheirActionClosures",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "sameShapedFileSelectionsStillReplaceTheirActionClosures",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibrarySelectionTests",
+          "methods": [
+            "selection",
+            "quickLookIsOfferedForASelectionWithNoCaretInTheWindow",
+            "quickLookStandsDownWhileTextIsBeingEdited",
+            "quickLookIsNotOfferedForNothing",
+            "theMenuBarOffersThePlanAndNothingOfItsOwn",
+            "aCaretChangeIsAChangeTheMenuHasToSee",
+            "sameShapedPrintSelectionsStillReplaceTheirActionClosures",
+            "sameShapedFileSelectionsStillReplaceTheirActionClosures"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 74
+        },
+        {
+          "name": "Performed",
+          "methods": [],
+          "properties": [
+            "actions"
+          ],
+          "exported": false,
+          "lineCount": 3
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "quickLookIsOfferedForASelectionWithNoCaretInTheWindow",
+        "quickLookStandsDownWhileTextIsBeingEdited",
+        "quickLookIsNotOfferedForNothing",
+        "theMenuBarOffersThePlanAndNothingOfItsOwn",
+        "aCaretChangeIsAChangeTheMenuHasToSee",
+        "sameShapedPrintSelectionsStillReplaceTheirActionClosures",
+        "sameShapedFileSelectionsStillReplaceTheirActionClosures",
+        "LibrarySelectionTests"
+      ],
+      "totalLines": 90,
       "hasStructuralAnalysis": true
     }
   }

@@ -36,6 +36,8 @@ extension LibraryActions {
             copy(targets)
         case .save:
             save(targets)
+        case .saveLocally:
+            Task { await library.saveLocally(targets) }
         case let .export(format):
             if let entry = targets.first { requestExport(entry, as: format) }
         case .exportTurntable:

@@ -21,6 +21,7 @@ extension LibraryPane {
             .onAppear { revealIfNeeded() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
+            .onChange(of: navigation.query.tokens) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
             // A click on an already-open Library: `.onAppear` above only
             // fires when the pane is freshly mounted.

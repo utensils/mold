@@ -17,6 +17,18 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     public let collections: [String]?
     public let trashedAt: UInt64?
     public let purgeAt: UInt64?
+    /// The serving host synthesized this recipe for a file it did not render.
+    /// Older hosts omit the flag; absence is treated as an original recipe.
+    public var metadataSynthetic: Bool? = nil
+    /// Exact server JSON for a cross-host import. The typed recipe is for UI;
+    /// it intentionally tolerates newer fields that an import must retain.
+    var rawMetadataJSON: Data? = nil
+    public var rawMetadataAvailable: Bool { rawMetadataJSON != nil }
+
+    private enum CodingKeys: String, CodingKey {
+        case filename, metadata, timestamp, format, sizeBytes, mediaVersion
+        case title, tags, favorite, collections, trashedAt, purgeAt, metadataSynthetic
+    }
 
     public var createdAt: Date { Date(timeIntervalSince1970: TimeInterval(timestamp)) }
     public var isFavorite: Bool { favorite ?? false }
@@ -104,7 +116,8 @@ public extension GalleryPrint {
             favorite: try row.decodeIfPresent(Bool.self, forKey: .favorite),
             collections: try row.decodeIfPresent([String].self, forKey: .collections),
             trashedAt: try row.decodeIfPresent(UInt64.self, forKey: .trashedAt),
-            purgeAt: try row.decodeIfPresent(UInt64.self, forKey: .purgeAt)
+            purgeAt: try row.decodeIfPresent(UInt64.self, forKey: .purgeAt),
+            metadataSynthetic: try row.decodeIfPresent(Bool.self, forKey: .metadataSynthetic)
         )
     }
 }

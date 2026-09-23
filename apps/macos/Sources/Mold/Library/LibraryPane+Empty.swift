@@ -6,6 +6,7 @@ import SwiftUI
 extension LibraryPane {
 
     func subtitle(_ showing: LibraryShowing) -> String {
+        if let progress = library.localSaveProgress { return progress }
         if showing.selected.count > 1 { return "\(showing.selected.count.formatted()) selected" }
         let shown = showing.visible.count
         // "1 prints" is the tell of a string built by concatenation. The noun

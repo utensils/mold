@@ -73,6 +73,7 @@ struct LibraryPane: View {
     // and threaded down, rather than each stage re-filtering the whole library
     // -- or this pass re-doing what the last one already worked out.
     var body: some View {
+        @Bindable var library = library
         let showing = index.showing(pool: pool, revision: library.rows.value,
                                     query: resolved, selection: selection.items)
         return watched(showing)
@@ -89,6 +90,11 @@ struct LibraryPane: View {
                 navigation.rememberEdge()
             })
             .destructionDialog($pendingDestruction)
+            .alert("Save to This Mac", isPresented: $library.localSaveAlertPresented) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(library.localSaveReport)
+            }
             .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
             .sheet(item: $meshExport) { prompt in
                 MeshExportSheet(prompt: prompt) { request in

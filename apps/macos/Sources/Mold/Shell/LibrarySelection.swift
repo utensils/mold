@@ -33,6 +33,8 @@ struct LibrarySelection: Equatable {
     /// anything else, which keeps `exportFormats` the clip's answer.
     let meshExports: MeshExport.Split?
     let trashCount: Int
+    let localSaveCount: Int
+    let trashLocationName: String?
     let name: String?
     let canReuse: Bool
     let canUseAsSource: Bool
@@ -66,7 +68,8 @@ struct LibrarySelection: Equatable {
                         canReuse: canReuse, canUseAsSource: canUseAsSource,
                         canAddReference: canAddReference,
                         canUpscale: canUpscale, upscalers: upscalers,
-                        trashCount: trashCount)
+                        trashCount: trashCount, localSaveCount: localSaveCount,
+                        trashLocationName: trashLocationName)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -77,6 +80,8 @@ struct LibrarySelection: Equatable {
             && lhs.isEditingText == rhs.isEditingText
             && lhs.exportFormats == rhs.exportFormats
             && lhs.meshExports == rhs.meshExports && lhs.trashCount == rhs.trashCount
+            && lhs.localSaveCount == rhs.localSaveCount
+            && lhs.trashLocationName == rhs.trashLocationName
             && lhs.name == rhs.name && lhs.canReuse == rhs.canReuse
             && lhs.canUseAsSource == rhs.canUseAsSource
             && lhs.canAddReference == rhs.canAddReference

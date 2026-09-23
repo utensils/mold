@@ -3,16 +3,41 @@ import SwiftUI
 
 // The library's toolbar. Split from the pane purely for size.
 //
-// What is NOT here matters: the shelf picker moved to the sidebar, where a
-// collection is an ordinary row, and the machine picker became a search token,
-// because filtering by machine is the same kind of act as filtering by tag and
-// there is no reason for it to have its own control.
+// The shelf picker lives in the sidebar. The machine picker is a visible
+// shortcut for the same search token that `on:machine` creates.
 extension LibraryPane {
 
     @ToolbarContentBuilder var toolbar: some ToolbarContent {
         // Its own binding: `@Bindable` in `body` is local to `body`, and the
         // toolbar lives out here for size.
         @Bindable var navigation = navigation
+        ToolbarItem {
+            Menu {
+                Button {
+                    chooseMachine(nil)
+                } label: {
+                    if selectedMachines.isEmpty { Label("All Machines", systemImage: "checkmark") }
+                    else { Text("All Machines") }
+                }
+                ForEach(hosts.hosts) { host in
+                    Button {
+                        chooseMachine(host)
+                    } label: {
+                        if selectedMachines.contains(host.id) {
+                            Label(host.name, systemImage: "checkmark")
+                        } else { Text(host.name) }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "server.rack")
+                    Text(machineFilterTitle)
+                        .lineLimit(1)
+                        .frame(maxWidth: 110)
+                }
+            }
+            .help("Show prints from one machine")
+        }
         ToolbarItem {
             Menu {
                 Picker("Sort By", selection: $navigation.query.sort) {
@@ -56,8 +81,39 @@ extension LibraryPane {
             navigation.query.text, machines: searchableMachines,
             tags: library.tags.counts.map(\.name))
         else { return }
-        navigation.query.tokens.append(token)
+        if case let .machine(id, name) = token {
+            chooseMachine(hosts.host(id))
+            // A host can disappear during search completion. Keep the token's
+            // own name if that happened; it still describes what was typed.
+            if hosts.host(id) == nil { navigation.query.tokens.append(.machine(id: id, name: name)) }
+        } else {
+            navigation.query.tokens.append(token)
+        }
         navigation.query.text = ""
+    }
+
+    var selectedMachines: Set<MoldHost.ID> {
+        Set(navigation.query.tokens.compactMap { token -> MoldHost.ID? in
+            if case let .machine(id, _) = token { return id }
+            return nil
+        })
+    }
+
+    var machineFilterTitle: String {
+        switch selectedMachines.count {
+        case 0: "All Machines"
+        case 1: selectedMachines.first.flatMap(hosts.name(of:)) ?? "One Machine"
+        default: "\(selectedMachines.count) Machines"
+        }
+    }
+
+    func chooseMachine(_ host: MoldHost?) {
+        navigation.query.tokens.removeAll {
+            if case .machine = $0 { return true }
+            return false
+        }
+        if let host { navigation.query.tokens.append(.machine(id: host.id, name: host.name)) }
+        clearSelection()
     }
 
     private var searchableMachines: [(id: MoldHost.ID, name: String)] {

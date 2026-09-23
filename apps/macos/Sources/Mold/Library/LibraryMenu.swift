@@ -51,7 +51,9 @@ struct LibraryMenu {
             canAddReference: canAttach(using: actions.addAsReference),
             canUpscale: actions.canUpscale(targets),
             upscalers: actions.upscalerOptions(for: targets),
-            trashCount: trashCount
+            trashCount: trashCount,
+            localSaveCount: targets.filter(LibraryStore.canSaveLocally).count,
+            trashLocationName: Set(targets.map(\.hostID)).count == 1 ? targets.first?.hostName : nil
         )
     }
 

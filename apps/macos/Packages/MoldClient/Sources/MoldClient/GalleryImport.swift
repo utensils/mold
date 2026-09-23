@@ -20,6 +20,10 @@ public struct GalleryImport: Sendable {
     /// When it was made. Absent means now, which puts an old picture at the
     /// top of today rather than where it belongs.
     public var timestamp: Date?
+    /// An existing Mold print carries its own recipe; Finder imports do not.
+    public var originalMetadata: OutputMetadata?
+    var originalMetadataJSON: Data?
+    public var metadataSynthetic = true
 
     public init(prompt: String, model: String, width: Int = 0, height: Int = 0,
                 version: String, file: Data, timestamp: Date? = nil) {
@@ -30,6 +34,8 @@ public struct GalleryImport: Sendable {
         self.version = version
         self.file = file
         self.timestamp = timestamp
+        self.originalMetadata = nil
+        self.originalMetadataJSON = nil
     }
 
     /// An arbitrary file from this Mac.
@@ -47,19 +53,54 @@ public struct GalleryImport: Sendable {
 
     public static let contentType = "application/vnd.mold.gallery-import"
 
+    /// Copy an existing print into another host's Library without changing
+    /// the bytes, recipe, or when the print was made.
+    public init(mirroring print: GalleryPrint, file: Data) {
+        self.init(prompt: print.metadata.prompt ?? "", model: print.metadata.model ?? "",
+                  version: print.metadata.version ?? "", file: file,
+                  timestamp: print.createdAt)
+        originalMetadata = print.metadata
+        originalMetadataJSON = print.rawMetadataJSON
+        metadataSynthetic = print.metadataSynthetic ?? false
+    }
+
     public func body() throws -> Data {
+        let metadata: [String: Any]
+        if let originalMetadataJSON {
+            guard let object = try JSONSerialization.jsonObject(with: originalMetadataJSON) as? [String: Any] else {
+                throw MoldClientError.malformedResponse
+            }
+            metadata = object
+        } else if let originalMetadata {
+            let encoded = try MoldJSON.encoder.encode(originalMetadata)
+            guard let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                throw MoldClientError.malformedResponse
+            }
+            var normalized = object
+            // Foundation's acronym conversion writes `sha256_s` for these
+            // two fields, while Rust's wire keys end in `sha256s`.
+            for prefix in ["edit_image", "id_image"] {
+                let generated = "\(prefix)_sha256_s"
+                if let digests = normalized.removeValue(forKey: generated) {
+                    normalized["\(prefix)_sha256s"] = digests
+                }
+            }
+            metadata = normalized
+        } else {
+            metadata = [
+                "prompt": prompt, "model": model, "seed": 0, "steps": 0,
+                "guidance": 0, "width": width, "height": height, "version": version,
+            ]
+        }
         var descriptor: [String: Any] = [
             // Eight of these are NOT optional on the wire, and a descriptor
             // missing any one is a 422 naming only the first. A render has
             // real values; an import has none, and zero is the honest answer
             // rather than a plausible-looking fiction somebody might reuse.
-            "metadata": [
-                "prompt": prompt, "model": model, "seed": 0, "steps": 0,
-                "guidance": 0, "width": width, "height": height, "version": version,
-            ],
-            // We invented this metadata. Saying so is what stops the host
-            // treating an imported picture as something it rendered.
-            "metadata_synthetic": true,
+            "metadata": metadata,
+            // Finder imports invented metadata; mirrored prints carry their
+            // source host's synthetic flag instead.
+            "metadata_synthetic": metadataSynthetic,
         ]
         if let timestamp {
             descriptor["timestamp"] = UInt64(timestamp.timeIntervalSince1970)
