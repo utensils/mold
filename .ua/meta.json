@@ -209,6 +209,39 @@
         "packaging/aur/mold-ai-bin/mold-ai-bin.install",
         "scripts/tests/aur-smoke-script.sh"
       ]
+    },
+    {
+      "id": "macos-library-local-save",
+      "updatedAt": "2026-09-23T20:25:00.090Z",
+      "baseCommit": "924b8b3d8eeef5b13401c8c8e47662995ed97ec4",
+      "scope": "Native macOS Library local copies of remote pictures with exact provenance, visible machine filters, source-host action routing, and location-specific destructive confirmation; global baseline unchanged.",
+      "files": [
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+        "apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+        "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+        "apps/macos/docs/library-local-save-plan.md",
+        "apps/macos/docs/library-local-save-verification.md"
+      ],
+      "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original August scan values."
     }
   ]
 }

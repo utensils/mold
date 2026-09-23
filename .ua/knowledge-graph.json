@@ -259,6 +259,39 @@
           "packaging/aur/mold-ai-bin/mold-ai-bin.install",
           "scripts/tests/aur-smoke-script.sh"
         ]
+      },
+      {
+        "id": "macos-library-local-save",
+        "updatedAt": "2026-09-23T20:25:00.090Z",
+        "baseCommit": "924b8b3d8eeef5b13401c8c8e47662995ed97ec4",
+        "scope": "Native macOS Library local copies of remote pictures with exact provenance, visible machine filters, source-host action routing, and location-specific destructive confirmation; global baseline unchanged.",
+        "files": [
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+          "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+          "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+          "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+          "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+          "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+          "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+          "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+          "apps/macos/Tests/MoldTests/FakeBackend.swift",
+          "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+          "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+          "apps/macos/docs/library-local-save-plan.md",
+          "apps/macos/docs/library-local-save-verification.md"
+        ],
+        "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original August scan values."
       }
     ]
   },
@@ -290830,34 +290863,6 @@
       "complexity": "complex"
     },
     {
-      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-      "type": "file",
-      "name": "LibraryMenuPlan+Items.swift",
-      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-      "summary": "Builds the ordered Library menu, including source-image and reference attachment actions.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
-      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
-      "type": "file",
-      "name": "LibraryMenuPlan.swift",
-      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
-      "summary": "Defines the shared Library action vocabulary and capability inputs used by context and menu-bar surfaces.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
       "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
       "type": "file",
       "name": "Recipe.swift",
@@ -290947,20 +290952,6 @@
       "name": "GenerationContractParityTests.swift",
       "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
       "summary": "Covers fixed strength, H3/LTX/checkpoint audio policy, active and unavailable output-format transitions, model decoding, persistence, reuse, batch, and placement parity.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "test"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
-      "type": "file",
-      "name": "LibraryMenuPlanTests.swift",
-      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
-      "summary": "Covers shared Library menu action ordering and attachment eligibility.",
       "tags": [
         "swift",
         "native-macos",
@@ -291082,20 +291073,6 @@
       "complexity": "complex"
     },
     {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
-      "type": "file",
-      "name": "LibraryActions+Menu.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
-      "summary": "Routes shared Library action values to their concrete operations.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
       "id": "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
       "type": "file",
       "name": "LibraryActions.swift",
@@ -291138,62 +291115,6 @@
       "complexity": "complex"
     },
     {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "type": "file",
-      "name": "LibraryMenu.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "summary": "Builds one print context menu from the shared plan and gates attachment actions to live single raster selections.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
-      "type": "file",
-      "name": "LibraryPane+Chrome.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
-      "summary": "Library pane owns presentation tasks and attachment preparation; initial gallery, trash and collection loading belongs to RootView.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-      "type": "file",
-      "name": "LibraryPane+Menu.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-      "summary": "Publishes Library and File menu actions with concrete selected print identities.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
-      "type": "file",
-      "name": "LibraryPane.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
-      "summary": "Consumes the shared draft store and routes eligible Library images into the current generation draft without bypassing restoration.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
       "id": "file:apps/macos/Sources/Mold/Library/LibraryViewer.swift",
       "type": "file",
       "name": "LibraryViewer.swift",
@@ -291222,20 +291143,6 @@
       "complexity": "complex"
     },
     {
-      "id": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
-      "type": "file",
-      "name": "LibrarySelection.swift",
-      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
-      "summary": "Library menu action selection includes ordered print identities as well as offered actions.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "implementation"
-      ],
-      "complexity": "complex"
-    },
-    {
       "id": "file:apps/macos/Tests/MoldTests/ClipTests.swift",
       "type": "file",
       "name": "ClipTests.swift",
@@ -291255,20 +291162,6 @@
       "name": "LibraryAttachmentTests.swift",
       "filePath": "apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
       "summary": "Covers exact restored-model adoption, attachment transactions, draft fences, Library-first restore, live-raster eligibility, action routing, and picture mutation.",
-      "tags": [
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity",
-        "test"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
-      "type": "file",
-      "name": "LibrarySelectionTests.swift",
-      "filePath": "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
-      "summary": "Covers focused Library selection equality and menu routing capability state.",
       "tags": [
         "swift",
         "native-macos",
@@ -291477,60 +291370,6 @@
       "summary": "Combines generation defaults, controls, temporal limits, and capabilities.",
       "tags": [
         "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryAction",
-      "type": "class",
-      "name": "LibraryAction",
-      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
-      "lineRange": [
-        20,
-        47
-      ],
-      "summary": "Names every action shared by native Library menus.",
-      "tags": [
-        "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryMenuPlan",
-      "type": "class",
-      "name": "LibraryMenuPlan",
-      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
-      "lineRange": [
-        50,
-        101
-      ],
-      "summary": "Carries selection and capability facts needed to build the shared Library menu.",
-      "tags": [
-        "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift:items",
-      "type": "function",
-      "name": "items",
-      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-      "lineRange": [
-        13,
-        15
-      ],
-      "summary": "Builds the ordered menu actions for prints, trash, and collections.",
-      "tags": [
-        "function",
         "swift",
         "native-macos",
         "scoped-refresh:macos-generation-library-parity"
@@ -291772,96 +291611,6 @@
       "complexity": "moderate"
     },
     {
-      "id": "function:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift:perform",
-      "type": "function",
-      "name": "perform",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
-      "lineRange": [
-        10,
-        53
-      ],
-      "summary": "Routes one shared Library action to its concrete callback or operation.",
-      "tags": [
-        "function",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
-      "type": "class",
-      "name": "LibraryMenu",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "lineRange": [
-        13,
-        62
-      ],
-      "summary": "Builds a print context menu from shared action planning and live raster eligibility.",
-      "tags": [
-        "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:canAttach",
-      "type": "function",
-      "name": "canAttach",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "lineRange": [
-        58,
-        61
-      ],
-      "summary": "Restricts attachment actions to one live non-video, non-mesh print with a destination callback.",
-      "tags": [
-        "function",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
-      "type": "class",
-      "name": "LibraryPane",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
-      "lineRange": [
-        9,
-        98
-      ],
-      "summary": "Coordinates native Library state, action routing, viewer presentation, and generation handoff.",
-      "tags": [
-        "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuSelection",
-      "type": "function",
-      "name": "menuSelection",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-      "lineRange": [
-        13,
-        43
-      ],
-      "summary": "Builds the focused menu-bar selection from the same attachment capability facts as context menus.",
-      "tags": [
-        "function",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
       "id": "class:apps/macos/Sources/Mold/Library/LibraryViewer.swift:LibraryViewer",
       "type": "class",
       "name": "LibraryViewer",
@@ -291871,24 +291620,6 @@
         138
       ],
       "summary": "Displays one print while exposing the shared Library context menu.",
-      "tags": [
-        "type-definition",
-        "swift",
-        "native-macos",
-        "scoped-refresh:macos-generation-library-parity"
-      ],
-      "complexity": "moderate"
-    },
-    {
-      "id": "class:apps/macos/Sources/Mold/Shell/LibrarySelection.swift:LibrarySelection",
-      "type": "class",
-      "name": "LibrarySelection",
-      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
-      "lineRange": [
-        13,
-        80
-      ],
-      "summary": "Carries focused Library action capability into macOS commands.",
       "tags": [
         "type-definition",
         "swift",
@@ -292973,19 +292704,6 @@
       "summary": "Owns initial sidebar library loading independent of destination and host status probes; host-list changes cancel and restart the shell load."
     },
     {
-      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
-      "type": "file",
-      "name": "LibraryStore.swift",
-      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
-      "tags": [
-        "swift",
-        "native-macos",
-        "library"
-      ],
-      "complexity": "moderate",
-      "summary": "Shell-owned reload starts images, trash and organization concurrently; slow image listing does not delay sidebar shelves, with cancellation and host identity guards."
-    },
-    {
       "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
       "type": "file",
       "name": "LibraryStore+Mutations.swift",
@@ -293301,18 +293019,6 @@
       "complexity": "simple"
     },
     {
-      "id": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "type": "file",
-      "name": "FakeBackend.swift",
-      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "summary": "Native test backend records calls before capturing arguments; settle conditions must wait for the state being asserted rather than call entry.",
-      "tags": [
-        "native-macos",
-        "tests"
-      ],
-      "complexity": "simple"
-    },
-    {
       "id": "file:.github/workflows/linux-cpu.yml",
       "type": "file",
       "name": "linux-cpu.yml",
@@ -293417,6 +293123,1083 @@
       "tags": [
         "distribution",
         "gpu-free-cli"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "type": "file",
+      "name": "GalleryImport.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "summary": "Builds bounded gallery import descriptors and mirrors existing prints while preserving raw recipe metadata, timestamps, bytes, and synthetic provenance.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:GalleryImport",
+      "type": "class",
+      "name": "GalleryImport",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "lineRange": [
+        9,
+        120
+      ],
+      "summary": "GalleryImport defines the GalleryImport state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:body",
+      "type": "function",
+      "name": "body",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "lineRange": [
+        67,
+        119
+      ],
+      "summary": "body implements a focused part of bounded gallery import descriptors and mirrors existing prints while preserving raw recipe metadata, timestamps, bytes, and synthetic provenance.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:importPrint",
+      "type": "function",
+      "name": "importPrint",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "lineRange": [
+        128,
+        140
+      ],
+      "summary": "importPrint implements a focused part of bounded gallery import descriptors and mirrors existing prints while preserving raw recipe metadata, timestamps, bytes, and synthetic provenance.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+      "type": "file",
+      "name": "GalleryPrint+Mutable.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+      "summary": "Applies optimistic Library metadata edits while retaining server supplied recipe provenance and raw metadata JSON.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "type": "file",
+      "name": "GalleryPrint.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "summary": "Defines a gallery print, its media identity and display helpers, and captures exact raw server metadata for lossless cross host copies.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift:GalleryPrint",
+      "type": "class",
+      "name": "GalleryPrint",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "lineRange": [
+        4,
+        93
+      ],
+      "summary": "GalleryPrint defines the GalleryPrint state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "type": "file",
+      "name": "HTTPBackend.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "summary": "Implements core HTTP backend reads and decodes gallery listings while retaining each print’s raw metadata object.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift:HTTPBackend",
+      "type": "class",
+      "name": "HTTPBackend",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "lineRange": [
+        7,
+        72
+      ],
+      "summary": "HTTPBackend defines the HTTPBackend state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift:galleryListing",
+      "type": "function",
+      "name": "galleryListing",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "lineRange": [
+        37,
+        71
+      ],
+      "summary": "galleryListing implements a focused part of core HTTP backend reads and decodes gallery listings while retaining each print’s raw metadata object.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "type": "file",
+      "name": "LibraryMenuPlan+Items.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+      "summary": "Builds ordered Library menu items, including local Library saves and source machine names for destructive actions.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "type": "file",
+      "name": "LibraryMenuPlan.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "summary": "Defines the platform neutral Library action and menu plan contract shared by native UI surfaces.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryAction",
+      "type": "class",
+      "name": "LibraryAction",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "lineRange": [
+        20,
+        48
+      ],
+      "summary": "LibraryAction defines the LibraryMenuPlan state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift:LibraryMenuPlan",
+      "type": "class",
+      "name": "LibraryMenuPlan",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "lineRange": [
+        51,
+        108
+      ],
+      "summary": "LibraryMenuPlan defines the LibraryMenuPlan state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "type": "file",
+      "name": "GalleryImportTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "summary": "Verifies import framing, required descriptors, timestamps, byte identity, and preservation of known and unknown recipe metadata.",
+      "tags": [
+        "test",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:GalleryImportSuite",
+      "type": "class",
+      "name": "GalleryImportSuite",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "lineRange": [
+        19,
+        121
+      ],
+      "summary": "GalleryImportSuite defines the GalleryImportTests state and behavior used by the native Library flow.",
+      "tags": [
+        "test",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:body",
+      "type": "function",
+      "name": "body",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "lineRange": [
+        21,
+        23
+      ],
+      "summary": "body implements a focused part of import framing, required descriptors, timestamps, byte identity, and preservation of known and unknown recipe metadata.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:mirroringKeepsTheOriginalRecipeAndItsProvenance",
+      "type": "function",
+      "name": "mirroringKeepsTheOriginalRecipeAndItsProvenance",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "lineRange": [
+        86,
+        101
+      ],
+      "summary": "mirroringKeepsTheOriginalRecipeAndItsProvenance implements a focused part of import framing, required descriptors, timestamps, byte identity, and preservation of known and unknown recipe metadata.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits",
+      "type": "function",
+      "name": "fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "lineRange": [
+        103,
+        120
+      ],
+      "summary": "fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits implements a focused part of import framing, required descriptors, timestamps, byte identity, and preservation of known and unknown recipe metadata.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "type": "file",
+      "name": "LibraryMenuPlanTests.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "summary": "Pins Library menu ordering, destructive placement, attachment options, local save eligibility, and source machine labeling.",
+      "tags": [
+        "test",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:LibraryMenuPlanSuite",
+      "type": "class",
+      "name": "LibraryMenuPlanSuite",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "lineRange": [
+        13,
+        164
+      ],
+      "summary": "LibraryMenuPlanSuite defines the LibraryMenuPlanTests state and behavior used by the native Library flow.",
+      "tags": [
+        "test",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+      "type": "function",
+      "name": "aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "lineRange": [
+        130,
+        136
+      ],
+      "summary": "aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave implements a focused part of Library menu ordering, destructive placement, attachment options, local save eligibility, and source machine labeling.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:aSingleMachineSelectionNamesWhereTrashGoes",
+      "type": "function",
+      "name": "aSingleMachineSelectionNamesWhereTrashGoes",
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "lineRange": [
+        138,
+        142
+      ],
+      "summary": "aSingleMachineSelectionNamesWhereTrashGoes implements a focused part of Library menu ordering, destructive placement, attachment options, local save eligibility, and source machine labeling.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+      "type": "file",
+      "name": "LibraryActions+Destructive.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+      "summary": "Coordinates immediate deletion and empty trash confirmation with unambiguous source machine identity.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift:deleteForever",
+      "type": "function",
+      "name": "deleteForever",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+      "lineRange": [
+        9,
+        33
+      ],
+      "summary": "deleteForever implements a focused part of immediate deletion and empty trash confirmation with unambiguous source machine identity.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "type": "file",
+      "name": "LibraryActions+Menu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "summary": "Routes planned Library menu actions to copy, export, attachment, upscale, trash, and local save operations.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift:perform",
+      "type": "function",
+      "name": "perform",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "lineRange": [
+        10,
+        59
+      ],
+      "summary": "perform implements a focused part of planned Library menu actions to copy, export, attachment, upscale, trash, and local save operations.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "type": "file",
+      "name": "LibraryMenu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "summary": "Adapts selected Library entries and capabilities into a reusable menu plan with host aware save and trash context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
+      "type": "class",
+      "name": "LibraryMenu",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "lineRange": [
+        13,
+        64
+      ],
+      "summary": "LibraryMenu defines the LibraryMenu state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:perform",
+      "type": "function",
+      "name": "perform",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "lineRange": [
+        24,
+        26
+      ],
+      "summary": "perform implements a focused part of selected Library entries and capabilities into a reusable menu plan with host aware save and trash context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "type": "file",
+      "name": "LibraryPane+Chrome.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "summary": "Composes Library chrome and clears selection when navigation scope or host filter tokens change.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:watched",
+      "type": "function",
+      "name": "watched",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "lineRange": [
+        10,
+        29
+      ],
+      "summary": "watched implements a focused part of Library chrome and clears selection when navigation scope or host filter tokens change.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:chrome",
+      "type": "function",
+      "name": "chrome",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "lineRange": [
+        32,
+        54
+      ],
+      "summary": "chrome implements a focused part of Library chrome and clears selection when navigation scope or host filter tokens change.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:content",
+      "type": "function",
+      "name": "content",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "lineRange": [
+        57,
+        76
+      ],
+      "summary": "content implements a focused part of Library chrome and clears selection when navigation scope or host filter tokens change.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "type": "file",
+      "name": "LibraryPane+Empty.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "summary": "Builds Library result subtitles and empty states, including active local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift:subtitle",
+      "type": "function",
+      "name": "subtitle",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "lineRange": [
+        8,
+        20
+      ],
+      "summary": "subtitle implements a focused part of Library result subtitles and empty states, including active local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift:empty",
+      "type": "function",
+      "name": "empty",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "lineRange": [
+        26,
+        47
+      ],
+      "summary": "empty implements a focused part of Library result subtitles and empty states, including active local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "type": "file",
+      "name": "LibraryPane+Menu.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "summary": "Creates selection scoped Library menus with local save eligibility and source host context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuSelection",
+      "type": "function",
+      "name": "menuSelection",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "lineRange": [
+        13,
+        46
+      ],
+      "summary": "menuSelection implements a focused part of selection scoped Library menus with local save eligibility and source host context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuFile",
+      "type": "function",
+      "name": "menuFile",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "lineRange": [
+        59,
+        76
+      ],
+      "summary": "menuFile implements a focused part of selection scoped Library menus with local save eligibility and source host context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "type": "file",
+      "name": "LibraryPane+Toolbar.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "summary": "Provides sorting, search, and an explicit machine filter that writes the same host tokens as typed search.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift:commitTypedToken",
+      "type": "function",
+      "name": "commitTypedToken",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "lineRange": [
+        79,
+        93
+      ],
+      "summary": "commitTypedToken implements a focused part of sorting, search, and an explicit machine filter that writes the same host tokens as typed search.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift:chooseMachine",
+      "type": "function",
+      "name": "chooseMachine",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "lineRange": [
+        110,
+        117
+      ],
+      "summary": "chooseMachine implements a focused part of sorting, search, and an explicit machine filter that writes the same host tokens as typed search.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "type": "file",
+      "name": "LibraryPane.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "summary": "Owns the native Library grid, selection state, menus, viewer, and local save completion alert.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryPane.swift:LibraryPane",
+      "type": "class",
+      "name": "LibraryPane",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+      "lineRange": [
+        9,
+        105
+      ],
+      "summary": "LibraryPane defines the LibraryPane state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "type": "file",
+      "name": "LibraryStore+LocalSave.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "summary": "Copies supported remote pictures into This Mac’s Library through fresh source listings, bounded media reads, exact provenance, and per item failure reporting.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:canSaveLocally",
+      "type": "function",
+      "name": "canSaveLocally",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        12,
+        18
+      ],
+      "summary": "canSaveLocally implements a focused part of supported remote pictures into This Mac’s Library through fresh source listings, bounded media reads, exact provenance, and per item failure reporting.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:saveLocally",
+      "type": "function",
+      "name": "saveLocally",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        20,
+        79
+      ],
+      "summary": "saveLocally implements a focused part of supported remote pictures into This Mac’s Library through fresh source listings, bounded media reads, exact provenance, and per item failure reporting.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "type": "file",
+      "name": "LibraryStore.swift",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "summary": "Maintains merged multi host Library state, organization data, refresh lifecycle, undo support, and local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryStore.swift:LibraryStore",
+      "type": "class",
+      "name": "LibraryStore",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "lineRange": [
+        10,
+        130
+      ],
+      "summary": "LibraryStore defines the LibraryStore state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:refresh",
+      "type": "function",
+      "name": "refresh",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "lineRange": [
+        75,
+        97
+      ],
+      "summary": "refresh implements a focused part of merged multi host Library state, organization data, refresh lifecycle, undo support, and local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:reload",
+      "type": "function",
+      "name": "reload",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "lineRange": [
+        101,
+        107
+      ],
+      "summary": "reload implements a focused part of merged multi host Library state, organization data, refresh lifecycle, undo support, and local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:apply",
+      "type": "function",
+      "name": "apply",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "lineRange": [
+        111,
+        129
+      ],
+      "summary": "apply implements a focused part of merged multi host Library state, organization data, refresh lifecycle, undo support, and local save progress.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "type": "file",
+      "name": "LibrarySelection.swift",
+      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "summary": "Carries focused Library selection identity and action capabilities into macOS commands, including local save and source location context.",
+      "tags": [
+        "native-macos",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Shell/LibrarySelection.swift:LibrarySelection",
+      "type": "class",
+      "name": "LibrarySelection",
+      "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "lineRange": [
+        13,
+        90
+      ],
+      "summary": "LibrarySelection defines the LibrarySelection state and behavior used by the native Library flow.",
+      "tags": [
+        "native-macos",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "type": "file",
+      "name": "FakeBackend.swift",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "summary": "Provides a controllable native backend test double that records gallery imports, media reads, mutations, and other client operations.",
+      "tags": [
+        "test",
+        "library",
+        "swift"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:apps/macos/Tests/MoldTests/FakeBackend.swift:FakeBackend",
+      "type": "class",
+      "name": "FakeBackend",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "lineRange": [
+        47,
+        1001
+      ],
+      "summary": "FakeBackend defines the FakeBackend state and behavior used by the native Library flow.",
+      "tags": [
+        "test",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/FakeBackend.swift:deleteForever",
+      "type": "function",
+      "name": "deleteForever",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "lineRange": [
+        896,
+        896
+      ],
+      "summary": "deleteForever implements a focused part of a controllable native backend test double that records gallery imports, media reads, mutations, and other client operations.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/FakeBackend.swift:importPrint",
+      "type": "function",
+      "name": "importPrint",
+      "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "lineRange": [
+        903,
+        912
+      ],
+      "summary": "importPrint implements a focused part of a controllable native backend test double that records gallery imports, media reads, mutations, and other client operations.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "type": "file",
+      "name": "LibraryLocalSaveTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "summary": "Verifies filtered remote picture copies, unavailable local engine reporting, partial import failures, and source host trash isolation.",
+      "tags": [
+        "test",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:LibraryLocalSaveTests",
+      "type": "class",
+      "name": "LibraryLocalSaveTests",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "lineRange": [
+        7,
+        100
+      ],
+      "summary": "LibraryLocalSaveTests defines the LibraryLocalSaveTests state and behavior used by the native Library flow.",
+      "tags": [
+        "test",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+      "type": "function",
+      "name": "savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "lineRange": [
+        13,
+        38
+      ],
+      "summary": "savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac implements a focused part of filtered remote picture copies, unavailable local engine reporting, partial import failures, and source host trash isolation.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+      "type": "function",
+      "name": "anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "lineRange": [
+        40,
+        52
+      ],
+      "summary": "anUnavailableLocalEngineExplainsWhyNothingWasSaved implements a focused part of filtered remote picture copies, unavailable local engine reporting, partial import failures, and source host trash isolation.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:aFailedImportReportsOneFailureAndContinuesTheBatch",
+      "type": "function",
+      "name": "aFailedImportReportsOneFailureAndContinuesTheBatch",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "lineRange": [
+        54,
+        77
+      ],
+      "summary": "aFailedImportReportsOneFailureAndContinuesTheBatch implements a focused part of filtered remote picture copies, unavailable local engine reporting, partial import failures, and source host trash isolation.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:remoteTrashDoesNotSendALocalCopyToTrash",
+      "type": "function",
+      "name": "remoteTrashDoesNotSendALocalCopyToTrash",
+      "filePath": "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "lineRange": [
+        79,
+        99
+      ],
+      "summary": "remoteTrashDoesNotSendALocalCopyToTrash implements a focused part of filtered remote picture copies, unavailable local engine reporting, partial import failures, and source host trash isolation.",
+      "tags": [
+        "test",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "type": "file",
+      "name": "LibrarySelectionTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "summary": "Verifies focused Library commands update for caret state and replace action closures when selection identity changes.",
+      "tags": [
+        "test",
+        "library",
+        "swift"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift:LibrarySelectionTests",
+      "type": "class",
+      "name": "LibrarySelectionTests",
+      "filePath": "apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "lineRange": [
+        16,
+        89
+      ],
+      "summary": "LibrarySelectionTests defines the LibrarySelectionTests state and behavior used by the native Library flow.",
+      "tags": [
+        "test",
+        "library",
+        "type-definition"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:apps/macos/docs/library-local-save-plan.md",
+      "type": "document",
+      "name": "library-local-save-plan.md",
+      "filePath": "apps/macos/docs/library-local-save-plan.md",
+      "summary": "Records the native Library design for copying remote pictures locally, preserving provenance, filtering by machine, and scoping destructive actions.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "library"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "document:apps/macos/docs/library-local-save-verification.md",
+      "type": "document",
+      "name": "library-local-save-verification.md",
+      "filePath": "apps/macos/docs/library-local-save-verification.md",
+      "summary": "Documents final native tests, lint, UAT, metadata preservation, collision behavior, and review evidence for local Library saves.",
+      "tags": [
+        "documentation",
+        "native-macos",
+        "library"
       ],
       "complexity": "simple"
     }
@@ -416009,13 +416792,6 @@
       "weight": 1
     },
     {
-      "source": "file:crates/mold-inference/tests/h3_runtime_code_identity.rs",
-      "target": "file:crates/mold-inference/tests/h3_runtime_code_identity.rs",
-      "type": "imports",
-      "direction": "forward",
-      "weight": 0.7
-    },
-    {
       "source": "file:crates/mold-inference/tests/pulid_adapter_parity.rs",
       "target": "function:crates/mold-inference/tests/pulid_adapter_parity.rs:golden",
       "type": "contains",
@@ -416959,13 +417735,6 @@
       "type": "contains",
       "direction": "forward",
       "weight": 1
-    },
-    {
-      "source": "file:crates/mold-server/tests/h3_server_features.rs",
-      "target": "file:crates/mold-server/tests/h3_server_features.rs",
-      "type": "imports",
-      "direction": "forward",
-      "weight": 0.7
     },
     {
       "source": "file:desktop/src-tauri/build.rs",
@@ -518524,13 +519293,6 @@
       "weight": 1
     },
     {
-      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift:items",
-      "type": "contains",
-      "direction": "forward",
-      "weight": 1
-    },
-    {
       "source": "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
       "target": "class:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift:DraftPictureAttachment",
       "type": "contains",
@@ -518631,13 +519393,6 @@
     {
       "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
       "target": "class:apps/macos/Sources/Mold/Library/LibraryMenu.swift:LibraryMenu",
-      "type": "contains",
-      "direction": "forward",
-      "weight": 1
-    },
-    {
-      "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "target": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:canAttach",
       "type": "contains",
       "direction": "forward",
       "weight": 1
@@ -519635,6 +520390,356 @@
       "type": "depends_on",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:GalleryImport",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:body",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift:importPrint",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift:GalleryPrint",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift:HTTPBackend",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift:galleryListing",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:GalleryImportSuite",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:body",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:mirroringKeepsTheOriginalRecipeAndItsProvenance",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift:fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:LibraryMenuPlanSuite",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:aRemotePictureOffersLibrarySaveSeparatelyFromFinderSave",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift:aSingleMachineSelectionNamesWhereTrashGoes",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift:deleteForever",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryMenu.swift:perform",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:watched",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:chrome",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift:content",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift:subtitle",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift:empty",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift:menuFile",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift:commitTypedToken",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift:chooseMachine",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:canSaveLocally",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:saveLocally",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryStore.swift:LibraryStore",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:refresh",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:reload",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore.swift:apply",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "target": "class:apps/macos/Tests/MoldTests/FakeBackend.swift:FakeBackend",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "target": "function:apps/macos/Tests/MoldTests/FakeBackend.swift:deleteForever",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+      "target": "function:apps/macos/Tests/MoldTests/FakeBackend.swift:importPrint",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "target": "class:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:LibraryLocalSaveTests",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "target": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "target": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:anUnavailableLocalEngineExplainsWhyNothingWasSaved",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "target": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:aFailedImportReportsOneFailureAndContinuesTheBatch",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "target": "function:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift:remoteTrashDoesNotSendALocalCopyToTrash",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+      "target": "class:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift:LibrarySelectionTests",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+      "type": "tested_by",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "target": "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+      "type": "related",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:apps/macos/docs/library-local-save-plan.md",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:apps/macos/docs/library-local-save-plan.md",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:apps/macos/docs/library-local-save-verification.md",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:apps/macos/docs/library-local-save-verification.md",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
     }
   ],
   "layers": [
@@ -520819,8 +521924,6 @@
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor+Draft.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/DraftDescriptor.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GenerateRequest.swift",
-        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Recipe.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Audio.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft+Recipe.swift",
@@ -520828,7 +521931,6 @@
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderDraft.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/RenderRequest.swift",
         "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GenerationContractParityTests.swift",
-        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
         "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/RenderDraftReuseTests.swift",
         "file:apps/macos/Sources/Mold/Generate/DraftPictureAttachment.swift",
         "file:apps/macos/Sources/Mold/Generate/GenerateController.swift",
@@ -520837,20 +521939,13 @@
         "file:apps/macos/Sources/Mold/Generate/PictureImport.swift",
         "file:apps/macos/Sources/Mold/Generate/ReferenceStrip+Import.swift",
         "file:apps/macos/Sources/Mold/Generate/SourceImageWell+Import.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryActions.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryAttachment+Run.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryAttachment.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryViewer.swift",
         "file:apps/macos/Sources/Mold/Library/ReuseStore.swift",
-        "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
         "file:apps/macos/Tests/MoldTests/ClipTests.swift",
         "file:apps/macos/Tests/MoldTests/LibraryAttachmentTests.swift",
-        "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/Model.swift",
         "file:apps/macos/Sources/Mold/Generate/ClipGroup.swift",
         "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/ModelTests.swift",
@@ -520897,7 +521992,6 @@
         "file:apps/macos/Sources/Mold/Shell/MoldCommands+LibraryFile.swift",
         "file:apps/macos/Sources/Mold/Models/ModelsPane+Actions.swift",
         "file:apps/macos/Sources/Mold/Shell/RootView.swift",
-        "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Organization.swift",
         "file:apps/macos/Sources/Mold/Library/LibraryStore+Rows.swift",
@@ -520919,7 +522013,28 @@
         "file:apps/macos/Tests/MoldTests/NotificationActivationTests.swift",
         "file:apps/macos/Tests/MoldTests/ModelActionsTests.swift",
         "file:apps/macos/Tests/MoldTests/BatchOutcomeTests.swift",
-        "file:apps/macos/Tests/MoldTests/FakeBackend.swift"
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint+Mutable.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+        "file:apps/macos/Packages/MoldClient/Tests/MoldClientTests/LibraryMenuPlanTests.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+        "file:apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+        "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+        "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift"
       ]
     },
     {
@@ -522130,7 +523245,9 @@
         "document:docs/plans/macos-generation-library-parity.md",
         "document:apps/macos/README.md",
         "document:changelog.d/macos-generation-library-parity.md",
-        "file:website/guide/installation.md"
+        "file:website/guide/installation.md",
+        "document:apps/macos/docs/library-local-save-plan.md",
+        "document:apps/macos/docs/library-local-save-verification.md"
       ]
     }
   ],
