@@ -11,7 +11,14 @@ extension LibraryActions {
         let noun = entries.count == 1
             ? "“\(entries[0].print.title ?? entries[0].print.filename)”"
             : "\(entries.count.formatted()) prints"
-        let locations = Set(entries.map(\.hostName)).sorted().joined(separator: ", ")
+        let machines = Dictionary(entries.map { ($0.hostID, $0.hostName) },
+                                  uniquingKeysWith: { first, _ in first })
+        let names = Dictionary(grouping: machines.values, by: { $0 }).mapValues(\.count)
+        let locations = machines.map { id, name in
+            guard names[name, default: 0] > 1 else { return name }
+            let address = hosts.host(id)?.baseURL.host ?? "unknown address"
+            return "\(name) (\(address), \(id.uuidString.prefix(8)))"
+        }.sorted().joined(separator: ", ")
         ask(Destruction(
             title: "Delete \(noun) immediately?",
             message: "This cannot be undone. Delete from \(locations). "

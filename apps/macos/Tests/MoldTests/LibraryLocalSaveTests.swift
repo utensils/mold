@@ -51,7 +51,7 @@ struct LibraryLocalSaveTests {
         #expect(library.localSaveReport.contains("Start This Mac’s engine"))
     }
 
-    @Test func aFilenameCollisionReportsOneFailureAndContinuesTheBatch() async {
+    @Test func aFailedImportReportsOneFailureAndContinuesTheBatch() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
         let localBackend = FakeBackend(host: local)
