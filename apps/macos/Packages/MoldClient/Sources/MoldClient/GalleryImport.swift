@@ -17,6 +17,8 @@ public struct GalleryImport: Sendable {
     /// receiving it, because that is what is creating the row.
     public var version: String
     public var file: Data
+    /// Large mirrors stay on disk from download through upload.
+    public var fileURL: URL?
     /// When it was made. Absent means now, which puts an old picture at the
     /// top of today rather than where it belongs.
     public var timestamp: Date?
@@ -33,6 +35,7 @@ public struct GalleryImport: Sendable {
         self.height = height
         self.version = version
         self.file = file
+        self.fileURL = nil
         self.timestamp = timestamp
         self.originalMetadata = nil
         self.originalMetadataJSON = nil
@@ -61,6 +64,17 @@ public struct GalleryImport: Sendable {
                   timestamp: print.createdAt)
         originalMetadata = print.metadata
         let embedded = EmbeddedPrintMetadata.json(in: file, named: print.filename)
+        originalMetadataJSON = embedded ?? print.rawMetadataJSON
+        metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
+    }
+
+    public init(mirroring print: GalleryPrint, fileAt url: URL) throws {
+        self.init(prompt: print.metadata.prompt ?? "", model: print.metadata.model ?? "",
+                  version: print.metadata.version ?? "", file: Data(),
+                  timestamp: print.createdAt)
+        fileURL = url
+        originalMetadata = print.metadata
+        let embedded = try EmbeddedPrintMetadata.json(in: url, named: print.filename)
         originalMetadataJSON = embedded ?? print.rawMetadataJSON
         metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
@@ -110,6 +124,8 @@ public struct GalleryImport: Sendable {
     }
 
     public func body() throws -> Data {
+        // A file-backed import must use writeBody(to:), which streams its file.
+        guard fileURL == nil else { throw MoldClientError.malformedResponse }
         let json = try descriptor()
 
         var body = Data(capacity: 12 + json.count + file.count)
@@ -126,15 +142,30 @@ public struct GalleryImport: Sendable {
     /// URLSession transfers a large gallery picture to the local engine.
     public func writeBody(to url: URL) throws {
         let json = try descriptor()
+        let fileLength: UInt64
+        if let fileURL {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            fileLength = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        } else {
+            fileLength = UInt64(file.count)
+        }
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try withUnsafeBytes(of: UInt32(json.count).bigEndian) { try handle.write(contentsOf: $0) }
-        try withUnsafeBytes(of: UInt64(file.count).bigEndian) { try handle.write(contentsOf: $0) }
+        try withUnsafeBytes(of: fileLength.bigEndian) { try handle.write(contentsOf: $0) }
         try handle.write(contentsOf: json)
-        try handle.write(contentsOf: file)
+        if let fileURL {
+            let source = try FileHandle(forReadingFrom: fileURL)
+            defer { try? source.close() }
+            while let chunk = try source.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
+                try handle.write(contentsOf: chunk)
+            }
+        } else {
+            try handle.write(contentsOf: file)
+        }
     }
 }
 

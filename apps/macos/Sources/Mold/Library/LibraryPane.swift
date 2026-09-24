@@ -106,7 +106,7 @@ struct LibraryPane: View {
             .destructionDialog($pendingDestruction)
             .sheet(isPresented: $library.localSaveAlertPresented) {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Save to This Mac").font(.title2.bold())
+                    Text("Sync to This Mac").font(.title2.bold())
                     Text(library.localSaveReport)
                     if !library.localSaveFailures.isEmpty {
                         Text("Couldn’t save").font(.headline)

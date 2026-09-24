@@ -86,6 +86,31 @@ public extension HTTPBackend {
         try await bytes(for: mediaRequest(filename, trashed: trashed))
     }
 
+    func mediaFile(_ filename: String, trashed: Bool) async throws -> URL {
+        let request = mediaRequest(filename, trashed: trashed)
+        let temporary: URL
+        let response: URLResponse
+        do {
+            (temporary, response) = try await session.download(for: request, delegate: redirectGuard)
+        } catch let error as URLError {
+            throw TransportFailure.from(error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw MoldClientError.malformedResponse
+        }
+        if !(200...299).contains(http.statusCode) {
+            let handle = try FileHandle(forReadingFrom: temporary)
+            defer { try? handle.close() }
+            let details = try handle.read(upToCount: 1_024 * 1_024) ?? Data()
+            try HTTPRefusal.check(http, details)
+            throw MoldClientError.malformedResponse
+        }
+        let owned = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mold-library-sync-\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: temporary, to: owned)
+        return owned
+    }
+
     /// A trashed print is behind the trash view, exactly as the listing is --
     /// asking the live route for one answers 404 on a print that is right
     /// there.

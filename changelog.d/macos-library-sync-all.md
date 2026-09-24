@@ -1,0 +1,1 @@
+- **Sync All to This Mac.** The macOS Library now copies remote pictures, clips, 3D prints, audio, and collections, including empty collections, in one click. It preserves media and organization, shows progress, and safely resumes on another click.

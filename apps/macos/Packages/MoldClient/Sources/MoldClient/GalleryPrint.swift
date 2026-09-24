@@ -25,6 +25,21 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     var rawMetadataJSON: Data? = nil
     public var rawMetadataAvailable: Bool { rawMetadataJSON != nil }
 
+    /// Canonical full recipe, including fields a newer server knows that
+    /// this client has not yet modeled in OutputMetadata.
+    public var canonicalMetadataJSON: Data? {
+        if let rawMetadataJSON,
+           let object = try? JSONSerialization.jsonObject(with: rawMetadataJSON),
+           let canonical = try? JSONSerialization.data(withJSONObject: object,
+                                                       options: [.sortedKeys, .fragmentsAllowed]) {
+            return canonical
+        }
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.outputFormatting = .sortedKeys
+        return try? encoder.encode(metadata)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case filename, metadata, timestamp, format, sizeBytes, mediaVersion
         case title, tags, favorite, collections, trashedAt, purgeAt, metadataSynthetic

@@ -66,6 +66,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var trashedRows: [GalleryPrint] = []
     nonisolated(unsafe) var tagRows: [TagCount] = []
     nonisolated(unsafe) var collectionRows: [Collection] = []
+    nonisolated(unsafe) var collectionCreateResponses: [String: Collection] = [:]
     /// `nil` means nothing was planted, so `queue()` behaves like every other
     /// unplanted route and throws rather than answering with an empty list.
     nonisolated(unsafe) var queueListing: QueueListing?
@@ -170,6 +171,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// `jobId` asked, in call order -- which child the preview poll followed.
     nonisolated(unsafe) var jobPreviewCalls: [String] = []
     nonisolated(unsafe) var mediaAnswer: Data?
+    nonisolated(unsafe) var mediaAnswers: [String: Data] = [:]
 
     // MARK: - Machines
 
@@ -900,6 +902,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// a call count cannot say.
     nonisolated(unsafe) var importedNames: [String] = []
     nonisolated(unsafe) var importedItems: [GalleryImport] = []
+    nonisolated(unsafe) var importedMedia: [Data] = []
     nonisolated(unsafe) var importFailures: Set<String> = []
 
     @discardableResult
@@ -910,12 +913,21 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         }
         importedNames.append(filename)
         importedItems.append(item)
+        importedMedia.append(try item.fileURL.map { try Data(contentsOf: $0) } ?? item.file)
         return filename
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {
         try record("media")
         guard let mediaAnswer else { throw notPlanted() }
         return mediaAnswer
+    }
+    func mediaFile(_ filename: String, trashed: Bool) async throws -> URL {
+        try record("mediaFile")
+        guard let bytes = mediaAnswers[filename] ?? mediaAnswer else { throw notPlanted() }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mold-test-media-\(UUID().uuidString)")
+        try bytes.write(to: url)
+        return url
     }
     func thumbnail(_ filename: String, size: Int, trashed: Bool) async throws -> Data {
         try record("thumbnail")
@@ -949,7 +961,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return collectionRows
     }
     func createCollection(name: String, description: String?) async throws -> Collection {
-        try record("createCollection"); throw notPlanted()
+        try record("createCollection")
+        guard let created = collectionCreateResponses[name] else { throw notPlanted() }
+        collectionRows.append(created)
+        return created
     }
     func updateCollection(id: String, change: CollectionChange) async throws -> Collection {
         try record("updateCollection"); throw notPlanted()

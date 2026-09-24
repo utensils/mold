@@ -293131,7 +293131,7 @@
       "type": "file",
       "name": "GalleryImport.swift",
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
-      "summary": "Native macOS Library bulk save, metadata integrity, collection mirroring, and render notification routing",
+      "summary": "Streaming gallery import framing for large media while preserving source recipe, timestamp and bytes.",
       "tags": [
         "native-macos",
         "library",
@@ -293208,7 +293208,7 @@
       "type": "file",
       "name": "GalleryPrint.swift",
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
-      "summary": "Defines a gallery print, its media identity and display helpers, and captures exact raw server metadata for lossless cross host copies.",
+      "summary": "Gallery wire row with canonical full metadata JSON for cross-version recipe identity.",
       "tags": [
         "native-macos",
         "library",
@@ -293755,7 +293755,7 @@
       "type": "file",
       "name": "LibraryPane+Toolbar.swift",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
-      "summary": "Provides sorting, search, and an explicit machine filter that writes the same host tokens as typed search.",
+      "summary": "Native Library toolbar actions, including the compact Sync All to This Mac control.",
       "tags": [
         "native-macos",
         "library",
@@ -293832,7 +293832,7 @@
       "type": "file",
       "name": "LibraryStore+LocalSave.swift",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
-      "summary": "Native macOS Library bulk save, metadata integrity, collection mirroring, and render notification routing",
+      "summary": "Native Library one-click all-host sync, bounded file-backed mirroring, durable origin tracking, pending organization retry, collision-safe names and collection copying.",
       "tags": [
         "native-macos",
         "library",
@@ -296642,6 +296642,144 @@
       "tags": [
         "code",
         "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:LocalSyncRecord",
+      "type": "class",
+      "name": "LocalSyncRecord",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        42,
+        42
+      ],
+      "summary": "Durable verified origin-to-local mapping that skips unchanged media.",
+      "tags": [
+        "native-macos",
+        "library",
+        "class"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:PendingSyncOrganization",
+      "type": "class",
+      "name": "PendingSyncOrganization",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        110,
+        110
+      ],
+      "summary": "Records an import before transfer so an interrupted run can finish organization without changing pre-existing local titles.",
+      "tags": [
+        "native-macos",
+        "library",
+        "class"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:syncAllLocally",
+      "type": "function",
+      "name": "syncAllLocally",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        252,
+        252
+      ],
+      "summary": "Starts a complete remote Library sync independently of active filters or selection.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:mirrorLocally",
+      "type": "function",
+      "name": "mirrorLocally",
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "lineRange": [
+        256,
+        256
+      ],
+      "summary": "Discovers every remote collection and media item, transfers with bounded concurrency, files copies locally and reports partial failures.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift:mediaFile",
+      "type": "function",
+      "name": "mediaFile",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+      "lineRange": [
+        89,
+        89
+      ],
+      "summary": "Downloads authenticated gallery media to a temporary file without buffering it in app memory.",
+      "tags": [
+        "native-macos",
+        "library",
+        "function"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift:GalleryTitleAssignment",
+      "type": "class",
+      "name": "GalleryTitleAssignment",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+      "lineRange": [
+        67,
+        67
+      ],
+      "summary": "Per-print title update in a bulk gallery mutation.",
+      "tags": [
+        "native-macos",
+        "library",
+        "class"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+      "type": "file",
+      "name": "GalleryMutations.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+      "summary": "Typed gallery mutation and collection request contracts.",
+      "tags": [
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+      "type": "file",
+      "name": "HTTPBackend+Gallery.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+      "summary": "Gallery HTTP endpoints, including authenticated media-to-file download.",
+      "tags": [
+        "native-macos",
+        "library"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift",
+      "type": "file",
+      "name": "MoldBackend+Gallery.swift",
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift",
+      "summary": "Updated source for native macOS Library synchronization.",
+      "tags": [
+        "native-macos",
+        "library"
       ],
       "complexity": "moderate"
     }
@@ -524190,6 +524328,62 @@
       "type": "contains",
       "direction": "forward",
       "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:LocalSyncRecord",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:PendingSyncOrganization",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:syncAllLocally",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:mirrorLocally",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+      "target": "function:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift:mediaFile",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+      "target": "class:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift:GalleryTitleAssignment",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+      "target": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+      "target": "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.8
     }
   ],
   "layers": [
@@ -525484,7 +525678,14 @@
         "file:apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
         "file:apps/macos/Tests/MoldTests/FakeBackend.swift",
         "file:apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
-        "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift"
+        "file:apps/macos/Tests/MoldTests/LibrarySelectionTests.swift",
+        "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:LocalSyncRecord",
+        "class:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:PendingSyncOrganization",
+        "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:syncAllLocally",
+        "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:mirrorLocally",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift"
       ]
     },
     {

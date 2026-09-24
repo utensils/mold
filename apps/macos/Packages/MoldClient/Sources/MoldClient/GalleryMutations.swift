@@ -37,6 +37,7 @@ public struct CollectionRef: Codable, Hashable, Sendable {
 public struct GalleryBulkMutation: Codable, Sendable {
     public let operationId: String
     public let filenames: [String]
+    public var titles: [GalleryTitleAssignment]
     public var favorite: Bool?
     public var addTags: [String]
     public var removeTags: [String]
@@ -47,18 +48,29 @@ public struct GalleryBulkMutation: Codable, Sendable {
     /// host agree on.
     public var removeFromCollectionSlug: String?
 
-    public init(filenames: [String], favorite: Bool? = nil,
+    public init(filenames: [String], titles: [GalleryTitleAssignment] = [], favorite: Bool? = nil,
                 addTags: [String] = [], removeTags: [String] = [],
                 addToCollection: CollectionRef? = nil,
                 removeFromCollectionSlug: String? = nil,
                 operationId: String = UUID().uuidString) {
         self.operationId = operationId
         self.filenames = filenames
+        self.titles = titles
         self.favorite = favorite
         self.addTags = addTags
         self.removeTags = removeTags
         self.addToCollection = addToCollection
         self.removeFromCollectionSlug = removeFromCollectionSlug
+    }
+}
+
+public struct GalleryTitleAssignment: Codable, Sendable {
+    public let filename: String
+    public let title: String
+
+    public init(filename: String, title: String) {
+        self.filename = filename
+        self.title = title
     }
 }
 
