@@ -1010,7 +1010,7 @@ export type ServerEvent =
   | { type: "job_ended"; id: string }
   | { type: "job_state_committed"; id: string }
   | { type: "generation_states_committed" }
-  | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
+  | { type: "gallery_added"; filename: string; image?: GalleryImage | null; imported?: boolean }
   | { type: "gallery_removed"; filename: string }
   | GalleryUpdatedEvent<GalleryImage>
   | GalleryTrashedEvent

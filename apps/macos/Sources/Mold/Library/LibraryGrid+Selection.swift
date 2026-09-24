@@ -6,13 +6,6 @@ import SwiftUI
 // `LibraryGridKeys`', both pure and tested away from any view.
 extension LibraryGrid {
 
-    /// Acts on the whole selection when the clicked print is in it.
-    func targets(for entry: LibraryEntry) -> [LibraryEntry] {
-        selection.items.contains(entry.id)
-            ? entries.filter { selection.items.contains($0.id) }
-            : [entry]
-    }
-
     func click(_ entry: LibraryEntry) {
         selection = cursor.clicking(entry.id, ClickModifiers.current, from: selection)
     }
@@ -24,6 +17,10 @@ extension LibraryGrid {
             return .handled
         case .open: return openLead()
         case .quickLook: return quickLookSelection()
+        case .clearSelection:
+            guard !selection.items.isEmpty else { return .ignored }
+            selection = .empty
+            return .handled
         case .trash: return trashSelection()
         case nil: return .ignored
         }

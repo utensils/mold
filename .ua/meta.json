@@ -242,6 +242,67 @@
         "apps/macos/docs/library-local-save-verification.md"
       ],
       "note": "Scoped source-verified update; repository-wide analyzedAt, gitCommitHash, and analyzedFiles remain the original August scan values."
+    },
+    {
+      "id": "macos-bulk-library-save-repair",
+      "updatedAt": "2026-09-24T16:48:07.564564Z",
+      "baseCommit": "2eaebec061658db6e40f2432b035730374009aee",
+      "scope": "Native macOS bulk Library selection, byte-authoritative imports, bounded transfer, local collection mirroring, import event notification suppression, Escape selection, and compact results; global baseline unchanged.",
+      "files": [
+        ".ua/knowledge-graph.json",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/EmbeddedPrintMetadata.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryEcho.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/MoldEvent.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/MoldEventTests.swift",
+        "apps/macos/Sources/Mold/Library/GalleryLive.swift",
+        "apps/macos/Sources/Mold/Library/LibraryGrid+Selection.swift",
+        "apps/macos/Sources/Mold/Library/LibraryGrid.swift",
+        "apps/macos/Sources/Mold/Library/LibraryGridKeys.swift",
+        "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Sources/Mold/Shell/RowActionMenu.swift",
+        "apps/macos/Sources/Mold/Support/LandedPrints.swift",
+        "apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "apps/macos/Tests/MoldTests/LandedPrintsTests.swift",
+        "apps/macos/Tests/MoldTests/LibraryGridKeysTests.swift",
+        "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+        "apps/macos/Tests/MoldTests/LibraryStoreLiveTests.swift",
+        "crates/mold-core/src/types.rs",
+        "crates/mold-server/src/queue.rs",
+        "crates/mold-server/src/routes.rs",
+        "crates/mold-server/src/routes_test.rs",
+        "desktop/src/lib/api/types.ts",
+        "desktop/src/stores/events.test.ts",
+        "desktop/src/stores/events.ts",
+        "docs/plans/macos-bulk-library-save.md"
+      ]
+    },
+    {
+      "id": "macos-bulk-library-save-claude-fixes",
+      "updatedAt": "2026-09-24T16:58:28.686733+00:00",
+      "baseCommit": "0f2a704e0c83fa3498ea8ff53fdba85a53e09371",
+      "scope": "Claude review followup: cancellation, typed uploads, collection lookup resilience, event ledger cleanup, and metadata parser coverage; global baseline unchanged.",
+      "files": [
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/EmbeddedPrintMetadata.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Transport.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryGrid+Selection.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+        "desktop/src/stores/generation.concurrency.test.ts",
+        "desktop/src/stores/generation.ts",
+        "desktop/src/stores/landedPrints.test.ts",
+        "desktop/src/stores/landedPrints.ts"
+      ],
+      "note": "Scoped structural refresh after peer review; repository-wide baseline remains unchanged."
     }
   ]
 }

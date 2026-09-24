@@ -61,11 +61,15 @@ final class GalleryLive {
         switch change {
         case let .updated(filename, row), let .restored(filename, row):
             if let row { replace(filename, with: row, on: host, in: store) } else {
-                Task { await relist(host, in: store) }
+                Task { await relists.run(host) { await relist(host, in: store) } }
             }
-        case let .added(_, row):
+        case let .added(_, row, imported):
+            // The bulk-save task performs one final local refresh. Redrawing
+            // the full grid for every imported picture makes a large save
+            // quadratic, even though the event still reaches other clients.
+            if imported && host == MoldEngine.localHostID && store.localSaveProgress != nil { return }
             if let row { insert(row, on: host, in: store) } else {
-                Task { await relist(host, in: store) }
+                Task { await relists.run(host) { await relist(host, in: store) } }
             }
         case let .removed(filename), let .trashed(filename):
             // Both take the print out of the live listing. The trash is its

@@ -54,6 +54,18 @@ struct LandedPrintsTests {
         #expect(landed.count == 1)
     }
 
+    @Test func aLibraryImportDoesNotCountAsARender() async {
+        let host = machine()
+        let backend = fake(for: host)
+        let hosts = HostStore(hosts: [host]) { _ in backend }
+        let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
+        await connect(host, hosts: hosts, backend: backend)
+        backend.emit(.gallery(.added(filename: "copy.png", row: nil, imported: true)))
+        await settle { backend.callCount("events") == 1 }
+        #expect(landed.count == 0)
+        #expect(landed.recent.isEmpty)
+    }
+
     @Test func theSameFilenameTwiceCountsOnce() async {
         let workstation = machine()
         let backend = fake(for: workstation)

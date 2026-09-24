@@ -76,7 +76,8 @@ final class LandedPrints {
     }
 
     private func apply(_ event: MoldEvent, from host: MoldHost.ID) {
-        guard case let .gallery(.added(filename, _)) = event else { return }
+        guard case let .gallery(.added(filename, _, imported)) = event,
+              !imported else { return }
         guard !isActive, enabled else { return }
         guard !recent.contains(where: { $0.host == host && $0.filename == filename }) else { return }
         let landing = Landing(host: host, filename: filename, at: Date())

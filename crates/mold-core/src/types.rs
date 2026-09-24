@@ -13174,6 +13174,9 @@ pub enum ServerEvent {
         filename: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image: Option<Box<GalleryImage>>,
+        /// Imports enter the Library but are not completed renders.
+        #[serde(default, skip_serializing_if = "is_false")]
+        imported: bool,
     },
     /// An output was deleted via `DELETE /api/gallery/image/:filename`
     /// (permanently — also emitted when a trashed print is purged).
@@ -13410,10 +13413,24 @@ mod server_event_tests {
         let no_row = ServerEvent::GalleryAdded {
             filename: "cat.png".into(),
             image: None,
+            imported: false,
         };
         assert_eq!(
             serde_json::to_string(&no_row).unwrap(),
             r#"{"type":"gallery_added","filename":"cat.png"}"#
+        );
+    }
+
+    #[test]
+    fn gallery_import_is_marked_distinctly_from_a_render() {
+        let imported = ServerEvent::GalleryAdded {
+            filename: "copy.png".into(),
+            image: None,
+            imported: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&imported).unwrap(),
+            r#"{"type":"gallery_added","filename":"copy.png","imported":true}"#
         );
     }
 
@@ -13453,6 +13470,7 @@ mod server_event_tests {
                 trashed_at: None,
                 purge_at: None,
             })),
+            imported: false,
         };
         let wire = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&wire).unwrap();
@@ -13460,6 +13478,7 @@ mod server_event_tests {
             ServerEvent::GalleryAdded {
                 filename,
                 image: Some(img),
+                imported: false,
             } => {
                 assert_eq!(filename, "cat.png");
                 assert_eq!(img.timestamp, 1_700_000_000);

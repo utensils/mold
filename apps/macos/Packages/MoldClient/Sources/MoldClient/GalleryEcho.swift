@@ -24,7 +24,7 @@ public struct GalleryEcho: Sendable {
     /// The row this change is about, when it names one.
     public static func names(_ change: MoldEvent.Gallery) -> String? {
         switch change {
-        case let .added(filename, _), let .updated(filename, _), let .restored(filename, _),
+        case let .added(filename, _, _), let .updated(filename, _), let .restored(filename, _),
              let .removed(filename), let .trashed(filename):
             filename
         case .collectionsChanged:

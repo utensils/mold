@@ -27,12 +27,16 @@ struct LibraryGrid: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        ScrollViewReader { scroller in
+        // Context menus are built while the grid redraws. Resolve the bulk
+        // selection once, not once per selected cell (quadratic for Select All).
+        let selectedTargets = selection.items.isEmpty ? []
+            : entries.filter { selection.items.contains($0.id) }
+        return ScrollViewReader { scroller in
             ScrollView {
                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 16) {
                     ForEach(sections) { section in
                         Section {
-                            ForEach(section.items) { cell($0) }
+                            ForEach(section.items) { cell($0, selectedTargets: selectedTargets) }
                         } header: {
                             // A section with no day is the whole list in one
                             // piece, under an order days cannot describe.
@@ -87,7 +91,8 @@ struct LibraryGrid: View {
         LibraryCursor(sections: sections, columns: columns)
     }
 
-    @ViewBuilder private func cell(_ entry: LibraryEntry) -> some View {
+    @ViewBuilder private func cell(_ entry: LibraryEntry,
+                                   selectedTargets: [LibraryEntry]) -> some View {
         if let host = hosts.first(where: { $0.id == entry.hostID }) {
             LibraryCell(
                 entry: entry, host: host, edge: edge,
@@ -100,7 +105,8 @@ struct LibraryGrid: View {
             .onTapGesture { click(entry) }
             .draggable(actions.draggable(entry))
             .libraryMenu(
-                LibraryMenu(targets: targets(for: entry), scope: scope, actions: actions,
+                LibraryMenu(targets: selection.items.contains(entry.id) ? selectedTargets : [entry],
+                            scope: scope, actions: actions,
                             shelves: shelves, enclosingShelf: enclosingShelf,
                             trashCount: trashCount, open: { onOpen(entry.id) }))
         }

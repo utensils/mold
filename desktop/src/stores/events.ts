@@ -213,7 +213,7 @@ export const useEventsStore = defineStore("events", {
           // badge is the only consumer that cares about the others. A print
           // that was trashed or deleted — including one a machine published
           // and then trashed because Save every result was off — never landed.
-          if (frame.type === "gallery_added")
+          if (frame.type === "gallery_added" && !frame.imported)
             useLandedPrintsStore().noteLanded(hostId, frame.filename);
           else if (frame.type === "gallery_trashed" || frame.type === "gallery_removed")
             useLandedPrintsStore().forgetLanded(frame.filename);

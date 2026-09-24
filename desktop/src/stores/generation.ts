@@ -1141,11 +1141,8 @@ export const useGenerationStore = defineStore("generation", {
             if (!job.remote || !job.mirrorRemoteOutput || !saveRemoteOutputs || !claim(effect)) {
               continue;
             }
-            // This Mac's copy raises its own `gallery_added` on the local
-            // stream. The print was counted on the machine that made it, and
-            // only this loop knows the copy's name is the same print — a
-            // renamed copy arrives under a name nothing has seen.
-            landed.expectCopy(filename);
+            // The import event is explicitly marked as a copy. The landed
+            // ledger counts the print on the machine that rendered it.
             try {
               // The durable child names only the file; the origin's gallery
               // row is where its prompt, seed, dimensions, and timing live.

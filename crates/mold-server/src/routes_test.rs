@@ -16735,7 +16735,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let event = events.try_recv().unwrap();
-        let mold_core::ServerEvent::GalleryAdded { filename, image } = event else {
+        let mold_core::ServerEvent::GalleryAdded {
+            filename, image, ..
+        } = event
+        else {
             panic!("expected GalleryAdded")
         };
         assert_eq!(filename, "mirrored.glb");
@@ -17977,7 +17980,8 @@ mod tests {
         );
         assert!(matches!(
             events.try_recv().unwrap(),
-            mold_core::ServerEvent::GalleryAdded { filename, .. } if filename == "print.png"
+            mold_core::ServerEvent::GalleryAdded { filename, imported: true, .. }
+                if filename == "print.png"
         ));
 
         // Identical bytes + identical metadata preserve cross-host filename

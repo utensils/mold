@@ -25,14 +25,6 @@ export const useLandedPrintsStore = defineStore("landedPrints", {
      * holds one.
      */
     unseen: new Map<string, string>(),
-    /**
-     * Names this app is about to import as its own copy of a print it has
-     * already counted. The mirror loop imports the origin's name AND the name
-     * the gallery gave the copy, so the second frame arrives under a name
-     * nothing has seen; only the mirror knows they are one print. Each entry
-     * is consumed by the frame it predicts, and `markSeen` clears the rest.
-     */
-    expectedCopies: new Set<string>(),
   }),
   getters: {
     count: (state): number => state.unseen.size,
@@ -40,20 +32,8 @@ export const useLandedPrintsStore = defineStore("landedPrints", {
   actions: {
     noteLanded(hostId: string, filename: string | null | undefined): void {
       if (!filename || !appIsBackground()) return;
-      if (this.expectedCopies.has(filename)) {
-        // Replaced, never mutated in place: this runs from SSE callbacks.
-        const remaining = new Set(this.expectedCopies);
-        remaining.delete(filename);
-        this.expectedCopies = remaining;
-        return;
-      }
       if (this.unseen.has(filename)) return;
       this.unseen = new Map(this.unseen).set(filename, hostId);
-    },
-    /** This app is importing its own copy of a print it already counted. */
-    expectCopy(filename: string | null | undefined): void {
-      if (!filename || this.expectedCopies.has(filename)) return;
-      this.expectedCopies = new Set(this.expectedCopies).add(filename);
     },
     /** Trashed or deleted: a print the person declined to keep never landed. */
     forgetLanded(filename: string | null | undefined): void {
@@ -65,7 +45,6 @@ export const useLandedPrintsStore = defineStore("landedPrints", {
     /** The window came back — the badge has done its job. */
     markSeen(): void {
       if (this.unseen.size > 0) this.unseen = new Map();
-      if (this.expectedCopies.size > 0) this.expectedCopies = new Set();
     },
   },
 });

@@ -100,6 +100,54 @@ private final class MirrorListingTransport: StubTransport {
         #expect(Array(bytes.suffix(2)) == [1, 2])
     }
 
+    @Test func embeddedRecipeWinsOverAStaleGalleryRow() throws {
+        let listing = #"{"filename":"remote.png","timestamp":1700000000,"metadata_synthetic":true,"metadata":{"prompt":"stale","model":"flux-dev:q8","seed":42,"steps":24,"guidance":3.5,"width":1024,"height":768,"version":"0.31.0"}}"#
+        let embedded = #"{"prompt":"original","model":"flux-dev:q8","seed":42,"steps":24,"guidance":3.5,"width":1024,"height":768,"version":"0.31.0"}"#
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(listing.utf8))
+        let text = Array("mold:parameters".utf8) + [0, 0, 0, 0, 0] + Array(embedded.utf8)
+        let length = UInt32(text.count).bigEndian
+        var png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        withUnsafeBytes(of: length) { png.append(contentsOf: $0) }
+        png.append(Data("iTXt".utf8))
+        png.append(contentsOf: text)
+        png.append(contentsOf: [0, 0, 0, 0])
+
+        let framed = try GalleryImport(mirroring: print, file: png).body()
+        let headerLength = framed[0..<4].reduce(0) { $0 << 8 | Int($1) }
+        let descriptor = try #require(JSONSerialization.jsonObject(
+            with: Data(framed[12..<(12 + headerLength)])) as? [String: Any])
+        let recipe = try #require(descriptor["metadata"] as? [String: Any])
+        #expect(recipe["prompt"] as? String == "original")
+        #expect(descriptor["metadata_synthetic"] as? Bool == false)
+    }
+
+    @Test func embeddedRecipeReaderAcceptsTextAndJPEGComments() {
+        let json = Data(#"{"prompt":"original","model":"flux-dev:q8"}"#.utf8)
+        let payload = Data("mold:parameters".utf8) + Data([0]) + json
+        var png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        withUnsafeBytes(of: UInt32(payload.count).bigEndian) { png.append(contentsOf: $0) }
+        png.append(Data("tEXt".utf8))
+        png.append(payload)
+        png.append(contentsOf: [0, 0, 0, 0])
+        #expect(EmbeddedPrintMetadata.json(in: png, named: "print.png") == json)
+
+        let comment = Data("mold:parameters ".utf8) + json
+        var jpeg = Data([0xFF, 0xD8, 0xFF, 0xFE])
+        withUnsafeBytes(of: UInt16(comment.count + 2).bigEndian) { jpeg.append(contentsOf: $0) }
+        jpeg.append(comment)
+        jpeg.append(contentsOf: [0xFF, 0xD9])
+        #expect(EmbeddedPrintMetadata.json(in: jpeg, named: "print.jpg") == json)
+        #expect(EmbeddedPrintMetadata.json(in: Data([0xFF]), named: "print.jpg") == nil)
+    }
+
+    @Test func fileBackedBodyMatchesTheInMemoryContract() throws {
+        let item = GalleryImport(prompt: "a fox", model: "import", version: "test", file: Data([1, 2, 3]))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try item.writeBody(to: url)
+        #expect(try Data(contentsOf: url) == item.body())
+    }
+
     @Test func fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits() async throws {
         let fetched = try await MirrorListingTransport.backend().gallery(etag: nil)
         guard case let .fresh(prints, _) = fetched else { Issue.record("expected listing"); return }

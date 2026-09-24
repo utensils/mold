@@ -17,12 +17,13 @@ enum LibraryGridAction: Hashable {
     case open
     case quickLook
     case trash
+    case clearSelection
 }
 
 enum LibraryGridKeys {
     /// Every key the grid answers, so the binding and the map cannot drift.
     static let keys: Set<KeyEquivalent> = [
-        .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .space, .delete,
+        .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .space, .delete, .escape,
     ]
 
     static func action(for key: KeyEquivalent,
@@ -36,6 +37,7 @@ enum LibraryGridKeys {
         case .downArrow: return arrow(.down, held)
         case .return: return held.isEmpty ? .open : nil
         case .space: return held.isEmpty ? .quickLook : nil
+        case .escape: return held.isEmpty ? .clearSelection : nil
         // ⌘⌫, and only ⌘⌫. The menu item owns the same chord and a main-menu
         // key equivalent is consumed first, so this is what answers when the
         // menu is not in play -- never a bare Backspace.

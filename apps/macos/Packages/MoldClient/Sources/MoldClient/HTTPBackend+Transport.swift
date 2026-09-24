@@ -62,4 +62,25 @@ extension HTTPBackend {
             throw TransportFailure.from(error)
         }
     }
+
+    func upload(_ request: URLRequest, fromFile file: URL) async throws -> Data {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.upload(
+                for: request, fromFile: file, delegate: redirectGuard)
+        } catch let error as URLError {
+            throw TransportFailure.from(error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw MoldClientError.malformedResponse
+        }
+        do {
+            try HTTPRefusal.check(http, data)
+        } catch {
+            TransportLog.refusal(error, for: request)
+            throw error
+        }
+        return data
+    }
 }

@@ -269,6 +269,7 @@ pub(crate) fn save_image_to_dir_with_suffix(
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
             image: image_row,
+            imported: false,
         });
         if seeded_filing {
             announce_seeded_filing(events, &filename, announced);
@@ -588,6 +589,7 @@ fn save_video_to_dir_with_sidecar(
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
             image: image_row,
+            imported: false,
         });
         if seeded_filing {
             announce_seeded_filing(events, &filename, announced);
@@ -850,6 +852,7 @@ pub(crate) fn save_video_to_dir_named(
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.to_string(),
             image: image_row,
+            imported: false,
         });
         if seeded_filing {
             announce_seeded_filing(events, filename, announced);
@@ -971,6 +974,7 @@ pub(crate) fn publish_video_path_to_dir_named(
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.to_string(),
             image: image_row,
+            imported: false,
         });
         if seeded_filing {
             announce_seeded_filing(events, filename, announced);
@@ -6529,7 +6533,9 @@ mod tests {
         );
 
         match rx.try_recv().unwrap() {
-            mold_core::ServerEvent::GalleryAdded { filename, image } => {
+            mold_core::ServerEvent::GalleryAdded {
+                filename, image, ..
+            } => {
                 assert!(filename.ends_with(".png"), "{filename}");
                 let img = image.expect("DB recorded — event must carry the gallery row");
                 assert_eq!(img.filename, filename);
@@ -6610,7 +6616,9 @@ mod tests {
         );
 
         match rx.try_recv().unwrap() {
-            mold_core::ServerEvent::GalleryAdded { filename, image } => {
+            mold_core::ServerEvent::GalleryAdded {
+                filename, image, ..
+            } => {
                 assert!(filename.ends_with(".mp4"), "{filename}");
                 assert!(image.is_some());
             }
