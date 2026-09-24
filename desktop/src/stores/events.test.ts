@@ -523,9 +523,14 @@ describe("fleet-wide event streams", () => {
     plato!.onEvent?.("message", frame("theirs.png"));
     expect(noteLanded).toHaveBeenCalledWith("plato", "theirs.png");
     noteLanded.mockClear();
-    primary!.onEvent?.("message", JSON.stringify({
-      type: "gallery_added", filename: "copied.png", imported: true,
-    }));
+    primary!.onEvent?.(
+      "message",
+      JSON.stringify({
+        type: "gallery_added",
+        filename: "copied.png",
+        imported: true,
+      }),
+    );
     expect(noteLanded).not.toHaveBeenCalled();
     // The gallery store holds the PRIMARY's bucket; a remote print reaches it
     // through the merged fetch, never through another machine's frame.
