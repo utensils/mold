@@ -32,11 +32,17 @@ import Testing
             {"type":"gallery_added","filename":"a.png","image":{"filename":"a.png",\
             "metadata":{"prompt":"owls"},"timestamp":1000,"favorite":true}}
             """
-        guard case let .gallery(.added(filename, row)) = MoldEvent(name: "event", data: data)
+        guard case let .gallery(.added(filename, row, _)) = MoldEvent(name: "event", data: data)
         else { Issue.record("not a gallery add"); return }
         #expect(filename == "a.png")
         // Present means insert without asking again; absent means go and read.
         #expect(row?.isFavorite == true)
+    }
+
+    @Test func importedGalleryEventRetainsItsOrigin() {
+        let event = MoldEvent(name: "event", data:
+            #"{"type":"gallery_added","filename":"copy.png","imported":true}"#)
+        #expect(event == .gallery(.added(filename: "copy.png", row: nil, imported: true)))
     }
 
     @Test func theOtherGalleryVerbsDecode() {

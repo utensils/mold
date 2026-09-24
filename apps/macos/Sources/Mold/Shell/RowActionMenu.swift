@@ -55,6 +55,22 @@ struct RowActionMenu<Kind: Hashable>: View {
 }
 
 extension View {
+    /// A large grid can attach menus to thousands of rows. Build the plan
+    /// only when the person opens one, rather than on every selection redraw.
+    func rowActionMenu<Kind: Hashable, Extra: View>(
+        lazy actions: @escaping () -> [RowAction<Kind>],
+        perform: @escaping (Kind) -> Void,
+        @ViewBuilder extra: @escaping () -> Extra = { EmptyView() }
+    ) -> some View {
+        contextMenu {
+            let offered = actions()
+            if RowAction.offersMenu(offered) {
+                RowActionMenu(actions: offered, perform: perform,
+                              extra: { AnyView(extra()) })
+            }
+        }
+    }
+
     /// A row's contextual menu, or none. THE door: no caller attaches
     /// `.contextMenu` of its own -- `MenuSurfaceTests` scans for it.
     ///

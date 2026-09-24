@@ -66,9 +66,10 @@ struct LibraryMenu {
 extension View {
     /// One print's menu, from the one list.
     func libraryMenu(_ menu: LibraryMenu) -> some View {
-        rowActionMenu(menu.items, perform: menu.perform) {
-            if !menu.share.isEmpty {
-                ShareLink(items: menu.share) { print in SharePreview(print.filename) }
+        rowActionMenu(lazy: { menu.items }, perform: menu.perform) {
+            let shares = menu.share
+            if !shares.isEmpty {
+                ShareLink(items: shares) { print in SharePreview(print.filename) }
             }
         }
     }

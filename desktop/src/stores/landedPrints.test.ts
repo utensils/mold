@@ -54,29 +54,8 @@ describe("landed prints", () => {
     expect(landed.count).toBe(1);
   });
 
-  /*
-   * The mirror imports BOTH names when the gallery renamed the copy, so a
-   * second `gallery_added` arrives here under a name nothing has seen. The one
-   * place that knows those names are one print is the mirror loop, which says
-   * so before it imports.
-   */
-  it("does not count a copy this app announced it was importing", () => {
+  it("counts a later render even when a prior import had the same filename", () => {
     const landed = useLandedPrintsStore();
-    landed.noteLanded("plato", "a.png");
-    landed.expectCopy("a.png");
-    landed.expectCopy("a-1.png");
-
-    landed.noteLanded("local", "a.png");
-    landed.noteLanded("local", "a-1.png");
-
-    expect(landed.count).toBe(1);
-  });
-
-  it("counts an unrelated print that happens to follow an expected copy", () => {
-    const landed = useLandedPrintsStore();
-    landed.expectCopy("a-1.png");
-    landed.noteLanded("local", "a-1.png");
-    // The expectation is consumed, so the NEXT print under that name counts.
     landed.noteLanded("local", "a-1.png");
     expect(landed.count).toBe(1);
   });

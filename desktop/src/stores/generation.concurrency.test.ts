@@ -1068,7 +1068,6 @@ describe("submitBatch connection cap", () => {
     const { useLandedPrintsStore } = await import("./landedPrints");
     const landed = useLandedPrintsStore();
     const noteLanded = vi.spyOn(landed, "noteLanded").mockImplementation(() => {});
-    const expectCopy = vi.spyOn(landed, "expectCopy").mockImplementation(() => {});
     const store = useGenerationStore();
     useHostsStore().extras = [
       {
@@ -1186,11 +1185,9 @@ describe("submitBatch connection cap", () => {
       1,
     );
     expect(submitted.jobs[0]!.result?.metadata).toEqual(originMetadata);
-    // The badge counts the print on the machine that MADE it, and the mirror
-    // warns the ledger that this Mac's copy is about to raise its own
-    // `gallery_added` here — one print, one badge, however many copies exist.
+    // The badge counts the print on the machine that made it; the local
+    // mirror's imported event is excluded by the event bridge.
     expect(noteLanded).toHaveBeenCalledWith("hal9000", "finished.png");
-    expect(expectCopy).toHaveBeenCalledWith("finished.png");
     expect(mockSse).not.toHaveBeenCalled();
   });
 

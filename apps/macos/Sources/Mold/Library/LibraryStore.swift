@@ -52,7 +52,10 @@ final class LibraryStore {
 
     /// A Library import to the embedded host is a batch, not a Finder export.
     var localSaveProgress: String?
+    var localSaveTask: Task<Void, Never>?
+    var localSaveStopRequested = false
     var localSaveReport = ""
+    var localSaveFailures: [String] = []
     var localSaveAlertPresented = false
 
     /// How many times the rows have changed. See `LibraryRevision`.

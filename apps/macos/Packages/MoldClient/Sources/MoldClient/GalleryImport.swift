@@ -60,11 +60,12 @@ public struct GalleryImport: Sendable {
                   version: print.metadata.version ?? "", file: file,
                   timestamp: print.createdAt)
         originalMetadata = print.metadata
-        originalMetadataJSON = print.rawMetadataJSON
-        metadataSynthetic = print.metadataSynthetic ?? false
+        let embedded = EmbeddedPrintMetadata.json(in: file, named: print.filename)
+        originalMetadataJSON = embedded ?? print.rawMetadataJSON
+        metadataSynthetic = embedded == nil ? (print.metadataSynthetic ?? false) : false
     }
 
-    public func body() throws -> Data {
+    private func descriptor() throws -> Data {
         let metadata: [String: Any]
         if let originalMetadataJSON {
             guard let object = try JSONSerialization.jsonObject(with: originalMetadataJSON) as? [String: Any] else {
@@ -105,8 +106,11 @@ public struct GalleryImport: Sendable {
         if let timestamp {
             descriptor["timestamp"] = UInt64(timestamp.timeIntervalSince1970)
         }
-        let json = try JSONSerialization.data(withJSONObject: descriptor,
-                                               options: [.sortedKeys])
+        return try JSONSerialization.data(withJSONObject: descriptor, options: [.sortedKeys])
+    }
+
+    public func body() throws -> Data {
+        let json = try descriptor()
 
         var body = Data(capacity: 12 + json.count + file.count)
         // Big endian, and the widths are not interchangeable: four for the
@@ -116,6 +120,21 @@ public struct GalleryImport: Sendable {
         body.append(json)
         body.append(file)
         return body
+    }
+
+    /// A file-backed upload avoids a second full-size in-memory copy while
+    /// URLSession transfers a large gallery picture to the local engine.
+    public func writeBody(to url: URL) throws {
+        let json = try descriptor()
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try withUnsafeBytes(of: UInt32(json.count).bigEndian) { try handle.write(contentsOf: $0) }
+        try withUnsafeBytes(of: UInt64(file.count).bigEndian) { try handle.write(contentsOf: $0) }
+        try handle.write(contentsOf: json)
+        try handle.write(contentsOf: file)
     }
 }
 
@@ -130,8 +149,11 @@ extension HTTPBackend {
         var request = self.request("/api/gallery/import/\(escaped(filename))")
         request.httpMethod = "PUT"
         request.setValue(GalleryImport.contentType, forHTTPHeaderField: "Content-Type")
-        request.httpBody = try item.body()
-        let data = try await bytes(for: request)
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mold-gallery-import-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try item.writeBody(to: temporary)
+        let data = try await upload(request, fromFile: temporary)
         struct Answer: Decodable { let filename: String }
         guard let answer = try? MoldJSON.decoder.decode(Answer.self, from: data) else {
             throw MoldClientError.malformedResponse

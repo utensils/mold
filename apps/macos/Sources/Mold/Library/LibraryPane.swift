@@ -1,3 +1,4 @@
+import AppKit
 import MoldClient
 import SwiftUI
 
@@ -77,6 +78,19 @@ struct LibraryPane: View {
         let showing = index.showing(pool: pool, revision: library.rows.value,
                                     query: resolved, selection: selection.items)
         return watched(showing)
+            .safeAreaInset(edge: .bottom) {
+                if let progress = library.localSaveProgress {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text(progress)
+                        Spacer()
+                        Button("Stop After Current Transfers") { library.localSaveStopRequested = true }
+                            .disabled(library.localSaveStopRequested)
+                    }
+                    .padding(12)
+                    .background(.bar)
+                }
+            }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
                 showsInspector.toggle()
@@ -90,10 +104,37 @@ struct LibraryPane: View {
                 navigation.rememberEdge()
             })
             .destructionDialog($pendingDestruction)
-            .alert("Save to This Mac", isPresented: $library.localSaveAlertPresented) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(library.localSaveReport)
+            .sheet(isPresented: $library.localSaveAlertPresented) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Save to This Mac").font(.title2.bold())
+                    Text(library.localSaveReport)
+                    if !library.localSaveFailures.isEmpty {
+                        Text("Couldn’t save").font(.headline)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(library.localSaveFailures, id: \.self) { failure in
+                                    Text(failure).textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                    }
+                    HStack {
+                        if !library.localSaveFailures.isEmpty {
+                            Button("Copy Error Details") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    ([library.localSaveReport] + library.localSaveFailures)
+                                        .joined(separator: "\n"), forType: .string)
+                            }
+                        }
+                        Spacer()
+                        Button("Done") { library.localSaveAlertPresented = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(24)
+                .frame(width: 600, height: library.localSaveFailures.isEmpty ? 180 : 480)
             }
             .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
             .sheet(item: $meshExport) { prompt in

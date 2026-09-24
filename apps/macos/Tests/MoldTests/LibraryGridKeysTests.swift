@@ -50,6 +50,11 @@ struct LibraryGridKeysTests {
         #expect(LibraryGridKeys.action(for: .space, modifiers: .command) == nil)
     }
 
+    @Test func escapeClearsTheGridSelection() {
+        #expect(LibraryGridKeys.action(for: .escape, modifiers: []) == .clearSelection)
+        #expect(LibraryGridKeys.action(for: .escape, modifiers: .command) == nil)
+    }
+
     /// The binding and the map cannot drift: every key the grid asks for has
     /// a meaning, and nothing else does.
     @Test func everyBoundKeyMeansSomething() {

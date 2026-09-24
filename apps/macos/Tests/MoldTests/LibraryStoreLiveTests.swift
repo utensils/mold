@@ -15,6 +15,25 @@ struct LibraryStoreLiveTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
+    @Test func bulkImportsDoNotRebuildTheGridOnePrintAtATime() {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let fake = FakeBackend(host: local)
+        let hosts = HostStore(hosts: [local]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        library.localSaveProgress = "Saving…"
+        let revision = library.rows.value
+        for index in 0..<100 {
+            library.live.apply(.gallery(.added(filename: "\(index).png",
+                row: FakeFixtures.print("\(index).png"), imported: true)),
+                from: local.id, in: library)
+        }
+        #expect(library.rows.value == revision)
+        #expect(library.items.isEmpty)
+        library.live.apply(.gallery(.added(filename: "render.png",
+            row: FakeFixtures.print("render.png"))), from: local.id, in: library)
+        #expect(library.items.map(\.print.filename) == ["render.png"])
+    }
+
     @Test func aPrintLandingDuringOneOfOurEditsStillAppears() async {
         let machine = host("workstation")
         let fake = FakeBackend(host: machine)

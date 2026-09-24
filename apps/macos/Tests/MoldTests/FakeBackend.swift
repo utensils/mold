@@ -889,8 +889,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func patch(_ filename: String, with patch: GalleryPatch) async throws { try record("patch") }
     func mutate(_ mutation: GalleryBulkMutation) async throws {
         try record("mutate")
+        mutationRequests.append(mutation)
         await pause("mutate")
     }
+    nonisolated(unsafe) var mutationRequests: [GalleryBulkMutation] = []
     func trash(_ filenames: [String]) async throws { try record("trash") }
     func restoreFromTrash(_ filenames: [String]) async throws { try record("restoreFromTrash") }
     func deleteForever(_ filenames: [String]) async throws { try record("deleteForever") }

@@ -9243,6 +9243,7 @@ async fn import_gallery_file(
             events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename_for_task.clone(),
                 image,
+                imported: true,
             });
         }
         transaction.rollback_unpublished().map_err(|error| {
@@ -9332,6 +9333,7 @@ async fn import_gallery_file(
             state.events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename.clone(),
                 image,
+                imported: true,
             });
             (filename, true)
         }
