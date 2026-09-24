@@ -3,12 +3,47 @@ import Foundation
 /// The recipe in the bytes is the immutable authority for a mirrored print.
 /// The gallery listing can have a newer DB recipe for the same old PNG/JPEG.
 public enum EmbeddedPrintMetadata {
+    public static func json(in url: URL, named filename: String) throws -> Data? {
+        let suffix = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        guard ["png", "jpg", "jpeg", "gif"].contains(suffix) else { return nil }
+        // Mapping avoids copying a full-size picture just to inspect its
+        // small metadata chunk before a file-backed upload.
+        return json(in: try Data(contentsOf: url, options: .mappedIfSafe), named: filename)
+    }
+
     public static func json(in file: Data, named filename: String) -> Data? {
         switch URL(fileURLWithPath: filename).pathExtension.lowercased() {
         case "png": return png(file)
         case "jpg", "jpeg": return jpeg(file)
+        case "gif": return gif(file)
         default: return nil
         }
+    }
+
+    private static func gif(_ file: Data) -> Data? {
+        guard file.starts(with: Data("GIF8".utf8)) else { return nil }
+        // GIF application metadata uses a comment extension: 21 FE, followed
+        // by one or more length-prefixed sub-blocks and a zero terminator.
+        let prefix = Data("mold:parameters ".utf8)
+        var cursor = 6
+        while cursor + 2 < file.count {
+            guard file[cursor] == 0x21, file[cursor + 1] == 0xFE else {
+                cursor += 1
+                continue
+            }
+            cursor += 2
+            var comment = Data()
+            while cursor < file.count {
+                let size = Int(file[cursor]); cursor += 1
+                if size == 0 { break }
+                guard size <= file.count - cursor else { return nil }
+                comment.append(file[cursor..<(cursor + size)])
+                cursor += size
+            }
+            if comment.starts(with: prefix),
+               let json = validJSON(comment.dropFirst(prefix.count)) { return json }
+        }
+        return nil
     }
 
     private static func validJSON(_ data: Data) -> Data? {

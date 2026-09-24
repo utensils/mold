@@ -10,6 +10,14 @@ struct LibraryLocalSaveTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
+    private func versionedPrint(_ name: String, prompt: String? = nil) -> GalleryPrint {
+        let json = try! JSONSerialization.data(withJSONObject: [
+            "filename": name, "timestamp": 1000, "size_bytes": 3,
+            "media_version": "1000:3", "metadata": ["prompt": prompt.map { $0 as Any } ?? NSNull()],
+        ])
+        return try! MoldJSON.decoder.decode(GalleryPrint.self, from: json)
+    }
+
     @Test func savingAFilteredRemoteSelectionImportsOnlyPicturesIntoThisMac() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("remote")
@@ -28,12 +36,12 @@ struct LibraryLocalSaveTests {
 
         await library.saveLocally([picture, localRow, mesh])
 
-        #expect(remoteBackend.callCount("media") == 1)
+        #expect(remoteBackend.callCount("mediaFile") == 1)
         #expect(remoteBackend.callCount("gallery") == 1)
         #expect(localBackend.importedNames == ["remote.png"])
-        #expect(localBackend.importedItems.first?.file == Data([1, 2, 3]))
+        #expect(localBackend.importedMedia.first == Data([1, 2, 3]))
         #expect(localBackend.importedItems.first?.originalMetadata?.prompt == "a fox")
-        #expect(localBackend.callCount("gallery") == 1)
+        #expect(localBackend.callCount("gallery") == 2)
         #expect(library.localSaveReport.contains("Skipped 2"))
     }
 
@@ -47,7 +55,7 @@ struct LibraryLocalSaveTests {
 
         await library.saveLocally([picture])
 
-        #expect(remoteBackend.callCount("media") == 0)
+        #expect(remoteBackend.callCount("mediaFile") == 0)
         #expect(library.localSaveAlertPresented)
         #expect(library.localSaveTask == nil)
         #expect(library.localSaveReport.contains("Start This Mac’s engine"))
@@ -145,11 +153,258 @@ struct LibraryLocalSaveTests {
         await library.saveLocally([collision, available])
 
         #expect(localBackend.importedNames == ["free.png"])
-        #expect(library.localSaveReport.contains("Copied 1 pictures"))
+        #expect(library.localSaveReport.contains("Copied 1 prints"))
         #expect(library.localSaveReport.contains("1 were not copied"))
         #expect(library.localSaveFailures.contains { $0.contains("taken.png") })
         #expect(library.localSaveAlertPresented)
-        #expect(localBackend.callCount("gallery") == 1)
+        #expect(localBackend.callCount("gallery") == 2)
+    }
+
+    @Test func syncAllIgnoresSelectionAndCopiesEveryMediaKindAndEmptyCollections() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("remote")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        remoteBackend.mediaAnswer = Data([1, 2, 3])
+        let print = try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"""
+            {
+            "filename":"star.png","timestamp":1000,
+            "metadata":{"prompt":"star","model":"flux","seed":1},
+            "collections":["remote-night"],"title":"A Star","favorite":true,"tags":["night"]
+            }
+            """#.utf8))
+        remoteBackend.prints = [print, FakeFixtures.print("movie.mp4"),
+                                FakeFixtures.print("shape.glb"), FakeFixtures.print("sound.wav")]
+        remoteBackend.collectionRows = [
+            Collection(id: "remote-night", name: "Night Sky", slug: "night-sky"),
+            Collection(id: "remote-empty", name: "Empty Shelf", slug: "empty-shelf"),
+        ]
+        localBackend.collectionCreateResponses = [
+            "Night Sky": Collection(id: "local-night", name: "Night Sky", slug: "night-sky"),
+            "Empty Shelf": Collection(id: "local-empty", name: "Empty Shelf", slug: "empty-shelf"),
+        ]
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+
+        #expect(Set(localBackend.importedNames) == ["star.png", "movie.mp4", "shape.glb", "sound.wav"])
+        #expect(localBackend.callCount("createCollection") == 2)
+        #expect(localBackend.mutationRequests.contains { $0.addToCollection?.name == "Night Sky"
+            && $0.filenames == ["star.png"] })
+        #expect(localBackend.mutationRequests.contains { $0.titles.contains {
+            $0.filename == "star.png" && $0.title == "A Star" } })
+        #expect(localBackend.mutationRequests.contains { $0.favorite == true
+            && $0.filenames == ["star.png"] })
+        #expect(localBackend.mutationRequests.contains { $0.addTags == ["night"]
+            && $0.filenames == ["star.png"] })
+        #expect(library.localSaveReport.contains("Created 2 collections"))
+    }
+
+    @Test func syncAllKeepsSameNamedPrintsFromDifferentHostsAndRerunsWithoutDuplicates() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let first = MoldHost(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                             name: "first", baseURL: URL(string: "http://first")!)
+        let second = MoldHost(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+                              name: "second", baseURL: URL(string: "http://second")!)
+        let localBackend = FakeBackend(host: local)
+        let firstBackend = FakeBackend(host: first)
+        let secondBackend = FakeBackend(host: second)
+        firstBackend.prints = [versionedPrint("same.png")]
+        secondBackend.prints = [versionedPrint("same.png")]
+        firstBackend.mediaAnswer = Data([1, 2, 3])
+        secondBackend.mediaAnswer = Data([4, 5, 6])
+        let hosts = HostStore(hosts: [local, first, second]) { machine in
+            if machine.id == local.id { return localBackend }
+            return machine.id == first.id ? firstBackend : secondBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+        let copied = localBackend.importedNames
+        #expect(copied.count == 2)
+        #expect(Set(copied).count == 2)
+        #expect(copied.contains("same.png"))
+        for (name, bytes) in zip(localBackend.importedNames, localBackend.importedMedia) {
+            localBackend.mediaAnswers[name] = bytes
+            localBackend.prints.append(versionedPrint(name))
+        }
+
+        await library.syncAllLocally()
+
+        #expect(localBackend.importedNames == copied)
+        #expect(library.localSaveReport.contains("2 were already here"))
+        let remoteReads = firstBackend.callCount("mediaFile") + secondBackend.callCount("mediaFile")
+        await library.syncAllLocally()
+        #expect(firstBackend.callCount("mediaFile") + secondBackend.callCount("mediaFile") == remoteReads)
+    }
+
+    @Test func syncAllKeepsDifferentRecipesEvenWhenMediaBytesMatch() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("different-recipe")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        let name = "same.png"
+        localBackend.prints = [versionedPrint(name, prompt: "local recipe")]
+        localBackend.mediaAnswers[name] = Data([1, 2, 3])
+        remoteBackend.prints = [versionedPrint(name, prompt: "remote recipe")]
+        remoteBackend.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+
+        await LibraryStore(hosts: hosts).syncAllLocally()
+
+        #expect(localBackend.importedNames.count == 1)
+        #expect(localBackend.importedNames.first != name)
+    }
+
+    @Test func syncAllBoundsCollisionNamesToFileSystemLimit() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("long-names")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        let name = String(repeating: "🌟", count: 59) + ".png"
+        localBackend.prints = [versionedPrint(name, prompt: "local")]
+        localBackend.mediaAnswers[name] = Data([1, 2, 3])
+        remoteBackend.prints = [versionedPrint(name, prompt: "remote")]
+        remoteBackend.mediaAnswer = Data([4, 5, 6])
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+
+        await LibraryStore(hosts: hosts).syncAllLocally()
+
+        #expect(localBackend.importedNames.count == 1)
+        #expect(localBackend.importedNames[0].utf8.count <= 255)
+        #expect(localBackend.importedNames[0].hasSuffix(".png"))
+    }
+
+    @Test func syncAllReportsAnUnavailableRemoteHost() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("unavailable")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        remoteBackend.plantedErrors["gallery"] = MoldClientError.malformedResponse
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+
+        #expect(library.localSaveFailures.contains { $0.contains("unavailable") })
+        #expect(library.localSaveReport.contains("issues need attention"))
+    }
+
+    @Test func failedOrganizationIsRetriedAfterMediaWasAlreadyPresent() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("retry-organization")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        var mutable = GalleryPrint.Mutable(versionedPrint("same.png", prompt: "recipe"))
+        mutable.title = "Remote title"
+        remoteBackend.prints = [mutable.build()]
+        remoteBackend.mediaAnswer = Data([1, 2, 3])
+        localBackend.plantedErrors["mutate"] = MoldClientError.malformedResponse
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+        #expect(localBackend.importedNames == ["same.png"])
+        #expect(library.localSaveFailures.contains { $0.contains("Print titles") })
+
+        localBackend.prints = [versionedPrint("same.png", prompt: "recipe")]
+        localBackend.mediaAnswers["same.png"] = Data([1, 2, 3])
+        localBackend.plantedErrors.removeValue(forKey: "mutate")
+        await library.syncAllLocally()
+        #expect(localBackend.mutationRequests.contains { $0.titles.contains {
+            $0.filename == "same.png" && $0.title == "Remote title" } })
+    }
+
+    @Test func anAlreadyLocalPrintKeepsItsOwnTitleOnSyncAll() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("existing-local-title")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        var localMutable = GalleryPrint.Mutable(versionedPrint("same.png", prompt: "recipe"))
+        localMutable.title = "My title"
+        localBackend.prints = [localMutable.build()]
+        localBackend.mediaAnswers["same.png"] = Data([1, 2, 3])
+        var remoteMutable = GalleryPrint.Mutable(versionedPrint("same.png", prompt: "recipe"))
+        remoteMutable.title = "Remote title"
+        remoteBackend.prints = [remoteMutable.build()]
+        remoteBackend.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+
+        await LibraryStore(hosts: hosts).syncAllLocally()
+
+        #expect(localBackend.importedNames.isEmpty)
+        #expect(localBackend.mutationRequests.allSatisfy { $0.titles.isEmpty })
+    }
+
+    @Test func uncertainImportResponseKeepsPendingOrganizationForRetry() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("uncertain-import")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        var mutable = GalleryPrint.Mutable(versionedPrint("clip.mp4", prompt: "recipe"))
+        mutable.title = "Remote clip"
+        remoteBackend.prints = [mutable.build()]
+        remoteBackend.mediaAnswer = Data([1, 2, 3])
+        localBackend.importFailures = ["clip.mp4"]
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+        #expect(library.localSaveFailures.contains { $0.contains("clip.mp4") })
+
+        // Simulate a server that committed before its response was lost.
+        localBackend.prints = [versionedPrint("clip.mp4", prompt: "recipe")]
+        localBackend.mediaAnswers["clip.mp4"] = Data([1, 2, 3])
+        localBackend.importFailures = []
+        await library.syncAllLocally()
+        #expect(localBackend.importedNames.isEmpty)
+        #expect(localBackend.mutationRequests.contains { $0.titles.contains {
+            $0.filename == "clip.mp4" && $0.title == "Remote clip" } })
+    }
+
+    @Test func impossibleStagingSizeReportsFailureWithoutDownloading() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("huge-gallery-row")
+        let localBackend = FakeBackend(host: local)
+        let remoteBackend = FakeBackend(host: remote)
+        let row = try! JSONSerialization.data(withJSONObject: [
+            "filename": "huge.mp4", "timestamp": 1000,
+            "size_bytes": Int.max, "metadata": ["prompt": "clip"],
+        ])
+        remoteBackend.prints = [try! MoldJSON.decoder.decode(GalleryPrint.self, from: row)]
+        let hosts = HostStore(hosts: [local, remote]) { machine in
+            machine.id == local.id ? localBackend : remoteBackend
+        }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+
+        await library.syncAllLocally()
+
+        #expect(remoteBackend.callCount("mediaFile") == 0)
+        #expect(library.localSaveFailures.contains { $0.contains("enough free space") })
     }
 
     @Test func remoteTrashDoesNotSendALocalCopyToTrash() async {

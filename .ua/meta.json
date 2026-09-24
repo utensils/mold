@@ -303,6 +303,31 @@
         "desktop/src/stores/landedPrints.ts"
       ],
       "note": "Scoped structural refresh after peer review; repository-wide baseline remains unchanged."
+    },
+    {
+      "id": "macos-library-sync-all",
+      "updatedAt": "2026-09-24T19:39:44.838455+00:00",
+      "baseCommit": "8f2b3fabfba089d80bd834c4ce55bfda60843700",
+      "scope": "Native macOS one-click complete Library sync, file-backed transfers, verified durable source map and organization retry; global baseline unchanged.",
+      "files": [
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/EmbeddedPrintMetadata.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryPrint.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift",
+        "apps/macos/Sources/Mold/Settings/PreferencesReset.swift",
+        "apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift",
+        "changelog.d/macos-library-sync-all.md",
+        "crates/mold-server/src/routes.rs",
+        "docs/plans/macos-library-sync-all.md"
+      ],
+      "note": "Scoped source-verified structural refresh before follow-up PR."
     }
   ]
 }

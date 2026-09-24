@@ -10,6 +10,13 @@ private final class MirrorListingTransport: StubTransport {
     }
 }
 
+private final class UnauthorizedMediaTransport: StubTransport {
+    override class func response(for path: String) -> (status: Int, body: Data)? {
+        guard path == "/api/gallery/image/clip.mp4" else { return nil }
+        return (401, Data(#"{"error":"unauthorized"}"#.utf8))
+    }
+}
+
 /// The body `PUT /api/gallery/import/:filename` expects.
 ///
 /// A length-prefixed frame rather than multipart, so a host can start writing
@@ -17,6 +24,31 @@ private final class MirrorListingTransport: StubTransport {
 /// descriptor, then the bytes. Getting the widths or the byte order wrong
 /// produces a 422 that says nothing useful, so they are pinned here.
 @Suite struct GalleryImportSuite {
+
+    @Test func streamedDownloadReportsAuthenticationFailure() async {
+        let backend = UnauthorizedMediaTransport.backend()
+        do {
+            _ = try await backend.mediaFile("clip.mp4", trashed: false)
+            Issue.record("expected authentication failure")
+        } catch MoldClientError.unauthorized {
+            // The file-backed route uses the same refusal handling as media().
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+
+    @Test func canonicalRecipeRetainsUnknownFieldsFromNewerHosts() throws {
+        let row = Data(#"{"filename":"clip.mp4","timestamp":1000,"metadata":{"prompt":"same"}}"#.utf8)
+        var first = try MoldJSON.decoder.decode(GalleryPrint.self, from: row)
+        var second = try MoldJSON.decoder.decode(GalleryPrint.self, from: row)
+        first.rawMetadataJSON = Data(#"{"prompt":"same","future_field":1}"#.utf8)
+        second.rawMetadataJSON = Data(#"{"future_field":2,"prompt":"same"}"#.utf8)
+
+        #expect(first.metadata == second.metadata)
+        #expect(first.canonicalMetadataJSON != second.canonicalMetadataJSON)
+        second.rawMetadataJSON = Data(#"{"future_field":1,"prompt":"same"}"#.utf8)
+        #expect(first.canonicalMetadataJSON == second.canonicalMetadataJSON)
+    }
 
     private func body(_ import_: GalleryImport) throws -> [UInt8] {
         Array(try import_.body())
@@ -146,6 +178,29 @@ private final class MirrorListingTransport: StubTransport {
         defer { try? FileManager.default.removeItem(at: url) }
         try item.writeBody(to: url)
         #expect(try Data(contentsOf: url) == item.body())
+    }
+
+    @Test func fileBackedMirrorFramesAClipWithoutHoldingItsBytesInTheImport() throws {
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"""
+            {
+            "filename":"clip.mp4","timestamp":1700000000,
+            "metadata":{"prompt":"a fox","model":"ltx","seed":7}
+            }
+            """#.utf8))
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let upload = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: upload)
+        }
+        try Data(repeating: 0xAB, count: 2_100_000).write(to: source)
+        let item = try GalleryImport(mirroring: print, fileAt: source)
+        #expect(item.file.isEmpty)
+        try item.writeBody(to: upload)
+        let framed = try Data(contentsOf: upload)
+        let fileLength = framed[4..<12].reduce(0) { $0 << 8 | UInt64($1) }
+        #expect(fileLength == 2_100_000)
+        #expect(framed.suffix(2_100_000) == Data(repeating: 0xAB, count: 2_100_000))
     }
 
     @Test func fetchedMirrorRetainsFieldsUnknownToThisClientAcrossOptimisticEdits() async throws {

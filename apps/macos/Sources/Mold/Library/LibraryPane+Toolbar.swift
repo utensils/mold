@@ -52,6 +52,17 @@ extension LibraryPane {
             .help("How the prints are ordered")
         }
         ToolbarItem {
+            Button {
+                guard library.localSaveTask == nil else { return }
+                library.localSaveTask = Task { await library.syncAllLocally() }
+            } label: {
+                Label("Sync All to This Mac", systemImage: "arrow.down.to.line.compact")
+            }
+            .help("Copy all remote Library prints and collections to This Mac, including clips and 3D prints")
+            .disabled(library.localSaveTask != nil
+                || !hosts.hosts.contains { $0.id != MoldEngine.localHostID })
+        }
+        ToolbarItem {
             Slider(value: $navigation.edge, in: 88...260) { Text("Thumbnail size") }
                 .frame(width: 110)
                 .help("Thumbnail size")

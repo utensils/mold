@@ -8935,7 +8935,9 @@ async fn import_gallery_file(
     drop(config);
     let format = mold_db::metadata_io::format_from_path(std::path::Path::new(&filename))
         .ok_or_else(|| {
-            invalid_gallery_import("gallery import must be PNG, JPEG, WebP, GIF, APNG, or MP4")
+            invalid_gallery_import(
+                "gallery import must be PNG, JPEG, WebP, GIF, APNG, MP4, WAV, or GLB",
+            )
         })?;
     let parsed_import = parse_gallery_import_prefix(&output_dir, &headers, body).await?;
     let timestamp = std::time::SystemTime::now()
