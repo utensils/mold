@@ -18,6 +18,12 @@ extension MoldEngine {
         onEngineGone = { [weak hosts] in hosts?.dropLocalEngine() }
     }
 
+    /// The other half: the engine answering puts "This Mac" in the list,
+    /// whoever started it.
+    func adoptsItsMachine(into hosts: HostStore) {
+        onEngineReady = { [weak hosts] host in hosts?.adoptLocalEngine(host) }
+    }
+
     /// Resolves the launch and runs the one-shot preamble, at most once.
     /// `nil` means the refusal is already on `state`.
     @discardableResult
@@ -105,6 +111,7 @@ extension MoldEngine {
         switch await EngineProbe.answer(port: port, apiKey: launch.apiKey) {
         case .answered:
             transition(to: .running(port: port))
+            if let host { onEngineReady?(host) }
             // After the engine is listening, so `run_server`'s own tokio
             // SIGTERM handler is already in place and this replaces it.
             EngineSignals.forwardTerminationToTheApp()

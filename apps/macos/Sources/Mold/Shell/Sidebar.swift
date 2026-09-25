@@ -11,6 +11,7 @@ struct Sidebar: View {
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     @Environment(LibraryNavigation.self) private var navigation
+    @Environment(MoldEngine.self) private var engine
     @Binding var destination: Destination
     /// The same key `MachinesPane` declares, over the same suite. Two views
     /// sharing one preference by name stay in sync with no plumbing -- the
@@ -58,6 +59,19 @@ struct Sidebar: View {
             }
 
             Section("Machines") {
+                // Until the engine answers there is no "This Mac" entry to
+                // draw -- polling a port that is not bound yet would read as
+                // a machine that is down -- so the launch says so here.
+                if engine.state == .starting, hosts.host(MoldEngine.localHostID) == nil {
+                    HStack(spacing: 8) {
+                        HostStatusDot(reachability: .checking)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("This Mac").lineLimit(1)
+                            Text("Starting…").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
                 ForEach(hosts.hosts) { host in
                     MachineRow(host: host, reachability: hosts.reachability(of: host),
                                destination: $destination)

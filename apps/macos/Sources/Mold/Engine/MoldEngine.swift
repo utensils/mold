@@ -64,6 +64,11 @@ final class MoldEngine {
     /// drop "This Mac". Set by the composition root, which owns both.
     var onEngineGone: (() -> Void)?
 
+    /// Called once the engine ANSWERS, with the machine-list entry for it.
+    /// Whoever started it -- the launch or Settings' Start button -- gets
+    /// "This Mac" in the list without polling for it.
+    var onEngineReady: ((MoldHost) -> Void)?
+
     /// What is true but not a refusal — today, only that something else is
     /// already publishing into this home (`EngineInterlock`).
     var advisory: String?

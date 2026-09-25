@@ -54,6 +54,7 @@ final class AppStores {
         engine = MoldEngine.bootstrapped()
         hosts = HostStore(hosts: HostStore.seededHosts())
         engine.dropsItsMachine(from: hosts)
+        engine.adoptsItsMachine(into: hosts)
         library = LibraryStore(hosts: hosts)
         models = ModelStore(hosts: hosts)
         queue = QueueStore(hosts: hosts)
@@ -81,5 +82,8 @@ final class AppStores {
         notifications = MoldNotifications(
             landedPrints: landedPrints, queue: queue, hosts: hosts, library: library)
         heartbeat = HostHeartbeat(hosts: hosts, queue: queue)
+        // Last, once every store that reads the machine list exists. The
+        // probe runs off the main actor, so the window opens meanwhile.
+        if EngineAutostart.atLaunch() { engine.start() }
     }
 }
