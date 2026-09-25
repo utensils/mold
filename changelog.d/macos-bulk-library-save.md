@@ -1,1 +1,0 @@
-- **Faster, reliable Mac Library saves.** Bulk saving remote pictures now preserves their recipes and collections, shows clear progress and errors, and can be stopped after current transfers. Imported copies no longer appear as newly rendered prints, and Escape clears a Library selection.
