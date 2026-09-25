@@ -91,9 +91,11 @@ extension LibraryPane {
         _ transaction: LibraryAttachmentTransaction, entry: LibraryEntry,
         fence: DraftAttachmentFence
     ) -> Bool {
-        let live = library.items.first(where: { $0.id == entry.id })
+        // The machine's own row: a tile may be a copy presented under a
+        // machine filter, which is not itself a row of `items`.
+        let live = library.entry(entry.id)
         let sourceIsUp = hosts.host(entry.hostID).map(hosts.isUp) == true
-        return live == entry && transaction.permits(
+        return live?.print == entry.print && transaction.permits(
             version: attachmentVersion, cursor: selection, viewed: viewing,
             scope: navigation.scope, destination: destination,
             draftIsCurrent: fence.permits(generate, reuse: reuseStore),

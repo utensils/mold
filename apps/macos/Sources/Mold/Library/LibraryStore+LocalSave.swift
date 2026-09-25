@@ -71,6 +71,27 @@ private struct LocalSyncRecord: Codable {
             && Self.recipe(local) == destinationRecipe
     }
 
+    /// Every sync record as a two-way link between a source print and the
+    /// This Mac copy made of it -- what `LibraryMerge` joins exactly. Decoded
+    /// only when the stored bytes change: `rebuild()` runs on every listing.
+    @MainActor static func links(localHost: MoldHost.ID) -> [PrintID: PrintID] {
+        let data = AppStorageSuite.defaults.data(forKey: syncRecordStorageKey)
+        if let cached = linkCache, cached.data == data { return cached.links }
+        var links: [PrintID: PrintID] = [:]
+        for (key, record) in load() {
+            guard let colon = key.firstIndex(of: ":"),
+                  let host = UUID(uuidString: String(key[..<colon])) else { continue }
+            let source = PrintID(host: host, filename: String(key[key.index(after: colon)...]))
+            let copy = PrintID(host: localHost, filename: record.destinationFilename)
+            links[source] = copy
+            links[copy] = source
+        }
+        linkCache = (data, links)
+        return links
+    }
+
+    @MainActor private static var linkCache: (data: Data?, links: [PrintID: PrintID])?
+
     static func load() -> [String: Self] {
         guard let data = AppStorageSuite.defaults.data(forKey: syncRecordStorageKey),
               let records = try? MoldJSON.decoder.decode([String: Self].self, from: data)
@@ -605,4 +626,12 @@ extension LibraryStore {
         localSaveAlertPresented = true
     }
 
+}
+
+@MainActor
+extension LibraryStore {
+    /// See `LocalSyncRecord.links`.
+    func syncLinks() -> [PrintID: PrintID] {
+        LocalSyncRecord.links(localHost: MoldEngine.localHostID)
+    }
 }

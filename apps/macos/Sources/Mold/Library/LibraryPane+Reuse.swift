@@ -43,9 +43,7 @@ extension LibraryPane {
         // audio and mask bytes leave no marker in the metadata at all -- and
         // mirroring an output does not copy the producing machine's private
         // archive, so one copy's blank says nothing about another's.
-        let copies = library.items
-            .filter { $0.print.filename == entry.print.filename }
-            .map(\.id)
+        let copies = (library.tile(containing: entry.id)?.everyCopy ?? entry.everyCopy).map(\.id)
         let ordered = [entry.id] + copies.filter { $0 != entry.id }
         Task {
             await reuseStore.probe(ordered, fence: fence, disclosing: metadata)

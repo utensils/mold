@@ -61,7 +61,10 @@ struct CollectionRow: View {
     }
 
     private func file(_ ids: [PrintID]) {
-        let entries = library.items.filter { ids.contains($0.id) }
+        // A drag from a machine-filtered grid carries THAT machine's copy;
+        // filing goes to the whole print either way.
+        var seen = Set<PrintID>()
+        let entries = ids.compactMap(library.tile(containing:)).filter { seen.insert($0.id).inserted }
         guard !entries.isEmpty else { return }
         library.file(entries, into: shelf)
     }

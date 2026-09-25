@@ -58,7 +58,7 @@ enum PictureSource {
         case let .file(url):
             return try await PictureImport.load(url, accepting: accepting)
         case let .print(id):
-            guard let entry = (library.items + library.trashed).first(where: { $0.id == id }) else {
+            guard let entry = library.entry(id) else {
                 throw MoldClientError.malformedResponse
             }
             guard let backend = hosts.backend(for: id.host) else {

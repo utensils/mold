@@ -88,8 +88,11 @@ struct LibraryInspector: View {
 
     /// Says when a selection spans machines, because the actions below will
     /// then touch more than one.
+    /// A print saved to This Mac is on two machines at once; every copy's
+    /// machine is named, lead first.
     private var machines: String? {
-        let names = Set(entries.map(\.hostName)).sorted()
+        var seen = Set<String>()
+        let names = entries.flatMap(\.hostNames).filter { seen.insert($0).inserted }
         return names.count > 1 ? "On \(names.joined(separator: ", "))" : names.first
     }
 }

@@ -18,15 +18,19 @@ extension LibraryPane {
         return !navigation.query.tokens.contains { if case .machine = $0 { true } else { false } }
     }
 
+    /// The visible tile `id` names -- its lead, or a copy merged under it.
     func entry(_ id: PrintID, in visible: [LibraryEntry]) -> LibraryEntry? {
-        visible.first { $0.id == id }
+        visible.first { $0.id == id } ?? visible.first { $0.copies.contains { $0.id == id } }
     }
 
     /// `navigation.reveal`'s one consumer: opens the named print and clears
     /// the channel right back, so a later visit to the pane does not reopen
     /// it (design M6 S5).
     func revealIfNeeded() {
-        guard let reveal = navigation.reveal else { return }
+        guard let named = navigation.reveal else { return }
+        // A print that landed on another machine and was saved here too is
+        // shown under its This Mac copy; reveal the tile, not a hidden id.
+        let reveal = library.tile(containing: named)?.id ?? named
         selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
         viewing = reveal
         navigation.reveal = nil

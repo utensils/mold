@@ -27,6 +27,36 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
     /// every keystroke; folding each row's text again per keystroke is work
     /// proportional to the library, repeated for every character typed.
     public let searchKey: String
+    /// The same print on OTHER machines, when the merged Library shows it
+    /// once (`LibraryMerge`). Empty on a machine's own row. The lead -- this
+    /// entry -- is the copy every read goes to; an edit goes to all of them.
+    public var copies: [LibraryEntry] = []
+
+    /// This entry and every copy of it, lead first.
+    public var everyCopy: [LibraryEntry] { [self] + copies }
+
+    /// Every machine holding it, lead first -- what the tile's badge names.
+    public var hostNames: [String] { everyCopy.map(\.hostName) }
+
+    /// The tile's machine badge: `This Mac · workstation`, or `This Mac +1` where
+    /// the tile is too narrow to name them all.
+    public func hostBadge(compact: Bool) -> String {
+        guard !copies.isEmpty else { return hostName }
+        return compact ? "\(hostName) +\(copies.count)" : hostNames.joined(separator: " · ")
+    }
+
+    /// The copy held by one of `hosts`, presented as the lead and carrying
+    /// the others -- how a machine filter shows THAT machine's copy of a
+    /// print whose lead is elsewhere. `nil` when none of them holds it.
+    public func presented(onAnyOf hosts: Set<MoldHost.ID>) -> LibraryEntry? {
+        if hosts.contains(hostID) { return self }
+        guard let index = copies.firstIndex(where: { hosts.contains($0.hostID) }) else { return nil }
+        var lead = copies[index]
+        var others = everyCopy
+        others.removeAll { $0.id == lead.id }
+        lead.copies = others
+        return lead
+    }
 
     /// A print as one machine reports it.
     ///

@@ -81,7 +81,7 @@ extension LibraryStore {
                         _ filing: Bool) -> PrintEdit {
         PrintEdit.plan(
             .collection(name: shelf.name, slug: shelf.slug, filing: filing),
-            over: entries,
+            over: withCopies(entries),
             // Each machine's OWN id for the shelf, which is what a print's
             // `collections` are spelled in.
             collectionIDs: shelf.hosts)
