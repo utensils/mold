@@ -12,7 +12,9 @@ import Foundation
 /// 1. a copy this app made itself (`links`, from the sync records) joins its
 ///    source exactly, even under a collision-renamed filename;
 /// 2. otherwise the same FILENAME is the same print -- a saved copy keeps the
-///    name it had on the machine that rendered it;
+///    name it had on the machine that rendered it -- unless both rows state a
+///    byte size and the sizes differ, which is two unrelated files that
+///    happen to share a name (and trashing one tile would reach both);
 /// 3. otherwise seed + exact byte size + model within an hour, which catches
 ///    older copies whose names diverged, while a genuine re-render reusing a
 ///    seed much later stays a separate print. Rows without a seed or a size
@@ -44,7 +46,10 @@ public enum LibraryMerge {
         for entry in entries {
             let identity = Self.identity(of: entry.print)
             var index = links[entry.id].flatMap { byID[$0] }
-            if index == nil { index = byFilename[entry.print.filename] }
+            if index == nil, let candidate = byFilename[entry.print.filename],
+               sizesAgree(groups[candidate][0].print, entry.print) {
+                index = candidate
+            }
             if index == nil, let identity {
                 index = byIdentity[identity]?.first { candidate in
                     withinWindow(groups[candidate][0].print, entry.print)
@@ -116,6 +121,12 @@ public enum LibraryMerge {
             }
         }
         return slug
+    }
+
+    /// A missing size on either side is no evidence against the match.
+    static func sizesAgree(_ lhs: GalleryPrint, _ rhs: GalleryPrint) -> Bool {
+        guard let left = lhs.sizeBytes, let right = rhs.sizeBytes else { return true }
+        return left == right
     }
 
     static func withinWindow(_ lhs: GalleryPrint, _ rhs: GalleryPrint) -> Bool {

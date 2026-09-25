@@ -57,8 +57,9 @@ engine: ## Build mold's Rust engine and link it into the app
 	@# Same deployment target as the app, or every object file warns.
 	@cd $(ENGINE_DIR) && CARGO_TARGET_DIR=$(ENGINE_TARGET) CARGO_BUILD_JOBS=8 \
 	  MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release --features metal
-	@# What `engine-freshness.sh` compares against on every `make build`.
-	@git rev-parse HEAD > $(ENGINE_LIB).commit
+	@# What `engine-freshness.sh` compares against on every `make build`: the
+	@# commit, and the uncommitted engine diff the build included.
+	@scripts/engine-freshness.sh --stamp $(ENGINE_LIB).commit
 	@$(MAKE) engine-config
 	@echo "  engine linked: $(ENGINE_LIB)"
 

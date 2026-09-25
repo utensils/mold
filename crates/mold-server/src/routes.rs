@@ -7446,15 +7446,20 @@ async fn patch_queue_job(
     delete,
     path = "/api/queue/{id}",
     tag = "queue",
-    params(("id" = String, Path, description = "Queue job id")),
+    params(
+        ("id" = String, Path, description = "Queue job id"),
+        ("only_held" = Option<bool>, Query, description = "Cancel only if the job is held right now; otherwise 409 QUEUE_JOB_NOT_HELD and nothing changes"),
+    ),
     responses(
         (status = 204, description = "Job cancellation accepted"),
         (status = 404, description = "Queue job not found"),
+        (status = 409, description = "`only_held` was set and the job is no longer held"),
     )
 )]
 async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<CancelQueueJobQuery>,
 ) -> Result<StatusCode, ApiError> {
     // Serialize the durable probe, bounded registry revocation, and durable
     // cancellation with feeder publication and PATCH. SQLite can block behind
@@ -7462,6 +7467,21 @@ async fn cancel_queue_job(
     // in-memory lifecycle transition and explicitly dropped before the final
     // DB mutation.
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    if query.only_held {
+        // Checked under the same transition lock Retry and feeder publication
+        // take, so a held row cannot be retried and start rendering between
+        // this answer and the cancellation below -- which is the whole point:
+        // a client clearing holds must never stop running work.
+        let journal = state.queue_journal.clone();
+        let probe_id = id.clone();
+        if !spawn_queue_read(move || journal.owns_held_row(&probe_id)).await? {
+            return Err(ApiError::with_code(
+                format!("queue job {id} is not held"),
+                "QUEUE_JOB_NOT_HELD",
+                StatusCode::CONFLICT,
+            ));
+        }
+    }
     match cancel_one_queue_job(&state, &id).await? {
         QueueJobCancelOutcome::Cancelled => Ok(StatusCode::NO_CONTENT),
         QueueJobCancelOutcome::Completing => Err(ApiError::queue_job_not_found(format!(
@@ -7471,6 +7491,17 @@ async fn cancel_queue_job(
             "queue job {id} not found"
         ))),
     }
+}
+
+/// `DELETE /api/queue/{id}` options. Unknown to an older server, which ignores
+/// the query and cancels whatever the row is.
+#[derive(Debug, Default, Deserialize)]
+struct CancelQueueJobQuery {
+    /// Cancel only if the row is HELD right now; otherwise answer 409 and
+    /// touch nothing. How a client clears holds without ever racing a Retry
+    /// into stopping a render.
+    #[serde(default)]
+    only_held: bool,
 }
 
 /// What one row's cancellation did, so the single-job route can answer 404

@@ -24,7 +24,7 @@ warns() { "$check" Engine.xcconfig 2>&1 | grep -q '^warning:'; }
 
 warns || fail "an engine with no stamp is unaccounted for and must warn"
 
-git rev-parse HEAD > "$lib.commit"
+"$check" --stamp "$lib.commit"
 ! warns || fail "an engine built at HEAD must not warn"
 
 echo docs >> README.md && git commit -qam docs
@@ -34,6 +34,16 @@ echo two >> crates/core/lib.rs
 warns || fail "an uncommitted engine change must warn"
 git commit -qam two
 warns || fail "a committed engine change since the stamp must warn"
+echo three >> crates/core/lib.rs
+
+"$check" --stamp "$lib.commit"
+! warns || fail "an engine built from uncommitted edits is fresh while they stand"
+git stash -q
+warns || fail "stashing the edits the engine was built from must warn"
+git stash pop -q
+! warns || fail "restoring them makes it fresh again"
+git commit -qam three
+! warns || fail "committing exactly what was built changes nothing"
 
 printf '// remote-only\n' > Engine.xcconfig
 ! warns || fail "a remote-only build has no engine to be stale"

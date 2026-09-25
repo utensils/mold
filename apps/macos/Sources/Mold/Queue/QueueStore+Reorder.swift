@@ -26,21 +26,19 @@ extension QueueStore {
     }
 
     /// Everything on ONE machine that is not rendering: the waiting and
-    /// restart-paused rows, and every HELD row. The bulk route
-    /// (`DELETE /api/queue`, `routes.rs:7869-7898`) deliberately leaves holds
-    /// alone, so "Empty Queue" used to leave a pane full of them; each hold is
-    /// cleared the way its own × clears it, `DELETE /api/queue/:id`, which
-    /// settles a held child as cancelled (`generation_batches.rs:710`).
-    /// Running work is untouched either way.
+    /// restart-paused rows, and the HELD rows the confirm counted. The bulk
+    /// route (`DELETE /api/queue`, `routes.rs:7869-7898`) deliberately leaves
+    /// holds alone, so "Empty Queue" used to leave a pane full of them; each
+    /// hold is cleared with `DELETE /api/queue/:id?only_held=true`, which the
+    /// machine refuses once a Retry has moved the row -- so this never stops
+    /// a render. Running work is untouched either way.
     ///
-    /// Reads the listing FIRST: the holds to clear are the machine's, not
-    /// whatever this store last saw.
-    func empty(on host: MoldHost.ID) async {
+    /// `held` is the set the person was shown. A job that became held while
+    /// the confirm was open was not counted, so it is not cleared.
+    func empty(on host: MoldHost.ID, held: Set<String>) async {
         let verb = QueueEmptyConfirm.verb
         guard !refuseIfFixture(host, doing: verb) else { return }
         guard let client = hosts.backend(for: host) else { return }
-        await poll(host)
-        let rows = entries(on: host)
         var failed = false
         if hosts.capabilities[host]?.canCancelAllQueued == true {
             do {
@@ -51,36 +49,35 @@ extension QueueStore {
             }
         }
         // Deliberately NO per-row fallback for WAITING rows on a machine
-        // without the bulk route: a row can start between this listing and
+        // without the bulk route: a row can start between the listing and
         // its DELETE, and the per-row route cancels running work -- which
-        // the confirm promises never happens. A HELD row cannot start.
-        for row in rows where row.state == .held {
-            failed = await cancelRow(row.id, via: client, on: host, doing: verb) || failed
+        // the confirm promises never happens.
+        for id in held.sorted() {
+            do {
+                _ = try await client.cancelHeldJob(id: id)
+            } catch {
+                hosts.report(error, on: host, doing: verb)
+                failed = true
+            }
         }
         if !failed { hosts.succeeded(on: host, doing: verb) }
         await poll(host)
     }
 
-    /// `empty(on:)` for every machine at once, concurrently -- each one
-    /// reports its own failure line, so one unreachable machine never hides
-    /// what the others did.
-    func emptyAll(_ targets: [MoldHost.ID]) async {
-        await withTaskGroup(of: Void.self) { group in
-            for host in targets {
-                group.addTask { await self.empty(on: host) }
-            }
-        }
+    /// The held rows this store is showing for a machine -- what a confirm
+    /// counts and hands to `empty(on:held:)`.
+    func heldIDs(on host: MoldHost.ID) -> Set<String> {
+        Set(entries(on: host).filter { $0.state == .held }.map(\.id))
     }
 
-    /// `true` when the machine refused.
-    private func cancelRow(_ id: String, via client: any MoldBackend,
-                           on host: MoldHost.ID, doing verb: String) async -> Bool {
-        do {
-            try await client.cancelJob(id: id)
-            return false
-        } catch {
-            hosts.report(error, on: host, doing: verb)
-            return true
+    /// `empty(on:held:)` for every machine at once, concurrently -- each one
+    /// reports its own failure line, so one unreachable machine never hides
+    /// what the others did.
+    func emptyAll(_ targets: [MoldHost.ID: Set<String>]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for (host, held) in targets {
+                group.addTask { await self.empty(on: host, held: held) }
+            }
         }
     }
 }

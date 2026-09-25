@@ -23,6 +23,7 @@ extension LibraryPane {
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
             .onChange(of: navigation.query.tokens) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
+            .onChange(of: library.rows.value) { _, _ in followMergedTiles() }
             // A click on an already-open Library: `.onAppear` above only
             // fires when the pane is freshly mounted.
             .onChange(of: navigation.reveal) { _, _ in revealIfNeeded() }

@@ -36,6 +36,19 @@ extension LibraryPane {
         navigation.reveal = nil
     }
 
+    /// Keeps the selection and the open print on their tiles when a rebuild
+    /// hands a tile a new lead. Not under a machine filter: there a tile IS
+    /// that machine's copy, whose id does not move, and changing the filter
+    /// clears the selection anyway.
+    func followMergedTiles() {
+        guard !navigation.query.tokens.contains(where: { if case .machine = $0 { true } else { false } })
+        else { return }
+        let resolve: (PrintID) -> PrintID? = { library.tile(containing: $0)?.id }
+        let followed = selection.remapped(through: resolve)
+        if followed != selection { selection = followed }
+        if let viewing, let tile = resolve(viewing), tile != viewing { self.viewing = tile }
+    }
+
     func host(of entry: LibraryEntry) -> MoldHost? {
         hosts.host(entry.hostID)
     }

@@ -4775,6 +4775,68 @@ mod tests {
         assert_eq!(child.state, "cancelled");
     }
 
+    /// `?only_held=true` is how a client clears holds without ever racing a
+    /// Retry into stopping a render: a held row goes, anything else is a 409
+    /// that touches nothing.
+    #[tokio::test]
+    async fn delete_queue_only_held_clears_a_held_child() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        admit_one_durable_batch(&state, "held-only", "held-only-batch");
+        let claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        state
+            .queue_journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold("operator review");
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/held-only?only_held=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.list_all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_queue_only_held_refuses_a_row_that_is_not_held() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "still-queued",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/still-queued?only_held=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "QUEUE_JOB_NOT_HELD");
+        assert_eq!(
+            state.queue_journal.list_all().len(),
+            1,
+            "nothing was cancelled"
+        );
+    }
+
     #[tokio::test]
     async fn delete_queue_running_job_revokes_inference_without_waiting_for_teardown() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());

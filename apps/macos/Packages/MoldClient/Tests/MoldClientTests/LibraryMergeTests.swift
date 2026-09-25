@@ -46,6 +46,16 @@ struct LibraryMergeTests {
         #expect(merged[0].hostID == workstation, "first in machine order leads")
     }
 
+    /// Two unrelated files that share a name are not one print: their byte
+    /// sizes say so, and merging them would trash both from one tile.
+    @Test func aSharedFilenameWithDifferentBytesStaysApart() {
+        let merged = LibraryMerge.merge([
+            entry("image.png", on: workstation, name: "workstation", bytes: 1_000),
+            entry("image.png", on: local, name: "This Mac", bytes: 2_000),
+        ], localHost: local)
+        #expect(merged.count == 2)
+    }
+
     @Test func differentPrintsStayApart() {
         let merged = LibraryMerge.merge([
             entry("cat.png", on: workstation, name: "workstation"),
@@ -165,5 +175,20 @@ struct LibraryMergeTests {
         var query = LibraryQuery()
         query.tokens = [.tag("pets")]
         #expect(query.apply(to: merged).count == 1)
+    }
+
+    /// A selection follows its print when a Save Locally hands the tile a
+    /// This Mac lead.
+    @Test func aSelectionFollowsItsPrintToANewLead() {
+        let remote = PrintID(host: workstation, filename: "cat.png")
+        let lead = PrintID(host: local, filename: "cat.png")
+        let other = PrintID(host: hal, filename: "dog.png")
+        let selection = LibraryCursor.Selection(items: [remote, other], anchor: remote, lead: remote)
+
+        let followed = selection.remapped { $0 == remote ? lead : nil }
+
+        #expect(followed.items == [lead, other])
+        #expect(followed.anchor == lead)
+        #expect(followed.lead == lead)
     }
 }

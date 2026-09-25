@@ -17,6 +17,17 @@ public extension HTTPBackend {
         _ = try await bytes(for: request)
     }
 
+    func cancelHeldJob(id: String) async throws -> Bool {
+        var request = self.request("/api/queue/\(escaped(id))?only_held=true")
+        request.httpMethod = "DELETE"
+        do {
+            _ = try await bytes(for: request)
+            return true
+        } catch MoldClientError.http(status: 409, code: "QUEUE_JOB_NOT_HELD", _) {
+            return false
+        }
+    }
+
     func pauseJob(id: String) async throws {
         _ = try await postRaw("/api/queue/\(escaped(id))/pause", body: EmptyBody())
     }

@@ -249,22 +249,47 @@ struct QueuePaneTests {
     /// used to leave the pane exactly as full of holds as it was.
     @Test func emptyClearsTheWaitingRowsInBulkAndEveryHeldRow() async {
         let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        await queue.refresh()
 
-        await queue.empty(on: workstation.id)
+        await queue.empty(on: workstation.id, held: queue.heldIDs(on: workstation.id))
 
         #expect(fake.callCount("cancelAllQueued") == 1)
         #expect(fake.cancelledIds == ["h1", "h2"], "running work is never touched")
+        #expect(fake.callCount("cancelJob") == 0, "holds go through the held-only route")
     }
 
     /// Only its holds: a waiting row could start between the listing and a
     /// per-row DELETE, and that route cancels running work.
     @Test func aMachineWithoutTheBulkRouteHasOnlyItsHoldsCleared() async {
         let (queue, fake, workstation) = await emptyBench(canCancelAll: false, entries: mixed)
+        await queue.refresh()
 
-        await queue.empty(on: workstation.id)
+        await queue.empty(on: workstation.id, held: queue.heldIDs(on: workstation.id))
 
         #expect(!fake.cancelledAll)
         #expect(fake.cancelledIds == ["h1", "h2"])
+    }
+
+    /// A job that became held while the confirm was open was never counted,
+    /// so it is not cleared.
+    @Test func onlyTheHoldsTheConfirmCountedAreCleared() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+
+        await queue.empty(on: workstation.id, held: ["h1"])
+
+        #expect(fake.cancelledIds == ["h1"])
+    }
+
+    /// Retried by somebody else in the meantime: the machine refuses the
+    /// held-only cancel, nothing is stopped, and that is not a failure.
+    @Test func aHoldRetriedElsewhereIsLeftAloneQuietly() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        fake.noLongerHeld = ["h2"]
+
+        await queue.empty(on: workstation.id, held: ["h1", "h2"])
+
+        #expect(fake.cancelledIds == ["h1"])
+        #expect(queue.hosts.failures.isEmpty)
     }
 
     /// The held row's own × -- `DELETE /api/queue/:id` with the row's id.
@@ -280,11 +305,11 @@ struct QueuePaneTests {
 
     @Test func aRefusedHoldIsReportedAndTheRestStillGo() async {
         let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
-        fake.refuses.insert("cancelJob")
+        fake.refuses.insert("cancelHeldJob")
 
-        await queue.empty(on: workstation.id)
+        await queue.empty(on: workstation.id, held: ["h1", "h2"])
 
-        #expect(fake.callCount("cancelJob") == 2, "one refusal does not stop the next hold")
+        #expect(fake.callCount("cancelHeldJob") == 2, "one refusal does not stop the next hold")
         #expect(queue.hosts.failures.contains { $0.sentence.contains("empty its queue") })
     }
 
@@ -435,7 +460,7 @@ struct QueuePaneTests {
         await queue.resume(entry, on: workstation.id)
         await queue.retry(entry, on: workstation.id)
         await queue.reorder([("job-1", 0)], on: workstation.id)
-        await queue.empty(on: workstation.id)
+        await queue.empty(on: workstation.id, held: ["job-1"])
         await queue.refresh()
 
         #expect(fake.calls.isEmpty)

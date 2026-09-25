@@ -1650,6 +1650,18 @@ impl QueueJournal {
         Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
+    /// Whether this id names an owned durable row that is HELD right now.
+    /// Read under `lock_durable_transition`, which also serializes Retry and
+    /// feeder publication, so the answer holds until that lock is released.
+    pub fn owns_held_row(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        Ok(generation_queue::get(db, id)?.is_some_and(|row| {
+            row.owner_uuid == owner && row.state == generation_queue::QueueRowState::Held
+        }))
+    }
+
     /// Project ONE owned durable row exactly as the paged listing projects it.
     ///
     /// The payload-carrying `GenerationQueueRow` has no `retryable` column and

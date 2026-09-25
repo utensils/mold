@@ -67,12 +67,13 @@ extension QueuePane {
     /// this too.
     func confirmEmptyQueue(on host: MoldHost) {
         let counts = emptyCounts(on: host)
+        let held = queue.heldIDs(on: host.id)
         pendingDestruction = Destruction(
             title: QueueEmptyConfirm.title(host: host.name),
             message: QueueEmptyConfirm.message(counts),
             verb: "Cancel Jobs"
         ) {
-            Task { await queue.empty(on: host.id) }
+            Task { await queue.empty(on: host.id, held: held) }
         }
     }
 
@@ -80,6 +81,7 @@ extension QueuePane {
     /// machine emptied concurrently and reporting its own failures.
     func confirmEmptyAllQueues() {
         let targets = emptyQueueTargets
+        let held = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, queue.heldIDs(on: $0.id)) })
         let counts = targets.reduce(QueueEmptyConfirm.Counts()) {
             $0 + emptyCounts(on: $1)
         }
@@ -88,12 +90,12 @@ extension QueuePane {
             message: QueueEmptyConfirm.message(counts, machines: targets.count),
             verb: "Cancel Jobs"
         ) {
-            Task { await queue.emptyAll(targets.map(\.id)) }
+            Task { await queue.emptyAll(held) }
         }
     }
 
     /// What Empty will actually cancel there: a machine without the bulk
-    /// route has only its holds cleared (`QueueStore.empty(on:)`).
+    /// route has only its holds cleared (`QueueStore.empty(on:held:)`).
     private func emptyCounts(on host: MoldHost) -> QueueEmptyConfirm.Counts {
         var counts = QueueEmptyConfirm.Counts(queue.entries(on: host.id))
         if hosts.capabilities[host.id]?.canCancelAllQueued != true {

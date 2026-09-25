@@ -775,6 +775,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("cancelJob")
         cancelledIds.append(id)
     }
+    /// Ids planted here answer "no longer held" and are not cancelled.
+    nonisolated(unsafe) var noLongerHeld: Set<String> = []
+    func cancelHeldJob(id: String) async throws -> Bool {
+        try record("cancelHeldJob")
+        guard !noLongerHeld.contains(id) else { return false }
+        cancelledIds.append(id)
+        return true
+    }
     func pauseJob(id: String) async throws { try record("pauseJob") }
     func resumeJob(id: String) async throws { try record("resumeJob") }
     func reorderJob(id: String, position: Int) async throws {
