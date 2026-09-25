@@ -25,6 +25,12 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
 /// What a host reports about itself. Mirrors `GET /api/status`.
 public struct ServerStatus: Hashable, Codable, Sendable {
     public let version: String
+    /// The commit the server was built from. `version` alone is the
+    /// workspace's release number, which every build between two releases
+    /// shares -- a week-stale engine and tonight's nightly both said
+    /// "0.31.0". `nil` on a build without git metadata.
+    public let gitSha: String?
+    public let buildDate: String?
     /// `nil` when the host cannot resolve its own hostname. `#[serde(skip_serializing_if)]`
     /// on the server omits the key entirely rather than sending an empty
     /// string, and a non-optional `String` here threw on that host and made
@@ -63,4 +69,13 @@ public struct ServerStatus: Hashable, Codable, Sendable {
         public let freeBytes: UInt64
     }
 
+}
+
+extension ServerStatus {
+    /// `0.31.0 (9c81f69)` -- the release number and, where the machine knows
+    /// it, the commit it was built from.
+    public var versionLabel: String {
+        guard let gitSha, !gitSha.isEmpty else { return version }
+        return "\(version) (\(gitSha.prefix(7)))"
+    }
 }

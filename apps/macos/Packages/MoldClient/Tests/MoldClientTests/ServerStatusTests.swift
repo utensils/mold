@@ -69,3 +69,19 @@ private let statusWithNoHostname = """
     let status = try MoldJSON.decoder.decode(ServerStatus.self, from: hal9000Status)
     #expect(status.modelsDisk == nil)
 }
+
+// The release number alone is shared by every build between two releases --
+// a week-stale engine and tonight's nightly both read "0.31.0". The commit is
+// what tells them apart.
+@Test func theVersionLabelCarriesTheShortCommit() throws {
+    let status = try MoldJSON.decoder.decode(ServerStatus.self, from: hal9000Status)
+    #expect(status.gitSha == "b2dbb45d")
+    #expect(status.buildDate == "2026-09-12")
+    #expect(status.versionLabel == "0.28.0 (b2dbb45)")
+}
+
+@Test func aBuildWithoutGitMetadataShowsTheBareVersion() throws {
+    let status = try MoldJSON.decoder.decode(ServerStatus.self, from: statusWithNoHostname)
+    #expect(status.gitSha == nil)
+    #expect(status.versionLabel == "0.29.0")
+}
