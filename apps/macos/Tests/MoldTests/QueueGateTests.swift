@@ -166,8 +166,39 @@ struct QueueGateTests {
         let offered = offer([
             .init(id: UUID(), name: "workstation", isPaused: false),
             .init(id: UUID(), name: "hal9000", isPaused: true),
-        ]).items().map(\.title)
-        #expect(offered == ["Pause Queue on workstation", "Resume Queue on hal9000"])
+        ]).items().filter { !$0.isSeparator }.map(\.title)
+        #expect(offered == [
+            "Pause Queue on All Machines", "Resume Queue on All Machines",
+            "Pause Queue on workstation", "Resume Queue on hal9000",
+        ])
+    }
+
+    /// The fleet verb offered is only the one that would change something.
+    @Test func allMachinesOffersOnlyTheVerbThatMovesSomething() {
+        let running = offer([
+            .init(id: UUID(), name: "workstation", isPaused: false),
+            .init(id: UUID(), name: "hal9000", isPaused: false),
+        ]).items()
+        #expect(running.first?.kind == .all(paused: true))
+        #expect(!running.contains { $0.title == QueueGateOffer.resumeAllTitle })
+    }
+
+    @Test func pausingEveryMachineSkipsOneAlreadyPaused() async {
+        let workstation = machine()
+        let hal = machine("hal9000")
+        let running = fake(for: workstation)
+        let paused = fake(for: hal, paused: true)
+        let hosts = HostStore(hosts: [workstation, hal]) { $0.id == workstation.id ? running : paused }
+        await hosts.refresh(workstation)
+        await hosts.refresh(hal)
+        let queue = QueueStore(hosts: hosts, coalesceDelay: .milliseconds(1))
+        let gate = QueueGateControl(hosts: hosts, queue: queue)
+
+        await gate.perform(.all(paused: true))
+
+        #expect(running.extras.gateCalls == [true])
+        #expect(paused.extras.gateCalls.isEmpty, "already paused -- nothing sent")
+        #expect(gate.isPaused(on: workstation.id))
     }
 
     @Test func noMachineDrawsNothing() {

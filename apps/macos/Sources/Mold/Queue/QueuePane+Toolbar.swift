@@ -28,7 +28,7 @@ extension QueuePane {
     @ViewBuilder private var gateControl: some View {
         let gate = queueGate
         if gate.machines.count == 1, let machine = gate.machines.first {
-            Button(machine.title) { gate.toggle(machine.id) }
+            Button(machine.title) { gate.toggle(.machine(machine.id)) }
         } else {
             Menu("Queue") {
                 RowActionMenu(actions: gate.items(), perform: gate.toggle)
@@ -45,7 +45,8 @@ extension QueuePane {
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item reads
     /// this too, and `private` does not cross a file boundary.
     var emptyQueueTargets: [MoldHost] {
-        Self.emptyQueueTargets(hosts.hosts, capabilities: hosts.capabilities)
+        Self.emptyQueueTargets(hosts.hosts, capabilities: hosts.capabilities,
+                               entries: queue.byHost)
     }
 
     @ViewBuilder private var emptyQueueControl: some View {
@@ -53,6 +54,8 @@ extension QueuePane {
             Button("Empty Queue…") { confirmEmptyQueue(on: host) }
         } else {
             Menu("Empty Queue…") {
+                Button(QueueEmptyConfirm.allMachinesItem) { confirmEmptyAllQueues() }
+                Divider()
                 ForEach(emptyQueueTargets) { host in
                     Button("Empty Queue on \(host.name)…") { confirmEmptyQueue(on: host) }
                 }
@@ -63,25 +66,45 @@ extension QueuePane {
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item calls
     /// this too.
     func confirmEmptyQueue(on host: MoldHost) {
-        let entries = queue.entries(on: host.id)
-        let waiting = entries.filter { $0.state == .queued }.count
-        let paused = entries.filter { $0.state == .paused }.count
+        let counts = QueueEmptyConfirm.Counts(queue.entries(on: host.id))
         pendingDestruction = Destruction(
             title: QueueEmptyConfirm.title(host: host.name),
-            message: QueueEmptyConfirm.message(waiting: waiting, paused: paused),
+            message: QueueEmptyConfirm.message(counts),
             verb: "Cancel Jobs"
         ) {
-            Task { await queue.cancelAll(on: host.id) }
+            Task { await queue.empty(on: host.id) }
         }
     }
 
-    /// Pure: which machines actually offer this. Absent means `false`
-    /// (design decision 5) -- a test pins the gate without a rendered
-    /// toolbar.
+    /// Every machine at once -- ONE confirm naming the whole count, then each
+    /// machine emptied concurrently and reporting its own failures.
+    func confirmEmptyAllQueues() {
+        let targets = emptyQueueTargets
+        let counts = targets.reduce(QueueEmptyConfirm.Counts()) {
+            $0 + QueueEmptyConfirm.Counts(queue.entries(on: $1.id))
+        }
+        pendingDestruction = Destruction(
+            title: QueueEmptyConfirm.allMachinesTitle,
+            message: QueueEmptyConfirm.message(counts, machines: targets.count),
+            verb: "Cancel Jobs"
+        ) {
+            Task { await queue.emptyAll(targets.map(\.id)) }
+        }
+    }
+
+    /// Pure: which machines Empty Queue can do something on. The bulk route
+    /// is capability-gated, but clearing a HELD row is not -- it is the one
+    /// action every hold has -- so a machine holding work is a target even
+    /// when it does not advertise the bulk route. Absent otherwise (design
+    /// decision 5) -- a test pins the gate without a rendered toolbar.
     static func emptyQueueTargets(
-        _ hosts: [MoldHost], capabilities: [MoldHost.ID: Capabilities]
+        _ hosts: [MoldHost], capabilities: [MoldHost.ID: Capabilities],
+        entries: [MoldHost.ID: [QueueEntry]] = [:]
     ) -> [MoldHost] {
-        hosts.filter { capabilities[$0.id]?.canCancelAllQueued == true }
+        hosts.filter { host in
+            capabilities[host.id]?.canCancelAllQueued == true
+                || (entries[host.id] ?? []).contains { $0.state == .held }
+        }
     }
 }
 
@@ -100,13 +123,49 @@ enum QueueSummary {
 
 /// The Empty Queue confirm's own sentence -- fact 12's whole point: running
 /// work is untouched, and the confirm has to say so or it reads as "stop
-/// everything".
+/// everything". Held rows go too: they are not going anywhere on their own,
+/// and leaving them is what made Empty Queue look broken.
 enum QueueEmptyConfirm {
-    static func title(host: String) -> String { "Cancel everything waiting on \(host)?" }
+    /// The verb every failure about this is keyed on.
+    static let verb = "empty its queue"
+    static let allMachinesItem = "Empty Queue on All Machines…"
+    static let allMachinesTitle = "Empty the queue on every machine?"
 
-    static func message(waiting: Int, paused: Int) -> String {
-        let waitingWord = waiting == 1 ? "1 waiting" : "\(waiting) waiting"
-        let pausedWord = paused == 1 ? "1 paused job" : "\(paused) paused jobs"
-        return "\(waitingWord) and \(pausedWord) will be cancelled. Anything already rendering keeps going."
+    struct Counts: Equatable {
+        var waiting = 0, paused = 0, held = 0
+
+        init(waiting: Int = 0, paused: Int = 0, held: Int = 0) {
+            (self.waiting, self.paused, self.held) = (waiting, paused, held)
+        }
+
+        init(_ entries: [QueueEntry]) {
+            func count(_ state: QueueState) -> Int { entries.filter { $0.state == state }.count }
+            self.init(waiting: count(.queued), paused: count(.paused), held: count(.held))
+        }
+
+        static func + (lhs: Self, rhs: Self) -> Self {
+            Self(waiting: lhs.waiting + rhs.waiting, paused: lhs.paused + rhs.paused,
+                 held: lhs.held + rhs.held)
+        }
+    }
+
+    static func title(host: String) -> String { "Empty the queue on \(host)?" }
+
+    /// "3 waiting, 1 paused and 12 held jobs will be cancelled." Zero
+    /// clauses are left out; the noun follows the LAST clause's count.
+    static func message(_ counts: Counts, machines: Int = 1) -> String {
+        let rendering = "Anything already rendering keeps going."
+        let clauses = [(counts.waiting, "waiting"), (counts.paused, "paused"), (counts.held, "held")]
+            .filter { $0.0 > 0 }
+        guard let last = clauses.last else {
+            return "Nothing is waiting or held right now. \(rendering)"
+        }
+        let words = clauses.map { "\($0.0) \($0.1)" }
+        let list = words.count == 1
+            ? words[0]
+            : words.dropLast().joined(separator: ", ") + " and " + words[words.count - 1]
+        let noun = last.0 == 1 ? "job" : "jobs"
+        let across = machines > 1 ? " across \(machines) machines" : ""
+        return "\(list) \(noun)\(across) will be cancelled. \(rendering)"
     }
 }

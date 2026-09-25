@@ -25,18 +25,63 @@ extension QueueStore {
         await poll(host)
     }
 
-    /// Cancels every queued or restart-paused row on ONE machine. Running
-    /// work is untouched (`routes.rs:7854-7859`) -- the confirm that leads
-    /// here says so, and the re-read afterward is what actually shows it.
-    func cancelAll(on host: MoldHost.ID) async {
-        guard !refuseIfFixture(host, doing: "cancel everything waiting") else { return }
+    /// Everything on ONE machine that is not rendering: the waiting and
+    /// restart-paused rows, and every HELD row. The bulk route
+    /// (`DELETE /api/queue`, `routes.rs:7869-7898`) deliberately leaves holds
+    /// alone, so "Empty Queue" used to leave a pane full of them; each hold is
+    /// cleared the way its own × clears it, `DELETE /api/queue/:id`, which
+    /// settles a held child as cancelled (`generation_batches.rs:710`). A
+    /// machine without the bulk route gets the same per-row call for its
+    /// waiting rows too. Running work is untouched either way.
+    ///
+    /// Reads the listing FIRST: the holds to clear are the machine's, not
+    /// whatever this store last saw.
+    func empty(on host: MoldHost.ID) async {
+        let verb = QueueEmptyConfirm.verb
+        guard !refuseIfFixture(host, doing: verb) else { return }
         guard let client = hosts.backend(for: host) else { return }
-        do {
-            try await client.cancelAllQueued()
-            hosts.succeeded(on: host)
-        } catch {
-            hosts.report(error, on: host, doing: "cancel everything waiting")
-        }
         await poll(host)
+        let rows = entries(on: host)
+        var failed = false
+        if hosts.capabilities[host]?.canCancelAllQueued == true {
+            do {
+                try await client.cancelAllQueued()
+            } catch {
+                hosts.report(error, on: host, doing: verb)
+                failed = true
+            }
+        } else {
+            for row in rows where row.state == .queued || row.state == .paused {
+                failed = await cancelRow(row.id, via: client, on: host, doing: verb) || failed
+            }
+        }
+        for row in rows where row.state == .held {
+            failed = await cancelRow(row.id, via: client, on: host, doing: verb) || failed
+        }
+        if !failed { hosts.succeeded(on: host, doing: verb) }
+        await poll(host)
+    }
+
+    /// `empty(on:)` for every machine at once, concurrently -- each one
+    /// reports its own failure line, so one unreachable machine never hides
+    /// what the others did.
+    func emptyAll(_ targets: [MoldHost.ID]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for host in targets {
+                group.addTask { await self.empty(on: host) }
+            }
+        }
+    }
+
+    /// `true` when the machine refused.
+    private func cancelRow(_ id: String, via client: any MoldBackend,
+                           on host: MoldHost.ID, doing verb: String) async -> Bool {
+        do {
+            try await client.cancelJob(id: id)
+            return false
+        } catch {
+            hosts.report(error, on: host, doing: verb)
+            return true
+        }
     }
 }
