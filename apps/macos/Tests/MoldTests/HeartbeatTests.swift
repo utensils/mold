@@ -254,6 +254,18 @@ struct HeartbeatTests {
         await tick.value
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func aStatusReleaseImmediatelyBeforeParkingIsNotLost() async throws {
+        let backend = FakeBackend(host: machine())
+        backend.serverStatus = FakeFixtures.serverStatus()
+        backend.statusHeldOpen = true
+        backend.beforeStatusPark = { backend.releaseStatus() }
+
+        _ = try await backend.status()
+
+        #expect(backend.callCount("status") == 1)
+    }
+
     /// A tick that was cancelled -- `stop()` while one is in flight -- asks
     /// nothing.
     @Test func aCancelledTickAsksNothing() async {

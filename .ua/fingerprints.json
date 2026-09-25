@@ -284721,7 +284721,7 @@
     },
     "apps/macos/Tests/MoldTests/FakeBackend.swift": {
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "contentHash": "9c874c7e8647aa9ec879b7b57368c2f6162f8639d0274a64a3a2b96c3a648acc",
+      "contentHash": "c755eea88f138ac35eadceb3e8bcc7de0e8611022c2a2958782abb394d8697d8",
       "functions": [
         {
           "name": "settle",
@@ -285471,7 +285471,9 @@
           "properties": [
             "lock",
             "raised",
-            "isRaised"
+            "isRaised",
+            "statusLock",
+            "beforeStatusPark"
           ],
           "exported": true,
           "lineCount": 6
@@ -285914,7 +285916,7 @@
         "downloadEvents",
         "FakeBackend"
       ],
-      "totalLines": 1018,
+      "totalLines": 1033,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift": {
@@ -288536,6 +288538,142 @@
       "exports": [],
       "totalLines": 89,
       "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/HeartbeatTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/HeartbeatTests.swift",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "fake",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "heartbeat",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aReconnectAsksEveryListenerToResyncEvenOnTheSameIdentity",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aReconnectMakesTheQueueReadTheMachineAgain",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aMachineWithNoEventRouteIsPolledOnItsOwn",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aMachineWithALiveStreamIsNeverPolled",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aMachineThatWasDownAtLaunchJoinsWithoutAnybodyPressingRefresh",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "anUpMachineThatNeverSaidWhatItCanDoIsAskedAgain",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aMachineThatKeepsRefusingItsCapabilitiesIsAskedLessOften",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "oneSlowMachineDoesNotHoldUpTheRest",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aStatusReleaseImmediatelyBeforeParkingIsNotLost",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "aCancelledTickAsksNothing",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "wakingTheMacReconnectsEveryStreamAndAsksForAResync",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        }
+      ],
+      "classes": [
+        {
+          "name": "HeartbeatTests",
+          "methods": [
+            "machine",
+            "fake",
+            "heartbeat",
+            "aReconnectAsksEveryListenerToResyncEvenOnTheSameIdentity",
+            "aReconnectMakesTheQueueReadTheMachineAgain",
+            "aMachineWithNoEventRouteIsPolledOnItsOwn",
+            "aMachineWithALiveStreamIsNeverPolled",
+            "aMachineThatWasDownAtLaunchJoinsWithoutAnybodyPressingRefresh",
+            "anUpMachineThatNeverSaidWhatItCanDoIsAskedAgain",
+            "aMachineThatKeepsRefusingItsCapabilitiesIsAskedLessOften",
+            "oneSlowMachineDoesNotHoldUpTheRest",
+            "aStatusReleaseImmediatelyBeforeParkingIsNotLost",
+            "aCancelledTickAsksNothing",
+            "wakingTheMacReconnectsEveryStreamAndAsksForAResync"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 319
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        }
+      ],
+      "exports": [],
+      "contentHash": "b3057b45ecabfad5eda8314bb085d6979f067e02d01726fe4ee40a785b2210b4",
+      "totalLines": 319
     }
   }
 }

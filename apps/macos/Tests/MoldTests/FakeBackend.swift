@@ -346,8 +346,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         // Setting the hold ARMS it: hold → release → hold again is a test
         // this seam should answer, and a latch that is never cleared would
         // silently not hold the second time.
-        didSet { if statusHeldOpen { statusReleased = false } }
+        didSet {
+            if statusHeldOpen { statusLock.withLock { statusReleased = false } }
+        }
     }
+    private let statusLock = NSLock()
     nonisolated(unsafe) private var statusWaiters: [CheckedContinuation<Void, Never>] = []
     /// The release is a LATCH, not a broadcast. `releaseStatus()` used to
     /// resume whoever happened to be waiting at that instant, so a `status()`
@@ -356,19 +359,31 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// returned long before the test's own `await tick.value` hung the whole
     /// bundle. Measured: 22 minutes, one suite, no output.
     nonisolated(unsafe) private var statusReleased = false
+    /// Inject a release immediately before a waiter tries to park. The latch
+    /// must make that release visible even if no waiter has been appended yet.
+    nonisolated(unsafe) var beforeStatusPark: (() -> Void)?
 
     func releaseStatus() {
-        statusReleased = true
-        let waiting = statusWaiters
-        statusWaiters = []
+        let waiting = statusLock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            statusReleased = true
+            let waiting = statusWaiters
+            statusWaiters = []
+            return waiting
+        }
         for continuation in waiting { continuation.resume() }
     }
 
     func status() async throws -> ServerStatus {
         try record("status")
-        if statusHeldOpen, !statusReleased {
+        if statusHeldOpen {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                statusWaiters.append(continuation)
+                beforeStatusPark?()
+                let released = statusLock.withLock { () -> Bool in
+                    if statusReleased { return true }
+                    statusWaiters.append(continuation)
+                    return false
+                }
+                if released { continuation.resume() }
             }
         }
         guard let serverStatus else { throw notPlanted() }

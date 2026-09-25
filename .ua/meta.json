@@ -328,6 +328,16 @@
         "docs/plans/macos-library-sync-all.md"
       ],
       "note": "Scoped source-verified structural refresh before follow-up PR."
+    },
+    {
+      "id": "macos-heartbeat-status-latch",
+      "updatedAt": "2026-09-25T00:16:27.476143+00:00",
+      "baseCommit": "2899440f",
+      "scope": "Native macOS heartbeat test latch and deterministic lost-wakeup regression; global baseline unchanged.",
+      "files": [
+        "apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "apps/macos/Tests/MoldTests/HeartbeatTests.swift"
+      ]
     }
   ]
 }

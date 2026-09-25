@@ -293990,7 +293990,7 @@
       "type": "file",
       "name": "FakeBackend.swift",
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "summary": "Provides a controllable native backend test double that records gallery imports, media reads, mutations, and other client operations.",
+      "summary": "Controllable native backend test double; synchronizes status release with waiter registration so a heartbeat test cannot lose a wakeup.",
       "tags": [
         "test",
         "library",
@@ -294007,7 +294007,7 @@
         47,
         1001
       ],
-      "summary": "FakeBackend defines the FakeBackend state and behavior used by the native Library flow.",
+      "summary": "Native backend test double with a locked status latch for deterministic heartbeat and library tests.",
       "tags": [
         "test",
         "library",
@@ -296780,6 +296780,19 @@
       "tags": [
         "native-macos",
         "library"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:apps/macos/Tests/MoldTests/HeartbeatTests.swift",
+      "type": "file",
+      "name": "HeartbeatTests.swift",
+      "filePath": "apps/macos/Tests/MoldTests/HeartbeatTests.swift",
+      "summary": "Native macOS heartbeat tests, including a deterministic regression for status release immediately before waiter registration.",
+      "tags": [
+        "test",
+        "macos",
+        "swift"
       ],
       "complexity": "moderate"
     }
@@ -525685,7 +525698,8 @@
         "function:apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift:mirrorLocally",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryMutations.swift",
         "file:apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
-        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift"
+        "file:apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift",
+        "file:apps/macos/Tests/MoldTests/HeartbeatTests.swift"
       ]
     },
     {
