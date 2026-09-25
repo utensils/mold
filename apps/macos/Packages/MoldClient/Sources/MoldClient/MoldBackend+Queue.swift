@@ -8,6 +8,11 @@ public protocol MoldQueueBackend: Sendable {
     /// this (`routes.rs:6817-6828`).
     func queueJob(id: String) async throws -> QueueJobDetail
     func cancelJob(id: String) async throws
+    /// Cancels the row ONLY if it is held right now (`?only_held=true`).
+    /// Returns `false` when the machine says it is no longer held -- a Retry
+    /// got there first -- and nothing was touched. An older machine ignores
+    /// the query and cancels whatever the row is.
+    func cancelHeldJob(id: String) async throws -> Bool
     func pauseJob(id: String) async throws
     func resumeJob(id: String) async throws
     /// Moves a QUEUED row to `position` in the machine's dispatch order --

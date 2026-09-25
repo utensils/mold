@@ -57,6 +57,9 @@ engine: ## Build mold's Rust engine and link it into the app
 	@# Same deployment target as the app, or every object file warns.
 	@cd $(ENGINE_DIR) && CARGO_TARGET_DIR=$(ENGINE_TARGET) CARGO_BUILD_JOBS=8 \
 	  MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release --features metal
+	@# What `engine-freshness.sh` compares against on every `make build`: the
+	@# commit, and the uncommitted engine diff the build included.
+	@scripts/engine-freshness.sh --stamp $(ENGINE_LIB).commit
 	@$(MAKE) engine-config
 	@echo "  engine linked: $(ENGINE_LIB)"
 
@@ -93,6 +96,7 @@ gen: ## Regenerate Mold.xcodeproj from project.yml
 	@$(XCODEGEN) generate --spec project.yml --quiet
 
 build: gen ## Build the app
+	@scripts/engine-freshness.sh Engine.xcconfig
 	@$(XCB) build | grep -Ev '^\s*$$' | tail -5
 
 run: build ## Build and launch the app
@@ -135,6 +139,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/dmg-volume-icon.sh
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
+	@scripts/tests/engine-freshness.sh
 	@cd Packages/MoldClient && swift test
 	@cd Packages/MoldStyle && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate

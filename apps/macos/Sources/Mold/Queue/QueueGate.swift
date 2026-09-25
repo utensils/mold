@@ -20,10 +20,17 @@ struct QueueGateOffer: Equatable {
         }
     }
 
+    /// What one item acts on: one machine (toggled), or every listed
+    /// machine at once, set to one state.
+    enum Target: Hashable {
+        case machine(MoldHost.ID)
+        case all(paused: Bool)
+    }
+
     /// Only the machines that advertise it. A machine that does not is not
     /// listed -- absent, never present and inert.
     let machines: [Machine]
-    let toggle: (MoldHost.ID) -> Void
+    let toggle: (Target) -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.machines == rhs.machines }
 
@@ -36,13 +43,29 @@ struct QueueGateOffer: Equatable {
     /// the README warns about binding one key twice. Nothing else is both
     /// free and conventional for "pause", so the item carries none rather
     /// than inventing a chord nobody would guess.
-    func items() -> [RowAction<MoldHost.ID>] {
+    ///
+    /// More than one machine also leads with the fleet-wide verbs: Pause on
+    /// All while anything is dispatching, Resume on All while anything is
+    /// paused -- both on a mixed fleet.
+    func items() -> [RowAction<Target>] {
+        guard !machines.isEmpty else { return [] }
         guard machines.count != 1 else {
             let machine = machines[0]
-            return [RowAction(kind: machine.id, title: machine.title)]
+            return [RowAction(kind: .machine(machine.id), title: machine.title)]
         }
-        return machines.map { RowAction(kind: $0.id, title: $0.titleNamingMachine) }
+        var fleet: [RowAction<Target>] = []
+        if machines.contains(where: { !$0.isPaused }) {
+            fleet.append(RowAction(kind: .all(paused: true), title: Self.pauseAllTitle))
+        }
+        if machines.contains(where: \.isPaused) {
+            fleet.append(RowAction(kind: .all(paused: false), title: Self.resumeAllTitle))
+        }
+        return fleet + [.separator]
+            + machines.map { RowAction(kind: .machine($0.id), title: $0.titleNamingMachine) }
     }
+
+    static let pauseAllTitle = "Pause Queue on All Machines"
+    static let resumeAllTitle = "Resume Queue on All Machines"
 
     /// What the pane says about a paused machine. A toggled label alone is
     /// not visible enough: the word on a control tells you what pressing it

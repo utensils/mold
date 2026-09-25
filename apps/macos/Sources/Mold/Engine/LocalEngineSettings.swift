@@ -5,6 +5,8 @@ import SwiftUI
 struct LocalEngineSettings: View {
     @Environment(MoldEngine.self) var engine
     @Environment(HostStore.self) var hosts
+    @AppStorage(EngineAutostart.startsAtLaunchKey, store: AppStorageSuite.defaults)
+    private var startsAtLaunch = true
 
     var body: some View {
         Form {
@@ -45,6 +47,9 @@ struct LocalEngineSettings: View {
             }
 
             Section {
+                if MoldEngine.isLinked {
+                    Toggle("Start the engine when Mold opens", isOn: $startsAtLaunch)
+                }
                 HStack {
                     Spacer()
                     controls
@@ -91,24 +96,9 @@ struct LocalEngineSettings: View {
             : "This build talks to remote machines only."
     }
 
-    func start() {
-        engine.start()
-        // The host exists once the engine has ANSWERED, which on a cold home
-        // with a large gallery is well past the old ten-second window: the
-        // engine's own probe waits for `/api/status`, so this waits for it.
-        Task {
-            while true {
-                if let host = engine.host {
-                    hosts.adoptLocalEngine(host)
-                    return
-                }
-                switch engine.state {
-                case .starting: try? await Task.sleep(for: .milliseconds(250))
-                default: return
-                }
-            }
-        }
-    }
+    /// The machine-list entry follows from the engine itself
+    /// (`MoldEngine.adoptsItsMachine`), so Start only starts.
+    func start() { engine.start() }
 
     func stop() async {
         await engine.stop()

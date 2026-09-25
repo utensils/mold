@@ -24,11 +24,19 @@ public struct LibraryQuery: Hashable, Sendable {
 
     public func apply(to entries: [LibraryEntry]) -> [LibraryEntry] {
         let showHidden = tokens.contains { if case .collection = $0 { true } else { false } }
-        var shown = entries.filter { entry in
+        // A merged print asked for by machine shows THAT machine's copy:
+        // filtering to a machine is asking what is on it.
+        let machineIDs = Set(tokens.compactMap { token -> MoldHost.ID? in
+            if case let .machine(id, _) = token { return id }
+            return nil
+        })
+        let candidates = machineIDs.isEmpty
+            ? entries : entries.compactMap { $0.presented(onAnyOf: machineIDs) }
+        var shown = candidates.filter { entry in
             matchesEveryGroup(entry) && (showHidden || !isHidden(entry))
         }
         if !text.trimmingCharacters(in: .whitespaces).isEmpty {
-            shown = shown.filter { $0.matches(text) }
+            shown = shown.filter { entry in entry.everyCopy.contains { $0.matches(text) } }
         }
         return sorted(shown)
     }
@@ -50,11 +58,11 @@ public struct LibraryQuery: Hashable, Sendable {
             case .kind: kinds.append(token)
             case .collection: collections.append(token)
             case let .tag(name):
-                guard entry.print.tagList.contains(where: {
-                    $0.caseInsensitiveCompare(name) == .orderedSame
+                guard entry.everyCopy.contains(where: { copy in
+                    copy.print.tagList.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
                 }) else { return false }
             case .favorite:
-                guard entry.print.isFavorite else { return false }
+                guard entry.everyCopy.contains(where: \.print.isFavorite) else { return false }
             }
         }
         for group in [machines, kinds, collections] where !group.isEmpty {
@@ -70,8 +78,10 @@ public struct LibraryQuery: Hashable, Sendable {
         case let .kind(kind):
             entry.print.kind == kind
         case let .collection(_, _, ids):
-            // The id for THIS print's machine, and no other.
-            ids[entry.hostID].map { entry.print.collectionList.contains($0) } ?? false
+            // Each copy is filed by its OWN machine's id for the shelf.
+            entry.everyCopy.contains { copy in
+                ids[copy.hostID].map { copy.print.collectionList.contains($0) } ?? false
+            }
         case .tag, .favorite:
             true
         }

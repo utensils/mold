@@ -175,10 +175,25 @@ struct QueuePaneTests {
         #expect(QueuePane.emptyQueueTargets([workstation], capabilities: [:]).isEmpty)
     }
 
+    /// A machine holding work is a target even without the bulk route:
+    /// clearing a hold is the one action every hold has.
+    @Test func aMachineHoldingWorkCanBeEmptiedWithoutTheBulkRoute() {
+        let workstation = machine("workstation")
+        let hal = machine("hal9000")
+        let capabilities: [MoldHost.ID: Capabilities] = [
+            workstation.id: FakeFixtures.capabilities(canCancelAll: false),
+            hal.id: FakeFixtures.capabilities(canCancelAll: false),
+        ]
+        let entries = [workstation.id: [FakeFixtures.queueEntry("h", state: "held")]]
+        let targets = QueuePane.emptyQueueTargets(
+            [workstation, hal], capabilities: capabilities, entries: entries)
+        #expect(targets.map(\.id) == [workstation.id])
+    }
+
     /// Pins fact 12's whole point: running work is untouched, and the
     /// confirm has to say so.
     @Test func theEmptyQueueConfirmSaysRunningWorkKeepsGoing() {
-        let message = QueueEmptyConfirm.message(waiting: 3, paused: 1)
+        let message = QueueEmptyConfirm.message(.init(waiting: 3, paused: 1))
         #expect(
             message
                 == "3 waiting and 1 paused job will be cancelled. Anything already rendering keeps going."
@@ -186,26 +201,116 @@ struct QueuePaneTests {
     }
 
     @Test func theEmptyQueueConfirmSingularizesOneOfEach() {
-        let message = QueueEmptyConfirm.message(waiting: 1, paused: 1)
+        let message = QueueEmptyConfirm.message(.init(waiting: 1, paused: 1))
         #expect(message.hasPrefix("1 waiting and 1 paused job "))
     }
 
-    // MARK: - Cancel all
+    @Test func theEmptyQueueConfirmCountsHeldJobsAndMachines() {
+        let one = QueueEmptyConfirm.message(.init(waiting: 3, paused: 1, held: 12))
+        #expect(one.hasPrefix("3 waiting, 1 paused and 12 held jobs will be cancelled."))
+        let fleet = QueueEmptyConfirm.message(.init(held: 12), machines: 3)
+        #expect(fleet.hasPrefix("12 held jobs across 3 machines will be cancelled."))
+        #expect(QueueEmptyConfirm.message(.init()).hasPrefix("Nothing is waiting or held"))
+    }
 
-    /// **Fails today**: `QueueStore.cancelAll(on:)` does not exist yet.
-    @Test func cancelAllCallsCancelAllQueuedOnceThenPolls() async {
+    @Test func theConfirmCountsComeFromTheRowsStates() {
+        let counts = QueueEmptyConfirm.Counts([
+            FakeFixtures.queueEntry("q"), FakeFixtures.queueEntry("p", state: "paused"),
+            FakeFixtures.queueEntry("h", state: "held"), FakeFixtures.queueEntry("r", state: "running"),
+        ])
+        #expect(counts == .init(waiting: 1, paused: 1, held: 1))
+    }
+
+    // MARK: - Empty
+
+    private func emptyBench(canCancelAll: Bool, entries: [QueueEntry]) async
+        -> (QueueStore, FakeBackend, MoldHost) {
         let workstation = machine()
         let fake = FakeBackend(host: workstation)
-        fake.queueListing = FakeFixtures.queueListing(["job-1"])
-        fake.cancelAllAnswer = FakeFixtures.queueCancelResult(3)
+        fake.serverStatus = FakeFixtures.serverStatus(queuePaused: nil)
+        fake.capabilityBlock = FakeFixtures.capabilities(canCancelAll: canCancelAll)
+        fake.exportBlock = FakeFixtures.exportOptions()
+        fake.queueListing = FakeFixtures.queueListing(entries: entries)
+        fake.cancelAllAnswer = FakeFixtures.queueCancelResult(1)
         let hosts = HostStore(hosts: [workstation]) { _ in fake }
-        let queue = QueueStore(hosts: hosts)
+        await hosts.refresh(workstation)
+        return (QueueStore(hosts: hosts), fake, workstation)
+    }
 
-        await queue.cancelAll(on: workstation.id)
+    private var mixed: [QueueEntry] {
+        [
+            FakeFixtures.queueEntry("q1"), FakeFixtures.queueEntry("p1", state: "paused"),
+            FakeFixtures.queueEntry("h1", state: "held"), FakeFixtures.queueEntry("h2", state: "held"),
+            FakeFixtures.queueEntry("r1", state: "running"),
+        ]
+    }
 
-        #expect(fake.cancelledAll)
+    /// The bug: `DELETE /api/queue` leaves every HELD row, so Empty Queue
+    /// used to leave the pane exactly as full of holds as it was.
+    @Test func emptyClearsTheWaitingRowsInBulkAndEveryHeldRow() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        await queue.refresh()
+
+        await queue.empty(on: workstation.id, held: queue.heldIDs(on: workstation.id))
+
         #expect(fake.callCount("cancelAllQueued") == 1)
-        #expect(fake.callCount("queue") == 1)
+        #expect(fake.cancelledIds == ["h1", "h2"], "running work is never touched")
+        #expect(fake.callCount("cancelJob") == 0, "holds go through the held-only route")
+    }
+
+    /// Only its holds: a waiting row could start between the listing and a
+    /// per-row DELETE, and that route cancels running work.
+    @Test func aMachineWithoutTheBulkRouteHasOnlyItsHoldsCleared() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: false, entries: mixed)
+        await queue.refresh()
+
+        await queue.empty(on: workstation.id, held: queue.heldIDs(on: workstation.id))
+
+        #expect(!fake.cancelledAll)
+        #expect(fake.cancelledIds == ["h1", "h2"])
+    }
+
+    /// A job that became held while the confirm was open was never counted,
+    /// so it is not cleared.
+    @Test func onlyTheHoldsTheConfirmCountedAreCleared() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+
+        await queue.empty(on: workstation.id, held: ["h1"])
+
+        #expect(fake.cancelledIds == ["h1"])
+    }
+
+    /// Retried by somebody else in the meantime: the machine refuses the
+    /// held-only cancel, nothing is stopped, and that is not a failure.
+    @Test func aHoldRetriedElsewhereIsLeftAloneQuietly() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        fake.noLongerHeld = ["h2"]
+
+        await queue.empty(on: workstation.id, held: ["h1", "h2"])
+
+        #expect(fake.cancelledIds == ["h1"])
+        #expect(queue.hosts.failures.isEmpty)
+    }
+
+    /// The held row's own × -- `DELETE /api/queue/:id` with the row's id.
+    @Test func cancellingAHeldRowSendsItsOwnId() async throws {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        await queue.refresh()
+        let held = try #require(queue.entries(on: workstation.id).first { $0.id == "h2" })
+
+        await queue.cancel(held, on: workstation.id)
+
+        #expect(fake.cancelledIds == ["h2"])
+    }
+
+    @Test func aRefusedHoldIsReportedAndTheRestStillGo() async {
+        let (queue, fake, workstation) = await emptyBench(canCancelAll: true, entries: mixed)
+        fake.refuses.insert("cancelHeldJob")
+
+        await queue.empty(on: workstation.id, held: ["h1", "h2"])
+
+        #expect(fake.callCount("cancelHeldJob") == 2, "one refusal does not stop the next hold")
+        #expect(queue.hosts.failures.contains { $0.sentence.contains("empty its queue") })
     }
 
     // MARK: - Batch keyboard move
@@ -316,6 +421,21 @@ struct QueuePaneTests {
         ])
     }
 
+    @Test func severalEmptyQueuesLeadWithAllMachines() {
+        let first = QueueSelection.EmptyQueue(id: UUID(), name: "workstation", run: {})
+        let second = QueueSelection.EmptyQueue(id: UUID(), name: "hal9000", run: {})
+        var ran: [String] = []
+        let selection = QueueSelection(job: nil, emptyQueues: [
+            .init(id: nil, name: "All Machines") { ran.append("all") }, first, second,
+        ])
+
+        #expect(selection.offeredTitles == [
+            "Empty Queue on All Machines…", "Empty Queue on workstation…", "Empty Queue on hal9000…",
+        ])
+        selection.perform(.emptyQueue(nil))
+        #expect(ran == ["all"])
+    }
+
     // MARK: - Fixture
 
     /// **Fails today**: `QueueStore.seed(from:)` does not exist yet. Every
@@ -340,7 +460,7 @@ struct QueuePaneTests {
         await queue.resume(entry, on: workstation.id)
         await queue.retry(entry, on: workstation.id)
         await queue.reorder([("job-1", 0)], on: workstation.id)
-        await queue.cancelAll(on: workstation.id)
+        await queue.empty(on: workstation.id, held: ["job-1"])
         await queue.refresh()
 
         #expect(fake.calls.isEmpty)

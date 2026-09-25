@@ -72,10 +72,16 @@ extension QueuePane {
     /// Every machine the toolbar's own chooser names. The menu must retain
     /// the same choice rather than silently acting on the first host.
     private var emptyQueueActions: [QueueSelection.EmptyQueue] {
-        emptyQueueTargets.map { host in
+        let targets = emptyQueueTargets
+        let machines = targets.map { host in
             QueueSelection.EmptyQueue(id: host.id, name: host.name) {
                 confirmEmptyQueue(on: host)
             }
         }
+        guard targets.count > 1 else { return machines }
+        let all = QueueSelection.EmptyQueue(id: nil, name: "All Machines") {
+            confirmEmptyAllQueues()
+        }
+        return [all] + machines
     }
 }

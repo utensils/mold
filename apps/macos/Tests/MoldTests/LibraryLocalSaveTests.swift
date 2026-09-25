@@ -153,7 +153,7 @@ struct LibraryLocalSaveTests {
         await library.saveLocally([collision, available])
 
         #expect(localBackend.importedNames == ["free.png"])
-        #expect(library.localSaveReport.contains("Copied 1 prints"))
+        #expect(library.localSaveReport.contains("Copied 1 print to"))
         #expect(library.localSaveReport.contains("1 were not copied"))
         #expect(library.localSaveFailures.contains { $0.contains("taken.png") })
         #expect(library.localSaveAlertPresented)

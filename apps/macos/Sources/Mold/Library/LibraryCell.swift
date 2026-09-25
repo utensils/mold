@@ -17,7 +17,6 @@ struct LibraryCell: View {
             .overlay(alignment: .topLeading) { hostBadge }
             .overlay { selectionRing }
             .contentShape(Rectangle())
-            .help(entry.print.metadata.prompt ?? entry.print.filename)
             // One element, not five: the badges are facts ABOUT the print and
             // belong in its sentence, not as separate stops on the way past it.
             .accessibilityElement(children: .ignore)
@@ -70,17 +69,28 @@ struct LibraryCell: View {
         }
     }
 
-    /// Which machine made it. Only shown when more than one is in the list --
-    /// on a single-host library it would be noise on every tile.
+    /// Every machine holding it -- a print saved to This Mac is ONE tile,
+    /// and the badge is where it says it is on both. Only shown when more
+    /// than one machine is in the list; on a single-host library it would be
+    /// noise on every tile.
     @ViewBuilder private var hostBadge: some View {
         if showsHostBadge {
-            Text(entry.hostName)
-                .font(.caption2)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Chrome.badgeBackdrop, in: Capsule())
-                .padding(5)
+            ViewThatFits(in: .horizontal) {
+                badge(entry.hostBadge(compact: false))
+                badge(entry.hostBadge(compact: true))
+            }
         }
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .lineLimit(1)
+            .fixedSize()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Chrome.badgeBackdrop, in: Capsule())
+            .padding(5)
     }
 }

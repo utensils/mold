@@ -19,7 +19,10 @@ extension MachinesPane {
     @ViewBuilder func identity(_ host: MoldHost) -> some View {
         Section {
             if case let .up(status) = hosts.reachability(of: host) {
-                LabeledContent("Version", value: "mold \(status.version)")
+                LabeledContent("Version", value: "mold \(status.versionLabel)")
+                if let built = status.buildDate {
+                    LabeledContent("Built", value: built)
+                }
                 LabeledContent("Up", value: uptime(status.uptimeSecs))
                 if let instance = status.instanceId {
                     LabeledContent("Identity") {

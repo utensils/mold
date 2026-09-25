@@ -39,9 +39,12 @@ public struct CollectionShelf: Identifiable, Hashable, Sendable {
     /// opening the row shows, so it is counted from the index the grid draws
     /// -- and a print counts only under the id ITS OWN machine gave the shelf.
     public func count(in entries: [LibraryEntry]) -> Int {
+        // Any copy filed on its own machine counts the print once -- the
+        // same rule the collection token filters by.
         entries.count { entry in
-            guard let id = hosts[entry.hostID] else { return false }
-            return entry.print.collectionList.contains(id)
+            entry.everyCopy.contains { copy in
+                hosts[copy.hostID].map { copy.print.collectionList.contains($0) } ?? false
+            }
         }
     }
 

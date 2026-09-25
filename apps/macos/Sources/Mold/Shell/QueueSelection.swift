@@ -9,8 +9,9 @@ struct QueueSelection: Equatable {
     var gate = QueueGateOffer(machines: [], toggle: { _ in })
     let emptyQueues: [EmptyQueue]
 
+    /// `id == nil` is Empty Queue on All Machines.
     struct EmptyQueue: Equatable {
-        let id: MoldHost.ID
+        let id: MoldHost.ID?
         let name: String
         let run: () -> Void
 
@@ -49,8 +50,9 @@ struct QueueSelection: Equatable {
     enum Item: Hashable {
         case act(QueueRowActions.Kind)
         case moveTo(MoldHost.ID)
-        case pauseQueue(MoldHost.ID)
-        case emptyQueue(MoldHost.ID)
+        case pauseQueue(QueueGateOffer.Target)
+        /// `nil` is every machine.
+        case emptyQueue(MoldHost.ID?)
     }
 
     /// The list the menu draws, with separators trimmed by `RowAction`.
@@ -72,10 +74,15 @@ struct QueueSelection: Equatable {
         }
         items.append(.separator)
         items += gate.items().map { $0.mapKind(Item.pauseQueue) }
-        if emptyQueues.count == 1, let target = emptyQueues.first {
+        items.append(.separator)
+        let machines = emptyQueues.filter { $0.id != nil }
+        if machines.count == 1, let target = machines.first {
             items.append(RowAction(kind: .emptyQueue(target.id), title: "Empty Queue…"))
         } else {
-            items += emptyQueues.map { target in
+            if emptyQueues.contains(where: { $0.id == nil }) {
+                items.append(RowAction(kind: .emptyQueue(nil), title: QueueEmptyConfirm.allMachinesItem))
+            }
+            items += machines.map { target in
                 RowAction(kind: .emptyQueue(target.id),
                           title: "Empty Queue on \(target.name)…")
             }

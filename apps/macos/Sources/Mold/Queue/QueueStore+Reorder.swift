@@ -25,18 +25,59 @@ extension QueueStore {
         await poll(host)
     }
 
-    /// Cancels every queued or restart-paused row on ONE machine. Running
-    /// work is untouched (`routes.rs:7854-7859`) -- the confirm that leads
-    /// here says so, and the re-read afterward is what actually shows it.
-    func cancelAll(on host: MoldHost.ID) async {
-        guard !refuseIfFixture(host, doing: "cancel everything waiting") else { return }
+    /// Everything on ONE machine that is not rendering: the waiting and
+    /// restart-paused rows, and the HELD rows the confirm counted. The bulk
+    /// route (`DELETE /api/queue`, `routes.rs:7869-7898`) deliberately leaves
+    /// holds alone, so "Empty Queue" used to leave a pane full of them; each
+    /// hold is cleared with `DELETE /api/queue/:id?only_held=true`, which the
+    /// machine refuses once a Retry has moved the row -- so this never stops
+    /// a render. Running work is untouched either way.
+    ///
+    /// `held` is the set the person was shown. A job that became held while
+    /// the confirm was open was not counted, so it is not cleared.
+    func empty(on host: MoldHost.ID, held: Set<String>) async {
+        let verb = QueueEmptyConfirm.verb
+        guard !refuseIfFixture(host, doing: verb) else { return }
         guard let client = hosts.backend(for: host) else { return }
-        do {
-            try await client.cancelAllQueued()
-            hosts.succeeded(on: host)
-        } catch {
-            hosts.report(error, on: host, doing: "cancel everything waiting")
+        var failed = false
+        if hosts.capabilities[host]?.canCancelAllQueued == true {
+            do {
+                try await client.cancelAllQueued()
+            } catch {
+                hosts.report(error, on: host, doing: verb)
+                failed = true
+            }
         }
+        // Deliberately NO per-row fallback for WAITING rows on a machine
+        // without the bulk route: a row can start between the listing and
+        // its DELETE, and the per-row route cancels running work -- which
+        // the confirm promises never happens.
+        for id in held.sorted() {
+            do {
+                _ = try await client.cancelHeldJob(id: id)
+            } catch {
+                hosts.report(error, on: host, doing: verb)
+                failed = true
+            }
+        }
+        if !failed { hosts.succeeded(on: host, doing: verb) }
         await poll(host)
+    }
+
+    /// The held rows this store is showing for a machine -- what a confirm
+    /// counts and hands to `empty(on:held:)`.
+    func heldIDs(on host: MoldHost.ID) -> Set<String> {
+        Set(entries(on: host).filter { $0.state == .held }.map(\.id))
+    }
+
+    /// `empty(on:held:)` for every machine at once, concurrently -- each one
+    /// reports its own failure line, so one unreachable machine never hides
+    /// what the others did.
+    func emptyAll(_ targets: [MoldHost.ID: Set<String>]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for (host, held) in targets {
+                group.addTask { await self.empty(on: host, held: held) }
+            }
+        }
     }
 }

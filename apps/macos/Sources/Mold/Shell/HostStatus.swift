@@ -29,7 +29,8 @@ extension HostStore.Reachability {
         switch self {
         case .unknown: nil
         case .checking: "Checking…"
-        case let .up(status): status.busy ? "Busy · \(status.version)" : "Ready · \(status.version)"
+        case let .up(status):
+            status.busy ? "Busy · \(status.versionLabel)" : "Ready · \(status.versionLabel)"
         case .needsKey: "Needs an API key"
         case let .down(reason): reason
         }
@@ -43,7 +44,7 @@ extension HostStore.Reachability {
         case .checking: "Checking…"
         case let .up(status):
             [status.hostname,
-             "mold \(status.version)",
+             "mold \(status.versionLabel)" + (status.buildDate.map { ", built \($0)" } ?? ""),
              status.hardware]
                 .compactMap(\.self).joined(separator: " · ")
         case .needsKey:

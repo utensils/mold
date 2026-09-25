@@ -14,7 +14,9 @@ public extension LibraryEntry {
         var parts = [spokenName]
         parts.append(print.kind.spoken)
         if print.isFavorite { parts.append("favourite") }
-        if showsHost { parts.append("on \(hostName)") }
+        if showsHost {
+            parts.append("on " + ListFormatter.localizedString(byJoining: hostNames))
+        }
         if print.trashedAt != nil {
             parts.append("deleted")
             parts.append(remaining(now))

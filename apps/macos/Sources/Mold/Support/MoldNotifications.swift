@@ -122,7 +122,7 @@ final class MoldNotifications {
         let title = landings.count == 1
             ? "Finished on \(machine)" : "\(landings.count) prints finished on \(machine)"
         let id = PrintID(host: host, filename: newest.filename)
-        let body = library.items.first { $0.id == id }?.print.metadata.prompt ?? newest.filename
+        let body = library.entry(id)?.print.metadata.prompt ?? newest.filename
         post(title: title, body: body, userInfo: ["kind": "print", "host": host.uuidString, "filename": id.filename])
     }
 

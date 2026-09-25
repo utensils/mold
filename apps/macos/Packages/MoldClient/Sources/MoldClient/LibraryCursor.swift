@@ -49,6 +49,16 @@ public struct LibraryCursor: Sendable {
         }
 
         public static let empty = Selection()
+
+        /// The same selection after the rows were rebuilt, with every id run
+        /// through `resolve` -- how a selection follows a print whose tile is
+        /// now led by another copy (a Save Locally on it, or a sync landing),
+        /// rather than silently pointing at a tile that no longer exists.
+        /// `resolve` answering `nil` keeps the id as it was.
+        public func remapped(through resolve: (PrintID) -> PrintID?) -> Selection {
+            func map(_ id: PrintID) -> PrintID { resolve(id) ?? id }
+            return Selection(items: Set(items.map(map)), anchor: anchor.map(map), lead: lead.map(map))
+        }
     }
 
     // MARK: - Clicking

@@ -53,7 +53,7 @@ struct LibraryMenu {
             upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount,
             localSaveCount: targets.filter(LibraryStore.canSaveLocally).count,
-            trashLocationName: Set(targets.map(\.hostID)).count == 1 ? targets.first?.hostName : nil
+            trashLocationName: LibraryEntry.soleMachineName(of: targets)
         )
     }
 

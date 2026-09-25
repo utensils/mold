@@ -808,6 +808,7 @@ pub async fn run_server(
             let output_dir = config.effective_output_dir();
             drop(config);
             std::fs::create_dir_all(&output_dir)?;
+            let recovery_started = std::time::Instant::now();
             let report = batch_transaction::recover_transactions(
                 &output_dir,
                 &state.gallery_publication_gate,
@@ -818,12 +819,15 @@ pub async fn run_server(
                 rolled_back = report.rolled_back,
                 rolled_forward = report.rolled_forward,
                 healed_committed_rows = report.healed_committed_rows,
+                elapsed_ms = gallery_authority::duration_ms(recovery_started.elapsed()),
                 "gallery transaction startup recovery complete"
             );
             if let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() {
+                let pins_started = std::time::Instant::now();
                 let pins = lifecycle
                     .reconcile_gallery_pins(&output_dir, &state.gallery_publication_gate)?;
                 tracing::info!(
+                    elapsed_ms = gallery_authority::duration_ms(pins_started.elapsed()),
                     retained = pins.retained,
                     released = pins.released,
                     release_failures = pins.release_failures,

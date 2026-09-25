@@ -35,28 +35,41 @@ extension LibraryStore {
                 }
             }
         }
-        trashed = trashPerHost.values.flatMap(\.self)
-            .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
+        rebuildTrash()
         rows.bump()
     }
 
     // MARK: - Mutations
 
+    /// A merged tile stands for every copy of its print, so an edit reaches
+    /// all of them -- starring the This Mac copy and leaving the original
+    /// unstarred would split one print in two again.
+    func withCopies(_ entries: [LibraryEntry]) -> [LibraryEntry] {
+        var seen = Set<PrintID>()
+        return entries.flatMap(\.everyCopy).filter { seen.insert($0.id).inserted }
+    }
+
     func setFavorite(_ favorite: Bool, on entries: [LibraryEntry]) {
-        apply(PrintEdit.plan(.favorite(favorite), over: entries))
+        apply(PrintEdit.plan(.favorite(favorite), over: withCopies(entries)))
     }
 
     func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry]) {
         let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        apply(PrintEdit.plan(.tag(clean, adding: adding), over: entries))
+        apply(PrintEdit.plan(.tag(clean, adding: adding), over: withCopies(entries)))
     }
 
     /// Names one print. The old name travels with the change so undo can put
     /// it back -- see `PrintChange.title`.
     func setTitle(_ title: String, on entry: LibraryEntry) {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        apply(PrintEdit.plan(.title(from: entry.print.title ?? "", to: clean), over: [entry]))
+        // One edit per previous title, so undo puts back what EACH copy was
+        // called rather than the lead's name on all of them. Registered in
+        // the same run-loop turn, they are one undo group.
+        let byPrevious = Dictionary(grouping: withCopies([entry])) { $0.print.title ?? "" }
+        for (previous, copies) in byPrevious.sorted(by: { $0.key < $1.key }) {
+            apply(PrintEdit.plan(.title(from: previous, to: clean), over: copies))
+        }
     }
 
     /// Trash keeps the bytes and starts a purge countdown; it is not a delete.
@@ -66,6 +79,7 @@ extension LibraryStore {
     /// Put Back, which survives quitting the app in a way an undo stack does
     /// not.
     func moveToTrash(_ entries: [LibraryEntry]) async {
+        let entries = withCopies(entries)
         let ids = Set(entries.map(\.id))
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             let before = perHost[hostID]
@@ -87,6 +101,7 @@ extension LibraryStore {
     }
 
     func restore(_ entries: [LibraryEntry]) async {
+        let entries = withCopies(entries)
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = hosts.backend(for: hostID) else { continue }
             do {
@@ -103,6 +118,7 @@ extension LibraryStore {
     /// Permanent on the host. Nothing here can undo it, which is why the panes
     /// ask first.
     func deleteForever(_ entries: [LibraryEntry]) async {
+        let entries = withCopies(entries)
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = hosts.backend(for: hostID) else { continue }
             do {

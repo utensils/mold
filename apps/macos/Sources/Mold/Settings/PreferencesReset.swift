@@ -77,6 +77,9 @@ enum PreferencesReset {
         "pendingBatches",
         "pendingChainJobs",
         "keychainKeysMigrated",
+        // Its own toggle on Settings ▸ This Mac; a reset quietly turning the
+        // engine back on at launch would be a change nobody asked for.
+        "engineStartsAtLaunch",
     ]
 
     static func reset(in defaults: UserDefaults) {

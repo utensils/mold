@@ -731,6 +731,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Set once `cancelAllQueued` is actually called -- a test asserting it
     /// was NOT called reads this rather than `calls.contains`.
     nonisolated(unsafe) var cancelledAll = false
+    /// Every id `cancelJob` was asked to cancel, in call order.
+    nonisolated(unsafe) var cancelledIds: [String] = []
     /// Every authority `retryJob` was asked to retry, in call order -- what a
     /// retry actually sent, not just that one was sent.
     nonisolated(unsafe) var retriedAuthorities: [QueueAuthority] = []
@@ -769,7 +771,18 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         guard let detail = queueJobDetails[id] else { throw notPlanted() }
         return detail
     }
-    func cancelJob(id: String) async throws { try record("cancelJob") }
+    func cancelJob(id: String) async throws {
+        try record("cancelJob")
+        cancelledIds.append(id)
+    }
+    /// Ids planted here answer "no longer held" and are not cancelled.
+    nonisolated(unsafe) var noLongerHeld: Set<String> = []
+    func cancelHeldJob(id: String) async throws -> Bool {
+        try record("cancelHeldJob")
+        guard !noLongerHeld.contains(id) else { return false }
+        cancelledIds.append(id)
+        return true
+    }
     func pauseJob(id: String) async throws { try record("pauseJob") }
     func resumeJob(id: String) async throws { try record("resumeJob") }
     func reorderJob(id: String, position: Int) async throws {

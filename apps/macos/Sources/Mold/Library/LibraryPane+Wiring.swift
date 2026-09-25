@@ -18,18 +18,35 @@ extension LibraryPane {
         return !navigation.query.tokens.contains { if case .machine = $0 { true } else { false } }
     }
 
+    /// The visible tile `id` names -- its lead, or a copy merged under it.
     func entry(_ id: PrintID, in visible: [LibraryEntry]) -> LibraryEntry? {
-        visible.first { $0.id == id }
+        visible.first { $0.id == id } ?? visible.first { $0.copies.contains { $0.id == id } }
     }
 
     /// `navigation.reveal`'s one consumer: opens the named print and clears
     /// the channel right back, so a later visit to the pane does not reopen
     /// it (design M6 S5).
     func revealIfNeeded() {
-        guard let reveal = navigation.reveal else { return }
+        guard let named = navigation.reveal else { return }
+        // A print that landed on another machine and was saved here too is
+        // shown under its This Mac copy; reveal the tile, not a hidden id.
+        let reveal = library.tile(containing: named)?.id ?? named
         selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
         viewing = reveal
         navigation.reveal = nil
+    }
+
+    /// Keeps the selection and the open print on their tiles when a rebuild
+    /// hands a tile a new lead. Not under a machine filter: there a tile IS
+    /// that machine's copy, whose id does not move, and changing the filter
+    /// clears the selection anyway.
+    func followMergedTiles() {
+        guard !navigation.query.tokens.contains(where: { if case .machine = $0 { true } else { false } })
+        else { return }
+        let resolve: (PrintID) -> PrintID? = { library.tile(containing: $0)?.id }
+        let followed = selection.remapped(through: resolve)
+        if followed != selection { selection = followed }
+        if let viewing, let tile = resolve(viewing), tile != viewing { self.viewing = tile }
     }
 
     func host(of entry: LibraryEntry) -> MoldHost? {

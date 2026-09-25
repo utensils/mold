@@ -28,7 +28,7 @@ extension QueuePane {
     @ViewBuilder private var gateControl: some View {
         let gate = queueGate
         if gate.machines.count == 1, let machine = gate.machines.first {
-            Button(machine.title) { gate.toggle(machine.id) }
+            Button(machine.title) { gate.toggle(.machine(machine.id)) }
         } else {
             Menu("Queue") {
                 RowActionMenu(actions: gate.items(), perform: gate.toggle)
@@ -45,7 +45,8 @@ extension QueuePane {
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item reads
     /// this too, and `private` does not cross a file boundary.
     var emptyQueueTargets: [MoldHost] {
-        Self.emptyQueueTargets(hosts.hosts, capabilities: hosts.capabilities)
+        Self.emptyQueueTargets(hosts.hosts, capabilities: hosts.capabilities,
+                               entries: queue.byHost)
     }
 
     @ViewBuilder private var emptyQueueControl: some View {
@@ -53,6 +54,8 @@ extension QueuePane {
             Button("Empty Queue…") { confirmEmptyQueue(on: host) }
         } else {
             Menu("Empty Queue…") {
+                Button(QueueEmptyConfirm.allMachinesItem) { confirmEmptyAllQueues() }
+                Divider()
                 ForEach(emptyQueueTargets) { host in
                     Button("Empty Queue on \(host.name)…") { confirmEmptyQueue(on: host) }
                 }
@@ -63,50 +66,57 @@ extension QueuePane {
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item calls
     /// this too.
     func confirmEmptyQueue(on host: MoldHost) {
-        let entries = queue.entries(on: host.id)
-        let waiting = entries.filter { $0.state == .queued }.count
-        let paused = entries.filter { $0.state == .paused }.count
+        let counts = emptyCounts(on: host)
+        let held = queue.heldIDs(on: host.id)
         pendingDestruction = Destruction(
             title: QueueEmptyConfirm.title(host: host.name),
-            message: QueueEmptyConfirm.message(waiting: waiting, paused: paused),
+            message: QueueEmptyConfirm.message(counts),
             verb: "Cancel Jobs"
         ) {
-            Task { await queue.cancelAll(on: host.id) }
+            Task { await queue.empty(on: host.id, held: held) }
         }
     }
 
-    /// Pure: which machines actually offer this. Absent means `false`
-    /// (design decision 5) -- a test pins the gate without a rendered
-    /// toolbar.
+    /// Every machine at once -- ONE confirm naming the whole count, then each
+    /// machine emptied concurrently and reporting its own failures.
+    func confirmEmptyAllQueues() {
+        let targets = emptyQueueTargets
+        let held = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, queue.heldIDs(on: $0.id)) })
+        let counts = targets.reduce(QueueEmptyConfirm.Counts()) {
+            $0 + emptyCounts(on: $1)
+        }
+        pendingDestruction = Destruction(
+            title: QueueEmptyConfirm.allMachinesTitle,
+            message: QueueEmptyConfirm.message(counts, machines: targets.count),
+            verb: "Cancel Jobs"
+        ) {
+            Task { await queue.emptyAll(held) }
+        }
+    }
+
+    /// What Empty will actually cancel there: a machine without the bulk
+    /// route has only its holds cleared (`QueueStore.empty(on:held:)`).
+    private func emptyCounts(on host: MoldHost) -> QueueEmptyConfirm.Counts {
+        var counts = QueueEmptyConfirm.Counts(queue.entries(on: host.id))
+        if hosts.capabilities[host.id]?.canCancelAllQueued != true {
+            counts.waiting = 0
+            counts.paused = 0
+        }
+        return counts
+    }
+
+    /// Pure: which machines Empty Queue can do something on. The bulk route
+    /// is capability-gated, but clearing a HELD row is not -- it is the one
+    /// action every hold has -- so a machine holding work is a target even
+    /// when it does not advertise the bulk route. Absent otherwise (design
+    /// decision 5) -- a test pins the gate without a rendered toolbar.
     static func emptyQueueTargets(
-        _ hosts: [MoldHost], capabilities: [MoldHost.ID: Capabilities]
+        _ hosts: [MoldHost], capabilities: [MoldHost.ID: Capabilities],
+        entries: [MoldHost.ID: [QueueEntry]] = [:]
     ) -> [MoldHost] {
-        hosts.filter { capabilities[$0.id]?.canCancelAllQueued == true }
-    }
-}
-
-/// The subtitle's own words -- fleet-wide, and pure so a test can pin the
-/// exact wording without a rendered pane. A held row is never "waiting": it
-/// is not going anywhere until something about it changes.
-enum QueueSummary {
-    static func sentence(_ entries: [QueueEntry]) -> String {
-        func count(_ state: QueueState) -> Int { entries.filter { $0.state == state }.count }
-        let clauses = [
-            (count(.queued), "waiting"), (count(.running), "rendering"), (count(.held), "held"),
-        ].compactMap { n, word in n > 0 ? "\(n) \(word)" : nil }
-        return clauses.isEmpty ? "Idle" : clauses.joined(separator: " · ")
-    }
-}
-
-/// The Empty Queue confirm's own sentence -- fact 12's whole point: running
-/// work is untouched, and the confirm has to say so or it reads as "stop
-/// everything".
-enum QueueEmptyConfirm {
-    static func title(host: String) -> String { "Cancel everything waiting on \(host)?" }
-
-    static func message(waiting: Int, paused: Int) -> String {
-        let waitingWord = waiting == 1 ? "1 waiting" : "\(waiting) waiting"
-        let pausedWord = paused == 1 ? "1 paused job" : "\(paused) paused jobs"
-        return "\(waitingWord) and \(pausedWord) will be cancelled. Anything already rendering keeps going."
+        hosts.filter { host in
+            capabilities[host.id]?.canCancelAllQueued == true
+                || (entries[host.id] ?? []).contains { $0.state == .held }
+        }
     }
 }

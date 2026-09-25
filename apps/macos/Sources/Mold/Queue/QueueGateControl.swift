@@ -68,6 +68,26 @@ struct QueueGateControl {
         await set(!isPaused(on: host), on: host)
     }
 
+    /// Every machine that advertises the control and is not already there,
+    /// concurrently -- each reports its own failure, so one unreachable
+    /// machine never hides what the others did.
+    func setAll(_ paused: Bool) async {
+        let targets = Self.targets(hosts.hosts, capabilities: hosts.capabilities)
+            .filter { isPaused(on: $0.id) != paused }
+        await withTaskGroup(of: Void.self) { group in
+            for host in targets {
+                group.addTask { await set(paused, on: host.id) }
+            }
+        }
+    }
+
+    func perform(_ target: QueueGateOffer.Target) async {
+        switch target {
+        case let .machine(host): await toggle(on: host)
+        case let .all(paused): await setAll(paused)
+        }
+    }
+
     /// The machines that advertise the control, in the order they are listed.
     /// Pure, so it pins without a rendered menu -- `emptyQueueTargets`' own
     /// shape.
@@ -83,6 +103,6 @@ struct QueueGateControl {
             machines: Self.targets(hosts.hosts, capabilities: hosts.capabilities)
                 .map { QueueGateOffer.Machine(id: $0.id, name: $0.name,
                                               isPaused: isPaused(on: $0.id)) },
-            toggle: { host in Task { await toggle(on: host) } })
+            toggle: { target in Task { await perform(target) } })
     }
 }
