@@ -79,6 +79,22 @@ struct LibraryMergeTests {
         #expect(merged.count == 1)
     }
 
+    /// Two files on ONE machine are two prints, however alike: the machine
+    /// itself lists them separately, and a merge would hide one behind the
+    /// other (and trash both with one press).
+    @Test func twoFilesOnOneMachineNeverMerge() {
+        let merged = LibraryMerge.merge([
+            entry("a.png", on: hal, name: "hal9000", timestamp: 1_000, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+            entry("b.png", on: hal, name: "hal9000", timestamp: 1_010, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+            entry("c.png", on: local, name: "This Mac", timestamp: 1_020, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+        ], localHost: local)
+        #expect(merged.count == 2)
+        #expect(merged.allSatisfy { Set($0.everyCopy.map(\.hostID)).count == $0.everyCopy.count })
+    }
+
     /// A genuine re-render reusing a seed, much later, is a different print.
     @Test func identityMatchesOnlyCountWithinTheWindow() {
         let merged = LibraryMerge.merge([

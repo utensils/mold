@@ -612,8 +612,10 @@ extension LibraryStore {
             LocalSyncRecord.save(syncedCopies)
         }
         let skipped = syncAll ? 0 : selection.count - candidates.count
-        var summary = "Copied \(transferred) prints to This Mac’s Library."
-        if alreadyLocal > 0 { summary += " \(alreadyLocal) were already here." }
+        var summary = "Copied \(transferred) \(transferred == 1 ? "print" : "prints") to This Mac’s Library."
+        if alreadyLocal > 0 {
+            summary += alreadyLocal == 1 ? " 1 was already here." : " \(alreadyLocal) were already here."
+        }
         if createdCollections > 0 {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."
         }

@@ -74,6 +74,7 @@ struct QueueSelection: Equatable {
         }
         items.append(.separator)
         items += gate.items().map { $0.mapKind(Item.pauseQueue) }
+        items.append(.separator)
         let machines = emptyQueues.filter { $0.id != nil }
         if machines.count == 1, let target = machines.first {
             items.append(RowAction(kind: .emptyQueue(target.id), title: "Empty Queue…"))

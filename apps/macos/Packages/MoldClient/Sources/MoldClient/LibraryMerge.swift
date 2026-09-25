@@ -18,6 +18,9 @@ import Foundation
 ///    seed much later stays a separate print. Rows without a seed or a size
 ///    never match this way.
 ///
+/// A print has at most one copy per machine: two files on the same machine
+/// are two prints, because that machine lists them apart.
+///
 /// The LOCAL copy leads when there is one -- it opens without a network and
 /// survives the other machine going away -- and every other copy rides along
 /// in `copies`.
@@ -42,6 +45,11 @@ public enum LibraryMerge {
             if index == nil, let identity, let candidate = byIdentity[identity],
                withinWindow(groups[candidate][0].print, entry.print) {
                 index = candidate
+            }
+            // One copy per machine: a second file on a machine already in the
+            // group is that machine's OWN second print.
+            if let candidate = index, groups[candidate].contains(where: { $0.hostID == entry.hostID }) {
+                index = nil
             }
             let group: Int
             if let index {
