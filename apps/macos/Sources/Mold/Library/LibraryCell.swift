@@ -17,7 +17,6 @@ struct LibraryCell: View {
             .overlay(alignment: .topLeading) { hostBadge }
             .overlay { selectionRing }
             .contentShape(Rectangle())
-            .help(entry.print.metadata.prompt ?? entry.print.filename)
             // One element, not five: the badges are facts ABOUT the print and
             // belong in its sentence, not as separate stops on the way past it.
             .accessibilityElement(children: .ignore)
