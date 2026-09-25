@@ -51,6 +51,46 @@ const LEGACY_STORAGE_VERSION: u32 = 2;
 const MUTATION_LOG_MAX_RECORDS: usize = 256;
 const MUTATION_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Wall-clock laps for one startup recovery pass. Each [`StartupLaps::lap`]
+/// logs the time since the previous lap at DEBUG, so
+/// `MOLD_LOG=info,mold_server=debug` shows where a slow startup goes before the
+/// server binds.
+pub(crate) struct StartupLaps {
+    scope: &'static str,
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupLaps {
+    pub(crate) fn start(scope: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            scope,
+            started: now,
+            last: now,
+        }
+    }
+
+    pub(crate) fn lap(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        tracing::debug!(
+            scope = self.scope,
+            step,
+            elapsed_ms = duration_ms(now - self.last),
+            "gallery startup recovery step"
+        );
+        self.last = now;
+    }
+
+    pub(crate) fn total_ms(&self) -> f64 {
+        duration_ms(self.started.elapsed())
+    }
+}
+
+pub(crate) fn duration_ms(duration: std::time::Duration) -> f64 {
+    (duration.as_secs_f64() * 10_000.0).round() / 10.0
+}
+
 fn supported_storage_version(version: u32) -> bool {
     version == STORAGE_VERSION || version == LEGACY_STORAGE_VERSION
 }
@@ -726,35 +766,51 @@ fn validate_envelope(
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
-    serde_json::from_reader(crate::batch_transaction::open_regular_file_no_follow(path)?)
-        .with_context(|| format!("reading gallery authority {}", path.display()))
+    // Whole-file read, then parse: see `read_regular_file_no_follow` for why
+    // this is never `from_reader` over the bare file.
+    serde_json::from_slice(&crate::batch_transaction::read_regular_file_no_follow(
+        path,
+    )?)
+    .with_context(|| format!("reading gallery authority {}", path.display()))
 }
 
 fn read_checkpoint_at(path: &Path) -> anyhow::Result<AuthoritySnapshot> {
+    let envelope = read_json(path)?;
     #[cfg(test)]
     CHECKPOINT_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-    validate_envelope(read_json(path)?, path)
+    validate_envelope(envelope, path)
 }
 
 // Full checkpoint parses (a serde pass plus a SHA-256 over the whole archive
-// index) this thread has performed since the last reset. Thread-local for the
-// reason `AUTHORITY_HASH_COUNT` is: the suite runs many tests in one process.
+// index) this thread has performed since the last reset. A probe for a file
+// that is absent (the usual WAL) parses nothing and is not counted.
+// Thread-local for the reason `AUTHORITY_HASH_COUNT` is: the suite runs many
+// tests in one process.
 #[cfg(test)]
 thread_local! {
     static CHECKPOINT_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-fn reset_checkpoint_parse_count() {
+pub(crate) fn reset_checkpoint_parse_count() {
     CHECKPOINT_PARSE_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-fn checkpoint_parse_count() -> usize {
+pub(crate) fn checkpoint_parse_count() -> usize {
     CHECKPOINT_PARSE_COUNT.with(|count| count.get())
 }
 
 fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
+    Ok(read_checkpoint_reporting_source(root)?.map(|(snapshot, _)| snapshot))
+}
+
+/// [`read_checkpoint`], also saying whether the snapshot came from the
+/// CURRENT checkpoint file (rather than a backup fallback), so a caller that
+/// needs that file's version and generation does not parse it again.
+fn read_checkpoint_reporting_source(
+    root: &Path,
+) -> anyhow::Result<Option<(AuthoritySnapshot, bool)>> {
     let candidates = [
         ("current", checkpoint_path(root)),
         ("backup", backup_checkpoint_path(root)),
@@ -771,7 +827,7 @@ fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
                         "using fallback checksummed gallery authority checkpoint"
                     );
                 }
-                return Ok(Some(snapshot));
+                return Ok(Some((snapshot, label == "current")));
             }
             Err(error)
                 if error
@@ -1462,7 +1518,17 @@ fn remove_wal(root: &Path) -> anyhow::Result<()> {
 }
 
 fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<AuthoritySnapshot>> {
-    let checkpoint = read_checkpoint(root)?;
+    let mut laps = StartupLaps::start("recover_storage");
+    let checkpoint = read_checkpoint_reporting_source(root)?;
+    laps.lap("read_checkpoint");
+    // The version and generation of the CURRENT checkpoint file, while this
+    // function has not rewritten it. The compaction decision below needs both
+    // and used to parse and checksum the whole file a second time to get them.
+    let mut current_file_facts = checkpoint
+        .as_ref()
+        .filter(|(_, from_current)| *from_current)
+        .map(|(snapshot, _)| (snapshot.version, snapshot.generation));
+    let checkpoint = checkpoint.map(|(snapshot, _)| snapshot);
     let marker = read_marker(root)?;
     let wal = match read_checkpoint_at(&wal_path(root)) {
         Ok(snapshot) => Some(snapshot),
@@ -1498,6 +1564,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
                 && digest_json(*wal).is_ok_and(|digest| digest == pending.snapshot_sha256)
         }) {
             write_checkpoint(root, wal_snapshot)?;
+            current_file_facts = None;
             write_marker(
                 root,
                 &MutationMarker {
@@ -1523,6 +1590,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
     } else if let Some(wal_snapshot) = wal {
         if wal_snapshot.generation == committed_generation.saturating_add(1) {
             write_checkpoint(root, &wal_snapshot)?;
+            current_file_facts = None;
             write_marker(
                 root,
                 &MutationMarker {
@@ -1545,6 +1613,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
     // only while they are contiguous and their digest matches; the first that
     // is not ends the replay and everything from there is truncated, because
     // a log is a sequence and a gap makes its tail meaningless.
+    laps.lap("resolve_wal");
     let mut replayed = 0_usize;
     let mut discarded = 0_usize;
     if let Some(snapshot) = current.as_mut() {
@@ -1602,6 +1671,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
     // the log starts empty, so the next process replays nothing. It is also
     // the v2 -> v3 upgrade — the checkpoint is rewritten at the current
     // storage version, read once and never again.
+    laps.lap("replay_mutation_log");
     if let Some(snapshot) = current.as_ref() {
         // Compaction rewrites the checkpoint AT THIS BUILD'S write version,
         // so it is also the v2 -> v3 upgrade. That makes it a decision, not
@@ -1613,17 +1683,24 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
         } else {
             LEGACY_STORAGE_VERSION
         };
-        let existing_version = read_checkpoint_at(&checkpoint_path(root))
-            .map(|existing| existing.version)
-            .ok();
+        let existing_version = match current_file_facts {
+            Some((version, _)) => Some(version),
+            None => read_checkpoint_at(&checkpoint_path(root))
+                .map(|existing| existing.version)
+                .ok(),
+        };
+        laps.lap("checkpoint_version");
         let needs_compaction = replayed > 0
             || discarded > 0
             || existing_version.is_none()
             || (authority_log && existing_version != Some(STORAGE_VERSION));
         if needs_compaction {
-            let checkpoint_generation = read_checkpoint_at(&checkpoint_path(root))
-                .map(|existing| existing.generation)
-                .unwrap_or(0);
+            let checkpoint_generation = match current_file_facts {
+                Some((_, generation)) => generation,
+                None => read_checkpoint_at(&checkpoint_path(root))
+                    .map(|existing| existing.generation)
+                    .unwrap_or(0),
+            };
             // Whether the store this root resolves to is ALREADY a version-3
             // one is the question, not what its checkpoint file happens to
             // say: an unreadable checkpoint under the `-v2` name read as
@@ -1641,6 +1718,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
             } else {
                 compact_mutation_log_at(root, snapshot, checkpoint_generation, storage_version)?;
             }
+            laps.lap("compaction");
         }
         write_marker(
             root,
@@ -1650,6 +1728,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
                 pending: None,
             },
         )?;
+        laps.lap("write_marker");
     }
     Ok(current)
 }
@@ -2087,12 +2166,16 @@ pub(crate) fn load_or_initialize_with_authority_log(
     // This process is about to recover, initialize, or repair the store, and
     // it will go on committing to it for as long as it runs. Say so, for the
     // whole of that lifetime.
+    let mut laps = StartupLaps::start("gallery_authority");
     hold_writer_lease(root);
     // Startup recovery is also where a home gets cleaned up after 42480db8,
     // whose lease lived in the transaction directory and stopped an older mold
     // from starting at all.
     remove_legacy_writer_lease(root);
-    let mut snapshot = match recover_storage(root, authority_log)? {
+    laps.lap("writer_lease");
+    let recovered = recover_storage(root, authority_log)?;
+    laps.lap("recover_storage");
+    let mut snapshot = match recovered {
         Some(snapshot) => snapshot,
         None => {
             let mut index = legacy()?;
@@ -2149,14 +2232,21 @@ pub(crate) fn load_or_initialize_with_authority_log(
         root,
         AuthorityTail::from_recovered(&snapshot, snapshot.generation, (0, 0)),
     );
-    let (stats, changed) = validate_snapshot_files(root, &mut snapshot.index)?;
-    if changed {
-        let exact_names = snapshot
+    let (stats, changed, refreshed) = validate_snapshot_files(root, &mut snapshot.index)?;
+    laps.lap("validate_snapshot_files");
+    // Refreshed identity facts are persisted with the same commit: they are
+    // in-place edits of those entries, so they are named in `exact_names`.
+    // Without this a gallery whose inodes/ctimes moved (a copy, a restore, a
+    // re-link) re-hashed every one of its files on every later boot.
+    if changed || !refreshed.is_empty() {
+        let mut exact_names = snapshot
             .index
             .quarantined_names
             .iter()
             .cloned()
-            .collect::<Vec<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
+        exact_names.extend(refreshed);
+        let exact_names = exact_names.into_iter().collect::<Vec<_>>();
         snapshot.generation = commit_snapshot(
             root,
             guard,
@@ -2165,6 +2255,7 @@ pub(crate) fn load_or_initialize_with_authority_log(
             "startup_validation",
             exact_names,
         )?;
+        laps.lap("startup_validation_commit");
     }
     for _ in 0..2 {
         if crate::batch_transaction::legacy_gallery_evidence_paths(root)?.is_empty() {
@@ -2186,6 +2277,15 @@ pub(crate) fn load_or_initialize_with_authority_log(
     } else {
         disable_v3_writing(root);
     }
+    laps.lap("legacy_evidence_gc");
+    tracing::debug!(
+        entries = snapshot.index.entries.len(),
+        files_statted = stats.files_statted,
+        files_hashed = stats.files_hashed,
+        quarantined = stats.quarantined,
+        elapsed_ms = laps.total_ms(),
+        "gallery authority loaded"
+    );
     Ok(LoadedAuthority {
         generation: snapshot.generation,
         index: snapshot.index,
@@ -2716,12 +2816,18 @@ fn populate_missing_facts(root: &Path, index: &mut CommittedArchiveIndex) -> any
     Ok(())
 }
 
+/// Stat every live and retired entry against its committed identity.
+///
+/// Returns the stats, whether the quarantine set (or a retired file) changed,
+/// and the names whose stable identity facts were refreshed in place after
+/// their bytes were re-verified — which the caller must persist.
 fn validate_snapshot_files(
     root: &Path,
     index: &mut CommittedArchiveIndex,
-) -> anyhow::Result<(ValidationStats, bool)> {
+) -> anyhow::Result<(ValidationStats, bool, Vec<String>)> {
     let mut stats = ValidationStats::default();
     let mut changed = false;
+    let mut refreshed = Vec::new();
     let names = index.entries.keys().cloned().collect::<Vec<_>>();
     for name in names {
         let Some(entry) = index.entries.get_mut(&name) else {
@@ -2756,6 +2862,9 @@ fn validate_snapshot_files(
                 == entry.identity.checksum_sha256
         };
         if valid {
+            if entry.facts.as_ref() != Some(&facts) {
+                refreshed.push(name.clone());
+            }
             entry.facts = Some(facts);
             if index.quarantined_names.remove(&name) {
                 stats.reactivated += 1;
@@ -2796,7 +2905,7 @@ fn validate_snapshot_files(
     if removed {
         sync_dir(root)?;
     }
-    Ok((stats, changed))
+    Ok((stats, changed, refreshed))
 }
 
 pub(crate) fn current_file_matches(
@@ -4665,6 +4774,39 @@ mod tests {
             "bb",
             "and replays as the value it had before"
         );
+    }
+
+    #[test]
+    fn a_clean_startup_load_parses_the_checkpoint_once() {
+        // `recover_storage` re-read and re-verified the whole checkpoint a
+        // second time only to learn its version, which it had just parsed.
+        for authority_log in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            let initial =
+                load_or_initialize_with_authority_log(dir.path(), &guard, authority_log, || {
+                    Ok(CommittedArchiveIndex::default())
+                })
+                .unwrap();
+            reset_checkpoint_parse_count();
+            let reloaded =
+                load_or_initialize_with_authority_log(dir.path(), &guard, authority_log, || {
+                    unreachable!("the store exists")
+                })
+                .unwrap();
+            assert_eq!(reloaded.generation, initial.generation);
+            assert_eq!(
+                checkpoint_parse_count(),
+                1,
+                "authority_log={authority_log}: one parse of a clean checkpoint"
+            );
+            let expected = if authority_log {
+                STORAGE_VERSION
+            } else {
+                LEGACY_STORAGE_VERSION
+            };
+            assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, expected);
+        }
     }
 
     #[test]

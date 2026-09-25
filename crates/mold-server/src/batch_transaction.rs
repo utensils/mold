@@ -2725,8 +2725,11 @@ pub async fn recover_transactions(
     // drops the later bookkeeping guard first. Otherwise an AttemptAuthority
     // destructor would wait forever on the lock still owned by this thread.
     let mut attempts = Vec::new();
+    let mut laps = crate::gallery_authority::StartupLaps::start("recover_transactions");
     let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
+    laps.lap("acquire_bookkeeping_lock");
     sweep_reclaimable_attempt_authorities(&bookkeeping_lock)?;
+    laps.lap("sweep_reclaimable_attempt_authorities");
     let root = output_dir.join(TRANSACTION_DIR);
     if !root.is_dir() {
         let loaded =
@@ -2746,6 +2749,8 @@ pub async fn recover_transactions(
     }
     attempts.sort_by(|left, right| left.manifest_path.cmp(&right.manifest_path));
     drop(bookkeeping_lock);
+    laps.lap("collect_claimed_attempts");
+    let claimed_attempts = attempts.len();
 
     let mut report = RecoveryReport::default();
     for claimed in attempts {
@@ -2896,8 +2901,20 @@ pub async fn recover_transactions(
             }
         }
     }
-    let archive_index = reconcile_committed_archive_index(output_dir)
-        .context("validating committed gallery archive index during startup recovery")?;
+    laps.lap("replay_attempts");
+    // ONE authority load serves the DB heal, the media projection and the
+    // installed index. This used to load it twice — once here to heal the DB
+    // and again after — each a full checkpoint parse and a stat (or hash) of
+    // every print. Bookkeeping is held across the heal so the index installed
+    // is exactly the one projected; the media projection below already wrote
+    // to the DB under this same lock.
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let loaded = crate::gallery_authority::load_or_initialize(output_dir, &bookkeeping, || {
+        load_committed_archive_index_legacy(output_dir)
+    })
+    .context("validating committed gallery archive index during startup recovery")?;
+    laps.lap("load_gallery_authority");
+    let archive_index = &loaded.index;
     let retired_names = archive_index
         .retired_names
         .iter()
@@ -2916,10 +2933,7 @@ pub async fn recover_transactions(
                 .with_context(|| format!("projecting retired gallery row {filename}"))?;
         }
     }
-    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-    let loaded = crate::gallery_authority::load_or_initialize(output_dir, &bookkeeping, || {
-        Ok(archive_index)
-    })?;
+    laps.lap("heal_metadata_db");
     if let Some(db) = db.as_ref() {
         let canonical = bookkeeping.canonical_root().to_string_lossy().into_owned();
         let bindings = loaded
@@ -2944,9 +2958,18 @@ pub async fn recover_transactions(
         mold_db::gallery_media::replace_directory(db, &canonical, &bindings)
             .context("projecting gallery-retained source media from committed authority")?;
     }
+    laps.lap("project_gallery_media");
+    let entries = loaded.index.entries.len();
     gate.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
     drop(bookkeeping);
     gate.acknowledge_retirement_projections(output_dir, retired_names)?;
+    laps.lap("install_committed_archive_index");
+    tracing::debug!(
+        entries,
+        claimed_attempts,
+        elapsed_ms = laps.total_ms(),
+        "gallery transaction recovery timings"
+    );
     Ok(report)
 }
 
@@ -4821,8 +4844,26 @@ pub(crate) fn open_regular_file_no_follow(path: &Path) -> anyhow::Result<File> {
     Ok(file)
 }
 
+/// Read a whole regular (no-follow) file into memory in one pass.
+///
+/// JSON is parsed from these bytes with `serde_json::from_slice`, never with
+/// `from_reader` over the bare `File`: serde_json's reader path pulls ONE byte
+/// per `read(2)` from an unbuffered source, which for the multi-megabyte
+/// gallery authority checkpoint was ~1.8 s of syscalls per parse on an
+/// external disk — and startup recovery parsed it four times before binding.
+pub(crate) fn read_regular_file_no_follow(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut file = open_regular_file_no_follow(path)?;
+    let mut bytes = Vec::with_capacity(
+        file.metadata()
+            .map(|metadata| metadata.len() as usize)
+            .unwrap_or(0),
+    );
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn read_archive_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
-    serde_json::from_reader(open_regular_file_no_follow(path)?)
+    serde_json::from_slice(&read_regular_file_no_follow(path)?)
         .with_context(|| format!("reading archive JSON {}", path.display()))
 }
 
@@ -5112,6 +5153,7 @@ fn load_committed_archive_index_legacy(output_dir: &Path) -> anyhow::Result<Comm
     Ok(read_committed_archive_catalog(output_dir, ArchiveFinalValidation::ReconcileMissing)?.index)
 }
 
+#[cfg(test)]
 pub(crate) fn load_committed_archive_index(
     output_dir: &Path,
 ) -> anyhow::Result<CommittedArchiveIndex> {
@@ -5638,6 +5680,7 @@ pub(crate) fn move_gallery_file_from_trash(
 
 /// Finish any delete whose durable archive-child tombstone reached disk
 /// before the process exited, then return the one validated current index.
+#[cfg(test)]
 pub(crate) fn reconcile_committed_archive_index(
     output_dir: &Path,
 ) -> anyhow::Result<CommittedArchiveIndex> {
@@ -8843,6 +8886,114 @@ mod tests {
         );
         assert!(changed.index.is_quarantined("first.png"));
         assert!(changed.index.get("second.png").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_rehashed_file_whose_bytes_still_match_is_not_hashed_again_next_boot() {
+        // Copying, restoring or re-linking a gallery moves every file's
+        // inode/ctime while leaving its bytes intact. Startup re-verifies those
+        // by checksum, which is right once — but the refreshed facts were
+        // never persisted, so EVERY later boot hashed the whole gallery again
+        // (measured 30 s per pass on a 3,716-print external-disk home).
+        let dir = tempfile::tempdir().unwrap();
+        publish_import(dir.path(), "facts-first", "first.png", 0, b"first").await;
+        publish_import(dir.path(), "facts-second", "second.png", 1, b"second").await;
+        // Settle to the steady state first: no commit is pending, so nothing
+        // else the next load writes can carry the refreshed facts by accident.
+        for _ in 0..2 {
+            let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            let settled =
+                crate::gallery_authority::load_or_initialize(dir.path(), &bookkeeping, || {
+                    unreachable!("a durable checkpoint already exists")
+                })
+                .unwrap();
+            assert_eq!(settled.stats.files_hashed, 0);
+        }
+        let generation_before = {
+            let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+            crate::gallery_authority::read_generation(dir.path(), &bookkeeping).unwrap()
+        };
+
+        let path = dir.path().join("first.png");
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        sync_dir(dir.path()).unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let first = crate::gallery_authority::load_or_initialize(dir.path(), &bookkeeping, || {
+            unreachable!("a durable checkpoint already exists")
+        })
+        .unwrap();
+        assert_eq!(
+            first.stats.files_hashed, 1,
+            "moved facts are re-verified by checksum"
+        );
+        assert!(!first.index.is_quarantined("first.png"));
+        drop(bookkeeping);
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let second = crate::gallery_authority::load_or_initialize(dir.path(), &bookkeeping, || {
+            unreachable!("a durable checkpoint already exists")
+        })
+        .unwrap();
+        assert_eq!(
+            second.stats.files_hashed, 0,
+            "a checksum-verified refresh of the stable facts must be durable"
+        );
+        assert!(second.index.get("first.png").is_some());
+        assert!(second.index.get("second.png").is_some());
+        assert_eq!(
+            first.generation,
+            generation_before.unwrap() + 1,
+            "the refresh is one ordinary committed mutation"
+        );
+        assert_eq!(
+            second.generation, first.generation,
+            "and a settled gallery commits nothing at startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_parses_the_checkpoint_once() {
+        // `recover_transactions` used to load the authority twice (once to
+        // heal the DB, once to install it), and each load parsed the
+        // checkpoint twice (once to recover, once more just to read its
+        // version) — four full parses of a multi-megabyte file before bind.
+        let dir = tempfile::tempdir().unwrap();
+        publish_import(dir.path(), "once-first", "first.png", 0, b"first").await;
+        assert!(dir.path().join(TRANSACTION_DIR).is_dir());
+        let gate = GalleryPublicationGate::default();
+        recover_transactions(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+
+        crate::gallery_authority::reset_checkpoint_parse_count();
+        let gate = GalleryPublicationGate::default();
+        recover_transactions(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+        assert_eq!(crate::gallery_authority::checkpoint_parse_count(), 1);
+        assert!(gate
+            .committed_archive_index(dir.path())
+            .unwrap()
+            .get("first.png")
+            .is_some());
+    }
+
+    #[test]
+    fn archive_json_is_read_whole_and_still_refuses_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        fs::write(&path, br#"{"a": 1}"#).unwrap();
+        let value: serde_json::Value = read_archive_json(&path).unwrap();
+        assert_eq!(value["a"], 1);
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(read_archive_json::<serde_json::Value>(&link).is_err());
+        }
     }
 
     #[tokio::test]
