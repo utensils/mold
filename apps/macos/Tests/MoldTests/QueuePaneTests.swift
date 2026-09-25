@@ -256,13 +256,15 @@ struct QueuePaneTests {
         #expect(fake.cancelledIds == ["h1", "h2"], "running work is never touched")
     }
 
-    @Test func aMachineWithoutTheBulkRouteIsEmptiedRowByRow() async {
+    /// Only its holds: a waiting row could start between the listing and a
+    /// per-row DELETE, and that route cancels running work.
+    @Test func aMachineWithoutTheBulkRouteHasOnlyItsHoldsCleared() async {
         let (queue, fake, workstation) = await emptyBench(canCancelAll: false, entries: mixed)
 
         await queue.empty(on: workstation.id)
 
         #expect(!fake.cancelledAll)
-        #expect(fake.cancelledIds == ["q1", "p1", "h1", "h2"])
+        #expect(fake.cancelledIds == ["h1", "h2"])
     }
 
     /// The held row's own × -- `DELETE /api/queue/:id` with the row's id.

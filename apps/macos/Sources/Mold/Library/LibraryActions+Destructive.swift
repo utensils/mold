@@ -11,7 +11,9 @@ extension LibraryActions {
         let noun = entries.count == 1
             ? "“\(entries[0].print.title ?? entries[0].print.filename)”"
             : "\(entries.count.formatted()) prints"
-        let machines = Dictionary(entries.map { ($0.hostID, $0.hostName) },
+        // Every copy: a merged print is deleted from every machine holding
+        // it, so the sentence has to name every one of them.
+        let machines = Dictionary(entries.flatMap(\.everyCopy).map { ($0.hostID, $0.hostName) },
                                   uniquingKeysWith: { first, _ in first })
         let names = Dictionary(grouping: machines.values, by: { $0 }).mapValues(\.count)
         let locations = machines.map { id, name in
@@ -21,8 +23,7 @@ extension LibraryActions {
         }.sorted().joined(separator: ", ")
         ask(Destruction(
             title: "Delete \(noun) immediately?",
-            message: "This cannot be undone. Delete from \(locations). "
-                + "Copies on other machines remain in their Libraries.",
+            message: "This cannot be undone. Delete from \(locations).",
             verb: "Delete Immediately"
         ) {
             Task {

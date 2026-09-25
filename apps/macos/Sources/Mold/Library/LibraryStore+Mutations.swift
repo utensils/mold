@@ -63,8 +63,13 @@ extension LibraryStore {
     /// it back -- see `PrintChange.title`.
     func setTitle(_ title: String, on entry: LibraryEntry) {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        apply(PrintEdit.plan(.title(from: entry.print.title ?? "", to: clean),
-                             over: withCopies([entry])))
+        // One edit per previous title, so undo puts back what EACH copy was
+        // called rather than the lead's name on all of them. Registered in
+        // the same run-loop turn, they are one undo group.
+        let byPrevious = Dictionary(grouping: withCopies([entry])) { $0.print.title ?? "" }
+        for (previous, copies) in byPrevious.sorted(by: { $0.key < $1.key }) {
+            apply(PrintEdit.plan(.title(from: previous, to: clean), over: copies))
+        }
     }
 
     /// Trash keeps the bytes and starts a purge countdown; it is not a delete.

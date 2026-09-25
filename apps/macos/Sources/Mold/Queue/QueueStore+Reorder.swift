@@ -30,9 +30,8 @@ extension QueueStore {
     /// (`DELETE /api/queue`, `routes.rs:7869-7898`) deliberately leaves holds
     /// alone, so "Empty Queue" used to leave a pane full of them; each hold is
     /// cleared the way its own × clears it, `DELETE /api/queue/:id`, which
-    /// settles a held child as cancelled (`generation_batches.rs:710`). A
-    /// machine without the bulk route gets the same per-row call for its
-    /// waiting rows too. Running work is untouched either way.
+    /// settles a held child as cancelled (`generation_batches.rs:710`).
+    /// Running work is untouched either way.
     ///
     /// Reads the listing FIRST: the holds to clear are the machine's, not
     /// whatever this store last saw.
@@ -50,11 +49,11 @@ extension QueueStore {
                 hosts.report(error, on: host, doing: verb)
                 failed = true
             }
-        } else {
-            for row in rows where row.state == .queued || row.state == .paused {
-                failed = await cancelRow(row.id, via: client, on: host, doing: verb) || failed
-            }
         }
+        // Deliberately NO per-row fallback for WAITING rows on a machine
+        // without the bulk route: a row can start between this listing and
+        // its DELETE, and the per-row route cancels running work -- which
+        // the confirm promises never happens. A HELD row cannot start.
         for row in rows where row.state == .held {
             failed = await cancelRow(row.id, via: client, on: host, doing: verb) || failed
         }

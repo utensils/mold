@@ -95,6 +95,21 @@ struct LibraryMergeTests {
         #expect(merged.allSatisfy { Set($0.everyCopy.map(\.hostID)).count == $0.everyCopy.count })
     }
 
+    /// One machine rendered the same seed twice, hours apart; a renamed copy
+    /// of the SECOND render still finds it.
+    @Test func aCopyOfALaterSameSeedRenderFindsIt() {
+        let merged = LibraryMerge.merge([
+            entry("first.png", on: hal, name: "hal9000", timestamp: 1_000, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+            entry("second.png", on: hal, name: "hal9000", timestamp: 20_000, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+            entry("renamed.png", on: local, name: "This Mac", timestamp: 20_030, bytes: 4_096,
+                  seed: 42, model: "flux-dev:q8"),
+        ], localHost: local)
+        #expect(merged.count == 2)
+        #expect(merged.first { $0.hostID == local }?.copies.map(\.print.filename) == ["second.png"])
+    }
+
     /// A genuine re-render reusing a seed, much later, is a different print.
     @Test func identityMatchesOnlyCountWithinTheWindow() {
         let merged = LibraryMerge.merge([

@@ -38,6 +38,14 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
     /// Every machine holding it, lead first -- what the tile's badge names.
     public var hostNames: [String] { everyCopy.map(\.hostName) }
 
+    /// The one machine every copy of `entries` is on, or `nil` when they span
+    /// several -- a menu says "Move to Trash on <machine>" only when that is
+    /// the whole of what it does, and a merged print is trashed everywhere.
+    public static func soleMachineName(of entries: [LibraryEntry]) -> String? {
+        let copies = entries.flatMap(\.everyCopy)
+        return Set(copies.map(\.hostID)).count == 1 ? copies.first?.hostName : nil
+    }
+
     /// The tile's machine badge: `This Mac · workstation`, or `This Mac +1` where
     /// the tile is too narrow to name them all.
     public func hostBadge(compact: Bool) -> String {

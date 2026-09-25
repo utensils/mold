@@ -66,7 +66,7 @@ extension QueuePane {
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item calls
     /// this too.
     func confirmEmptyQueue(on host: MoldHost) {
-        let counts = QueueEmptyConfirm.Counts(queue.entries(on: host.id))
+        let counts = emptyCounts(on: host)
         pendingDestruction = Destruction(
             title: QueueEmptyConfirm.title(host: host.name),
             message: QueueEmptyConfirm.message(counts),
@@ -81,7 +81,7 @@ extension QueuePane {
     func confirmEmptyAllQueues() {
         let targets = emptyQueueTargets
         let counts = targets.reduce(QueueEmptyConfirm.Counts()) {
-            $0 + QueueEmptyConfirm.Counts(queue.entries(on: $1.id))
+            $0 + emptyCounts(on: $1)
         }
         pendingDestruction = Destruction(
             title: QueueEmptyConfirm.allMachinesTitle,
@@ -90,6 +90,17 @@ extension QueuePane {
         ) {
             Task { await queue.emptyAll(targets.map(\.id)) }
         }
+    }
+
+    /// What Empty will actually cancel there: a machine without the bulk
+    /// route has only its holds cleared (`QueueStore.empty(on:)`).
+    private func emptyCounts(on host: MoldHost) -> QueueEmptyConfirm.Counts {
+        var counts = QueueEmptyConfirm.Counts(queue.entries(on: host.id))
+        if hosts.capabilities[host.id]?.canCancelAllQueued != true {
+            counts.waiting = 0
+            counts.paused = 0
+        }
+        return counts
     }
 
     /// Pure: which machines Empty Queue can do something on. The bulk route

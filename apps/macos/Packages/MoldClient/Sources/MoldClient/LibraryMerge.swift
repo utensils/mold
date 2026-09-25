@@ -36,15 +36,20 @@ public enum LibraryMerge {
         var groups: [[LibraryEntry]] = []
         var byID: [PrintID: Int] = [:]
         var byFilename: [String: Int] = [:]
-        var byIdentity: [String: Int] = [:]
+        // Every group with an identity, not just the first: one machine can
+        // hold two renders of a seed an hour or more apart, and a copy of the
+        // SECOND must still find it.
+        var byIdentity: [String: [Int]] = [:]
 
         for entry in entries {
             let identity = Self.identity(of: entry.print)
             var index = links[entry.id].flatMap { byID[$0] }
             if index == nil { index = byFilename[entry.print.filename] }
-            if index == nil, let identity, let candidate = byIdentity[identity],
-               withinWindow(groups[candidate][0].print, entry.print) {
-                index = candidate
+            if index == nil, let identity {
+                index = byIdentity[identity]?.first { candidate in
+                    withinWindow(groups[candidate][0].print, entry.print)
+                        && !groups[candidate].contains { $0.hostID == entry.hostID }
+                }
             }
             // One copy per machine: a second file on a machine already in the
             // group is that machine's OWN second print.
@@ -63,7 +68,9 @@ public enum LibraryMerge {
             // Every name a copy goes by points at the print, so a later copy
             // under either name still joins it.
             byFilename[entry.print.filename] = group
-            if let identity, byIdentity[identity] == nil { byIdentity[identity] = group }
+            if let identity, byIdentity[identity]?.contains(group) != true {
+                byIdentity[identity, default: []].append(group)
+            }
         }
 
         return groups.map { copies in

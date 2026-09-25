@@ -41,6 +41,37 @@ struct LibraryMergeStoreTests {
         #expect(library.items.map(\.print.filename) == ["dog.png"])
     }
 
+    /// Renaming a merged print and undoing it puts back what EACH copy was
+    /// called, not the lead's old name on both.
+    @Test func undoingARenameRestoresEachCopysOwnTitle() async throws {
+        let (library, here, there) = await bench()
+        func titled(_ name: String) -> GalleryPrint {
+            var print = GalleryPrint.Mutable(FakeFixtures.print("cat.png"))
+            print.title = name
+            return print.build()
+        }
+        here.prints = [titled("Kitty")]
+        there.prints = [titled("Cat"), FakeFixtures.print("dog.png")]
+        library.etags.removeAll()
+        await library.refresh()
+        let manager = UndoManager()
+        manager.groupsByEvent = false
+        library.undo.manager = manager
+        let cat = try #require(library.items.first { $0.print.filename == "cat.png" })
+
+        manager.beginUndoGrouping()
+        library.setTitle("Tabby", on: cat)
+        manager.endUndoGrouping()
+        #expect(Set(library.items.flatMap(\.everyCopy).filter { $0.print.filename == "cat.png" }
+            .map(\.print.title)) == ["Tabby"])
+
+        manager.undo()
+
+        let titles = library.items.flatMap(\.everyCopy).filter { $0.print.filename == "cat.png" }
+            .reduce(into: [String: String]()) { $0[$1.hostName] = $1.print.title ?? "" }
+        #expect(titles == ["This Mac": "Kitty", "workstation": "Cat"])
+    }
+
     @Test func aCopyIsStillFoundByItsOwnID() async {
         let (library, _, _) = await bench()
         let remote = library.items.flatMap(\.copies).first
