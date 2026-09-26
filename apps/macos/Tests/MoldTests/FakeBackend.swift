@@ -923,9 +923,38 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         await pause("mutate")
     }
     nonisolated(unsafe) var mutationRequests: [GalleryBulkMutation] = []
-    func trash(_ filenames: [String]) async throws { try record("trash") }
-    func restoreFromTrash(_ filenames: [String]) async throws { try record("restoreFromTrash") }
-    func deleteForever(_ filenames: [String]) async throws { try record("deleteForever") }
+    nonisolated(unsafe) var trashRequests: [[String]] = []
+    nonisolated(unsafe) var trashFailureOnCall: Int?
+    nonisolated(unsafe) var trashPartialFailureCount = 0
+    func trash(_ filenames: [String]) async throws {
+        try record("trash")
+        trashRequests.append(filenames)
+        await pause("trash")
+        if trashFailureOnCall == callCount("trash") {
+            let partial = Set(filenames.prefix(trashPartialFailureCount))
+            trashedRows.append(contentsOf: prints.filter { partial.contains($0.filename) })
+            prints.removeAll { partial.contains($0.filename) }
+            throw MoldClientError.http(status: 409, code: "CONFLICT", message: "Conflict")
+        }
+        let names = Set(filenames)
+        let moved = prints.filter { names.contains($0.filename) }
+        trashedRows.append(contentsOf: moved)
+        prints.removeAll { names.contains($0.filename) }
+    }
+    func restoreFromTrash(_ filenames: [String]) async throws {
+        try record("restoreFromTrash")
+        await pause("restoreFromTrash")
+        let names = Set(filenames)
+        prints.append(contentsOf: trashedRows.filter { names.contains($0.filename) })
+        trashedRows.removeAll { names.contains($0.filename) }
+    }
+    func deleteForever(_ filenames: [String]) async throws {
+        try record("deleteForever")
+        await pause("deleteForever")
+        let names = Set(filenames)
+        prints.removeAll { names.contains($0.filename) }
+        trashedRows.removeAll { names.contains($0.filename) }
+    }
     /// Every import's filename, in order -- what a BATCH actually sent, which
     /// a call count cannot say.
     nonisolated(unsafe) var importedNames: [String] = []
@@ -936,6 +965,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     @discardableResult
     func importPrint(_ item: GalleryImport, as filename: String) async throws -> String {
         try record("importPrint")
+        await pause("importPrint")
         if importFailures.contains(filename) {
             throw MoldClientError.http(status: 409, code: "NAME_COLLISION", message: "A different print owns that name.")
         }
@@ -946,6 +976,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {
         try record("media")
+        await pause("media")
         guard let mediaAnswer else { throw notPlanted() }
         return mediaAnswer
     }
@@ -997,7 +1028,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func updateCollection(id: String, change: CollectionChange) async throws -> Collection {
         try record("updateCollection"); throw notPlanted()
     }
-    func deleteCollection(id: String) async throws { try record("deleteCollection") }
+    func deleteCollection(id: String) async throws {
+        try record("deleteCollection")
+        await pause("deleteCollection")
+    }
     func tags() async throws -> [TagCount] {
         try record("tags")
         await pause("tags")
@@ -1006,10 +1040,18 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     @discardableResult
     func renameTag(_ name: String, to newName: String) async throws -> TagCount {
         try record("renameTag")
+        await pause("renameTag")
         return TagCount(name: newName, count: 0)
     }
-    func deleteTag(_ name: String) async throws { try record("deleteTag") }
-    func emptyTrash() async throws { try record("emptyTrash") }
+    func deleteTag(_ name: String) async throws {
+        try record("deleteTag")
+        await pause("deleteTag")
+    }
+    func emptyTrash() async throws {
+        try record("emptyTrash")
+        await pause("emptyTrash")
+        trashedRows.removeAll()
+    }
 
     // MARK: - Streams
 

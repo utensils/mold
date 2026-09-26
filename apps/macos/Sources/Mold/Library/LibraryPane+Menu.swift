@@ -41,7 +41,8 @@ extension LibraryPane {
             perform: { action in
                 actions.perform(action, on: entries, scope: navigation.scope,
                                 open: entries.count == 1 ? { viewing = entries[0].id } : nil)
-            }
+            },
+            lifecycleBusy: library.isBulkBusy
         )
     }
 

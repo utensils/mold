@@ -79,69 +79,18 @@ extension LibraryStore {
     /// Put Back, which survives quitting the app in a way an undo stack does
     /// not.
     func moveToTrash(_ entries: [LibraryEntry]) async {
-        let entries = withCopies(entries)
-        let ids = Set(entries.map(\.id))
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            let before = perHost[hostID]
-            perHost[hostID] = (perHost[hostID] ?? []).filter { !ids.contains($0.id) }
-            rebuild()
-            guard let client = hosts.backend(for: hostID) else { continue }
-            do {
-                try await client.trash(group.map(\.print.filename))
-                hosts.succeeded(on: hostID)
-            } catch {
-                // Only THIS machine's rows come back -- a refusal here says
-                // nothing about the machines that already succeeded.
-                perHost[hostID] = before
-                rebuild()
-                hosts.report(error, on: hostID, doing: "move those to the trash")
-            }
-        }
-        trashEtags.removeAll()
+        await runBulk(.trash, entries: entries)
     }
 
     func restore(_ entries: [LibraryEntry]) async {
-        let entries = withCopies(entries)
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = hosts.backend(for: hostID) else { continue }
-            do {
-                try await client.restoreFromTrash(group.map(\.print.filename))
-                hosts.succeeded(on: hostID)
-            } catch {
-                hosts.report(error, on: hostID, doing: "put those back")
-            }
-        }
-        etags.removeAll()
-        trashEtags.removeAll()
+        await runBulk(.restore, entries: entries)
     }
 
-    /// Permanent on the host. Nothing here can undo it, which is why the panes
-    /// ask first.
     func deleteForever(_ entries: [LibraryEntry]) async {
-        let entries = withCopies(entries)
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = hosts.backend(for: hostID) else { continue }
-            do {
-                try await client.deleteForever(group.map(\.print.filename))
-                hosts.succeeded(on: hostID)
-            } catch {
-                hosts.report(error, on: hostID, doing: "delete those permanently")
-            }
-        }
-        trashEtags.removeAll()
+        await runBulk(.delete, entries: entries)
     }
 
-    /// Empties every machine's trash at once. The confirmation lives in
-    /// `LibraryActions+Destructive`; this is what runs once someone agrees.
     func emptyTrash() async {
-        for host in hosts.hosts {
-            do {
-                try await hosts.backend(for: host).emptyTrash()
-                hosts.succeeded(on: host.id)
-            } catch {
-                hosts.report(error, on: host.id, doing: "empty the trash")
-            }
-        }
-        await refreshTrash()
+        await runEmptyTrash()
     }
 }

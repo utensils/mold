@@ -54,6 +54,8 @@ struct LibrarySelection: Equatable {
     /// uses, so an item cannot mean two things.
     let perform: (LibraryAction) -> Void
 
+    var lifecycleBusy = false
+
     var isEmpty: Bool { count == 0 }
 
     /// Quick Look's item, which owns the bare space bar, is offered only when
@@ -69,11 +71,11 @@ struct LibrarySelection: Equatable {
                         canAddReference: canAddReference,
                         canUpscale: canUpscale, upscalers: upscalers,
                         trashCount: trashCount, localSaveCount: localSaveCount,
-                        trashLocationName: trashLocationName)
+                        trashLocationName: trashLocationName, lifecycleBusy: lifecycleBusy)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.targets == rhs.targets
+        lhs.lifecycleBusy == rhs.lifecycleBusy && lhs.targets == rhs.targets
             && lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf

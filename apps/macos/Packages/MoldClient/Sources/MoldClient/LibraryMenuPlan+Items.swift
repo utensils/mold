@@ -11,7 +11,14 @@ public extension LibraryMenuPlan {
     /// they are on purpose and `RowAction.rendered` leaves the order alone;
     /// it is still what drops an empty submenu and trims a stray divider.
     var items: [Item] {
-        RowAction.rendered((scope == .trash ? trashItems : printItems) + collectionItems)
+        RowAction.rendered((scope == .trash ? trashItems : printItems) + collectionItems).map { item in
+            var item = item
+            switch item.kind {
+            case .trash?, .putBack?, .deleteForever?, .emptyTrash?: item.isDisabled = lifecycleBusy
+            default: break
+            }
+            return item
+        }
     }
 
     /// The Library's own row: a `RowAction` like every other menu's.

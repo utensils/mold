@@ -22336,6 +22336,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_reader_runs_between_bounded_trash_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        let names = (0..17)
+            .map(|index| format!("print-{index:02}.png"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            seed_print(&db, dir.path(), name, None);
+        }
+        let app = app_with_state(state);
+        let hook = crate::gallery_trash::install_trash_chunk_boundary_hook(dir.path());
+        let trash_app = app.clone();
+        let trash_names = names.clone();
+        let trash = tokio::spawn(async move {
+            trash_app
+                .oneshot(json_request(
+                    "POST",
+                    "/api/gallery/trash",
+                    serde_json::json!({"filenames": trash_names}),
+                ))
+                .await
+                .unwrap()
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), hook.wait_until_reached())
+            .await
+            .expect("the request reached its first chunk boundary");
+        let listing = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.clone().oneshot(empty_request("GET", "/api/gallery")),
+        )
+        .await
+        .expect("a gallery reader is not held behind the next trash chunk")
+        .unwrap();
+        assert_eq!(listing.status(), StatusCode::OK);
+        assert_eq!(json_body(listing).await.as_array().unwrap().len(), 1);
+
+        hook.resume();
+        assert_eq!(trash.await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert!(gallery_rows(&app, "/api/gallery").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn gallery_trash_sweep_and_empty_honor_retention() {
         let dir = tempfile::tempdir().unwrap();
         let (state, db) = organized_state(dir.path());
@@ -22922,27 +22965,29 @@ mod tests {
             .into_iter()
             .map(|(request, expected)| {
                 let app = app.clone();
+                let route = format!("{} {}", request.method(), request.uri());
                 (
+                    route,
                     expected,
                     tokio::spawn(async move { app.oneshot(request).await.unwrap() }),
                 )
             })
             .collect();
-        for (_, request) in &mut requests {
+        for (route, _, request) in &mut requests {
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), request)
                     .await
                     .is_err(),
-                "an organization/trash route ran while the publication writer was held"
+                "{route} ran while the publication writer was held"
             );
         }
         drop(writer);
-        for (expected, request) in requests {
+        for (route, expected, request) in requests {
             let response = tokio::time::timeout(Duration::from_secs(5), request)
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(response.status(), expected, "{:?}", response);
+            assert_eq!(response.status(), expected, "{route}: {response:?}");
         }
     }
 

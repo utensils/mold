@@ -53,7 +53,7 @@ struct LibraryMenu {
             upscalers: actions.upscalerOptions(for: targets),
             trashCount: trashCount,
             localSaveCount: targets.filter(LibraryStore.canSaveLocally).count,
-            trashLocationName: LibraryEntry.soleMachineName(of: targets)
+            trashLocationName: LibraryEntry.soleMachineName(of: targets), lifecycleBusy: actions.library.isBulkBusy
         )
     }
 

@@ -12,23 +12,23 @@ public extension HTTPBackend {
 
     /// Replay-safe by `operationId`, so a retry cannot double-apply.
     func mutate(_ mutation: GalleryBulkMutation) async throws {
-        _ = try await postRaw("/api/gallery/mutations", body: mutation)
+        _ = try await postRaw("/api/gallery/mutations", body: mutation, timeout: 300)
     }
 
     /// Moves prints to the trash, where they keep their own purge countdown.
     func trash(_ filenames: [String]) async throws {
-        _ = try await postRaw("/api/gallery/trash", body: TrashRequest(filenames: filenames))
+        _ = try await postRaw("/api/gallery/trash", body: TrashRequest(filenames: filenames), timeout: 300)
     }
 
     func restoreFromTrash(_ filenames: [String]) async throws {
         _ = try await postRaw("/api/gallery/trash/restore",
-                              body: TrashRequest(filenames: filenames))
+                              body: TrashRequest(filenames: filenames), timeout: 300)
     }
 
     /// Permanent. There is no undo on the host side.
     func deleteForever(_ filenames: [String]) async throws {
         _ = try await postRaw("/api/gallery/trash/delete-forever",
-                              body: TrashRequest(filenames: filenames))
+                              body: TrashRequest(filenames: filenames), timeout: 300)
     }
 
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> {
@@ -123,11 +123,12 @@ public extension HTTPBackend {
         return request
     }
 
-    internal func postRaw<Body: Encodable>(_ path: String, body: Body) async throws -> Data {
+    internal func postRaw<Body: Encodable>(_ path: String, body: Body, timeout: TimeInterval = 10) async throws -> Data {
         var request = self.request(path)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try MoldJSON.encoder.encode(body)
+        request.timeoutInterval = timeout
         return try await bytes(for: request)
     }
 }

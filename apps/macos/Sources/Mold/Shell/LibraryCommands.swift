@@ -55,7 +55,7 @@ private struct LibraryShortcuts: ViewModifier {
         .disabled(selection.isEmpty)
         Button("Move to Trash") { selection.perform(.trash) }
             .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(selection.isEmpty || selection.scope.isTrash)
+            .disabled(selection.isEmpty || selection.scope.isTrash || selection.lifecycleBusy)
     }
 }
 

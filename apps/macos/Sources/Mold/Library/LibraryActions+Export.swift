@@ -98,7 +98,9 @@ extension LibraryActions {
                                                              format: request.format)
             guard await panel.begin() == .OK, let url = panel.url else { return }
             do {
-                try data.write(to: url)
+                try await Task.detached(priority: .utility) {
+                    try data.write(to: url)
+                }.value
             } catch {
                 // A disk full, a read-only folder: the person chose Export…,
                 // waited for the machine to convert, picked a destination --

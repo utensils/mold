@@ -59,10 +59,12 @@ struct LibraryActions {
     }
 
     func moveToTrash(_ entries: [LibraryEntry]) {
+        guard !library.isBulkBusy else { return }
         Task { await library.moveToTrash(entries) }
     }
 
     func restore(_ entries: [LibraryEntry]) {
+        guard !library.isBulkBusy else { return }
         Task {
             await library.restore(entries)
             await reload()
@@ -76,8 +78,19 @@ struct LibraryActions {
     /// Puts the picture on the pasteboard, so ⌘V works anywhere.
     func copy(_ entries: [LibraryEntry]) {
         Task {
+            let targets = Array(entries.prefix(10))
+            let activity = targets.count > 1
+                ? library.beginBulkActivity("Copying 0 of \(targets.count.formatted()) prints…")
+                : nil
+            defer { if let activity { library.endBulkActivity(activity) } }
             var images: [NSImage] = []
-            for entry in entries.prefix(10) {
+            for (index, entry) in targets.enumerated() {
+                if let activity {
+                    library.updateBulkActivity(
+                        activity,
+                        "Copying \((index + 1).formatted()) of \(targets.count.formatted()) prints…"
+                    )
+                }
                 if let data = await data(for: entry), let image = NSImage(data: data) {
                     images.append(image)
                 }

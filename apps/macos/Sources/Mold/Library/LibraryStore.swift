@@ -51,6 +51,15 @@ final class LibraryStore {
     let live = GalleryLive()
 
     /// A Library import to the embedded host is a batch, not a Finder export.
+    var bulkActivities: [UUID: String] = [:]
+    var bulkProgress: String?
+    var bulkResult: String?
+    var bulkRunning = false
+    var bulkEmptying = false
+    var isBulkBusy: Bool { bulkRunning }
+    var bulkStopRequested = false
+    var bulkTargets: Set<PrintID> = []
+
     var localSaveProgress: String?
     var localSaveTask: Task<Void, Never>?
     var localSaveStopRequested = false

@@ -62,12 +62,30 @@ final class LibraryTags {
         }
 
         let hosts = store.hosts
+        // Freeze the destinations with the action. A machine added halfway
+        // through belongs to the next refresh; changing the denominator while
+        // this operation is on screen would make its progress misleading.
+        let destinations: [(host: MoldHost, client: any MoldBackend)] = hosts.hosts.map {
+            ($0, hosts.backend(for: $0))
+        }
+        let activity = store.beginBulkActivity(
+            "Renaming tag on 0 of \(destinations.count.formatted()) machines…"
+        )
         Task {
-            for host in hosts.hosts {
+            defer { store.endBulkActivity(activity) }
+            for (index, destination) in destinations.enumerated() {
+                let (host, client) = destination
+                guard hosts.host(host.id) == host else { continue }
+                store.updateBulkActivity(
+                    activity,
+                    "Renaming tag on \((index + 1).formatted()) of \(destinations.count.formatted()) machines…"
+                )
                 do {
-                    _ = try await hosts.backend(for: host).renameTag(name, to: clean)
+                    _ = try await client.renameTag(name, to: clean)
+                    guard hosts.host(host.id) == host else { continue }
                     hosts.succeeded(on: host.id)
                 } catch {
+                    guard hosts.host(host.id) == host else { continue }
                     // A machine that has never seen the tag answers 404, which
                     // is not a failure of the rename -- it is a machine with
                     // nothing to rename.
@@ -76,7 +94,8 @@ final class LibraryTags {
                     hosts.report(error, on: host.id, doing: "rename the tag “\(name)”")
                 }
             }
-            await reload(in: store)
+            store.updateBulkActivity(activity, "Refreshing tags…")
+            await reload(destinations, in: store)
         }
     }
 
@@ -92,16 +111,32 @@ final class LibraryTags {
         store.undo.forget()
 
         let hosts = store.hosts
+        let destinations: [(host: MoldHost, client: any MoldBackend)] = hosts.hosts.map {
+            ($0, hosts.backend(for: $0))
+        }
+        let activity = store.beginBulkActivity(
+            "Deleting tag on 0 of \(destinations.count.formatted()) machines…"
+        )
         Task {
-            for host in hosts.hosts {
+            defer { store.endBulkActivity(activity) }
+            for (index, destination) in destinations.enumerated() {
+                let (host, client) = destination
+                guard hosts.host(host.id) == host else { continue }
+                store.updateBulkActivity(
+                    activity,
+                    "Deleting tag on \((index + 1).formatted()) of \(destinations.count.formatted()) machines…"
+                )
                 do {
-                    try await hosts.backend(for: host).deleteTag(name)
+                    try await client.deleteTag(name)
+                    guard hosts.host(host.id) == host else { continue }
                     hosts.succeeded(on: host.id)
                 } catch {
+                    guard hosts.host(host.id) == host else { continue }
                     hosts.report(error, on: host.id, doing: "delete the tag “\(name)”")
                 }
             }
-            await reload(in: store)
+            store.updateBulkActivity(activity, "Refreshing tags…")
+            await reload(destinations, in: store)
         }
     }
 
@@ -115,16 +150,22 @@ final class LibraryTags {
         store.rebuild()
     }
 
-    private func reload(in store: LibraryStore) async {
+    private func reload(
+        _ destinations: [(host: MoldHost, client: any MoldBackend)], in store: LibraryStore
+    ) async {
         store.etags.removeAll()
-        for host in store.hosts.hosts {
+        for (host, client) in destinations {
+            guard store.hosts.host(host.id) == host else { continue }
             do {
-                perHost[host.id] = try await store.hosts.backend(for: host).tags()
+                let tags = try await client.tags()
+                guard store.hosts.host(host.id) == host else { continue }
+                perHost[host.id] = tags
                 // Scoped to its own verb: this is a passive refresh that runs
                 // after every rename and delete, and must not silently clear
                 // a failure THAT action just reported.
                 store.hosts.succeeded(on: host.id, doing: "read its tags")
             } catch {
+                guard store.hosts.host(host.id) == host else { continue }
                 store.hosts.report(error, on: host.id, doing: "read its tags")
             }
         }

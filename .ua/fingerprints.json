@@ -161451,7 +161451,7 @@
     },
     "crates/mold-server/src/batch_transaction.rs": {
       "filePath": "crates/mold-server/src/batch_transaction.rs",
-      "contentHash": "0fb29849b3c9a8153043b4e647f496301185052e79fda9780ebfa69287960b39",
+      "contentHash": "451cf5ab73c992f763ba761dcd586ec5a0e0e2d384b45ea66b96de737e8972c1",
       "functions": [
         {
           "name": "is_invalid_authority",
@@ -161553,6 +161553,26 @@
           "lineCount": 31
         },
         {
+          "name": "retained_media_for_item",
+          "params": [
+            "output_dir",
+            "filename"
+          ],
+          "returnType": "anyhow::Result<Option<(ArchivedChildIdentity, Vec<GalleryMediaPin>)>>",
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "validated_retained_media_for_item",
+          "params": [
+            "output_dir",
+            "filename"
+          ],
+          "returnType": "anyhow::Result<ValidatedRetainedMedia>",
+          "exported": true,
+          "lineCount": 38
+        },
+        {
           "name": "committed_archive_index_while_locked",
           "params": [
             "output_dir",
@@ -161581,7 +161601,7 @@
           ],
           "returnType": "anyhow::Result<()>",
           "exported": false,
-          "lineCount": 52
+          "lineCount": 69
         },
         {
           "name": "retire_committed_filename",
@@ -161610,6 +161630,52 @@
           "returnType": "anyhow::Result<()>",
           "exported": true,
           "lineCount": 43
+        },
+        {
+          "name": "finalize_retained_media_release",
+          "params": [
+            "output_dir",
+            "filenames"
+          ],
+          "returnType": "anyhow::Result<Vec<GalleryMediaPin>>",
+          "exported": true,
+          "lineCount": 37
+        },
+        {
+          "name": "bind_retained_media_for_job",
+          "params": [
+            "output_dir",
+            "job_id",
+            "media_set",
+            "pin"
+          ],
+          "returnType": "anyhow::Result<Vec<(String, GalleryMediaPin)>>",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "bind_retained_media_for_output",
+          "params": [
+            "output_dir",
+            "identity",
+            "media_set",
+            "pin"
+          ],
+          "returnType": "anyhow::Result<Vec<(String, GalleryMediaPin)>>",
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "bind_retained_media",
+          "params": [
+            "output_dir",
+            "target",
+            "media_set",
+            "pin"
+          ],
+          "returnType": "anyhow::Result<Vec<(String, GalleryMediaPin)>>",
+          "exported": false,
+          "lineCount": 102
         },
         {
           "name": "preflight_disk_space",
@@ -161739,7 +161805,7 @@
           "name": "drop",
           "params": [],
           "exported": false,
-          "lineCount": 20
+          "lineCount": 25
         },
         {
           "name": "drop",
@@ -161909,7 +161975,7 @@
           ],
           "returnType": "Result<(), UnresolvedBatchCommit>",
           "exported": true,
-          "lineCount": 29
+          "lineCount": 59
         },
         {
           "name": "commit_verified_finals",
@@ -162344,7 +162410,7 @@
           ],
           "returnType": "anyhow::Result<RecoveryReport>",
           "exported": true,
-          "lineCount": 217
+          "lineCount": 264
         },
         {
           "name": "collect_claimed_attempts",
@@ -162364,7 +162430,7 @@
           ],
           "returnType": "anyhow::Result<()>",
           "exported": false,
-          "lineCount": 34
+          "lineCount": 48
         },
         {
           "name": "release_all_reservations_for_owner",
@@ -162961,6 +163027,25 @@
           "lineCount": 24
         },
         {
+          "name": "gallery_media_pin_scope",
+          "params": [
+            "output_dir"
+          ],
+          "returnType": "anyhow::Result<String>",
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "gallery_media_pin_id",
+          "params": [
+            "output_dir",
+            "identity"
+          ],
+          "returnType": "anyhow::Result<String>",
+          "exported": false,
+          "lineCount": 22
+        },
+        {
           "name": "deleted_archive_child_digest",
           "params": [
             "identity"
@@ -163015,6 +163100,15 @@
           "lineCount": 15
         },
         {
+          "name": "read_regular_file_no_follow",
+          "params": [
+            "path"
+          ],
+          "returnType": "anyhow::Result<Vec<u8>>",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
           "name": "read_archive_json",
           "params": [
             "path"
@@ -163049,7 +163143,7 @@
           ],
           "returnType": "anyhow::Result<CommittedArchiveCatalog>",
           "exported": false,
-          "lineCount": 202
+          "lineCount": 204
         },
         {
           "name": "load_committed_archive_index_legacy",
@@ -163086,12 +163180,49 @@
             "output_dir",
             "final_path",
             "record",
+            "precomputed_sha256",
             "gate",
             "bookkeeping"
           ],
           "returnType": "anyhow::Result<GenerationRecord>",
           "exported": true,
-          "lineCount": 42
+          "lineCount": 18
+        },
+        {
+          "name": "archive_ordinary_gallery_record_with_identity",
+          "params": [
+            "output_dir",
+            "final_path",
+            "record",
+            "precomputed_sha256",
+            "gate",
+            "bookkeeping"
+          ],
+          "returnType": "anyhow::Result<(GenerationRecord, ArchivedChildIdentity)>",
+          "exported": true,
+          "lineCount": 51
+        },
+        {
+          "name": "retire_trashed_archive_filename",
+          "params": [
+            "output_dir",
+            "filename",
+            "gate"
+          ],
+          "returnType": "anyhow::Result<()>",
+          "exported": true,
+          "lineCount": 44
+        },
+        {
+          "name": "compatible_gallery_reimport",
+          "params": [
+            "manifest",
+            "child",
+            "existing"
+          ],
+          "returnType": "bool",
+          "exported": false,
+          "lineCount": 21
         },
         {
           "name": "tombstone_committed_archive_filename",
@@ -163116,6 +163247,17 @@
           "lineCount": 59
         },
         {
+          "name": "trash_committed_archive_filenames",
+          "params": [
+            "output_dir",
+            "filenames",
+            "gate"
+          ],
+          "returnType": "anyhow::Result<TrashArchiveBatchOutcome>",
+          "exported": true,
+          "lineCount": 136
+        },
+        {
           "name": "restore_trashed_archive_filename",
           "params": [
             "output_dir",
@@ -163125,7 +163267,7 @@
           ],
           "returnType": "anyhow::Result<RestoreArchiveDisposition>",
           "exported": true,
-          "lineCount": 65
+          "lineCount": 66
         },
         {
           "name": "gallery_trash_dir",
@@ -163205,19 +163347,7 @@
           ],
           "returnType": "anyhow::Result<String>",
           "exported": false,
-          "lineCount": 7
-        },
-        {
-          "name": "reserve_final_name_with_directory_sync",
-          "params": [
-            "output_dir",
-            "desired",
-            "owner",
-            "sync_directory"
-          ],
-          "returnType": "anyhow::Result<String>",
-          "exported": false,
-          "lineCount": 48
+          "lineCount": 64
         },
         {
           "name": "release_reservation",
@@ -163231,15 +163361,14 @@
           "lineCount": 25
         },
         {
-          "name": "reserve_gallery_final_name_with_directory_sync",
+          "name": "reserve_gallery_final_name",
           "params": [
             "output_dir",
-            "desired",
-            "sync_directory"
+            "desired"
           ],
           "returnType": "anyhow::Result<GalleryNameReservation>",
           "exported": true,
-          "lineCount": 21
+          "lineCount": 19
         },
         {
           "name": "load_journal",
@@ -163327,6 +163456,28 @@
           "lineCount": 5
         },
         {
+          "name": "checksum_ordinary_publication",
+          "params": [
+            "path"
+          ],
+          "returnType": "anyhow::Result<String>",
+          "exported": false,
+          "lineCount": 5
+        },
+        {
+          "name": "reset_ordinary_publication_hash_count",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "ordinary_publication_hash_count",
+          "params": [],
+          "returnType": "usize",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
           "name": "reset_authority_hash_count",
           "params": [],
           "exported": false,
@@ -163347,7 +163498,23 @@
           ],
           "returnType": "anyhow::Result<()>",
           "exported": false,
-          "lineCount": 46
+          "lineCount": 21
+        },
+        {
+          "name": "publish_copy_no_replace",
+          "params": [
+            "staged",
+            "final_path"
+          ],
+          "returnType": "anyhow::Result<()>",
+          "exported": false,
+          "lineCount": 27
+        },
+        {
+          "name": "publication_copy_preserves_timestamp_and_refuses_replacement",
+          "params": [],
+          "exported": false,
+          "lineCount": 16
         },
         {
           "name": "atomic_write_json",
@@ -163422,12 +163589,18 @@
             "blocking_read",
             "install_committed_archive_index",
             "committed_archive_index",
+            "retained_media_for_item",
+            "validated_retained_media_for_item",
             "committed_archive_index_while_locked",
             "completed_output_for_job",
             "record_committed_manifest",
             "retire_committed_filename",
             "unretire_committed_filename",
-            "acknowledge_retirement_projections"
+            "acknowledge_retirement_projections",
+            "finalize_retained_media_release",
+            "bind_retained_media_for_job",
+            "bind_retained_media_for_output",
+            "bind_retained_media"
           ],
           "properties": [
             "inner",
@@ -163462,6 +163635,16 @@
             "Infrastructure"
           ],
           "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "RetainedMediaTarget",
+          "methods": [],
+          "properties": [
+            "Job",
+            "Output"
+          ],
+          "exported": false,
           "lineCount": 4
         },
         {
@@ -163553,10 +163736,32 @@
           "properties": [
             "identity",
             "record",
-            "facts"
+            "facts",
+            "retained_media"
+          ],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "GalleryMediaPin",
+          "methods": [],
+          "properties": [
+            "media_set",
+            "pin_id"
           ],
           "exported": true,
           "lineCount": 6
+        },
+        {
+          "name": "ValidatedRetainedMedia",
+          "methods": [],
+          "properties": [
+            "Missing",
+            "Invalid",
+            "Present"
+          ],
+          "exported": true,
+          "lineCount": 8
         },
         {
           "name": "CommittedArchiveIndex",
@@ -163882,6 +164087,16 @@
           "lineCount": 13
         },
         {
+          "name": "TrashArchiveBatchOutcome",
+          "methods": [],
+          "properties": [
+            "completed",
+            "failure"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
           "name": "RestoreArchiveDisposition",
           "methods": [],
           "properties": [
@@ -163968,11 +164183,16 @@
         "blocking_read",
         "install_committed_archive_index",
         "committed_archive_index",
+        "retained_media_for_item",
+        "validated_retained_media_for_item",
         "committed_archive_index_while_locked",
         "completed_output_for_job",
         "retire_committed_filename",
         "unretire_committed_filename",
         "acknowledge_retirement_projections",
+        "finalize_retained_media_release",
+        "bind_retained_media_for_job",
+        "bind_retained_media_for_output",
         "preflight_disk_space",
         "BatchManifestState",
         "BatchManifestChild",
@@ -163982,6 +164202,8 @@
         "from_path",
         "from_metadata",
         "CommittedArchiveEntry",
+        "GalleryMediaPin",
+        "ValidatedRetainedMedia",
         "record",
         "CommittedArchiveIndex",
         "get",
@@ -164018,17 +164240,23 @@
         "acquire_gallery_bookkeeping_lock",
         "legacy_gallery_evidence_paths",
         "remove_legacy_gallery_evidence",
+        "gallery_media_pin_scope",
         "open_regular_file_no_follow",
         "create_private_file_no_follow",
         "create_private_file_no_follow",
         "open_regular_file_no_follow",
+        "read_regular_file_no_follow",
         "load_committed_archive_index",
         "find_completed_output_in_committed_archive",
         "archive_ordinary_gallery_record",
+        "archive_ordinary_gallery_record_with_identity",
         "ArchiveDeleteDisposition",
+        "retire_trashed_archive_filename",
         "tombstone_committed_archive_filename",
         "TrashArchiveDisposition",
         "trash_committed_archive_filename",
+        "TrashArchiveBatchOutcome",
+        "trash_committed_archive_filenames",
         "RestoreArchiveDisposition",
         "restore_trashed_archive_filename",
         "gallery_trash_dir",
@@ -164036,12 +164264,14 @@
         "move_gallery_file_to_trash",
         "move_gallery_file_from_trash",
         "reconcile_committed_archive_index",
-        "reserve_gallery_final_name_with_directory_sync",
+        "reserve_gallery_final_name",
         "checksum_file_for_authority",
+        "reset_ordinary_publication_hash_count",
+        "ordinary_publication_hash_count",
         "sync_ordinary_gallery_directory",
         "tolerate_unsupported_ordinary_directory_sync"
       ],
-      "totalLines": 10119,
+      "totalLines": 11403,
       "hasStructuralAnalysis": true
     },
     "crates/mold-server/src/catalog_api.rs": {
@@ -173051,8 +173281,26 @@
     },
     "crates/mold-server/src/gallery_trash.rs": {
       "filePath": "crates/mold-server/src/gallery_trash.rs",
-      "contentHash": "11b043fd85120d79e4a671d0bba44dfdead058dd9ab69bdbaa2867d60dfc013d",
+      "contentHash": "e191334dddeea7944e6cef1d886727beccdad3d6d556058d0c48ee08a65f9a9e",
       "functions": [
+        {
+          "name": "reads_trash",
+          "params": [],
+          "returnType": "Result<bool, ApiError>",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "resolve_gallery_media_for_view",
+          "params": [
+            "dir",
+            "name",
+            "from_trash"
+          ],
+          "returnType": "PathBuf",
+          "exported": true,
+          "lineCount": 7
+        },
         {
           "name": "resolve_gallery_media_source",
           "params": [
@@ -173088,7 +173336,7 @@
             "name"
           ],
           "exported": false,
-          "lineCount": 12
+          "lineCount": 27
         },
         {
           "name": "ensure_row_for_live_file",
@@ -173101,6 +173349,18 @@
           "returnType": "bool",
           "exported": false,
           "lineCount": 33
+        },
+        {
+          "name": "trash_published_outputs_blocking",
+          "params": [
+            "dir",
+            "saved",
+            "db",
+            "gate",
+            "events"
+          ],
+          "exported": true,
+          "lineCount": 50
         },
         {
           "name": "trash_print_blocking",
@@ -173134,11 +173394,26 @@
             "dir",
             "name",
             "db",
-            "gate"
+            "gate",
+            "media_lifecycle"
           ],
           "returnType": "Result<(), ApiError>",
           "exported": true,
-          "lineCount": 40
+          "lineCount": 54
+        },
+        {
+          "name": "purge_if_still_trashed_blocking",
+          "params": [
+            "dir",
+            "name",
+            "db",
+            "gate",
+            "media_lifecycle",
+            "expired_by"
+          ],
+          "returnType": "Result<bool, ApiError>",
+          "exported": false,
+          "lineCount": 24
         },
         {
           "name": "hard_delete_live_print_blocking",
@@ -173146,11 +173421,35 @@
             "dir",
             "name",
             "db",
-            "gate"
+            "gate",
+            "media_lifecycle"
           ],
           "returnType": "Result<(), ApiError>",
           "exported": true,
-          "lineCount": 67
+          "lineCount": 81
+        },
+        {
+          "name": "remove_gallery_media_projection",
+          "params": [
+            "db",
+            "dir",
+            "name"
+          ],
+          "returnType": "anyhow::Result<()>",
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "release_retired_media_pins",
+          "params": [
+            "dir",
+            "name",
+            "gate",
+            "lifecycle"
+          ],
+          "returnType": "Result<(), ApiError>",
+          "exported": false,
+          "lineCount": 26
         },
         {
           "name": "delete_gallery_image",
@@ -173161,7 +173460,7 @@
           ],
           "returnType": "Result<StatusCode, ApiError>",
           "exported": true,
-          "lineCount": 53
+          "lineCount": 73
         },
         {
           "name": "clean_filenames",
@@ -173183,6 +173482,55 @@
           "lineCount": 7
         },
         {
+          "name": "trash_chunk_boundary_hook",
+          "params": [],
+          "returnType": "&'static std::sync::Mutex<Option<std::sync::Arc<TrashChunkBoundaryHook>>>",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "install_trash_chunk_boundary_hook",
+          "params": [
+            "output_dir"
+          ],
+          "returnType": "std::sync::Arc<TrashChunkBoundaryHook>",
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "wait_until_reached",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "resume",
+          "params": [],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "pause_at_trash_chunk_boundary",
+          "params": [
+            "output_dir"
+          ],
+          "exported": false,
+          "lineCount": 11
+        },
+        {
+          "name": "trash_gallery_chunk_blocking",
+          "params": [
+            "dir",
+            "names",
+            "db",
+            "gate",
+            "events"
+          ],
+          "returnType": "Result<Option<ApiError>, ApiError>",
+          "exported": false,
+          "lineCount": 162
+        },
+        {
           "name": "trash_gallery_files",
           "params": [
             "State(state)",
@@ -173190,7 +173538,7 @@
           ],
           "returnType": "Result<StatusCode, ApiError>",
           "exported": true,
-          "lineCount": 40
+          "lineCount": 57
         },
         {
           "name": "restore_gallery_files",
@@ -173200,7 +173548,7 @@
           ],
           "returnType": "Result<StatusCode, ApiError>",
           "exported": true,
-          "lineCount": 37
+          "lineCount": 46
         },
         {
           "name": "delete_gallery_files_forever",
@@ -173210,7 +173558,7 @@
           ],
           "returnType": "Result<StatusCode, ApiError>",
           "exported": true,
-          "lineCount": 46
+          "lineCount": 74
         },
         {
           "name": "empty_gallery_trash",
@@ -173219,7 +173567,7 @@
           ],
           "returnType": "Result<Json<EmptyTrashResult>, ApiError>",
           "exported": true,
-          "lineCount": 30
+          "lineCount": 66
         },
         {
           "name": "sweep_gallery_trash",
@@ -173237,7 +173585,7 @@
           ],
           "returnType": "anyhow::Result<TrashSweepResult>",
           "exported": true,
-          "lineCount": 50
+          "lineCount": 86
         },
         {
           "name": "spawn_trash_sweeper",
@@ -173262,6 +173610,17 @@
           "lineCount": 4
         },
         {
+          "name": "GalleryMediaQuery",
+          "methods": [
+            "reads_trash"
+          ],
+          "properties": [
+            "view"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
           "name": "TrashOutcome",
           "methods": [],
           "properties": [
@@ -173271,6 +173630,20 @@
           ],
           "exported": true,
           "lineCount": 9
+        },
+        {
+          "name": "TrashChunkBoundaryHook",
+          "methods": [
+            "wait_until_reached",
+            "resume"
+          ],
+          "properties": [
+            "output_dir",
+            "reached",
+            "resume"
+          ],
+          "exported": true,
+          "lineCount": 5
         }
       ],
       "imports": [
@@ -173345,13 +173718,21 @@
       ],
       "exports": [
         "GalleryDeleteQuery",
+        "GalleryMediaQuery",
+        "reads_trash",
+        "resolve_gallery_media_for_view",
         "resolve_gallery_media_source",
         "TrashOutcome",
+        "trash_published_outputs_blocking",
         "trash_print_blocking",
         "restore_print_blocking",
         "purge_trashed_print_blocking",
         "hard_delete_live_print_blocking",
         "delete_gallery_image",
+        "TrashChunkBoundaryHook",
+        "install_trash_chunk_boundary_hook",
+        "wait_until_reached",
+        "resume",
         "trash_gallery_files",
         "restore_gallery_files",
         "delete_gallery_files_forever",
@@ -173360,7 +173741,7 @@
         "sweep_trash_once",
         "spawn_trash_sweeper"
       ],
-      "totalLines": 873,
+      "totalLines": 1588,
       "hasStructuralAnalysis": true
     },
     "crates/mold-server/src/generation_cancel.rs": {
@@ -197600,12 +197981,12 @@
     },
     "crates/mold-server/src/routes_test.rs": {
       "filePath": "crates/mold-server/src/routes_test.rs",
-      "contentHash": "df659ca4cae8fe6ad6e168ad68849628bf494cd5a6415b782ec8b49cb14bf45b",
+      "contentHash": "ac084a9f2dbf3afe9e67a0a1affd3f326feb02d07c588d2c67ddc89ed033bdc5",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 20697,
+      "totalLines": 24011,
       "hasStructuralAnalysis": true
     },
     "crates/mold-server/src/scheduler/mod.rs": {
@@ -284721,7 +285102,7 @@
     },
     "apps/macos/Tests/MoldTests/FakeBackend.swift": {
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
-      "contentHash": "c755eea88f138ac35eadceb3e8bcc7de0e8611022c2a2958782abb394d8697d8",
+      "contentHash": "2c06aa31263b0166f67f77037ddeb0c05216b3aa760503ebc793baec2da40e1d",
       "functions": [
         {
           "name": "settle",
@@ -284835,14 +285216,14 @@
           "name": "releaseStatus",
           "params": [],
           "exported": true,
-          "lineCount": 6
+          "lineCount": 9
         },
         {
           "name": "status",
           "params": [],
           "returnType": "ServerStatus",
           "exported": true,
-          "lineCount": 10
+          "lineCount": 16
         },
         {
           "name": "capabilities",
@@ -285073,7 +285454,16 @@
             "id"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 4
+        },
+        {
+          "name": "cancelHeldJob",
+          "params": [
+            "id"
+          ],
+          "returnType": "Bool",
+          "exported": true,
+          "lineCount": 6
         },
         {
           "name": "pauseJob",
@@ -285256,7 +285646,7 @@
             "mutation"
           ],
           "exported": true,
-          "lineCount": 4
+          "lineCount": 5
         },
         {
           "name": "trash",
@@ -285264,7 +285654,7 @@
             "filenames"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 15
         },
         {
           "name": "restoreFromTrash",
@@ -285272,7 +285662,7 @@
             "filenames"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 7
         },
         {
           "name": "deleteForever",
@@ -285280,7 +285670,7 @@
             "filenames"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 7
         },
         {
           "name": "importPrint",
@@ -285290,7 +285680,7 @@
           ],
           "returnType": "String",
           "exported": true,
-          "lineCount": 10
+          "lineCount": 12
         },
         {
           "name": "media",
@@ -285300,7 +285690,17 @@
           ],
           "returnType": "Data",
           "exported": true,
-          "lineCount": 5
+          "lineCount": 6
+        },
+        {
+          "name": "mediaFile",
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "URL",
+          "exported": true,
+          "lineCount": 8
         },
         {
           "name": "thumbnail",
@@ -285364,7 +285764,7 @@
           ],
           "returnType": "Collection",
           "exported": true,
-          "lineCount": 3
+          "lineCount": 6
         },
         {
           "name": "updateCollection",
@@ -285382,7 +285782,7 @@
             "id"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 4
         },
         {
           "name": "tags",
@@ -285399,7 +285799,7 @@
           ],
           "returnType": "TagCount",
           "exported": true,
-          "lineCount": 5
+          "lineCount": 6
         },
         {
           "name": "deleteTag",
@@ -285407,13 +285807,13 @@
             "name"
           ],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 4
         },
         {
           "name": "emptyTrash",
           "params": [],
           "exported": true,
-          "lineCount": 1
+          "lineCount": 5
         },
         {
           "name": "events",
@@ -285454,12 +285854,6 @@
           "returnType": "AsyncThrowingStream<DownloadEvent, Error>",
           "exported": true,
           "lineCount": 7
-        },
-        {
-          "name": "mediaFile",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
         }
       ],
       "classes": [
@@ -285471,9 +285865,7 @@
           "properties": [
             "lock",
             "raised",
-            "isRaised",
-            "statusLock",
-            "beforeStatusPark"
+            "isRaised"
           ],
           "exported": true,
           "lineCount": 6
@@ -285522,6 +285914,7 @@
             "queue",
             "queueJob",
             "cancelJob",
+            "cancelHeldJob",
             "pauseJob",
             "resumeJob",
             "reorderJob",
@@ -285549,6 +285942,7 @@
             "deleteForever",
             "importPrint",
             "media",
+            "mediaFile",
             "thumbnail",
             "exportOptions",
             "export",
@@ -285579,6 +285973,7 @@
             "trashedRows",
             "tagRows",
             "collectionRows",
+            "collectionCreateResponses",
             "queueListing",
             "serverStatus",
             "capabilityBlock",
@@ -285620,6 +286015,7 @@
             "batchEventsContinuations",
             "jobPreviewCalls",
             "mediaAnswer",
+            "mediaAnswers",
             "deviceState",
             "resourceSnapshot",
             "peerRows",
@@ -285633,8 +286029,10 @@
             "delays",
             "entryWaiters",
             "statusHeldOpen",
+            "statusLock",
             "statusWaiters",
             "statusReleased",
+            "beforeStatusPark",
             "placementCopiesRequested",
             "placementRequests",
             "chainJobAnswer",
@@ -285675,6 +286073,7 @@
             "reorders",
             "cancelAllAnswer",
             "cancelledAll",
+            "cancelledIds",
             "retriedAuthorities",
             "batchStatusQueries",
             "batchStatusesYields",
@@ -285683,15 +286082,21 @@
             "admitAnswer",
             "completedTransfers",
             "queueYields",
+            "noLongerHeld",
             "extras",
             "licenseRows",
             "acceptedLicenses",
+            "mutationRequests",
+            "trashRequests",
+            "trashFailureOnCall",
+            "trashPartialFailureCount",
             "importedNames",
             "importedItems",
+            "importedMedia",
             "importFailures"
           ],
           "exported": true,
-          "lineCount": 955
+          "lineCount": 1042
         }
       ],
       "imports": [
@@ -285733,6 +286138,7 @@
         "trashedRows",
         "tagRows",
         "collectionRows",
+        "collectionCreateResponses",
         "queueListing",
         "serverStatus",
         "capabilityBlock",
@@ -285771,6 +286177,7 @@
         "batchEventsContinuations",
         "jobPreviewCalls",
         "mediaAnswer",
+        "mediaAnswers",
         "deviceState",
         "resourceSnapshot",
         "peerRows",
@@ -285791,6 +286198,7 @@
         "record",
         "notPlanted",
         "statusHeldOpen",
+        "beforeStatusPark",
         "releaseStatus",
         "status",
         "capabilities",
@@ -285852,6 +286260,7 @@
         "reorders",
         "cancelAllAnswer",
         "cancelledAll",
+        "cancelledIds",
         "retriedAuthorities",
         "batchStatusQueries",
         "batchStatusesYields",
@@ -285863,6 +286272,8 @@
         "queue",
         "queueJob",
         "cancelJob",
+        "noLongerHeld",
+        "cancelHeldJob",
         "pauseJob",
         "resumeJob",
         "reorderJob",
@@ -285888,14 +286299,20 @@
         "trashedPrints",
         "patch",
         "mutate",
+        "mutationRequests",
+        "trashRequests",
+        "trashFailureOnCall",
+        "trashPartialFailureCount",
         "trash",
         "restoreFromTrash",
         "deleteForever",
         "importedNames",
         "importedItems",
+        "importedMedia",
         "importFailures",
         "importPrint",
         "media",
+        "mediaFile",
         "thumbnail",
         "exportOptions",
         "export",
@@ -285916,7 +286333,7 @@
         "downloadEvents",
         "FakeBackend"
       ],
-      "totalLines": 1033,
+      "totalLines": 1089,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/GalleryImport.swift": {
@@ -286340,7 +286757,7 @@
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift": {
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
-      "contentHash": "710fdf8d0609507ee034323abd9e3a664bba3fc3c32062312c42bcf0ed2ac726",
+      "contentHash": "bf00a3872943190d532b8149e60ce56e7402be303e017af404ecb950d20f0e61",
       "functions": [
         {
           "name": "saveTitle",
@@ -286370,7 +286787,7 @@
             "saveTitle"
           ],
           "exported": false,
-          "lineCount": 147
+          "lineCount": 154
         }
       ],
       "imports": [
@@ -286385,12 +286802,12 @@
         "items",
         "saveTitle"
       ],
-      "totalLines": 152,
+      "totalLines": 159,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift": {
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
-      "contentHash": "335481be40793f4dfeaf8e3aca942fa9a89c01d1ad078d4c0b220cad0493da00",
+      "contentHash": "7e61d41ee3609388ffb0979f1462b11b3c1eea464b17a9782b5b4f26f1c6d8b0",
       "functions": [
         {
           "name": "LibraryMenuPlan.init",
@@ -286411,10 +286828,11 @@
             "upscalers",
             "trashCount",
             "localSaveCount",
-            "trashLocationName"
+            "trashLocationName",
+            "lifecycleBusy"
           ],
           "exported": true,
-          "lineCount": 27
+          "lineCount": 28
         }
       ],
       "classes": [
@@ -286467,12 +286885,13 @@
             "canAddReference",
             "canUpscale",
             "upscalers",
+            "lifecycleBusy",
             "trashCount",
             "localSaveCount",
             "trashLocationName"
           ],
           "exported": true,
-          "lineCount": 58
+          "lineCount": 60
         },
         {
           "name": "extension LibraryMenuPlan",
@@ -286519,6 +286938,7 @@
         "canAddReference",
         "canUpscale",
         "upscalers",
+        "lifecycleBusy",
         "trashCount",
         "localSaveCount",
         "trashLocationName",
@@ -286527,7 +286947,7 @@
         "reuseTitle",
         "LibraryScopeKind"
       ],
-      "totalLines": 123,
+      "totalLines": 125,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Packages/MoldClient/Tests/MoldClientTests/GalleryImportTests.swift": {
@@ -286904,7 +287324,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
-      "contentHash": "3176bbce2d91ed32f6528d1a97efb007ea508470ea91f50cac170c17acc89ecb",
+      "contentHash": "0f10e00ef622a9a75ff2bfa4486df718aa9f21e19eaee97fcc0969e60b72f807",
       "functions": [
         {
           "name": "deleteForever",
@@ -286912,7 +287332,7 @@
             "entries"
           ],
           "exported": true,
-          "lineCount": 25
+          "lineCount": 26
         },
         {
           "name": "emptyTrash",
@@ -286930,7 +287350,7 @@
           ],
           "properties": [],
           "exported": false,
-          "lineCount": 44
+          "lineCount": 45
         }
       ],
       "imports": [
@@ -286951,7 +287371,7 @@
         "deleteForever",
         "emptyTrash"
       ],
-      "totalLines": 50,
+      "totalLines": 51,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Sources/Mold/Library/LibraryActions+Menu.swift": {
@@ -287003,7 +287423,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryMenu.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
-      "contentHash": "f97a8fc1116a6a8f5c76fe3e00a4159fd861dcd62148986e09a202085d4220f6",
+      "contentHash": "10b165fe88e2f1d2898571c055a01c142f03e4736c43fe594204e4a8159aa6fe",
       "functions": [
         {
           "name": "perform",
@@ -287029,7 +287449,7 @@
           ],
           "returnType": "some View",
           "exported": true,
-          "lineCount": 7
+          "lineCount": 8
         }
       ],
       "classes": [
@@ -287061,7 +287481,7 @@
           ],
           "properties": [],
           "exported": false,
-          "lineCount": 10
+          "lineCount": 11
         },
         {
           "name": "extension LibraryScope",
@@ -287102,7 +287522,7 @@
         "libraryMenu",
         "menuKind"
       ],
-      "totalLines": 87,
+      "totalLines": 88,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Sources/Mold/Library/LibraryPane+Chrome.swift": {
@@ -287174,7 +287594,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
-      "contentHash": "c5ff2255125d7e8a08ad0099f5dd6c38b310bdcdfc2dd5444e4b2338dad64731",
+      "contentHash": "8838ab621dd992e908bad045b2f468dce3e8e38fcea551cbc1d243b542bba328",
       "functions": [
         {
           "name": "subtitle",
@@ -287235,7 +287655,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
-      "contentHash": "62a1d70b48970c91167b39a846445e6841c3b24f270e281bdd57e087198b8dbb",
+      "contentHash": "e55dcf881448e15935f696254ad0b003b792dae6e792fb79ffaead47f5f34d78",
       "functions": [
         {
           "name": "menuSelection",
@@ -287244,7 +287664,7 @@
           ],
           "returnType": "LibrarySelection",
           "exported": true,
-          "lineCount": 34
+          "lineCount": 35
         },
         {
           "name": "menuFile",
@@ -287269,7 +287689,7 @@
             "enclosingShelf"
           ],
           "exported": false,
-          "lineCount": 92
+          "lineCount": 93
         }
       ],
       "imports": [
@@ -287293,7 +287713,7 @@
         "isEditingText",
         "enclosingShelf"
       ],
-      "totalLines": 97,
+      "totalLines": 98,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Sources/Mold/Library/LibraryPane+Toolbar.swift": {
@@ -287360,7 +287780,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryPane.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryPane.swift",
-      "contentHash": "adc475964d1c760302e097463ba2440cd86e54fdb6dde0ebe39e76d7759efe40",
+      "contentHash": "dee0cbc716367a1a7b524cce153accceae7102d2b6b04ccd4edb922d7f7b3b38",
       "functions": [],
       "classes": [
         {
@@ -287392,10 +287812,16 @@
             "body"
           ],
           "exported": true,
-          "lineCount": 97
+          "lineCount": 154
         }
       ],
       "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
         {
           "source": "MoldClient",
           "specifiers": [
@@ -287406,12 +287832,6 @@
           "source": "SwiftUI",
           "specifiers": [
             "SwiftUI"
-          ]
-        },
-        {
-          "source": "AppKit",
-          "specifiers": [
-            "AppKit"
           ]
         }
       ],
@@ -287438,7 +287858,7 @@
         "body",
         "LibraryPane"
       ],
-      "totalLines": 146,
+      "totalLines": 164,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Sources/Mold/Library/LibraryStore+LocalSave.swift": {
@@ -287612,7 +288032,7 @@
     },
     "apps/macos/Sources/Mold/Library/LibraryStore.swift": {
       "filePath": "apps/macos/Sources/Mold/Library/LibraryStore.swift",
-      "contentHash": "57514acf6ad024f3a2d431a75491b754f36594763f3e0ac9ca4d66c67c66b034",
+      "contentHash": "cb808545d1db05578bb7a0457e5ad0d253a9ae82f61e645dfd424bc0859fa5ba",
       "functions": [
         {
           "name": "LibraryStore.init",
@@ -287668,13 +288088,24 @@
             "undo",
             "mutations",
             "live",
+            "bulkActivities",
+            "bulkProgress",
+            "bulkResult",
+            "bulkRunning",
+            "bulkEmptying",
+            "isBulkBusy",
+            "bulkStopRequested",
+            "bulkTargets",
             "localSaveProgress",
+            "localSaveTask",
+            "localSaveStopRequested",
             "localSaveReport",
+            "localSaveFailures",
             "localSaveAlertPresented",
             "rows"
           ],
           "exported": true,
-          "lineCount": 121
+          "lineCount": 133
         }
       ],
       "imports": [
@@ -287705,8 +288136,19 @@
         "undo",
         "mutations",
         "live",
+        "bulkActivities",
+        "bulkProgress",
+        "bulkResult",
+        "bulkRunning",
+        "bulkEmptying",
+        "isBulkBusy",
+        "bulkStopRequested",
+        "bulkTargets",
         "localSaveProgress",
+        "localSaveTask",
+        "localSaveStopRequested",
         "localSaveReport",
+        "localSaveFailures",
         "localSaveAlertPresented",
         "rows",
         "LibraryStore.init",
@@ -287715,12 +288157,12 @@
         "apply",
         "LibraryStore"
       ],
-      "totalLines": 131,
+      "totalLines": 143,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Sources/Mold/Shell/LibrarySelection.swift": {
       "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
-      "contentHash": "fe5399b3057ed5844f6ca8505f6b3218046dee5fd16beaa5ff06437e25296ab1",
+      "contentHash": "b3205f7f3ea0bc94f8c095fd929f6c5c9ee2d997a1d1c670fabe0e6bb34e604a",
       "functions": [
         {
           "name": "==",
@@ -287770,12 +288212,13 @@
             "upscalers",
             "share",
             "perform",
+            "lifecycleBusy",
             "isEmpty",
             "canQuickLook",
             "plan"
           ],
           "exported": true,
-          "lineCount": 78
+          "lineCount": 80
         },
         {
           "name": "LibraryImport",
@@ -287849,6 +288292,7 @@
         "upscalers",
         "share",
         "perform",
+        "lifecycleBusy",
         "isEmpty",
         "canQuickLook",
         "plan",
@@ -287863,7 +288307,7 @@
         "librarySelection",
         "libraryImport"
       ],
-      "totalLines": 119,
+      "totalLines": 121,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Tests/MoldTests/LibraryLocalSaveTests.swift": {
@@ -288305,94 +288749,178 @@
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift": {
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
-      "contentHash": "4843d085f31be23edf1538d97c169ebf72ae963d77782bd7c1dd1ae14fcc6c0a",
+      "contentHash": "10e95e6fa0cde9aae9bea498c27e1d10402bd5a4367aca7d6754df13cd376105",
       "functions": [
         {
           "name": "patch",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "patch"
+          ],
+          "exported": true,
+          "lineCount": 7
         },
         {
           "name": "mutate",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "mutation"
+          ],
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "trash",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "restoreFromTrash",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 4
         },
         {
           "name": "deleteForever",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filenames"
+          ],
+          "exported": true,
+          "lineCount": 4
         },
         {
           "name": "trashedPrints",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "etag"
+          ],
+          "returnType": "Fetched<[GalleryPrint]>",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "collections",
           "params": [],
-          "exported": false,
-          "lineCount": 1
+          "returnType": "[Collection]",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "tags",
           "params": [],
-          "exported": false,
-          "lineCount": 1
+          "returnType": "[TagCount]",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "exportOptions",
           "params": [],
-          "exported": false,
-          "lineCount": 1
+          "returnType": "ExportOptions",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "export",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "format"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "export",
+          "params": [
+            "filename",
+            "body"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 8
         },
         {
           "name": "thumbnail",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "size",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 6
         },
         {
           "name": "media",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "mediaFile",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "URL",
+          "exported": true,
+          "lineCount": 24
         },
         {
           "name": "mediaRequest",
-          "params": [],
-          "exported": false,
-          "lineCount": 1
+          "params": [
+            "filename",
+            "trashed"
+          ],
+          "returnType": "URLRequest",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "postRaw",
+          "params": [
+            "path",
+            "body",
+            "timeout"
+          ],
+          "returnType": "Data",
+          "exported": true,
+          "lineCount": 8
         }
       ],
-      "classes": [],
+      "classes": [
+        {
+          "name": "extension HTTPBackend",
+          "methods": [
+            "patch",
+            "mutate",
+            "trash",
+            "restoreFromTrash",
+            "deleteForever",
+            "trashedPrints",
+            "collections",
+            "tags",
+            "exportOptions",
+            "export",
+            "export",
+            "thumbnail",
+            "media",
+            "mediaFile",
+            "mediaRequest",
+            "postRaw"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 131
+        }
+      ],
       "imports": [
         {
           "source": "Foundation",
@@ -288401,8 +288929,25 @@
           ]
         }
       ],
-      "exports": [],
-      "totalLines": 133,
+      "exports": [
+        "patch",
+        "mutate",
+        "trash",
+        "restoreFromTrash",
+        "deleteForever",
+        "trashedPrints",
+        "collections",
+        "tags",
+        "exportOptions",
+        "export",
+        "export",
+        "thumbnail",
+        "media",
+        "mediaFile",
+        "mediaRequest",
+        "postRaw"
+      ],
+      "totalLines": 135,
       "hasStructuralAnalysis": true
     },
     "apps/macos/Packages/MoldClient/Sources/MoldClient/MoldBackend+Gallery.swift": {
@@ -288674,6 +289219,2080 @@
       "exports": [],
       "contentHash": "b3057b45ecabfad5eda8314bb085d6979f067e02d01726fe4ee40a785b2210b4",
       "totalLines": 319
+    },
+    "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Organize.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Organize.swift",
+      "contentHash": "392d53e026017de260bef6e7e6a53689bed7c8df546e0a3c6426348b3d6b7cb8",
+      "functions": [
+        {
+          "name": "createCollection",
+          "params": [
+            "name",
+            "description"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "updateCollection",
+          "params": [
+            "id",
+            "change"
+          ],
+          "returnType": "Collection",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "deleteCollection",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "renameTag",
+          "params": [
+            "name",
+            "newName"
+          ],
+          "returnType": "TagCount",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "deleteTag",
+          "params": [
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "emptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 6
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension HTTPBackend",
+          "methods": [
+            "createCollection",
+            "updateCollection",
+            "deleteCollection",
+            "renameTag",
+            "deleteTag",
+            "emptyTrash"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 47
+        },
+        {
+          "name": "TagRename",
+          "methods": [],
+          "properties": [
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 3
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        }
+      ],
+      "exports": [
+        "createCollection",
+        "updateCollection",
+        "deleteCollection",
+        "renameTag",
+        "deleteTag",
+        "emptyTrash",
+        "name",
+        "TagRename"
+      ],
+      "totalLines": 64,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Packages/MoldClient/Tests/MoldClientTests/BulkTransportTests.swift": {
+      "filePath": "apps/macos/Packages/MoldClient/Tests/MoldClientTests/BulkTransportTests.swift",
+      "contentHash": "982617bddabd5ed0b2884a2700f93d354030772213c0f49219004372f816e573",
+      "functions": [
+        {
+          "name": "response",
+          "params": [
+            "path"
+          ],
+          "returnType": "(status: Int, body: Data)?",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "startLoading",
+          "params": [],
+          "exported": false,
+          "lineCount": 4
+        },
+        {
+          "name": "destructiveRequestsAllowFilesystemWorkWithoutChangingProbeTimeouts",
+          "params": [],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "busyLifecycleActionsAreDisabledInBothMenuScopes",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "BulkTransport",
+          "methods": [
+            "response",
+            "startLoading"
+          ],
+          "properties": [
+            "timeouts"
+          ],
+          "exported": false,
+          "lineCount": 10
+        },
+        {
+          "name": "BulkTransportTests",
+          "methods": [
+            "destructiveRequestsAllowFilesystemWorkWithoutChangingProbeTimeouts",
+            "busyLifecycleActionsAreDisabledInBothMenuScopes"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 27
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "destructiveRequestsAllowFilesystemWorkWithoutChangingProbeTimeouts",
+        "busyLifecycleActionsAreDisabledInBothMenuScopes",
+        "BulkTransportTests"
+      ],
+      "totalLines": 43,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/GalleryLive.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/GalleryLive.swift",
+      "contentHash": "03a4c080937ff41a9928a0c82fc12c9dc1c1fa72ca847f22025a3c4cd205a231",
+      "functions": [
+        {
+          "name": "apply",
+          "params": [
+            "event",
+            "host",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "apply",
+          "params": [
+            "change",
+            "host",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 44
+        },
+        {
+          "name": "replace",
+          "params": [
+            "filename",
+            "print",
+            "host",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "insert",
+          "params": [
+            "print",
+            "host",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "drop",
+          "params": [
+            "filename",
+            "host",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 5
+        },
+        {
+          "name": "relist",
+          "params": [
+            "id",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 28
+        }
+      ],
+      "classes": [
+        {
+          "name": "GalleryLive",
+          "methods": [
+            "apply",
+            "apply",
+            "replace",
+            "insert",
+            "drop",
+            "relist"
+          ],
+          "properties": [
+            "echo",
+            "relists"
+          ],
+          "exported": true,
+          "lineCount": 143
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "echo",
+        "relists",
+        "apply",
+        "relist",
+        "GalleryLive"
+      ],
+      "totalLines": 158,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryActions+Export.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Export.swift",
+      "contentHash": "2e01e41ae9108f935e9caa3bafb51a53d0dad920b6398d4cd91084a9be3ce1ad",
+      "functions": [
+        {
+          "name": "exportFormats",
+          "params": [
+            "entry"
+          ],
+          "returnType": "[String]",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "meshExports",
+          "params": [
+            "entry"
+          ],
+          "returnType": "MeshExport.Split",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "meshGeometry",
+          "params": [
+            "entry",
+            "format"
+          ],
+          "returnType": "MeshExportGeometry?",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "meshGeometryCapabilities",
+          "params": [
+            "entry"
+          ],
+          "returnType": "MeshExportGeometryCapabilities?",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "export",
+          "params": [
+            "entry",
+            "format"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "requestExport",
+          "params": [
+            "entry",
+            "format",
+            "bounds"
+          ],
+          "exported": true,
+          "lineCount": 19
+        },
+        {
+          "name": "requestTurntable",
+          "params": [
+            "entry",
+            "bounds"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "export",
+          "params": [
+            "entry",
+            "request"
+          ],
+          "exported": true,
+          "lineCount": 33
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryActions",
+          "methods": [
+            "exportFormats",
+            "meshExports",
+            "meshGeometry",
+            "meshGeometryCapabilities",
+            "export",
+            "requestExport",
+            "requestTurntable",
+            "export"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 107
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "exportFormats",
+        "meshExports",
+        "meshGeometry",
+        "meshGeometryCapabilities",
+        "export",
+        "requestExport",
+        "requestTurntable",
+        "export"
+      ],
+      "totalLines": 114,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryActions+Files.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Files.swift",
+      "contentHash": "34c1a3b81a9c747b0a0afc6d4bdb17d1df5908ddc50ca406f9515d83d4489139",
+      "functions": [
+        {
+          "name": "files",
+          "params": [
+            "entries"
+          ],
+          "returnType": "[(url: URL, title: String)]",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "quickLook",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 23
+        },
+        {
+          "name": "save",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 29
+        },
+        {
+          "name": "saveAll",
+          "params": [
+            "entries",
+            "folder"
+          ],
+          "exported": true,
+          "lineCount": 31
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryActions",
+          "methods": [
+            "files",
+            "quickLook",
+            "save",
+            "saveAll"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 121
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "files",
+        "quickLook",
+        "save",
+        "saveAll"
+      ],
+      "totalLines": 130,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryActions.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+      "contentHash": "52a48a92da464280d539031cfc7410ef2afd544e4ccea020268b526365542999",
+      "functions": [
+        {
+          "name": "toggleFavorite",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "setTag",
+          "params": [
+            "tag",
+            "adding",
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "moveToTrash",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "restore",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "reload",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "copy",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "playableURL",
+          "params": [
+            "entry"
+          ],
+          "returnType": "URL?",
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "data",
+          "params": [
+            "entry"
+          ],
+          "returnType": "Data?",
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryActions",
+          "methods": [
+            "toggleFavorite",
+            "setTag",
+            "moveToTrash",
+            "restore",
+            "reload",
+            "copy",
+            "playableURL",
+            "data"
+          ],
+          "properties": [
+            "hosts",
+            "library",
+            "reuse",
+            "useAsSource",
+            "addAsReference",
+            "confirmDestruction",
+            "materializer",
+            "upscales",
+            "collectionAction",
+            "meshExport",
+            "imports"
+          ],
+          "exported": true,
+          "lineCount": 131
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        },
+        {
+          "source": "UniformTypeIdentifiers",
+          "specifiers": [
+            "UniformTypeIdentifiers"
+          ]
+        }
+      ],
+      "exports": [
+        "hosts",
+        "library",
+        "reuse",
+        "useAsSource",
+        "addAsReference",
+        "confirmDestruction",
+        "materializer",
+        "upscales",
+        "collectionAction",
+        "meshExport",
+        "imports",
+        "toggleFavorite",
+        "setTag",
+        "moveToTrash",
+        "restore",
+        "reload",
+        "copy",
+        "playableURL",
+        "data",
+        "LibraryActions"
+      ],
+      "totalLines": 139,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryMutations+Wire.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMutations+Wire.swift",
+      "contentHash": "aa7fc7a0a1fce7ccd2659bf933c61e376d0c92a365918e6c15860d97508cfaa4",
+      "functions": [
+        {
+          "name": "attempt",
+          "params": [
+            "entry",
+            "host",
+            "store"
+          ],
+          "returnType": "Error?",
+          "exported": true,
+          "lineCount": 46
+        },
+        {
+          "name": "send",
+          "params": [
+            "entry",
+            "client"
+          ],
+          "exported": false,
+          "lineCount": 10
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryMutations",
+          "methods": [
+            "attempt",
+            "send"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 65
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "attempt"
+      ],
+      "totalLines": 73,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryMutations.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryMutations.swift",
+      "contentHash": "6ba830ce7fce48b7571d140968bdd44522eb448c547814034b0f2cb12fb9ea74",
+      "functions": [
+        {
+          "name": "send",
+          "params": [
+            "edit",
+            "store"
+          ],
+          "returnType": "[String]",
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "drain",
+          "params": [
+            "host",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 21
+        },
+        {
+          "name": "drainOnce",
+          "params": [
+            "host",
+            "store"
+          ],
+          "returnType": "Bool",
+          "exported": false,
+          "lineCount": 38
+        },
+        {
+          "name": "replayPending",
+          "params": [
+            "host",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "settleProgress",
+          "params": [
+            "entry"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "destination",
+          "params": [
+            "entry"
+          ],
+          "returnType": "Destination?",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "rejectStale",
+          "params": [
+            "entry",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "updateProgress",
+          "params": [
+            "retrying"
+          ],
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "finishProgress",
+          "params": [],
+          "exported": false,
+          "lineCount": 5
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryMutations",
+          "methods": [
+            "send",
+            "drain",
+            "drainOnce",
+            "replayPending",
+            "settleProgress",
+            "destination",
+            "rejectStale",
+            "updateProgress",
+            "finishProgress"
+          ],
+          "properties": [
+            "outbox",
+            "draining",
+            "destinations",
+            "progress",
+            "targetCount",
+            "settledCount"
+          ],
+          "exported": true,
+          "lineCount": 155
+        },
+        {
+          "name": "Destination",
+          "methods": [],
+          "properties": [
+            "host",
+            "client"
+          ],
+          "exported": true,
+          "lineCount": 4
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "outbox",
+        "progress",
+        "send",
+        "replayPending",
+        "settleProgress",
+        "destination",
+        "rejectStale",
+        "LibraryMutations",
+        "host",
+        "client",
+        "Destination"
+      ],
+      "totalLines": 172,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryPane+BulkStatus.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryPane+BulkStatus.swift",
+      "contentHash": "dcd593981f822b181e2456a9f5449e04de701a5bbc9155a0b9e71b94641af625",
+      "functions": [
+        {
+          "name": "bulkStatusRow",
+          "params": [
+            "message",
+            "controls"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 12
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryPane",
+          "methods": [
+            "bulkStatusRow"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 14
+        }
+      ],
+      "imports": [
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "bulkStatusRow"
+      ],
+      "totalLines": 17,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore+Bulk.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Bulk.swift",
+      "contentHash": "38ac0df9cd2bd12f5232ae172fe47da122b8e45eae91cd0fb02cde7ee0767032",
+      "functions": [
+        {
+          "name": "beginBulkActivity",
+          "params": [
+            "message"
+          ],
+          "returnType": "UUID",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "updateBulkActivity",
+          "params": [
+            "id",
+            "message"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "endBulkActivity",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 1
+        },
+        {
+          "name": "runBulk",
+          "params": [
+            "action",
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 76
+        },
+        {
+          "name": "runEmptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 37
+        },
+        {
+          "name": "reconcileBulk",
+          "params": [
+            "host",
+            "client"
+          ],
+          "returnType": "Bool",
+          "exported": false,
+          "lineCount": 29
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryStore",
+          "methods": [
+            "beginBulkActivity",
+            "updateBulkActivity",
+            "endBulkActivity",
+            "runBulk",
+            "runEmptyTrash",
+            "reconcileBulk"
+          ],
+          "properties": [
+            "bulkBatchSize"
+          ],
+          "exported": false,
+          "lineCount": 165
+        },
+        {
+          "name": "BulkRemoval",
+          "methods": [],
+          "properties": [
+            "trash",
+            "restore",
+            "delete"
+          ],
+          "exported": true,
+          "lineCount": 3
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "bulkBatchSize",
+        "beginBulkActivity",
+        "updateBulkActivity",
+        "endBulkActivity",
+        "runBulk",
+        "runEmptyTrash",
+        "BulkRemoval"
+      ],
+      "totalLines": 171,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore+Editing.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Editing.swift",
+      "contentHash": "81ba5afb561e1bfe6c667ce63b68b956860546ec15e1fd86dc731f3f9773ece6",
+      "functions": [
+        {
+          "name": "apply",
+          "params": [
+            "edit"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "mutate",
+          "params": [
+            "edit"
+          ],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "collectionID",
+          "params": [
+            "change",
+            "hostID"
+          ],
+          "returnType": "String?",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "reloadCollections",
+          "params": [],
+          "exported": true,
+          "lineCount": 20
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryStore",
+          "methods": [
+            "apply",
+            "mutate",
+            "collectionID",
+            "reloadCollections"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 72
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "apply",
+        "mutate",
+        "collectionID",
+        "reloadCollections"
+      ],
+      "totalLines": 82,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+      "contentHash": "55ab20127fbccb573aae1e50d81a2566df9b47e3e8a430050f5210b9700e7428",
+      "functions": [
+        {
+          "name": "refreshTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 29
+        },
+        {
+          "name": "withCopies",
+          "params": [
+            "entries"
+          ],
+          "returnType": "[LibraryEntry]",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "setFavorite",
+          "params": [
+            "favorite",
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "setTag",
+          "params": [
+            "tag",
+            "adding",
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "setTitle",
+          "params": [
+            "title",
+            "entry"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "moveToTrash",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "restore",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "deleteForever",
+          "params": [
+            "entries"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "emptyTrash",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryStore",
+          "methods": [
+            "refreshTrash",
+            "withCopies",
+            "setFavorite",
+            "setTag",
+            "setTitle",
+            "moveToTrash",
+            "restore",
+            "deleteForever",
+            "emptyTrash"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 90
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "refreshTrash",
+        "withCopies",
+        "setFavorite",
+        "setTag",
+        "setTitle",
+        "moveToTrash",
+        "restore",
+        "deleteForever",
+        "emptyTrash"
+      ],
+      "totalLines": 97,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryStore+Shelves.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryStore+Shelves.swift",
+      "contentHash": "53929c4f7f869738b8761f2142fdf3bb8366ca807af6e89e5e507370155aaf41",
+      "functions": [
+        {
+          "name": "createShelf",
+          "params": [
+            "name",
+            "hostID"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "renameShelf",
+          "params": [
+            "shelf",
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "deleteShelf",
+          "params": [
+            "shelf"
+          ],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "setShelfHidden",
+          "params": [
+            "shelf",
+            "hidden"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "runShelfOperation",
+          "params": [
+            "shelf",
+            "progress",
+            "errorVerb",
+            "send"
+          ],
+          "exported": false,
+          "lineCount": 35
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension LibraryStore",
+          "methods": [
+            "createShelf",
+            "renameShelf",
+            "deleteShelf",
+            "setShelfHidden",
+            "runShelfOperation"
+          ],
+          "properties": [],
+          "exported": false,
+          "lineCount": 80
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "createShelf",
+        "renameShelf",
+        "deleteShelf",
+        "setShelfHidden"
+      ],
+      "totalLines": 87,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/LibraryTags.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/LibraryTags.swift",
+      "contentHash": "f1bf35859f80374a40794df90139907078978dae565cbe85d4ccc0dd7f81ac1a",
+      "functions": [
+        {
+          "name": "prune",
+          "params": [
+            "live"
+          ],
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "rename",
+          "params": [
+            "name",
+            "newName",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 49
+        },
+        {
+          "name": "delete",
+          "params": [
+            "name",
+            "store"
+          ],
+          "exported": true,
+          "lineCount": 35
+        },
+        {
+          "name": "retag",
+          "params": [
+            "name",
+            "replacement",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "reload",
+          "params": [
+            "destinations",
+            "store"
+          ],
+          "exported": false,
+          "lineCount": 20
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryTags",
+          "methods": [
+            "prune",
+            "rename",
+            "delete",
+            "retag",
+            "reload"
+          ],
+          "properties": [
+            "perHost",
+            "counts"
+          ],
+          "exported": true,
+          "lineCount": 160
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "perHost",
+        "counts",
+        "prune",
+        "rename",
+        "delete",
+        "LibraryTags"
+      ],
+      "totalLines": 174,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/PrintImport.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/PrintImport.swift",
+      "contentHash": "ad2501e2d7ba8a747f148694f4a913725f97b63498f9998e6abe8050108d2073",
+      "functions": [
+        {
+          "name": "chooseFiles",
+          "params": [
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "send",
+          "params": [
+            "urls",
+            "host"
+          ],
+          "exported": true,
+          "lineCount": 61
+        },
+        {
+          "name": "report",
+          "params": [
+            "unreadable",
+            "host"
+          ],
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "pixelSize",
+          "params": [
+            "url"
+          ],
+          "returnType": "(width: Int, height: Int)",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "version",
+          "params": [
+            "host"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 4
+        }
+      ],
+      "classes": [
+        {
+          "name": "PrintImport",
+          "methods": [
+            "chooseFiles",
+            "send",
+            "report",
+            "pixelSize",
+            "version"
+          ],
+          "properties": [
+            "hosts",
+            "library"
+          ],
+          "exported": true,
+          "lineCount": 119
+        }
+      ],
+      "imports": [
+        {
+          "source": "AppKit",
+          "specifiers": [
+            "AppKit"
+          ]
+        },
+        {
+          "source": "ImageIO",
+          "specifiers": [
+            "ImageIO"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "UniformTypeIdentifiers",
+          "specifiers": [
+            "UniformTypeIdentifiers"
+          ]
+        }
+      ],
+      "exports": [
+        "hosts",
+        "library",
+        "chooseFiles",
+        "send",
+        "PrintImport"
+      ],
+      "totalLines": 134,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/PrintMaterializer+Budget.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/PrintMaterializer+Budget.swift",
+      "contentHash": "0dd61001c5038f7abe18fc09eeb415cd0fbd9003f5d9360ba9305f12737fd605",
+      "functions": [
+        {
+          "name": "contents",
+          "params": [
+            "root"
+          ],
+          "returnType": "[CacheBudget.File]",
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "enforceBudget",
+          "params": [
+            "key"
+          ],
+          "exported": true,
+          "lineCount": 22
+        },
+        {
+          "name": "noteIfTooLarge",
+          "params": [
+            "file",
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "noteIfTooLargeOffMain",
+          "params": [
+            "file",
+            "name"
+          ],
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "touch",
+          "params": [
+            "file"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "touchOffMain",
+          "params": [
+            "file"
+          ],
+          "exported": true,
+          "lineCount": 6
+        }
+      ],
+      "classes": [
+        {
+          "name": "extension PrintMaterializer",
+          "methods": [
+            "contents",
+            "enforceBudget",
+            "noteIfTooLarge",
+            "noteIfTooLargeOffMain",
+            "touch",
+            "touchOffMain"
+          ],
+          "properties": [
+            "contents",
+            "usedBytes"
+          ],
+          "exported": false,
+          "lineCount": 125
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "contents",
+        "usedBytes",
+        "enforceBudget",
+        "noteIfTooLarge",
+        "noteIfTooLargeOffMain",
+        "touch",
+        "touchOffMain"
+      ],
+      "totalLines": 130,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Library/PrintMaterializer.swift": {
+      "filePath": "apps/macos/Sources/Mold/Library/PrintMaterializer.swift",
+      "contentHash": "b813cb52dccc0b482f9c714c0e64af973d0c008d6820f2ab7bddf09a8dd12d94",
+      "functions": [
+        {
+          "name": "PrintMaterializer.init",
+          "params": [
+            "root",
+            "inUse"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "url",
+          "params": [
+            "entry",
+            "name",
+            "fetch"
+          ],
+          "returnType": "URL?",
+          "exported": true,
+          "lineCount": 73
+        },
+        {
+          "name": "purge",
+          "params": [],
+          "exported": true,
+          "lineCount": 4
+        }
+      ],
+      "classes": [
+        {
+          "name": "CacheWriteResult",
+          "methods": [],
+          "properties": [
+            "written",
+            "unsafeDestination",
+            "failed"
+          ],
+          "exported": false,
+          "lineCount": 5
+        },
+        {
+          "name": "PrintMaterializer",
+          "methods": [
+            "init",
+            "url",
+            "purge"
+          ],
+          "properties": [
+            "defaultCapMegabytes",
+            "capKey",
+            "cacheRoot",
+            "note",
+            "inFlight",
+            "inFlightKeys",
+            "inUse",
+            "defaultRoot",
+            "capBytes"
+          ],
+          "exported": true,
+          "lineCount": 134
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        }
+      ],
+      "exports": [
+        "defaultCapMegabytes",
+        "capKey",
+        "cacheRoot",
+        "note",
+        "inFlightKeys",
+        "inUse",
+        "PrintMaterializer.init",
+        "capBytes",
+        "url",
+        "purge",
+        "PrintMaterializer"
+      ],
+      "totalLines": 156,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Sources/Mold/Shell/LibraryCommands.swift": {
+      "filePath": "apps/macos/Sources/Mold/Shell/LibraryCommands.swift",
+      "contentHash": "0d6a317500091b9176b1af0795555129088374583f7049af7f631aa5d61e5869",
+      "functions": [
+        {
+          "name": "body",
+          "params": [
+            "content"
+          ],
+          "returnType": "some View",
+          "exported": true,
+          "lineCount": 18
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryCommands",
+          "methods": [],
+          "properties": [
+            "library",
+            "body"
+          ],
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "LibraryShortcuts",
+          "methods": [
+            "body"
+          ],
+          "properties": [
+            "selection"
+          ],
+          "exported": false,
+          "lineCount": 22
+        },
+        {
+          "name": "ImportCommands",
+          "methods": [],
+          "properties": [
+            "importer",
+            "body"
+          ],
+          "exported": false,
+          "lineCount": 12
+        }
+      ],
+      "imports": [
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "SwiftUI",
+          "specifiers": [
+            "SwiftUI"
+          ]
+        }
+      ],
+      "exports": [
+        "body",
+        "LibraryCommands"
+      ],
+      "totalLines": 76,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/LibraryBulkActivityTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/LibraryBulkActivityTests.swift",
+      "contentHash": "600d7d1c71ebece5e226b2f4ffe1ab4a7b69014fed31675f02674f79c59832d2",
+      "functions": [
+        {
+          "name": "machine",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "optimisticEditReportsItsTargetCountUntilTheOutboxSettles",
+          "params": [],
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "optimisticEditNeverRetargetsAnEditedHostAfterItsReply",
+          "params": [],
+          "exported": true,
+          "lineCount": 26
+        },
+        {
+          "name": "independentActivitiesDoNotHideEachOther",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        },
+        {
+          "name": "importStaysVisibleAndDiscardsAReplyAfterItsHostIsRemoved",
+          "params": [],
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "globalTagProgressRejectsAnOldHostsReplyAndReload",
+          "params": [],
+          "exported": true,
+          "lineCount": 21
+        },
+        {
+          "name": "bulkSaveReportsEachPrintUntilDiskCopiesFinish",
+          "params": [],
+          "exported": true,
+          "lineCount": 31
+        },
+        {
+          "name": "fleetShelfProgressDoesNotRetargetAnEditedHost",
+          "params": [],
+          "exported": true,
+          "lineCount": 30
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryBulkActivityTests",
+          "methods": [
+            "machine",
+            "optimisticEditReportsItsTargetCountUntilTheOutboxSettles",
+            "optimisticEditNeverRetargetsAnEditedHostAfterItsReply",
+            "independentActivitiesDoNotHideEachOther",
+            "importStaysVisibleAndDiscardsAReplyAfterItsHostIsRemoved",
+            "globalTagProgressRejectsAnOldHostsReplyAndReload",
+            "bulkSaveReportsEachPrintUntilDiskCopiesFinish",
+            "fleetShelfProgressDoesNotRetargetAnEditedHost"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 171
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "optimisticEditReportsItsTargetCountUntilTheOutboxSettles",
+        "optimisticEditNeverRetargetsAnEditedHostAfterItsReply",
+        "independentActivitiesDoNotHideEachOther",
+        "importStaysVisibleAndDiscardsAReplyAfterItsHostIsRemoved",
+        "globalTagProgressRejectsAnOldHostsReplyAndReload",
+        "bulkSaveReportsEachPrintUntilDiskCopiesFinish",
+        "fleetShelfProgressDoesNotRetargetAnEditedHost",
+        "LibraryBulkActivityTests"
+      ],
+      "totalLines": 178,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/LibraryBulkTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/LibraryBulkTests.swift",
+      "contentHash": "0de7a59e972d5980a1fc2a5cd6d9e346482382ce19acbfc3b37d0a5c662ba220",
+      "functions": [
+        {
+          "name": "bench",
+          "params": [
+            "count"
+          ],
+          "returnType": "(LibraryStore, FakeBackend, MoldHost)",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "largeTrashUsesBoundedRequestsAndReconciles",
+          "params": [],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "statusIsVisibleWhileAwaitingAndStopFinishesCurrentBatch",
+          "params": [],
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "stoppingDoesNotProbeUntouchedMachines",
+          "params": [],
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "failedChunkKeepsAcknowledgedWorkAndReadsHostTruth",
+          "params": [],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "removedHostCannotReceiveStaleResponseOrNextBatch",
+          "params": [],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "replacedHostDiscardsOldReply",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "ownBulkEventsDoNotRebuildPerPrintButUnrelatedEventsStillApply",
+          "params": [],
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "emptyTrashUsesTrashOnlyEndpoint",
+          "params": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "emptyTrashNeverUsesStaleNamesToDeleteLivePrints",
+          "params": [],
+          "exported": true,
+          "lineCount": 11
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryBulkTests",
+          "methods": [
+            "bench",
+            "largeTrashUsesBoundedRequestsAndReconciles",
+            "statusIsVisibleWhileAwaitingAndStopFinishesCurrentBatch",
+            "stoppingDoesNotProbeUntouchedMachines",
+            "failedChunkKeepsAcknowledgedWorkAndReadsHostTruth",
+            "removedHostCannotReceiveStaleResponseOrNextBatch",
+            "replacedHostDiscardsOldReply",
+            "ownBulkEventsDoNotRebuildPerPrintButUnrelatedEventsStillApply",
+            "emptyTrashUsesTrashOnlyEndpoint",
+            "emptyTrashNeverUsesStaleNamesToDeleteLivePrints"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 135
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "largeTrashUsesBoundedRequestsAndReconciles",
+        "statusIsVisibleWhileAwaitingAndStopFinishesCurrentBatch",
+        "stoppingDoesNotProbeUntouchedMachines",
+        "failedChunkKeepsAcknowledgedWorkAndReadsHostTruth",
+        "removedHostCannotReceiveStaleResponseOrNextBatch",
+        "replacedHostDiscardsOldReply",
+        "ownBulkEventsDoNotRebuildPerPrintButUnrelatedEventsStillApply",
+        "emptyTrashUsesTrashOnlyEndpoint",
+        "emptyTrashNeverUsesStaleNamesToDeleteLivePrints",
+        "LibraryBulkTests"
+      ],
+      "totalLines": 141,
+      "hasStructuralAnalysis": true
+    },
+    "apps/macos/Tests/MoldTests/LibraryStoreFailureTests.swift": {
+      "filePath": "apps/macos/Tests/MoldTests/LibraryStoreFailureTests.swift",
+      "contentHash": "b0998bc6f6e6d17d4ea318e9ed46fb8784b2a73ba437d3bce073dfe07e0346e5",
+      "functions": [
+        {
+          "name": "host",
+          "params": [
+            "name"
+          ],
+          "returnType": "MoldHost",
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "oneMachineRefusingTheTrashDoesNotResurrectAnotherMachinesRows",
+          "params": [],
+          "exported": true,
+          "lineCount": 27
+        },
+        {
+          "name": "deletingATagAMachineRefusesIsReported",
+          "params": [],
+          "exported": true,
+          "lineCount": 13
+        }
+      ],
+      "classes": [
+        {
+          "name": "LibraryStoreFailureTests",
+          "methods": [
+            "host",
+            "oneMachineRefusingTheTrashDoesNotResurrectAnotherMachinesRows",
+            "deletingATagAMachineRefusesIsReported"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 53
+        }
+      ],
+      "imports": [
+        {
+          "source": "Foundation",
+          "specifiers": [
+            "Foundation"
+          ]
+        },
+        {
+          "source": "MoldClient",
+          "specifiers": [
+            "MoldClient"
+          ]
+        },
+        {
+          "source": "Testing",
+          "specifiers": [
+            "Testing"
+          ]
+        },
+        {
+          "source": "Mold",
+          "specifiers": [
+            "Mold"
+          ]
+        }
+      ],
+      "exports": [
+        "oneMachineRefusingTheTrashDoesNotResurrectAnotherMachinesRows",
+        "deletingATagAMachineRefusesIsReported",
+        "LibraryStoreFailureTests"
+      ],
+      "totalLines": 64,
+      "hasStructuralAnalysis": true
     }
   }
 }

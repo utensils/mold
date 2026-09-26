@@ -79,17 +79,34 @@ struct LibraryPane: View {
                                     query: resolved, selection: selection.items)
         return watched(showing)
             .safeAreaInset(edge: .bottom) {
-                if let progress = library.localSaveProgress {
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text(progress)
-                        Spacer()
-                        Button("Stop After Current Transfers") { library.localSaveStopRequested = true }
-                            .disabled(library.localSaveStopRequested)
+                VStack(spacing: 0) {
+                    if let progress = library.localSaveProgress {
+                        bulkStatusRow(progress) {
+                            Button("Stop After Current Transfers") { library.localSaveStopRequested = true }
+                                .disabled(library.localSaveStopRequested)
+                        }
                     }
-                    .padding(12)
-                    .background(.bar)
+                    if let progress = library.bulkProgress {
+                        bulkStatusRow(progress) {
+                            Button(library.bulkEmptying ? "Stop After Current Machine" : "Stop After Current Batch") { library.bulkStopRequested = true }
+                                .disabled(library.bulkStopRequested)
+                        }
+                    }
+                    if let progress = library.mutations.progress {
+                        bulkStatusRow(progress) { EmptyView() }
+                    }
+                    ForEach(library.bulkActivities.keys.sorted(by: { $0.uuidString < $1.uuidString }), id: \.self) { id in
+                        bulkStatusRow(library.bulkActivities[id] ?? "Working…") { EmptyView() }
+                    }
+                    if let result = library.bulkResult, !library.bulkRunning {
+                        HStack {
+                            Text(result)
+                            Spacer()
+                            Button("Dismiss") { library.bulkResult = nil }
+                        }.padding(12).background(.bar)
+                    }
                 }
+
             }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
