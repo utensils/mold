@@ -11,6 +11,10 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-09-26
+
+- **Responsive native Library bulk operations.** Native macOS Studio now shows status for Library bulk operations, sends trash/restore/permanent deletion in bounded batches, lets you stop after the current batch, and reconciles partial or uncertain results instead of restoring stale rows. Bulk trash shares one durable archive commit per server chunk; gallery reads can advance between chunks or individual restore/purge items, and disconnects cannot leave blocking filesystem work outside its publication lock.
+
 ## [0.32.0] - 2026-09-25
 
 - **Mold Studio for macOS starts its engine at launch.** This Mac's engine now starts when the app opens instead of waiting for Settings ▸ This Mac ▸ Start Engine; a new "Start the engine when Mold opens" setting turns that off. The sidebar shows This Mac as Starting… until it answers.
@@ -5982,7 +5986,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.32.1...HEAD
+[0.32.1]: https://github.com/utensils/mold/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1
