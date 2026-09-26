@@ -11,6 +11,56 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-25
+
+- **Mold Studio for macOS starts its engine at launch.** This Mac's engine now starts when the app opens instead of waiting for Settings ▸ This Mac ▸ Start Engine; a new "Start the engine when Mold opens" setting turns that off. The sidebar shows This Mac as Starting… until it answers.
+- **One tile per print in the macOS Library.** A print saved to This Mac with Save Locally or Sync All no longer appears twice. Copies merge the way the desktop app merges them, the tile's badge names every machine holding it, and favourites, tags, titles, collections and the trash reach every copy.
+- **Empty the macOS queue for real, on every machine.** Empty Queue now clears held jobs too (the bulk route left them all behind), and the Queue and Empty Queue menus gain All Machines items for Empty, Pause and Resume.
+- **Build commits beside machine versions.** The macOS machine list reads `0.31.0 (9c81f69)` rather than a bare release number, so a stale engine is visible; a machine's page adds its build date. Library tiles no longer show the prompt as a hover tooltip.
+- **`DELETE /api/queue/{id}?only_held=true`.** Cancels a queue job only while it is held, answering `409 QUEUE_JOB_NOT_HELD` and changing nothing otherwise, so a client clearing holds can never stop a render that a Retry just started. The macOS app's Empty Queue uses it.
+- **The server answers in well under a second on a large gallery.** Startup
+  gallery recovery read the multi-megabyte archive checkpoint one byte per
+  system call, parsed it four times, and loaded the whole authority twice
+  before binding — about 7.4 s on a 3,716-print gallery on an external disk,
+  now about 0.3 s. A gallery whose files were copied or restored (so their
+  inodes moved) was also re-hashed in full on every boot, because the
+  re-verified file facts were never saved; they are now committed once, so the
+  next start is stat-only again. Each recovery step logs its `elapsed_ms` at
+  debug level.
+- **Sync All to This Mac.** The macOS Library now copies remote pictures, clips, 3D prints, audio, and collections, including empty collections, in one click. It preserves media and organization, shows progress, and safely resumes on another click.
+- **Faster, reliable Mac Library saves.** Bulk saving remote pictures now preserves their recipes and collections, shows clear progress and errors, and can be stopped after current transfers. Imported copies no longer appear as newly rendered prints, and Escape clears a Library selection.
+- **Native Library host actions.** Filter prints by machine, save selected remote pictures into This Mac’s Library with their original media and recipe, and scope trash actions to the machine holding each copy.
+- Linux clients can install and update Mold without an NVIDIA GPU or CUDA libraries. Stable and nightly releases now include a GPU-free CLI archive; the installer selects it when no GPU is available and supports `MOLD_BACKEND=cpu` for explicit remote-only use.
+- `mold-ai-bin` on AUR now installs the GPU-free CLI instead of the CUDA-linked SM89 archive, avoiding missing `libcudart.so.12` at startup. Existing users needing local GPU generation should switch to the `mold-ai` / `mold-ai-git` source packages or a matching CUDA release archive.
+- **Reuse the native macOS app when opening notifications.** Mold Studio now
+  declares its single-instance launch policy, retains notification clicks during
+  startup, and brings its main window forward on the selected print or Queue.
+- **Keep Machines selected on the macOS overview.** The sidebar now highlights
+  Machines until a specific machine is opened, instead of falling back to the
+  default machine while the fleet overview is showing.
+- **Align native versions and load albums at startup.** Native macOS builds now share the workspace release version and desktop nightly numbering. Every main commit schedules a nightly candidate so a stale build cannot leave the channel without a replacement. Library albums load independently of slow image and trash listings, including when the app opens on Models.
+- **Credit native app contributors.** The native About panel now credits James Brink and Jeffrey Dilley and includes the same description, license, and project link as the Tauri desktop app.
+- **Apply preference resets immediately.** Resetting native preferences now clears the in-memory default machine before the action returns.
+- **Speed up Qwen Image 2.1 on Mac.** Use fused Metal attention, fewer
+  normalization/rotary copies, compact cached-step modulation, and a BF16
+  denoiser while keeping the encoder and VAE in F32. The precision change can
+  alter fine details for a fixed seed. `MOLD_QWEN_IMAGE21_DTYPE=f32` restores
+  full denoiser precision; combine it with `MOLD_ATTN=math` for the original
+  Metal computation path. Other families and CPU/CUDA precision are unchanged.
+- **Complete native macOS menus and update settings.** General settings now
+  offers Stable/Nightly selection and Check Now in release builds, and explains
+  update availability in development builds. Show Queue works from every pane,
+  navigation reopens the main window, queue clearing names each machine, and
+  menu actions follow the current job, model, or print selection.
+  The Library sidebar loads collections and counts at startup without requiring
+  a visit to All Prints.
+- **The first `queued` progress event no longer counts the job itself.** A
+  request submitted behind one running generation could be told it was `#2 in
+line` and then re-announced as `#1`: the seed read the live-job count, and
+  when the durable queue feeder registered the new job before the handler
+  read it, the job was counted as a job ahead of itself. The seed now reads
+  the job's own place in the registry when it is already there.
+
 ## [0.31.0] - 2026-09-21
 
 - **AUR packages no longer execute the CUDA-linked binary to generate shell
@@ -5932,7 +5982,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/utensils/mold/compare/v0.29.0...v0.30.0
