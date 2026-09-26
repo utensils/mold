@@ -60,6 +60,11 @@ final class GalleryLive {
 
         switch change {
         case let .updated(filename, row), let .restored(filename, row):
+            if store.bulkTargets.contains(PrintID(host: host, filename: filename)) {
+                store.etags[host] = nil
+                store.trashEtags[host] = nil
+                return
+            }
             if let row { replace(filename, with: row, on: host, in: store) } else {
                 Task { await relists.run(host) { await relist(host, in: store) } }
             }
@@ -74,6 +79,11 @@ final class GalleryLive {
         case let .removed(filename), let .trashed(filename):
             // Both take the print out of the live listing. The trash is its
             // own scope with its own ETag, so it re-reads when it is opened.
+            if store.bulkTargets.contains(PrintID(host: host, filename: filename)) {
+                store.etags[host] = nil
+                store.trashEtags[host] = nil
+                return
+            }
             drop(filename, on: host, in: store)
             store.trashEtags.removeAll()
         case .collectionsChanged:
@@ -104,6 +114,7 @@ final class GalleryLive {
     }
 
     private func drop(_ filename: String, on host: MoldHost.ID, in store: LibraryStore) {
+        guard (store.perHost[host] ?? []).contains(where: { $0.print.filename == filename }) else { return }
         store.perHost[host] = (store.perHost[host] ?? []).filter { $0.print.filename != filename }
         store.rebuild()
     }

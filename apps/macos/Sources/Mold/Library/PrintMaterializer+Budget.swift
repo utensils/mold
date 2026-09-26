@@ -22,11 +22,15 @@ extension PrintMaterializer {
     /// A folder with nothing measurable in it -- what a failed write leaves
     /// behind -- is size 0 rather than absent, so eviction can still see it.
     var contents: [CacheBudget.File] {
+        Self.contents(at: cacheRoot)
+    }
+
+    nonisolated private static func contents(at root: URL) -> [CacheBudget.File] {
         let manager = FileManager.default
         let keys: Set<URLResourceKey> = [.contentAccessDateKey, .contentModificationDateKey,
                                          .fileSizeKey]
         let folders = (try? manager.contentsOfDirectory(
-            at: cacheRoot, includingPropertiesForKeys: Array(keys))) ?? []
+            at: root, includingPropertiesForKeys: Array(keys))) ?? []
         return folders.map { folder in
             let files = (try? manager.contentsOfDirectory(
                 at: folder, includingPropertiesForKeys: Array(keys))) ?? []
@@ -97,10 +101,29 @@ extension PrintMaterializer {
             + "so Mold cannot keep a copy. Settings ▸ General sets the cap."
     }
 
+    func noteIfTooLargeOffMain(_ file: URL, named name: String) async {
+        let bytes = await Task.detached(priority: .utility) {
+            (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        }.value
+        guard bytes > capBytes else { return }
+        let size = ByteCountFormatStyle().format(Int64(bytes))
+        let cap = ByteCountFormatStyle().format(Int64(capBytes))
+        note = "“\(name)” is \(size) and the media cache holds \(cap), "
+            + "so Mold cannot keep a copy. Settings ▸ General sets the cap."
+    }
+
     /// Marks a file as used now, so the least-recently-used rule has something
     /// to go on. macOS does not reliably update access times by itself.
     func touch(_ file: URL) {
         try? FileManager.default.setAttributes([.modificationDate: Date()],
                                                ofItemAtPath: file.path)
+    }
+
+
+    func touchOffMain(_ file: URL) async {
+        await Task.detached(priority: .utility) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()],
+                                                   ofItemAtPath: file.path)
+        }.value
     }
 }

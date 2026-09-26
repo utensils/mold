@@ -29,6 +29,8 @@ struct LibraryStoreFailureTests {
 
         let willingEntry = LibraryEntry(host: willing, print: FakeFixtures.print("a.png"))
         let refusingEntry = LibraryEntry(host: refusing, print: FakeFixtures.print("b.png"))
+        willingBackend.prints = [willingEntry.print]
+        refusingBackend.prints = [refusingEntry.print]
         library.perHost[willing.id] = [willingEntry]
         library.perHost[refusing.id] = [refusingEntry]
         library.rebuild()

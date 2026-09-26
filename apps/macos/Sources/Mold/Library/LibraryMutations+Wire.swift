@@ -15,23 +15,33 @@ extension LibraryMutations {
     func attempt(
         _ entry: MutationOutbox.Entry, on host: MoldHost.ID, in store: LibraryStore
     ) async -> Error? {
-        guard let client = store.hosts.backend(for: host) else {
-            // The machine was removed. Its rows went with it.
-            outbox.failed(entry.id)
+        guard let destination = destination(for: entry),
+              store.hosts.host(host) == destination.host else {
+            await rejectStale(entry, in: store)
             return nil
         }
         do {
-            try await send(entry, to: client)
+            try await send(entry, to: destination.client)
+            guard store.hosts.host(host) == destination.host else {
+                await rejectStale(entry, in: store)
+                return nil
+            }
             outbox.succeeded(entry.id)
+            settleProgress(entry)
             store.undo.settled(entry: entry.id)
             store.hosts.succeeded(on: host)
             return nil
         } catch {
+            guard store.hosts.host(host) == destination.host else {
+                await rejectStale(entry, in: store)
+                return nil
+            }
             if (error as? MoldClientError)?.isTransient == true {
                 outbox.retry(entry.id)
             } else {
                 store.hosts.report(error, on: host, doing: entry.change.verb)
                 outbox.failed(entry.id)
+                settleProgress(entry)
                 // The inverse was registered synchronously, before anything
                 // was sent -- it has to be, or `UndoManager` files it on the
                 // undo stack instead of the redo one. The machine has now

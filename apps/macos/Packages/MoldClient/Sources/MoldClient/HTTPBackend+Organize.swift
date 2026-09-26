@@ -47,7 +47,10 @@ public extension HTTPBackend {
     /// Empties the trash now. Permanent, and the only call here that destroys
     /// anything.
     func emptyTrash() async throws {
-        try await delete("/api/gallery/trash")
+        var request = self.request("/api/gallery/trash")
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 300
+        _ = try await bytes(for: request)
     }
 }
 

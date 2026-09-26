@@ -28,8 +28,18 @@ extension LibraryActions {
     /// after downloading all of them.
     func quickLook(_ entries: [LibraryEntry]) {
         Task {
+            let activity = entries.count > 1
+                ? library.beginBulkActivity("Preparing 0 of \(entries.count.formatted()) previews…")
+                : nil
+            defer { if let activity { library.endBulkActivity(activity) } }
             var files: [(url: URL, title: String)] = []
-            for entry in entries {
+            for (index, entry) in entries.enumerated() {
+                if let activity {
+                    library.updateBulkActivity(
+                        activity,
+                        "Preparing \((index + 1).formatted()) of \(entries.count.formatted()) previews…"
+                    )
+                }
                 if entry.print.isMesh {
                     if let poster = await meshPosterFile(for: entry) { files.append(poster) }
                 } else if let file = await self.files(for: [entry]).first {
@@ -57,8 +67,10 @@ extension LibraryActions {
                 // is what the person agreed to -- but a failure here is theirs
                 // to hear about, not something to swallow.
                 do {
-                    try? FileManager.default.removeItem(at: url)
-                    try FileManager.default.copyItem(at: source.url, to: url)
+                    try await Task.detached(priority: .utility) {
+                        try? FileManager.default.removeItem(at: url)
+                        try FileManager.default.copyItem(at: source.url, to: url)
+                    }.value
                 } catch {
                     hosts.report(error, on: first.hostID, doing: "save that print")
                 }
@@ -84,15 +96,28 @@ extension LibraryActions {
     /// case-insensitive volume APFS is by default: ten prints asked for, nine
     /// saved, no message.
     func saveAll(_ entries: [LibraryEntry], into folder: URL) async {
-        let existing = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        guard !entries.isEmpty else { return }
+        let activity = library.beginBulkActivity(
+            "Saving 0 of \(entries.count.formatted()) prints…"
+        )
+        defer { library.endBulkActivity(activity) }
+        let existing = await Task.detached(priority: .utility) {
+            (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        }.value
         var names = SaveNames(existing: existing)
-        for entry in entries {
+        for (index, entry) in entries.enumerated() {
+            library.updateBulkActivity(
+                activity,
+                "Saving \((index + 1).formatted()) of \(entries.count.formatted()) prints…"
+            )
             guard let source = await files(for: [entry]).first else { continue }
             // The person chose THIS folder and nothing above it.
             guard let destination = SafeFilename.url(names.claim(entry.print.filename),
                                                      in: folder) else { continue }
             do {
-                try FileManager.default.copyItem(at: source.url, to: destination)
+                try await Task.detached(priority: .utility) {
+                    try FileManager.default.copyItem(at: source.url, to: destination)
+                }.value
             } catch {
                 // A disk full, a read-only folder: silent before, through a
                 // `try?` that swallowed it whole.

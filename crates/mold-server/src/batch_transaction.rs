@@ -5502,6 +5502,163 @@ pub(crate) fn trash_committed_archive_filename(
     Ok(TrashArchiveDisposition::Moved)
 }
 
+/// Result of one bounded bulk move into the gallery trash.
+///
+/// `completed` is always an in-order prefix. `failure`, when present, names
+/// the first item after that prefix that could not be moved. An identity
+/// replacement is represented by `PreservedReplacement` at the end of
+/// `completed`: quarantining that name is itself a durable authority change,
+/// even though the caller must report a conflict rather than trashing it.
+pub(crate) struct TrashArchiveBatchOutcome {
+    pub(crate) completed: Vec<(String, TrashArchiveDisposition)>,
+    pub(crate) failure: Option<(String, anyhow::Error)>,
+}
+
+/// Move an in-order, bounded set of gallery files to trash with one authority
+/// commit.
+///
+/// The old bulk HTTP path called `trash_committed_archive_filename` once per
+/// print. On a v2 authority store that rewrote and synced the full gallery
+/// checkpoint for every selected print. This primitive keeps the exact same
+/// move-before-retirement crash invariant, but loads the index once and makes
+/// one durable authority commit for the successful prefix.
+pub(crate) fn trash_committed_archive_filenames(
+    output_dir: &Path,
+    filenames: &[String],
+    gate: &GalleryPublicationGate,
+) -> anyhow::Result<TrashArchiveBatchOutcome> {
+    for filename in filenames {
+        validate_component(filename, "gallery trash filename")?;
+    }
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let canonical_output_dir = bookkeeping.canonical_root().to_path_buf();
+    let output_dir = canonical_output_dir.as_path();
+    let mut index = gate.committed_archive_index_while_locked(output_dir, &bookkeeping)?;
+    let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
+        .context("gallery authority generation is missing")?;
+    let trash_dir = ensure_gallery_trash_dir(output_dir)?;
+    let mut completed = Vec::with_capacity(filenames.len());
+    let mut moved = Vec::with_capacity(filenames.len());
+    let mut exact_names = Vec::with_capacity(filenames.len());
+    let mut failure = None;
+    let mut authority_changed = false;
+
+    for filename in filenames {
+        let entry = index.entries.get(filename).cloned();
+        if let Some(entry) = entry.as_ref() {
+            match crate::gallery_authority::current_file_matches(output_dir, entry) {
+                Ok(true) => {}
+                Ok(false) => {
+                    index.quarantined_names.insert(filename.clone());
+                    exact_names.push(filename.clone());
+                    authority_changed = true;
+                    completed.push((
+                        filename.clone(),
+                        TrashArchiveDisposition::PreservedReplacement,
+                    ));
+                    break;
+                }
+                Err(error) => {
+                    failure = Some((filename.clone(), error));
+                    break;
+                }
+            }
+        }
+
+        let live_path = output_dir.join(filename);
+        let trash_path = trash_dir.join(filename);
+        if entry.is_none() && !live_path.is_file() && trash_path.is_file() {
+            // A crash may have moved an unarchived print before its DB flag
+            // was written. The single-file path treats this as NoArchive and
+            // lets the caller finish the tombstone/row projection; do not try
+            // to rename a live path that is intentionally absent.
+            completed.push((filename.clone(), TrashArchiveDisposition::NoArchive));
+            continue;
+        }
+        if fs::symlink_metadata(&trash_path).is_ok() {
+            failure = Some((
+                filename.clone(),
+                anyhow::anyhow!(
+                    "the gallery trash already holds {filename}; empty the trash or restore it first"
+                ),
+            ));
+            break;
+        }
+        if let Err(error) = fs::rename(&live_path, &trash_path).with_context(|| {
+            format!(
+                "moving {} to the gallery trash at {}",
+                live_path.display(),
+                trash_path.display()
+            )
+        }) {
+            failure = Some((filename.clone(), error));
+            break;
+        }
+        moved.push((live_path, trash_path));
+
+        let disposition = if let Some(entry) = entry {
+            index.entries.remove(filename);
+            index.quarantined_names.remove(filename);
+            index.retired_names.insert(filename.clone());
+            index.retired_entries.insert(filename.clone(), entry);
+            index
+                .retirement_epochs
+                .insert(filename.clone(), generation.saturating_add(1));
+            index.retirement_projection_epochs.remove(filename);
+            exact_names.push(filename.clone());
+            authority_changed = true;
+            TrashArchiveDisposition::Moved
+        } else {
+            TrashArchiveDisposition::NoArchive
+        };
+        completed.push((filename.clone(), disposition));
+    }
+
+    // Rename durability is shared by the chunk rather than paid twice for
+    // every child. The authority commit follows these syncs, preserving the
+    // move-before-retirement ordering of the single-file primitive.
+    if !moved.is_empty() {
+        if let Err(error) = sync_ordinary_gallery_directory(output_dir)
+            .and_then(|()| sync_ordinary_gallery_directory(&trash_dir))
+        {
+            for (live_path, trash_path) in moved.iter().rev() {
+                let _ = fs::rename(trash_path, live_path);
+            }
+            let _ = sync_ordinary_gallery_directory(output_dir);
+            let _ = sync_ordinary_gallery_directory(&trash_dir);
+            return Err(error);
+        }
+    }
+
+    if authority_changed {
+        let next_generation = match crate::gallery_authority::commit_snapshot(
+            output_dir,
+            &bookkeeping,
+            generation,
+            &mut index,
+            "user_trash_bulk",
+            exact_names,
+        ) {
+            Ok(generation) => generation,
+            Err(error) => {
+                for (live_path, trash_path) in moved.iter().rev() {
+                    let _ = fs::rename(trash_path, live_path);
+                }
+                let _ = sync_ordinary_gallery_directory(output_dir);
+                let _ = sync_ordinary_gallery_directory(&trash_dir);
+                return Err(error);
+            }
+        };
+        gate.install_committed_archive_index(output_dir, next_generation, index);
+    }
+    for (filename, disposition) in &completed {
+        if *disposition == TrashArchiveDisposition::NoArchive {
+            gate.retire_committed_filename(output_dir, filename);
+        }
+    }
+    Ok(TrashArchiveBatchOutcome { completed, failure })
+}
+
 /// Outcome of restoring a trashed filename into the committed archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreArchiveDisposition {
@@ -9170,6 +9327,108 @@ mod tests {
                 .unwrap(),
             ValidatedRetainedMedia::Invalid
         ));
+    }
+
+    #[tokio::test]
+    async fn bulk_trash_retires_a_chunk_in_one_authority_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["first.png", "second.png", "third.png"] {
+            publish_import(dir.path(), name, name, 0, name.as_bytes()).await;
+        }
+        let gate = GalleryPublicationGate::default();
+        gate.committed_archive_index(dir.path()).unwrap();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let before = crate::gallery_authority::read_generation(dir.path(), &bookkeeping)
+            .unwrap()
+            .unwrap();
+        drop(bookkeeping);
+
+        let names = vec![
+            "first.png".to_owned(),
+            "second.png".to_owned(),
+            "third.png".to_owned(),
+        ];
+        let outcome = trash_committed_archive_filenames(dir.path(), &names, &gate).unwrap();
+        assert!(outcome.failure.is_none());
+        assert_eq!(outcome.completed.len(), names.len());
+        assert!(outcome
+            .completed
+            .iter()
+            .all(|(_, disposition)| *disposition == TrashArchiveDisposition::Moved));
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let after = crate::gallery_authority::read_generation(dir.path(), &bookkeeping)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, before + 1, "one bounded chunk is one durable commit");
+        for name in names {
+            assert!(!dir.path().join(&name).exists());
+            assert!(gallery_trash_dir(dir.path()).join(&name).is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_trash_commits_only_the_prefix_before_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["first.png", "changed.png", "later.png"] {
+            publish_import(dir.path(), name, name, 0, name.as_bytes()).await;
+        }
+        fs::write(dir.path().join("changed.png"), b"replacement").unwrap();
+        let gate = GalleryPublicationGate::default();
+        let outcome = trash_committed_archive_filenames(
+            dir.path(),
+            &[
+                "first.png".to_owned(),
+                "changed.png".to_owned(),
+                "later.png".to_owned(),
+            ],
+            &gate,
+        )
+        .unwrap();
+        assert!(outcome.failure.is_none());
+        assert_eq!(
+            outcome.completed,
+            vec![
+                ("first.png".to_owned(), TrashArchiveDisposition::Moved),
+                (
+                    "changed.png".to_owned(),
+                    TrashArchiveDisposition::PreservedReplacement,
+                ),
+            ]
+        );
+        assert!(gallery_trash_dir(dir.path()).join("first.png").is_file());
+        assert_eq!(
+            fs::read(dir.path().join("changed.png")).unwrap(),
+            b"replacement"
+        );
+        assert!(dir.path().join("later.png").is_file());
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.retired_names.contains("first.png"));
+        assert!(index.quarantined_names.contains("changed.png"));
+        assert!(index.entries.contains_key("later.png"));
+    }
+
+    #[test]
+    fn bulk_trash_accepts_an_unarchived_file_already_moved_by_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = ensure_gallery_trash_dir(dir.path()).unwrap();
+        fs::write(trash.join("interrupted.png"), b"recoverable").unwrap();
+        let gate = GalleryPublicationGate::default();
+        let outcome =
+            trash_committed_archive_filenames(dir.path(), &["interrupted.png".to_owned()], &gate)
+                .unwrap();
+        assert!(outcome.failure.is_none());
+        assert_eq!(
+            outcome.completed,
+            vec![(
+                "interrupted.png".to_owned(),
+                TrashArchiveDisposition::NoArchive,
+            )]
+        );
+        assert_eq!(
+            fs::read(trash.join("interrupted.png")).unwrap(),
+            b"recoverable"
+        );
     }
 
     #[test]

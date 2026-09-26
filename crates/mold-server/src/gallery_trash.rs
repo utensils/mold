@@ -451,6 +451,35 @@ pub(crate) fn purge_trashed_print_blocking(
     Ok(())
 }
 
+/// Revalidate a row selected by an earlier empty/sweep snapshot while the
+/// caller holds the gallery writer. A restore may have won between listing
+/// and this item; in that case purging the stale candidate would delete its
+/// DB row and retained-media pins while leaving its restored live bytes.
+fn purge_if_still_trashed_blocking(
+    dir: &Path,
+    name: &str,
+    db: &MetadataDb,
+    gate: &GalleryPublicationGate,
+    media_lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
+    expired_by: Option<(u32, i64)>,
+) -> Result<bool, ApiError> {
+    let row = db
+        .get(dir, name)
+        .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?;
+    let Some(trashed_at) = row.and_then(|row| row.trashed_at_ms) else {
+        return Ok(false);
+    };
+    if let Some((retention, now_ms)) = expired_by {
+        let expired = mold_db::trash::purge_at_ms(trashed_at, retention)
+            .is_some_and(|purge_at| purge_at <= now_ms);
+        if !expired {
+            return Ok(false);
+        }
+    }
+    purge_trashed_print_blocking(dir, name, db, gate, media_lifecycle)?;
+    Ok(true)
+}
+
 /// The historical hard delete of a LIVE print (bytes, sidecars, row,
 /// archive tombstone). Caller holds the gallery writer. This is the whole
 /// behaviour of `DELETE /api/gallery/image/:filename` when the metadata DB
@@ -597,7 +626,6 @@ pub(crate) async fn delete_gallery_image(
     AxumPath(filename): AxumPath<String>,
     Query(query): Query<GalleryDeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
     let dir = gallery_output_dir(&state).await?;
     let name = clean_gallery_filename(&filename)?;
     let permanent = query.permanent.unwrap_or(false);
@@ -605,7 +633,9 @@ pub(crate) async fn delete_gallery_image(
     let gate = state.gallery_publication_gate.clone();
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let task_name = name.clone();
+    let gallery_writer = state.gallery_publication_gate.write().await;
     let event = tokio::task::spawn_blocking(move || -> Result<Option<ServerEvent>, ApiError> {
+        let _gallery_writer = gallery_writer;
         let Some(db) = db.as_ref().as_ref() else {
             hard_delete_live_print_blocking(
                 &dir,
@@ -686,6 +716,232 @@ fn name_failure(name: &str, error: ApiError) -> ApiError {
     )
 }
 
+/// Bound the time for which one blocking worker excludes gallery readers and
+/// bound the recovery/rollback set of one authority commit.
+const GALLERY_TRASH_CHUNK_SIZE: usize = 16;
+
+#[cfg(test)]
+pub(crate) struct TrashChunkBoundaryHook {
+    output_dir: PathBuf,
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn trash_chunk_boundary_hook(
+) -> &'static std::sync::Mutex<Option<std::sync::Arc<TrashChunkBoundaryHook>>> {
+    static HOOK: std::sync::OnceLock<
+        std::sync::Mutex<Option<std::sync::Arc<TrashChunkBoundaryHook>>>,
+    > = std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn install_trash_chunk_boundary_hook(
+    output_dir: &Path,
+) -> std::sync::Arc<TrashChunkBoundaryHook> {
+    let hook = std::sync::Arc::new(TrashChunkBoundaryHook {
+        output_dir: std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf()),
+        reached: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    });
+    *trash_chunk_boundary_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(hook.clone());
+    hook
+}
+
+#[cfg(test)]
+impl TrashChunkBoundaryHook {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+        trash_chunk_boundary_hook()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
+}
+
+#[cfg(test)]
+async fn pause_at_trash_chunk_boundary(output_dir: &Path) {
+    let hook = trash_chunk_boundary_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let canonical = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
+    if let Some(hook) = hook.filter(|hook| hook.output_dir == canonical) {
+        hook.reached.notify_one();
+        hook.resume.notified().await;
+    }
+}
+
+fn trash_gallery_chunk_blocking(
+    dir: &Path,
+    names: &[String],
+    db: &MetadataDb,
+    gate: &GalleryPublicationGate,
+    events: &crate::events::EventBroadcaster,
+) -> Result<Option<ApiError>, ApiError> {
+    enum PreparedAction {
+        AlreadyTrashed,
+        Vanished(String),
+        Candidate(String),
+    }
+
+    let now_ms = mold_core::time::now_epoch_ms();
+    let trash_dir = batch_transaction::gallery_trash_dir(dir);
+    let mut candidates = Vec::with_capacity(names.len());
+    let mut actions = Vec::with_capacity(names.len());
+    let mut tombstones = std::collections::BTreeMap::new();
+    let mut preflight_failure = None;
+
+    // Perform every fallible DB read in request order before moving the
+    // candidate prefix. That keeps the documented stop-at-first-error shape
+    // while allowing its archive mutations to share one durable commit.
+    for name in names {
+        let row = match db.get(dir, name) {
+            Ok(row) => row,
+            Err(error) => {
+                preflight_failure = Some(name_failure(
+                    name,
+                    internal("metadata DB read failed", format!("{error:#}")),
+                ));
+                break;
+            }
+        };
+        if row.as_ref().is_some_and(|row| row.trashed_at_ms.is_some()) {
+            actions.push(PreparedAction::AlreadyTrashed);
+            continue;
+        }
+        let live_path = dir.join(name);
+        let live_exists = live_path.is_file();
+        let already_in_trash = trash_dir.join(name).is_file();
+        if row.is_none() && !live_exists {
+            preflight_failure = Some(name_failure(
+                name,
+                not_found(format!("gallery print not found: {name}")),
+            ));
+            break;
+        }
+        if row.is_some() && !live_exists && !already_in_trash {
+            // Defer this mutation until the authority prefix before it has
+            // succeeded. Preflight must never delete a later row past an
+            // earlier identity conflict.
+            actions.push(PreparedAction::Vanished(name.clone()));
+            continue;
+        }
+        if row.is_none() && live_exists && !ensure_row_for_live_file(db, dir, name, &live_path) {
+            preflight_failure = Some(name_failure(
+                name,
+                ApiError::internal(format!(
+                    "could not record {name} in the metadata DB before trashing it"
+                )),
+            ));
+            break;
+        }
+        match db.build_tombstone(dir, name, now_ms) {
+            Ok(tombstone) => {
+                if let Some(tombstone) = tombstone {
+                    tombstones.insert(name.clone(), tombstone);
+                }
+                candidates.push(name.clone());
+                actions.push(PreparedAction::Candidate(name.clone()));
+            }
+            Err(error) => {
+                preflight_failure = Some(name_failure(
+                    name,
+                    internal("failed to build trash tombstone", format!("{error:#}")),
+                ));
+                break;
+            }
+        }
+    }
+
+    let outcome = if candidates.is_empty() {
+        batch_transaction::TrashArchiveBatchOutcome {
+            completed: Vec::new(),
+            failure: None,
+        }
+    } else {
+        batch_transaction::trash_committed_archive_filenames(dir, &candidates, gate).map_err(
+            |error| {
+                internal(
+                    "failed to retire committed gallery metadata before trashing",
+                    format!("{error:#}"),
+                )
+            },
+        )?
+    };
+    let mut finalization_failure = None;
+    let mut completed = outcome.completed.into_iter();
+    for action in actions {
+        let PreparedAction::Candidate(name) = action else {
+            match action {
+                PreparedAction::AlreadyTrashed => {}
+                PreparedAction::Vanished(name) => {
+                    let _ = db.delete(dir, &name);
+                    events.publish(ServerEvent::GalleryRemoved { filename: name });
+                }
+                PreparedAction::Candidate(_) => unreachable!(),
+            }
+            continue;
+        };
+        let Some((completed_name, disposition)) = completed.next() else {
+            break;
+        };
+        debug_assert_eq!(completed_name, name);
+        if disposition == TrashArchiveDisposition::PreservedReplacement {
+            finalization_failure = Some(name_failure(
+                &name,
+                ApiError::with_code(
+                    "gallery file changed since publication; the replacement was preserved and quarantined",
+                    GALLERY_DELETE_IDENTITY_CHANGED,
+                    StatusCode::CONFLICT,
+                ),
+            ));
+            break;
+        }
+
+        // Once the authority commit says the whole prefix is retired, finish
+        // every item in that prefix even if a sidecar/DB write fails. Stopping
+        // here would knowingly leave later moved bytes unindexed until a
+        // restart reconcile. Preserve the first error for the HTTP response.
+        if let Some(tombstone) = tombstones.remove(&name) {
+            if let Err(error) = mold_db::trash::write_tombstone(&trash_dir, &tombstone) {
+                finalization_failure.get_or_insert_with(|| {
+                    name_failure(
+                        &name,
+                        internal("failed to write trash tombstone", format!("{error:#}")),
+                    )
+                });
+                continue;
+            }
+        }
+        match db.mark_trashed(dir, &name, now_ms) {
+            Ok(_) => events.publish(ServerEvent::GalleryTrashed { filename: name }),
+            Err(error) => {
+                finalization_failure.get_or_insert_with(|| {
+                    name_failure(
+                        &name,
+                        internal("failed to flag print as trashed", format!("{error:#}")),
+                    )
+                });
+            }
+        }
+    }
+    if let Some((name, error)) = outcome.failure {
+        return Ok(Some(name_failure(
+            &name,
+            internal("failed to move print to the trash", format!("{error:#}")),
+        )));
+    }
+    Ok(finalization_failure.or(preflight_failure))
+}
+
 /// Move several prints to the trash. Stops at the first failure (naming the
 /// filename); prints trashed before it stay trashed and are announced.
 #[utoipa::path(
@@ -705,41 +961,58 @@ pub(crate) async fn trash_gallery_files(
     State(state): State<AppState>,
     Json(request): Json<TrashFilenamesRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
     let dir = gallery_output_dir(&state).await?;
     let names = clean_filenames(&request)?;
     let db = state.metadata_db.clone();
     require_metadata_db(&db)?;
     let gate = state.gallery_publication_gate.clone();
-    let (events, failure) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<ServerEvent>, Option<ApiError>), ApiError> {
-            let db = require_metadata_db(&db)?;
-            let now_ms = mold_core::time::now_epoch_ms();
-            let mut events = Vec::new();
-            for name in names {
-                match trash_print_blocking(&dir, &name, db, &gate, now_ms) {
-                    Ok(TrashOutcome::Trashed) => {
-                        events.push(ServerEvent::GalleryTrashed { filename: name })
-                    }
-                    Ok(TrashOutcome::AlreadyTrashed) => {}
-                    Ok(TrashOutcome::Vanished) => {
-                        events.push(ServerEvent::GalleryRemoved { filename: name })
-                    }
-                    Err(error) => return Ok((events, Some(name_failure(&name, error)))),
-                }
-            }
-            Ok((events, None))
-        },
-    )
-    .await
-    .map_err(|e| ApiError::internal(format!("gallery trash task failed: {e}")))??;
-    for event in events {
-        state.events.publish(event);
+    let started = std::time::Instant::now();
+    let total = names.len();
+    let mut completed = 0usize;
+    for chunk in names.chunks(GALLERY_TRASH_CHUNK_SIZE) {
+        let chunk = chunk.to_vec();
+        let chunk_len = chunk.len();
+        let chunk_dir = dir.clone();
+        let chunk_db = db.clone();
+        let chunk_gate = gate.clone();
+        let chunk_events = state.events.clone();
+        let gallery_writer = gate.write().await;
+        let failure = tokio::task::spawn_blocking(move || {
+            // Owned by the blocking task, not the HTTP future. If its client
+            // times out and Axum drops the waiter, the detached filesystem
+            // work remains protected until it actually finishes.
+            let _gallery_writer = gallery_writer;
+            let db = require_metadata_db(&chunk_db)?;
+            trash_gallery_chunk_blocking(&chunk_dir, &chunk, db, &chunk_gate, &chunk_events)
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery trash task failed: {e}")))??;
+        if failure.is_none() {
+            completed += chunk_len;
+        }
+        tracing::info!(
+            completed,
+            total,
+            attempted = chunk_len,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "gallery bulk trash progress"
+        );
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        #[cfg(test)]
+        if completed < total {
+            pause_at_trash_chunk_boundary(&dir).await;
+        }
+        // Give queued readers a chance before the next writer is acquired.
+        tokio::task::yield_now().await;
     }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(StatusCode::NO_CONTENT),
-    }
+    tracing::info!(
+        total,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "gallery bulk trash complete"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── POST /api/gallery/trash/restore ─────────────────────────────────────────
@@ -763,38 +1036,47 @@ pub(crate) async fn restore_gallery_files(
     State(state): State<AppState>,
     Json(request): Json<TrashFilenamesRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
     let dir = gallery_output_dir(&state).await?;
     let names = clean_filenames(&request)?;
     let db = state.metadata_db.clone();
     require_metadata_db(&db)?;
     let retention = current_retention_days(&state).await;
     let gate = state.gallery_publication_gate.clone();
-    let (events, failure) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<ServerEvent>, Option<ApiError>), ApiError> {
-            let db = require_metadata_db(&db)?;
-            let mut events = Vec::new();
-            for name in names {
-                match restore_print_blocking(&dir, &name, db, &gate, retention) {
-                    Ok(image) => events.push(ServerEvent::GalleryRestored {
-                        filename: name,
-                        image: image.map(Box::new),
-                    }),
-                    Err(error) => return Ok((events, Some(name_failure(&name, error)))),
-                }
-            }
-            Ok((events, None))
-        },
-    )
-    .await
-    .map_err(|e| ApiError::internal(format!("gallery restore task failed: {e}")))??;
-    for event in events {
-        state.events.publish(event);
+    let started = std::time::Instant::now();
+    let total = names.len();
+    for (offset, name) in names.into_iter().enumerate() {
+        let item_dir = dir.clone();
+        let item_db = db.clone();
+        let item_gate = gate.clone();
+        let item_events = state.events.clone();
+        let item_name = name.clone();
+        let gallery_writer = gate.write().await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _gallery_writer = gallery_writer;
+            let db = require_metadata_db(&item_db)?;
+            let image = restore_print_blocking(&item_dir, &item_name, db, &item_gate, retention)?;
+            item_events.publish(ServerEvent::GalleryRestored {
+                filename: item_name,
+                image: image.map(Box::new),
+            });
+            Ok::<_, ApiError>(())
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("gallery restore task failed: {error}")))?;
+        if let Err(error) = result {
+            return Err(name_failure(&name, error));
+        }
+        if (offset + 1) % GALLERY_TRASH_CHUNK_SIZE == 0 || offset + 1 == total {
+            tracing::info!(
+                completed = offset + 1,
+                total,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "gallery bulk restore progress"
+            );
+        }
+        tokio::task::yield_now().await;
     }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(StatusCode::NO_CONTENT),
-    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── POST /api/gallery/trash/delete-forever ────────────────────────────────
@@ -817,66 +1099,75 @@ pub(crate) async fn delete_gallery_files_forever(
     State(state): State<AppState>,
     Json(request): Json<TrashFilenamesRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
     let dir = gallery_output_dir(&state).await?;
     let names = clean_filenames(&request)?;
     let db = state.metadata_db.clone();
     let gate = state.gallery_publication_gate.clone();
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
-    let (removed, failure) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<String>, Option<ApiError>), ApiError> {
-            let mut removed = Vec::new();
-            for name in names {
-                let outcome = if let Some(db) = db.as_ref().as_ref() {
-                    let trashed = db
-                        .get(&dir, &name)
-                        .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
-                        .is_some_and(|row| row.trashed_at_ms.is_some());
-                    if trashed {
-                        purge_trashed_print_blocking(
-                            &dir,
-                            &name,
-                            db,
-                            &gate,
-                            media_lifecycle.as_deref(),
-                        )
-                    } else {
-                        hard_delete_live_print_blocking(
-                            &dir,
-                            &name,
-                            Some(db),
-                            &gate,
-                            media_lifecycle.as_deref(),
-                        )
-                    }
+    let started = std::time::Instant::now();
+    let total = names.len();
+    for (offset, name) in names.into_iter().enumerate() {
+        let item_dir = dir.clone();
+        let item_db = db.clone();
+        let item_gate = gate.clone();
+        let item_media_lifecycle = media_lifecycle.clone();
+        let item_events = state.events.clone();
+        let item_name = name.clone();
+        let gallery_writer = gate.write().await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _gallery_writer = gallery_writer;
+            if let Some(db) = item_db.as_ref().as_ref() {
+                let trashed = db
+                    .get(&item_dir, &item_name)
+                    .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
+                    .is_some_and(|row| row.trashed_at_ms.is_some());
+                if trashed {
+                    purge_trashed_print_blocking(
+                        &item_dir,
+                        &item_name,
+                        db,
+                        &item_gate,
+                        item_media_lifecycle.as_deref(),
+                    )?;
                 } else {
                     hard_delete_live_print_blocking(
-                        &dir,
-                        &name,
-                        None,
-                        &gate,
-                        media_lifecycle.as_deref(),
-                    )
-                };
-                match outcome {
-                    Ok(()) => removed.push(name),
-                    Err(error) => return Ok((removed, Some(name_failure(&name, error)))),
+                        &item_dir,
+                        &item_name,
+                        Some(db),
+                        &item_gate,
+                        item_media_lifecycle.as_deref(),
+                    )?;
                 }
+            } else {
+                hard_delete_live_print_blocking(
+                    &item_dir,
+                    &item_name,
+                    None,
+                    &item_gate,
+                    item_media_lifecycle.as_deref(),
+                )?;
             }
-            Ok((removed, None))
-        },
-    )
-    .await
-    .map_err(|error| ApiError::internal(format!("gallery bulk delete task failed: {error}")))??;
-    for filename in removed {
-        state
-            .events
-            .publish(ServerEvent::GalleryRemoved { filename });
+            item_events.publish(ServerEvent::GalleryRemoved {
+                filename: item_name,
+            });
+            Ok::<_, ApiError>(())
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("gallery bulk delete task failed: {error}")))?;
+        if let Err(error) = result {
+            return Err(name_failure(&name, error));
+        }
+        if (offset + 1) % GALLERY_TRASH_CHUNK_SIZE == 0 || offset + 1 == total {
+            tracing::info!(
+                completed = offset + 1,
+                total,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "gallery permanent delete progress"
+            );
+        }
+        tokio::task::yield_now().await;
     }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(StatusCode::NO_CONTENT),
-    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── DELETE /api/gallery/trash ───────────────────────────────────────────────
@@ -895,39 +1186,63 @@ pub(crate) async fn delete_gallery_files_forever(
 pub(crate) async fn empty_gallery_trash(
     State(state): State<AppState>,
 ) -> Result<Json<EmptyTrashResult>, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
     let dir = gallery_output_dir(&state).await?;
     let db = state.metadata_db.clone();
     require_metadata_db(&db)?;
     let gate = state.gallery_publication_gate.clone();
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
-    let purged = tokio::task::spawn_blocking(move || -> Result<Vec<String>, ApiError> {
-        let db = require_metadata_db(&db)?;
-        let rows = db
-            .list_trashed(Some(&dir))
-            .map_err(|e| internal("metadata DB read failed", format!("{e:#}")))?;
-        let mut purged = Vec::new();
-        for row in rows {
-            purge_trashed_print_blocking(
-                &dir,
-                &row.filename,
-                db,
-                &gate,
-                media_lifecycle.as_deref(),
-            )?;
-            purged.push(row.filename);
-        }
-        Ok(purged)
+    let list_dir = dir.clone();
+    let list_db = db.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        let db = require_metadata_db(&list_db)?;
+        db.list_trashed(Some(&list_dir))
+            .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))
     })
     .await
-    .map_err(|e| ApiError::internal(format!("empty trash task failed: {e}")))??;
-    let count = purged.len() as u64;
-    for filename in purged {
-        state
-            .events
-            .publish(ServerEvent::GalleryRemoved { filename });
+    .map_err(|error| ApiError::internal(format!("empty trash listing failed: {error}")))??;
+    let total = rows.len();
+    let started = std::time::Instant::now();
+    let mut purged = 0u64;
+    for (offset, row) in rows.into_iter().enumerate() {
+        let item_dir = dir.clone();
+        let item_db = db.clone();
+        let item_gate = gate.clone();
+        let item_media_lifecycle = media_lifecycle.clone();
+        let item_events = state.events.clone();
+        let filename = row.filename;
+        let gallery_writer = gate.write().await;
+        let did_purge = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+            let _gallery_writer = gallery_writer;
+            let db = require_metadata_db(&item_db)?;
+            let purged = purge_if_still_trashed_blocking(
+                &item_dir,
+                &filename,
+                db,
+                &item_gate,
+                item_media_lifecycle.as_deref(),
+                None,
+            )?;
+            if purged {
+                item_events.publish(ServerEvent::GalleryRemoved { filename });
+            }
+            Ok(purged)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("empty trash task failed: {error}")))??;
+        if did_purge {
+            purged += 1;
+        }
+        if (offset + 1) % GALLERY_TRASH_CHUNK_SIZE == 0 || offset + 1 == total {
+            tracing::info!(
+                completed = offset + 1,
+                total,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "empty gallery trash progress"
+            );
+        }
+        tokio::task::yield_now().await;
     }
-    Ok(Json(EmptyTrashResult { purged: count }))
+    Ok(Json(EmptyTrashResult { purged }))
 }
 
 // ── POST /api/gallery/trash/sweep + the sweeper ─────────────────────────────
@@ -956,8 +1271,8 @@ pub(crate) async fn sweep_gallery_trash(
 
 /// One retention pass: purge every trashed print whose
 /// `gallery.trash_retention_days` (read fresh from the live config; `0`
-/// keeps forever) has elapsed. Takes the gallery writer for the pass and
-/// publishes `gallery_removed` for each purged print.
+/// keeps forever) has elapsed. Each expired print owns the writer only for
+/// its blocking purge, so listings can run between a large sweep's items.
 pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSweepResult> {
     let (dir, retention) = {
         let config = state.config.read().await;
@@ -975,41 +1290,62 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
     }
     let gate = state.gallery_publication_gate.clone();
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
-    let _gallery_writer = state.gallery_publication_gate.write().await;
-    let (purged, remaining) =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<String>, u64)> {
-            let Some(db) = db.as_ref().as_ref() else {
-                return Ok((Vec::new(), 0));
-            };
-            let now_ms = mold_core::time::now_epoch_ms();
-            let expired = db.expired_trashed(&dir, retention, now_ms)?;
-            let mut purged = Vec::with_capacity(expired.len());
-            for row in expired {
-                match purge_trashed_print_blocking(
-                    &dir,
-                    &row.filename,
-                    db,
-                    &gate,
-                    media_lifecycle.as_deref(),
-                ) {
-                    Ok(()) => purged.push(row.filename),
-                    Err(error) => tracing::warn!(
-                        file = %row.filename,
-                        error = %error.error,
-                        "trash sweep could not purge an expired print"
-                    ),
-                }
+    let list_dir = dir.clone();
+    let list_db = db.clone();
+    let expired = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let Some(db) = list_db.as_ref().as_ref() else {
+            return Ok(Vec::new());
+        };
+        db.expired_trashed(&list_dir, retention, mold_core::time::now_epoch_ms())
+    })
+    .await??;
+    let mut count = 0u64;
+    for row in expired {
+        let item_dir = dir.clone();
+        let item_db = db.clone();
+        let item_gate = gate.clone();
+        let item_media_lifecycle = media_lifecycle.clone();
+        let item_events = state.events.clone();
+        let filename = row.filename;
+        let log_name = filename.clone();
+        let gallery_writer = gate.write().await;
+        let result = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+            let _gallery_writer = gallery_writer;
+            let db = require_metadata_db(&item_db)?;
+            let purged = purge_if_still_trashed_blocking(
+                &item_dir,
+                &filename,
+                db,
+                &item_gate,
+                item_media_lifecycle.as_deref(),
+                Some((retention, mold_core::time::now_epoch_ms())),
+            )?;
+            if purged {
+                item_events.publish(ServerEvent::GalleryRemoved { filename });
             }
-            let remaining = db.list_trashed(Some(&dir))?.len() as u64;
-            Ok((purged, remaining))
+            Ok(purged)
         })
-        .await??;
-    let count = purged.len() as u64;
-    for filename in purged {
-        state
-            .events
-            .publish(ServerEvent::GalleryRemoved { filename });
+        .await?;
+        match result {
+            Ok(true) => count += 1,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                file = %log_name,
+                error = %error.error,
+                "trash sweep could not purge an expired print"
+            ),
+        }
+        tokio::task::yield_now().await;
     }
+    let remaining_dir = dir.clone();
+    let remaining_db = db.clone();
+    let remaining = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
+        let Some(db) = remaining_db.as_ref().as_ref() else {
+            return Ok(0);
+        };
+        Ok(db.list_trashed(Some(&remaining_dir))?.len() as u64)
+    })
+    .await??;
     Ok(TrashSweepResult {
         purged: count,
         remaining,
@@ -1058,6 +1394,96 @@ pub(crate) fn spawn_trash_sweeper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn detached_blocking_mutation_keeps_its_owned_gallery_writer() {
+        let gate = GalleryPublicationGate::default();
+        let writer = gate.write().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::task::spawn_blocking(move || {
+            let _writer = writer;
+            let _ = started_tx.send(());
+            release_rx.recv().unwrap();
+        });
+        started_rx.await.unwrap();
+        waiter.abort();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), gate.read())
+                .await
+                .is_err(),
+            "dropping the waiter must not expose an active blocking mutation"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), gate.read())
+            .await
+            .expect("the writer is released when the blocking mutation ends");
+    }
+
+    #[test]
+    fn stale_empty_snapshot_does_not_purge_a_restored_print() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let live = dir.path().join("restored.png");
+        std::fs::write(&live, b"restored").unwrap();
+        assert!(ensure_row_for_live_file(
+            &db,
+            dir.path(),
+            "restored.png",
+            &live
+        ));
+        db.mark_trashed(dir.path(), "restored.png", 1).unwrap();
+        let trash = batch_transaction::ensure_gallery_trash_dir(dir.path()).unwrap();
+        std::fs::rename(&live, trash.join("restored.png")).unwrap();
+
+        // Empty Trash listed the row, then Restore won before Empty acquired
+        // this item's writer.
+        std::fs::rename(trash.join("restored.png"), &live).unwrap();
+        db.mark_restored(dir.path(), "restored.png").unwrap();
+        let gate = GalleryPublicationGate::default();
+        assert!(!purge_if_still_trashed_blocking(
+            dir.path(),
+            "restored.png",
+            &db,
+            &gate,
+            None,
+            None,
+        )
+        .unwrap());
+        assert_eq!(std::fs::read(live).unwrap(), b"restored");
+        assert!(db.get(dir.path(), "restored.png").unwrap().is_some());
+    }
+
+    #[test]
+    fn stale_sweep_snapshot_rechecks_the_current_retention_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let live = dir.path().join("reaged.png");
+        std::fs::write(&live, b"reaged").unwrap();
+        assert!(ensure_row_for_live_file(
+            &db,
+            dir.path(),
+            "reaged.png",
+            &live
+        ));
+        let trash = batch_transaction::ensure_gallery_trash_dir(dir.path()).unwrap();
+        std::fs::rename(&live, trash.join("reaged.png")).unwrap();
+        let now = mold_core::time::now_epoch_ms();
+        db.mark_trashed(dir.path(), "reaged.png", now).unwrap();
+        let gate = GalleryPublicationGate::default();
+        assert!(!purge_if_still_trashed_blocking(
+            dir.path(),
+            "reaged.png",
+            &db,
+            &gate,
+            None,
+            Some((30, now)),
+        )
+        .unwrap());
+        assert!(trash.join("reaged.png").is_file());
+        assert!(db.get(dir.path(), "reaged.png").unwrap().is_some());
+    }
 
     #[test]
     fn permanent_delete_projection_removes_retained_media_bindings() {

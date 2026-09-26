@@ -15,18 +15,42 @@ import MoldClient
 /// only what needs the store: the wire call itself, the local report, and
 /// the re-list.
 @MainActor
+@Observable
 final class LibraryMutations {
+    struct Destination {
+        let host: MoldHost
+        let client: any MoldBackend
+    }
+
     /// The queued edits themselves. Read by the store's echo test, which
     /// asks what is in flight before trusting a frame.
     var outbox = MutationOutbox()
     /// The machines whose chain a task is already walking.
     private var draining: Set<MoldHost.ID> = []
+    /// The exact address/key identity an edit was queued for. A retry can run
+    /// seconds later; resolving by UUID then could send the old filenames to
+    /// a completely different machine the person edited into that row.
+    @ObservationIgnored private var destinations: [String: Destination] = [:]
+    /// One line in the Library's activity bar while optimistic edits are still
+    /// making their way to the machines. The count is print-updates rather
+    /// than requests: one bulk request carrying 500 filenames should say that
+    /// it has 500 things left to settle.
+    private(set) var progress: String?
+    private var targetCount = 0
+    private var settledCount = 0
 
     /// Queues an edit for every machine it names, and answers with the ids of
     /// the entries carrying it -- what `undo` ties its registration to.
     @discardableResult
     func send(_ edit: PrintEdit, in store: LibraryStore) -> [String] {
         let queued = outbox.enqueue(edit)
+        for entry in queued {
+            guard let host = store.hosts.host(entry.host),
+                  let client = store.hosts.backend(for: entry.host) else { continue }
+            destinations[entry.id] = Destination(host: host, client: client)
+        }
+        targetCount += queued.reduce(0) { $0 + $1.filenames.count }
+        updateProgress()
         for host in outbox.waiting { drain(host, in: store) }
         return queued.map(\.id)
     }
@@ -37,7 +61,10 @@ final class LibraryMutations {
         // walking.
         guard draining.insert(host).inserted else { return }
         Task {
-            defer { draining.remove(host) }
+            defer {
+                draining.remove(host)
+                if outbox.isEmpty, draining.isEmpty { finishProgress() }
+            }
             // Round and round until the outbox is EMPTY, not until the chain
             // is walked once: this host stays in `draining` for the whole
             // task, including the trailing re-list and collection reload
@@ -61,9 +88,11 @@ final class LibraryMutations {
                 break loop
             case let .send(entry):
                 if case .collection = entry.change { touchedCollections = true }
+                updateProgress()
                 lastError = await attempt(entry, on: host, in: store)
             case let .wait(duration, then: entry):
                 if case .collection = entry.change { touchedCollections = true }
+                updateProgress(retrying: true)
                 try? await Task.sleep(for: duration)
                 lastError = await attempt(entry, on: host, in: store)
             case let .giveUp(entry, orphaned: _):
@@ -72,6 +101,7 @@ final class LibraryMutations {
                 // thing `attempt`'s own give-up below does.
                 store.hosts.report(lastError ?? MoldClientError.malformedResponse,
                                    on: host, doing: entry.change.verb)
+                settleProgress(entry)
                 await store.live.relist(host, in: store)
             }
         }
@@ -96,5 +126,46 @@ final class LibraryMutations {
         for pending in outbox.chain(for: host) {
             store.mutate(PrintEdit(change: pending.change, targets: [host: pending.filenames]))
         }
+    }
+
+    /// Called only after an outbox entry has left its chain for good. A retry
+    /// deliberately does not advance the count: the same update is still in
+    /// flight, using the same idempotency key.
+    func settleProgress(_ entry: MutationOutbox.Entry) {
+        destinations[entry.id] = nil
+        settledCount += entry.filenames.count
+        updateProgress()
+    }
+
+    func destination(for entry: MutationOutbox.Entry) -> Destination? {
+        destinations[entry.id]
+    }
+
+    /// Retires an edit whose original machine identity disappeared. The
+    /// optimistic row and its undo entry both become untrue, so the current
+    /// machine (if the row was edited in place) is re-read without ever
+    /// receiving the old identity's filenames.
+    func rejectStale(_ entry: MutationOutbox.Entry, in store: LibraryStore) async {
+        outbox.failed(entry.id)
+        settleProgress(entry)
+        store.undo.forget(entry: entry.id)
+        if store.hosts.host(entry.host) != nil {
+            await store.live.relist(entry.host, in: store)
+        }
+    }
+
+    private func updateProgress(retrying: Bool = false) {
+        guard targetCount > 0 else {
+            progress = nil
+            return
+        }
+        let verb = retrying ? "Retrying" : "Updating"
+        progress = "\(verb) \(settledCount.formatted()) of \(targetCount.formatted()) print changes…"
+    }
+
+    private func finishProgress() {
+        progress = nil
+        targetCount = 0
+        settledCount = 0
     }
 }

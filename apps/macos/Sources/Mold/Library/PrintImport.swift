@@ -41,14 +41,24 @@ struct PrintImport {
     /// which is the only way to pin what a batch does with one bad file in the
     /// middle of it.
     func send(_ urls: [URL], to host: MoldHost) async {
-        guard let client = hosts.backend(for: host.id) else { return }
+        guard !urls.isEmpty, hosts.host(host.id) == host,
+              let client = hosts.backend(for: host.id) else { return }
+        let activity = library.beginBulkActivity(
+            "Importing 0 of \(urls.count.formatted()) files to \(host.name)…"
+        )
+        defer { library.endBulkActivity(activity) }
         /// The files this Mac could not read, reported ONCE when the batch is
         /// done. Not per file: every successful import calls
         /// `hosts.succeeded(on:)`, which clears that machine's failures, so a
         /// report made mid-loop is wiped by the next file that works -- ten
         /// chosen, one unreadable, nothing said.
         var unreadable: [(name: String, error: Error)] = []
-        for url in urls {
+        for (index, url) in urls.enumerated() {
+            guard hosts.host(host.id) == host else { return }
+            library.updateBulkActivity(
+                activity,
+                "Importing \((index + 1).formatted()) of \(urls.count.formatted()) files to \(host.name)…"
+            )
             let data: Data
             do {
                 // Off the main actor, like every other file this app reads:
@@ -63,18 +73,28 @@ struct PrintImport {
                 unreadable.append((url.lastPathComponent, error))
                 continue
             }
+            // The file read can be slow enough for the machine to be removed
+            // or edited meanwhile. Never send the old host's pending bytes to
+            // the backend snapshot after its identity has gone stale.
+            guard hosts.host(host.id) == host else { return }
             // The file's own date, so an old picture lands where it belongs in
             // a day-sectioned timeline instead of at the top of today.
-            let made = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
-            let size = Self.pixelSize(of: url)
+            let metadata = await Task.detached(priority: .utility) {
+                let made = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate
+                return (made, Self.pixelSize(of: url))
+            }.value
+            guard hosts.host(host.id) == host else { return }
             let item = GalleryImport(importing: data, named: url.lastPathComponent,
                                      version: version(of: host),
-                                     width: size.width, height: size.height, madeAt: made)
+                                     width: metadata.1.width, height: metadata.1.height,
+                                     madeAt: metadata.0)
             do {
                 _ = try await client.importPrint(item, as: url.lastPathComponent)
+                guard hosts.host(host.id) == host else { return }
                 hosts.succeeded(on: host.id)
             } catch {
+                guard hosts.host(host.id) == host else { return }
                 hosts.report(error, on: host.id, doing: "import “\(url.lastPathComponent)”")
                 return
             }
@@ -84,7 +104,7 @@ struct PrintImport {
 
     /// One line for the whole batch, once every import that could happen has.
     private func report(_ unreadable: [(name: String, error: Error)], to host: MoldHost) {
-        guard let first = unreadable.first else { return }
+        guard hosts.host(host.id) == host, let first = unreadable.first else { return }
         let verb = unreadable.count == 1
             ? "import “\(first.name)”"
             : "import \(unreadable.count) of those files"
@@ -95,7 +115,7 @@ struct PrintImport {
     /// by decoding it -- an import may be a 60 MB PNG and nothing here needs
     /// the pixels. A clip or a mesh has no such header, and zero is the honest
     /// answer.
-    private static func pixelSize(of url: URL) -> (width: Int, height: Int) {
+    nonisolated private static func pixelSize(of url: URL) -> (width: Int, height: Int) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
                   as? [CFString: Any],

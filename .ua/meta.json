@@ -338,6 +338,49 @@
         "apps/macos/Tests/MoldTests/FakeBackend.swift",
         "apps/macos/Tests/MoldTests/HeartbeatTests.swift"
       ]
+    },
+    {
+      "id": "macos-bulk-library-responsiveness",
+      "updatedAt": "2026-09-26T18:39:15.841058+00:00",
+      "baseCommit": "a6d8284497816f9f28dcb278dc572f38ba52477f",
+      "scope": "Native macOS bounded lifecycle operations, shared bulk status, frozen host routing, and server archive transaction fairness. Repository-wide baseline unchanged.",
+      "files": [
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Organize.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan+Items.swift",
+        "apps/macos/Packages/MoldClient/Sources/MoldClient/LibraryMenuPlan.swift",
+        "apps/macos/Packages/MoldClient/Tests/MoldClientTests/BulkTransportTests.swift",
+        "apps/macos/Sources/Mold/Library/GalleryLive.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Destructive.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Export.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions+Files.swift",
+        "apps/macos/Sources/Mold/Library/LibraryActions.swift",
+        "apps/macos/Sources/Mold/Library/LibraryMenu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryMutations+Wire.swift",
+        "apps/macos/Sources/Mold/Library/LibraryMutations.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+BulkStatus.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Empty.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane+Menu.swift",
+        "apps/macos/Sources/Mold/Library/LibraryPane.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Bulk.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Editing.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Mutations.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore+Shelves.swift",
+        "apps/macos/Sources/Mold/Library/LibraryStore.swift",
+        "apps/macos/Sources/Mold/Library/LibraryTags.swift",
+        "apps/macos/Sources/Mold/Library/PrintImport.swift",
+        "apps/macos/Sources/Mold/Library/PrintMaterializer+Budget.swift",
+        "apps/macos/Sources/Mold/Library/PrintMaterializer.swift",
+        "apps/macos/Sources/Mold/Shell/LibraryCommands.swift",
+        "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
+        "apps/macos/Tests/MoldTests/FakeBackend.swift",
+        "apps/macos/Tests/MoldTests/LibraryBulkActivityTests.swift",
+        "apps/macos/Tests/MoldTests/LibraryBulkTests.swift",
+        "apps/macos/Tests/MoldTests/LibraryStoreFailureTests.swift",
+        "crates/mold-server/src/batch_transaction.rs",
+        "crates/mold-server/src/gallery_trash.rs",
+        "crates/mold-server/src/routes_test.rs"
+      ]
     }
   ]
 }

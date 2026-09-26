@@ -7,7 +7,7 @@ import SwiftUI
 extension LibraryActions {
     /// Asks, then destroys. There is no undo on the host side and none here.
     func deleteForever(_ entries: [LibraryEntry]) {
-        guard !entries.isEmpty, let ask = confirmDestruction else { return }
+        guard !library.isBulkBusy, !entries.isEmpty, let ask = confirmDestruction else { return }
         let noun = entries.count == 1
             ? "“\(entries[0].print.title ?? entries[0].print.filename)”"
             : "\(entries.count.formatted()) prints"
@@ -36,7 +36,7 @@ extension LibraryActions {
     /// Empties every machine's trash at once.
     func emptyTrash() {
         let waiting = library.trashed.count
-        guard waiting > 0, let ask = confirmDestruction else { return }
+        guard !library.isBulkBusy, waiting > 0, let ask = confirmDestruction else { return }
         ask(Destruction(
             title: "Empty the Trash?",
             message: "\(waiting.formatted()) "

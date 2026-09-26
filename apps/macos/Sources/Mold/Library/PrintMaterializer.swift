@@ -1,6 +1,12 @@
 import Foundation
 import MoldClient
 
+nonisolated private enum CacheWriteResult: Sendable {
+    case written
+    case unsafeDestination
+    case failed(String)
+}
+
 /// A real file on disk for a print, fetched once.
 ///
 /// Quick Look, `ShareLink`, Save to… and the Finder drag all need a file and
@@ -79,8 +85,11 @@ final class PrintMaterializer {
         guard let folder = SafeFilename.url(key, in: cacheRoot),
               let file = SafeFilename.url(filename, in: folder)
         else { return nil }
-        if FileManager.default.fileExists(atPath: file.path) {
-            touch(file)
+        let cached = await Task.detached(priority: .utility) {
+            FileManager.default.fileExists(atPath: file.path)
+        }.value
+        if cached {
+            await touchOffMain(file)
             return file
         }
         // The filename rides along: `key` alone is (host, media_version), and
@@ -92,22 +101,35 @@ final class PrintMaterializer {
 
         let task = Task<URL?, Never> { [file, folder] in
             guard let data = await fetch() else { return nil }
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            // `write(to:)` follows a symbolic link, and this app is not
-            // sandboxed: a link planted at this path by anything else on the
-            // Mac would put the machine's bytes wherever it points.
-            guard SafeFilename.isFreshDestination(file) else { return nil }
-            do {
-                try data.write(to: file)
-            } catch {
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    try FileManager.default.createDirectory(
+                        at: folder, withIntermediateDirectories: true)
+                    // Keep the safety check beside the write on the same
+                    // worker. Checking on MainActor and writing later would
+                    // open a window for a symbolic link to replace the path.
+                    guard SafeFilename.isFreshDestination(file) else {
+                        return CacheWriteResult.unsafeDestination
+                    }
+                    try data.write(to: file)
+                    return CacheWriteResult.written
+                } catch {
+                    return CacheWriteResult.failed(error.localizedDescription)
+                }
+            }.value
+            switch result {
+            case .written:
+                return file
+            case .unsafeDestination:
+                return nil
+            case let .failed(message):
                 // A failed write used to return `nil` through a `try?` and the
                 // person saw a preview that never opened -- the exact symptom
                 // the cache note exists to replace.
                 self.note = "Mold could not keep “\(entry.print.displayName)” on "
-                    + "this Mac: \(error.localizedDescription)"
+                    + "this Mac: \(message)"
                 return nil
             }
-            return file
         }
         inFlight[flightKey] = task
         let url = await task.value
@@ -117,7 +139,10 @@ final class PrintMaterializer {
         // `keeping:` what was just written, or a print larger than the cap is
         // deleted here and its URL handed back to a caller that then fails
         // silently.
-        if let url { noteIfTooLarge(url, named: entry.print.displayName) }
+        if let url { await noteIfTooLargeOffMain(url, named: entry.print.displayName) }
+        // Lease inspection and deletion stay one MainActor transaction. A
+        // detached eviction snapshot can become stale while suspended and
+        // delete a folder a new Quick Look or drag has leased meanwhile.
         enforceBudget(keeping: key)
         return url
     }

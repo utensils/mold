@@ -73,6 +73,7 @@ public struct LibraryMenuPlan: Sendable {
     /// than two is one plain item -- a submenu with one row in it is a door
     /// onto a corridor.
     public let upscalers: [UpscalerOption]
+    public let lifecycleBusy: Bool
     public let trashCount: Int
     /// Supported remote pictures in this selection.
     public let localSaveCount: Int
@@ -86,7 +87,8 @@ public struct LibraryMenuPlan: Sendable {
                 canUseAsSource: Bool = false,
                 canAddReference: Bool = false, canUpscale: Bool = false,
                 upscalers: [UpscalerOption] = [], trashCount: Int = 0,
-                localSaveCount: Int = 0, trashLocationName: String? = nil) {
+                localSaveCount: Int = 0, trashLocationName: String? = nil, lifecycleBusy: Bool = false) {
+        self.lifecycleBusy = lifecycleBusy
         self.meshExports = meshExports
         self.scope = scope
         self.count = count

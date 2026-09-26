@@ -60,13 +60,20 @@ extension LibraryStore {
     /// This machine's own collections, or a report if it refused to say.
     func reloadCollections() async {
         etags.removeAll()
-        for host in hosts.hosts {
+        let destinations: [(host: MoldHost, client: any MoldBackend)] = hosts.hosts.map {
+            ($0, hosts.backend(for: $0))
+        }
+        for (host, client) in destinations {
+            guard hosts.host(host.id) == host else { continue }
             do {
-                collectionsPerHost[host.id] = try await hosts.backend(for: host).collections()
+                let collections = try await client.collections()
+                guard hosts.host(host.id) == host else { continue }
+                collectionsPerHost[host.id] = collections
                 // Scoped: a passive refresh after every shelf edit must not
                 // clear a failure that edit itself just reported.
                 hosts.succeeded(on: host.id, doing: "read its collections")
             } catch {
+                guard hosts.host(host.id) == host else { continue }
                 hosts.report(error, on: host.id, doing: "read its collections")
             }
         }
