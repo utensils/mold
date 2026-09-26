@@ -381,6 +381,16 @@
         "crates/mold-server/src/gallery_trash.rs",
         "crates/mold-server/src/routes_test.rs"
       ]
+    },
+    {
+      "id": "macos-bulk-trash-snapshot-guard",
+      "updatedAt": "2026-09-26T18:59:34.194203+00:00",
+      "baseCommit": "e5bcad6909b1beaf3facc32225f53c30e226de09",
+      "scope": "Source-verified guarded Empty Trash/sweep snapshots and publication-lock regression diagnostics; repository-wide baseline unchanged.",
+      "files": [
+        "crates/mold-server/src/gallery_trash.rs",
+        "crates/mold-server/src/routes_test.rs"
+      ]
     }
   ]
 }

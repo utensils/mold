@@ -1193,7 +1193,12 @@ pub(crate) async fn empty_gallery_trash(
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let list_dir = dir.clone();
     let list_db = db.clone();
+    // Snapshot candidates while publication is excluded, including the empty
+    // case. Release this reader before taking any per-item writer so readers
+    // can make progress between purges.
+    let gallery_reader = gate.read().await;
     let rows = tokio::task::spawn_blocking(move || {
+        let _gallery_reader = gallery_reader;
         let db = require_metadata_db(&list_db)?;
         db.list_trashed(Some(&list_dir))
             .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))
@@ -1292,7 +1297,13 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
     let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let list_dir = dir.clone();
     let list_db = db.clone();
+    // The initial candidate snapshot participates in the same publication
+    // boundary as gallery listings, even when no rows are expired. Move the
+    // owned guard into the worker so cancellation cannot release it while the
+    // blocking read is still running.
+    let gallery_reader = gate.read().await;
     let expired = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let _gallery_reader = gallery_reader;
         let Some(db) = list_db.as_ref().as_ref() else {
             return Ok(Vec::new());
         };
@@ -1339,7 +1350,9 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
     }
     let remaining_dir = dir.clone();
     let remaining_db = db.clone();
+    let gallery_reader = gate.read().await;
     let remaining = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
+        let _gallery_reader = gallery_reader;
         let Some(db) = remaining_db.as_ref().as_ref() else {
             return Ok(0);
         };

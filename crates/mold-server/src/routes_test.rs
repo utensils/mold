@@ -22965,27 +22965,29 @@ mod tests {
             .into_iter()
             .map(|(request, expected)| {
                 let app = app.clone();
+                let route = format!("{} {}", request.method(), request.uri());
                 (
+                    route,
                     expected,
                     tokio::spawn(async move { app.oneshot(request).await.unwrap() }),
                 )
             })
             .collect();
-        for (_, request) in &mut requests {
+        for (route, _, request) in &mut requests {
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), request)
                     .await
                     .is_err(),
-                "an organization/trash route ran while the publication writer was held"
+                "{route} ran while the publication writer was held"
             );
         }
         drop(writer);
-        for (expected, request) in requests {
+        for (route, expected, request) in requests {
             let response = tokio::time::timeout(Duration::from_secs(5), request)
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(response.status(), expected, "{:?}", response);
+            assert_eq!(response.status(), expected, "{route}: {response:?}");
         }
     }
 

@@ -335,6 +335,16 @@
           "crates/mold-server/src/gallery_trash.rs",
           "crates/mold-server/src/routes_test.rs"
         ]
+      },
+      {
+        "id": "macos-bulk-trash-snapshot-guard",
+        "updatedAt": "2026-09-26T18:59:34.194203+00:00",
+        "baseCommit": "e5bcad6909b1beaf3facc32225f53c30e226de09",
+        "scope": "Source-verified guarded Empty Trash/sweep snapshots and publication-lock regression diagnostics; repository-wide baseline unchanged.",
+        "files": [
+          "crates/mold-server/src/gallery_trash.rs",
+          "crates/mold-server/src/routes_test.rs"
+        ]
       }
     ]
   },
@@ -4573,7 +4583,7 @@
       "filePath": "crates/mold-server/src/gallery_trash.rs",
       "lineRange": [
         1186,
-        1246
+        1251
       ],
       "summary": "Provides empty_gallery_trash in gallery_trash.rs.",
       "tags": [
@@ -4588,8 +4598,8 @@
       "name": "sweep_gallery_trash",
       "filePath": "crates/mold-server/src/gallery_trash.rs",
       "lineRange": [
-        1261,
-        1270
+        1266,
+        1275
       ],
       "summary": "Provides sweep_gallery_trash in gallery_trash.rs.",
       "tags": [
@@ -4604,8 +4614,8 @@
       "name": "sweep_trash_once",
       "filePath": "crates/mold-server/src/gallery_trash.rs",
       "lineRange": [
-        1276,
-        1353
+        1281,
+        1366
       ],
       "summary": "Provides sweep_trash_once in gallery_trash.rs.",
       "tags": [
@@ -4620,8 +4630,8 @@
       "name": "spawn_trash_sweeper",
       "filePath": "crates/mold-server/src/gallery_trash.rs",
       "lineRange": [
-        1358,
-        1392
+        1371,
+        1405
       ],
       "summary": "Provides spawn_trash_sweeper in gallery_trash.rs.",
       "tags": [
@@ -223251,8 +223261,8 @@
       "name": "drop",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        1034,
-        1036
+        2699,
+        2707
       ],
       "summary": "Provides drop in batch_transaction.rs.",
       "tags": [
@@ -223603,8 +223613,8 @@
       "name": "release_reservation",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        2064,
-        2075
+        5941,
+        5965
       ],
       "summary": "Provides release_reservation in batch_transaction.rs.",
       "tags": [
@@ -224099,8 +224109,8 @@
       "name": "is_attempt_authority_open_contention",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3513,
-        3523
+        3526,
+        3528
       ],
       "summary": "Provides is_attempt_authority_open_contention in batch_transaction.rs.",
       "tags": [
@@ -224147,8 +224157,8 @@
       "name": "open_attempt_authority_probe_file",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3567,
-        3569
+        3594,
+        3596
       ],
       "summary": "Provides open_attempt_authority_probe_file in batch_transaction.rs.",
       "tags": [
@@ -224163,8 +224173,8 @@
       "name": "open_attempt_authority_file",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3599,
-        3636
+        4072,
+        4086
       ],
       "summary": "Provides open_attempt_authority_file in batch_transaction.rs.",
       "tags": [
@@ -224195,8 +224205,8 @@
       "name": "verify_directory_no_follow",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3709,
-        3717
+        3720,
+        3728
       ],
       "summary": "Provides verify_directory_no_follow in batch_transaction.rs.",
       "tags": [
@@ -224227,8 +224237,8 @@
       "name": "create_private_directory_no_follow",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3750,
-        3775
+        3778,
+        3785
       ],
       "summary": "Provides create_private_directory_no_follow in batch_transaction.rs.",
       "tags": [
@@ -224259,8 +224269,8 @@
       "name": "verify_authority_file_at_path",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3832,
-        3855
+        4089,
+        4111
       ],
       "summary": "Provides verify_authority_file_at_path in batch_transaction.rs.",
       "tags": [
@@ -224275,8 +224285,8 @@
       "name": "remove_locked_authority_path",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3858,
-        3896
+        4114,
+        4121
       ],
       "summary": "Provides remove_locked_authority_path in batch_transaction.rs.",
       "tags": [
@@ -224291,8 +224301,8 @@
       "name": "sync_attempt_authority_parent",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        3899,
-        3908
+        4124,
+        4126
       ],
       "summary": "Provides sync_attempt_authority_parent in batch_transaction.rs.",
       "tags": [
@@ -224403,8 +224413,8 @@
       "name": "open_gallery_bookkeeping_lock_target",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        4311,
-        4318
+        4354,
+        4369
       ],
       "summary": "Provides open_gallery_bookkeeping_lock_target in batch_transaction.rs.",
       "tags": [
@@ -224419,8 +224429,8 @@
       "name": "verify_gallery_bookkeeping_lock_target",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        4372,
-        4386
+        4395,
+        4403
       ],
       "summary": "Provides verify_gallery_bookkeeping_lock_target in batch_transaction.rs.",
       "tags": [
@@ -224531,8 +224541,8 @@
       "name": "open_regular_file_no_follow",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        4735,
-        4768
+        4831,
+        4845
       ],
       "summary": "Provides open_regular_file_no_follow in batch_transaction.rs.",
       "tags": [
@@ -224547,8 +224557,8 @@
       "name": "create_private_file_no_follow",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        4774,
-        4809
+        4812,
+        4828
       ],
       "summary": "Provides create_private_file_no_follow in batch_transaction.rs.",
       "tags": [
@@ -294273,8 +294283,8 @@
       "name": "apply",
       "filePath": "apps/macos/Sources/Mold/Library/GalleryLive.swift",
       "lineRange": [
-        24,
-        47
+        49,
+        92
       ],
       "summary": "Provides apply in GalleryLive.swift.",
       "tags": [
@@ -296722,8 +296732,8 @@
       "name": "export",
       "filePath": "apps/macos/Packages/MoldClient/Sources/MoldClient/HTTPBackend+Gallery.swift",
       "lineRange": [
-        54,
-        56
+        63,
+        70
       ],
       "summary": "Provides export in HTTPBackend+Gallery.swift.",
       "tags": [
@@ -297110,8 +297120,8 @@
       "name": "export",
       "filePath": "apps/macos/Sources/Mold/Library/LibraryActions+Export.swift",
       "lineRange": [
-        42,
-        44
+        80,
+        112
       ],
       "summary": "Provides export in LibraryActions+Export.swift.",
       "tags": [
@@ -298374,8 +298384,8 @@
       "name": "==",
       "filePath": "apps/macos/Sources/Mold/Shell/LibrarySelection.swift",
       "lineRange": [
-        77,
-        91
+        99,
+        99
       ],
       "summary": "Provides == in LibrarySelection.swift.",
       "tags": [
@@ -298710,8 +298720,8 @@
       "name": "batchStatus",
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
       "lineRange": [
-        455,
-        459
+        464,
+        470
       ],
       "summary": "Provides batchStatus in FakeBackend.swift.",
       "tags": [
@@ -299526,8 +299536,8 @@
       "name": "export",
       "filePath": "apps/macos/Tests/MoldTests/FakeBackend.swift",
       "lineRange": [
-        1001,
-        1003
+        1006,
+        1009
       ],
       "summary": "Provides export in FakeBackend.swift.",
       "tags": [
@@ -300138,8 +300148,8 @@
       "name": "fmt",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        96,
-        101
+        2693,
+        2695
       ],
       "summary": "Provides fmt in batch_transaction.rs.",
       "tags": [
@@ -300346,8 +300356,8 @@
       "name": "inject_commit_error",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        1922,
-        1928
+        1931,
+        1933
       ],
       "summary": "Provides inject_commit_error in batch_transaction.rs.",
       "tags": [
@@ -300362,8 +300372,8 @@
       "name": "inject_commit_crash",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        1936,
-        1941
+        1944,
+        1944
       ],
       "summary": "Provides inject_commit_crash in batch_transaction.rs.",
       "tags": [
@@ -300426,8 +300436,8 @@
       "name": "inject_delta_append_error",
       "filePath": "crates/mold-server/src/batch_transaction.rs",
       "lineRange": [
-        2044,
-        2050
+        2053,
+        2055
       ],
       "summary": "Provides inject_delta_append_error in batch_transaction.rs.",
       "tags": [

@@ -173281,7 +173281,7 @@
     },
     "crates/mold-server/src/gallery_trash.rs": {
       "filePath": "crates/mold-server/src/gallery_trash.rs",
-      "contentHash": "5db8db04fd3e6de3387e4bd6e90aeac5fd879e028bbe5c06e0a8429b8bd0ab05",
+      "contentHash": "e191334dddeea7944e6cef1d886727beccdad3d6d556058d0c48ee08a65f9a9e",
       "functions": [
         {
           "name": "reads_trash",
@@ -173567,7 +173567,7 @@
           ],
           "returnType": "Result<Json<EmptyTrashResult>, ApiError>",
           "exported": true,
-          "lineCount": 61
+          "lineCount": 66
         },
         {
           "name": "sweep_gallery_trash",
@@ -173585,7 +173585,7 @@
           ],
           "returnType": "anyhow::Result<TrashSweepResult>",
           "exported": true,
-          "lineCount": 78
+          "lineCount": 86
         },
         {
           "name": "spawn_trash_sweeper",
@@ -173741,7 +173741,7 @@
         "sweep_trash_once",
         "spawn_trash_sweeper"
       ],
-      "totalLines": 1575,
+      "totalLines": 1588,
       "hasStructuralAnalysis": true
     },
     "crates/mold-server/src/generation_cancel.rs": {
@@ -197981,12 +197981,12 @@
     },
     "crates/mold-server/src/routes_test.rs": {
       "filePath": "crates/mold-server/src/routes_test.rs",
-      "contentHash": "b779476912d24c98dc898410fb3e51c63d4a99625c97f45462eb1b27d9643633",
+      "contentHash": "ac084a9f2dbf3afe9e67a0a1affd3f326feb02d07c588d2c67ddc89ed033bdc5",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 24009,
+      "totalLines": 24011,
       "hasStructuralAnalysis": true
     },
     "crates/mold-server/src/scheduler/mod.rs": {
