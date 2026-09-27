@@ -27,9 +27,11 @@ pub struct Qwen3VlVisionDimensions {
     num_position_embeddings: usize,
     deepstack_visual_indexes: Vec<usize>,
     activation: Activation,
-    /// The mergers' `act_fn`. transformers' `Qwen3VLVisionPatchMerger` uses
-    /// `nn.GELU()` (exact erf); H3's port has always used the tanh
-    /// approximation and keeps it so no H3 byte moves.
+    /// The mergers' `act_fn`, which is NOT `hidden_act`: transformers'
+    /// `Qwen3VLVisionPatchMerger.act_fn = nn.GELU()` (exact erf,
+    /// `modeling_qwen3_vl.py:181` at transformers 5.17.0) for the main and
+    /// every DeepStack merger, while `hidden_act` (`gelu_pytorch_tanh`)
+    /// reaches only the blocks' MLP. Both released towers use erf here.
     merger_activation: Activation,
 }
 
@@ -49,7 +51,16 @@ impl Qwen3VlVisionDimensions {
             num_position_embeddings: vision.num_position_embeddings,
             deepstack_visual_indexes: vision.deepstack_visual_indexes.clone(),
             activation: Activation::GeluPytorchTanh,
-            merger_activation: Activation::GeluPytorchTanh,
+            // Every H3 upstream runs the mergers on exact erf GELU: diffusers'
+            // H3 pipeline loads transformers' `Qwen3VLForConditionalGeneration`
+            // (`modular_pipelines/minimax_h3/encoders.py:17`), whose merger is
+            // `nn.GELU()` (`modeling_qwen3_vl.py:181`), and ComfyUI's H3
+            // conditioner (`comfy/text_encoders/minimax.py:27`) calls bare
+            // `F.gelu` in both the main merger (`qwen35.py:560`) and the
+            // DeepStack mergers (`qwen3vl.py:36`); only the block MLP takes
+            // `approximate="tanh"` (`qwen35.py:483`). The port used tanh
+            // here until 2026-09-27.
+            merger_activation: Activation::Gelu,
         }
     }
 
@@ -864,6 +875,100 @@ fn cumulative_sequence_lengths(grid: &[[usize; 3]]) -> Vec<usize> {
 mod tests {
     use super::*;
     use candle_nn::VarMap;
+
+    /// Every released Qwen3-VL tower runs its blocks on the configured
+    /// `gelu_pytorch_tanh` but its mergers on exact erf GELU: transformers'
+    /// `Qwen3VLVisionPatchMerger.act_fn = nn.GELU()` ignores `hidden_act`, and
+    /// ComfyUI's H3 conditioner (`qwen35.py:560`, `qwen3vl.py:36`) calls
+    /// `F.gelu` with no `approximate`. H3 and Qwen Image 2.1 agree.
+    #[test]
+    fn released_towers_use_tanh_blocks_and_erf_mergers() {
+        let h3 = super::super::config::H3ConditionerConfig::from_json(
+            super::super::config::tests::released_config().as_bytes(),
+        )
+        .unwrap();
+        for dimensions in [
+            Qwen3VlVisionDimensions::from_h3(&h3),
+            Qwen3VlVisionDimensions::qwen_image_21(),
+        ] {
+            assert_eq!(dimensions.activation, Activation::GeluPytorchTanh);
+            assert_eq!(dimensions.merger_activation, Activation::Gelu);
+        }
+    }
+
+    /// The released H3 tower against the fp32 transformers oracle
+    /// (`testdata/minimax_h3/vision/capture.py`), on the installed
+    /// conditioner's own `visual.*` weights. Gated on
+    /// `MOLD_TEST_H3_VISION_CAPTURE` (the capture) and
+    /// `MOLD_TEST_H3_SHARED_DIR` (`$MOLD_HOME/models/shared/minimax-h3`).
+    /// It also runs the tower with the old tanh mergers and requires erf
+    /// to be strictly closer, so the evidence for the activation choice is
+    /// re-derived on every run rather than recorded once.
+    #[test]
+    fn released_h3_tower_matches_the_fp32_transformers_capture() {
+        let (Ok(capture), Ok(shared)) = (
+            std::env::var("MOLD_TEST_H3_VISION_CAPTURE"),
+            std::env::var("MOLD_TEST_H3_SHARED_DIR"),
+        ) else {
+            return;
+        };
+        let shared = std::path::Path::new(&shared);
+        let config = super::super::config::H3ConditionerConfig::from_json(
+            &std::fs::read(shared.join("text_encoder/config.json")).unwrap(),
+        )
+        .unwrap();
+        let weights = std::fs::read_dir(shared.join("text_encoders"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
+            .unwrap();
+        let captured = candle::safetensors::load(&capture, &Device::Cpu).unwrap();
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights], DType::F32, &Device::Cpu).unwrap()
+        };
+        let relative = |actual: &Tensor, expected: &Tensor| -> (f32, f32) {
+            let diff = (actual - expected).unwrap().abs().unwrap();
+            let expected = expected.abs().unwrap();
+            let scalar = |t: Tensor| t.to_scalar::<f32>().unwrap();
+            (
+                scalar(diff.flatten_all().unwrap().max(0).unwrap())
+                    / scalar(expected.flatten_all().unwrap().max(0).unwrap()),
+                scalar(diff.mean_all().unwrap()) / scalar(expected.mean_all().unwrap()),
+            )
+        };
+        let run = |dimensions: &Qwen3VlVisionDimensions| -> Vec<(f32, f32)> {
+            let model = Qwen3VlVisionModel::new(dimensions, vb.pp("visual")).unwrap();
+            let (merged, deepstack) = model
+                .forward(
+                    &captured["pixel_values"],
+                    &captured["image_grid_thw"],
+                    &mut |_| Ok(()),
+                )
+                .unwrap();
+            std::iter::once(relative(&merged, &captured["vision_merger"]))
+                .chain(deepstack.iter().enumerate().map(|(index, map)| {
+                    relative(map, &captured[&format!("vision_deepstack_{index}")])
+                }))
+                .collect()
+        };
+        let released = Qwen3VlVisionDimensions::from_h3(&config);
+        let erf = run(&released);
+        let tanh = run(&Qwen3VlVisionDimensions {
+            merger_activation: Activation::GeluPytorchTanh,
+            ..released
+        });
+        for (label, (erf, tanh)) in ["merger", "deepstack 0", "deepstack 1", "deepstack 2"]
+            .iter()
+            .zip(erf.iter().zip(&tanh))
+        {
+            eprintln!(
+                "{label}: erf max {:.3e} mean {:.3e} | tanh max {:.3e} mean {:.3e}",
+                erf.0, erf.1, tanh.0, tanh.1
+            );
+            assert!(erf.0 <= 5e-5, "{label}: erf max {}", erf.0);
+            assert!(erf.1 < tanh.1, "{label}: erf {} vs tanh {}", erf.1, tanh.1);
+        }
+    }
 
     #[test]
     fn interpolation_points_match_the_released_fp32_operation_order() {
