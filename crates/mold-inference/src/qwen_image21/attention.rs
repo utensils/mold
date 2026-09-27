@@ -368,13 +368,12 @@ mod tests {
     /// and without padded keys. Flash accumulates in F32 over BF16 inputs,
     /// so it matches a math reference evaluated in F32 on the same BF16
     /// values to BF16 rounding, and it must actually be the flash kernels
-    /// that ran. Skips without a CUDA device (CI has none).
+    /// that ran. Ignored by default: it needs a CUDA device and panics without one.
     #[cfg(feature = "flash-attn")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn fast_still_flash_segments_match_the_math_prefill_on_cuda() {
-        let Ok(device) = Device::new_cuda(0) else {
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         let slots = [
             false, false, false, false, true, true, false, false, false, false,
         ];
@@ -422,7 +421,26 @@ mod tests {
                 let reference = legacy
                     .attend(&f32(&queries), &f32(&k), &f32(&v), &plan)
                     .unwrap();
+                // Every full block (padded or not) and every unpadded causal
+                // text run has a flash arm; only a causal run over padded
+                // keys builds a math bias. `takes_flash` alone proves
+                // nothing, so count the kernels that actually launched.
+                let flash_segments = plan
+                    .segments
+                    .iter()
+                    .filter(|segment| {
+                        segment.mask == SegmentMask::Full
+                            || plan.key_valid_prefix(segment.kv_len).is_none()
+                    })
+                    .count() as u64;
+                assert!(flash_segments > 0);
+                let dispatches = crate::attention::flash_dispatch_count();
                 let actual = fast.attend(&queries, &k, &v, &plan).unwrap();
+                assert_eq!(
+                    crate::attention::flash_dispatch_count() - dispatches,
+                    flash_segments,
+                    "cached={cached}: a flash-eligible segment did not run FlashAttention"
+                );
                 assert_eq!(actual.dims(), reference.dims());
                 assert_eq!(actual.dtype(), DType::BF16);
                 let error = max_error(&f32(&actual), &reference);

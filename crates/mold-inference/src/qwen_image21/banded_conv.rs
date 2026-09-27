@@ -316,13 +316,12 @@ mod tests {
     /// a band's smaller `M`, so the pin is a BF16 rounding bound, not bit
     /// equality (measured on an L40S: two bands were bitwise, three were
     /// not) — which is exactly why `BandScope` keeps v0.32 canvases unbanded.
-    /// Skips without a CUDA device (CI has none).
+    /// Ignored by default: it needs a CUDA device and panics without one.
     #[cfg(feature = "cuda")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn banded_convolution_matches_the_whole_convolution_on_cuda_at_vae_shapes() {
-        let Ok(device) = Device::new_cuda(0) else {
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         let _im2col = crate::conv_policy::ConvScope::apply(crate::conv_policy::ConvBackend::Im2Col);
         for (c_in, c_out, height, width) in [(288, 144, 256, 384), (144, 144, 320, 192)] {
             let layer = conv(c_in, c_out, &device, DType::BF16);

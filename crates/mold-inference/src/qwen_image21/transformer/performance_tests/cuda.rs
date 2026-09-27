@@ -459,7 +459,12 @@ fn official_cuda_mode_benchmark() -> Result<()> {
         let timestep = crate::qwen_image21::scheduler::step_timestep(
             &scheduler,
             dtype,
-            mode.path.round_timestep_to_dtype,
+            // The harness renders plain text-to-image on CUDA; the path's
+            // own rule decides (the fast path always rounds).
+            mode.path
+                .rounds_timestep(crate::qwen_image21::exec_path::Qwen21RequestShape {
+                    has_v032_bytes: tier == "bf16",
+                }),
         );
         device.synchronize()?;
         let step_started = Instant::now();
@@ -575,7 +580,7 @@ fn official_cuda_mode_benchmark() -> Result<()> {
             "compact_modulation": mode.path.compact_modulation,
             "fused_adaln": mode.path.fused_adaln,
             "f32_rope_tables": mode.path.f32_rope_tables,
-            "round_timestep_to_dtype": mode.path.round_timestep_to_dtype,
+            "upstream_rounding": format!("{:?}", mode.path.upstream_rounding),
         },
         "tier": tier,
         "width": width,

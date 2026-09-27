@@ -25,6 +25,7 @@ use std::time::Instant;
 use super::layout::QwenImage21JointLayout;
 use super::lora::{
     build_registry as build_lora_registry, fingerprint as lora_fingerprint, Qwen21LoraEntry,
+    Qwen21LoraFingerprint,
 };
 use super::reference::{
     encode_prompt_with_images, encode_vision, load_vision_tower, prepare_reference,
@@ -75,7 +76,7 @@ pub struct QwenImage21Engine {
     /// `lora::fingerprint` — empty means none. It describes the transformer
     /// that is resident, not the request: written where adapters are
     /// installed, cleared wherever the transformer goes away.
-    active_lora: Vec<(u64, u64)>,
+    active_lora: Vec<Qwen21LoraFingerprint>,
     /// Parity tests inject upstream's exact initial latents: torch's RNG is
     /// not mold's ChaCha stream, so a seed cannot reproduce them.
     #[cfg(test)]
@@ -158,6 +159,14 @@ fn denoise_cache_budget(
         2,
     );
     super::PrefixCacheBudget::Headroom(super::prefix_cache_headroom(free, 0, workspace))
+}
+
+/// The request warnings a denoise raises, in the order they were decided: an
+/// off-recipe turbo trajectory (`scheduler::scheduler_for`), then a prefix
+/// cache that did not fit. Both change what the render is, so both reach the
+/// response rather than the progress log alone.
+fn denoise_request_warnings(schedule: Option<String>, cache: Option<String>) -> Vec<String> {
+    schedule.into_iter().chain(cache).collect()
 }
 
 /// The positive prompt the encoder reads: the model card's RGBA recipe
@@ -870,8 +879,8 @@ impl QwenImage21Engine {
             req.steps as usize,
             latent_tokens,
         );
-        if let Some(warning) = schedule_warning {
-            progress.info(&warning);
+        if let Some(warning) = &schedule_warning {
+            progress.info(warning);
         }
         let mut latents = match initial_latents {
             Some(latents) => {
@@ -894,6 +903,12 @@ impl QwenImage21Engine {
         };
 
         let exec_path = transformer.exec_path();
+        // Upstream rounds `t` through the latent dtype (`P:770,775`) and
+        // evaluates its rotary angles in float32 (`T:673-675`); only a request
+        // with archived v0.32 bytes on a path that shipped them keeps v0.32's
+        // boundaries (`Qwen21ExecPath::rounds_timestep` / `rope_angles`).
+        let request_shape = super::exec_path::Qwen21RequestShape::of(req);
+        let rounds_timestep = exec_path.rounds_timestep(request_shape);
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
@@ -953,12 +968,14 @@ impl QwenImage21Engine {
             .zip(layouts)
             .zip(&decisions)
             .map(|((branch, layout), decision)| {
-                transformer.prepare(
-                    branch,
-                    layout,
-                    condition.as_ref().map(|c| c.latents.clone()),
-                    *decision,
-                )
+                transformer
+                    .prepare(
+                        branch,
+                        layout,
+                        condition.as_ref().map(|c| c.latents.clone()),
+                        *decision,
+                    )
+                    .map(|prepared| prepared.for_request(request_shape))
             })
             .collect::<Result<Vec<_>>>()?;
         for step in 0..total {
@@ -967,7 +984,7 @@ impl QwenImage21Engine {
             // The diffusion transformer takes normalized `[0, 1]` time. The
             // fast path rounds it through the working dtype exactly as
             // upstream divides it; the v0.32 path keeps its f64 value.
-            let timestep = step_timestep(&scheduler, dtype, exec_path.round_timestep_to_dtype);
+            let timestep = step_timestep(&scheduler, dtype, rounds_timestep);
             let conditional_prediction = prepared[0].forward(&latents, timestep)?;
             let prediction = if let Some(negative) = prepared.get_mut(1) {
                 progress.checkpoint()?;
@@ -991,7 +1008,7 @@ impl QwenImage21Engine {
             latents,
             latent_height,
             latent_width,
-            warnings: cache_warning.into_iter().collect(),
+            warnings: denoise_request_warnings(schedule_warning, cache_warning),
             prefix_cache: prefix_cache_outcome(&decisions),
         })
     }
@@ -1702,13 +1719,42 @@ mod tests {
         );
     }
 
+    /// A turbo tier walked at a step count it was not distilled for is an
+    /// off-recipe render; that warning is a request warning, not only a
+    /// progress line.
     #[test]
-    fn timestep_rounding_belongs_to_the_exec_path() {
+    fn an_off_recipe_turbo_schedule_is_a_request_warning() {
+        use super::super::scheduler::{scheduler_for, ScheduleKind};
+        let (_, schedule) = scheduler_for(
+            ScheduleKind::for_model("qwen-image-2.1-turbo:bf16"),
+            8,
+            4096,
+        );
+        assert!(schedule.is_some());
+        let warnings =
+            denoise_request_warnings(schedule.clone(), Some("cache recomputes".to_string()));
+        assert_eq!(
+            warnings,
+            vec![schedule.unwrap(), "cache recomputes".to_string()]
+        );
+        assert!(denoise_request_warnings(None, None).is_empty());
+    }
+
+    #[test]
+    fn upstream_rounding_belongs_to_the_exec_path() {
         use crate::qwen_image21::exec_path::Qwen21ExecPath;
-        // v0.32 (legacy, Metal, CPU) keeps the unrounded value; only the
-        // CUDA fast path rounds through the working dtype (BF16: 900 -> 0.8984375).
-        assert!(!Qwen21ExecPath::legacy().round_timestep_to_dtype);
-        assert!(Qwen21ExecPath::cuda_fast().round_timestep_to_dtype);
+        use crate::qwen_image21::exec_path::Qwen21RequestShape;
+        // The legacy path keeps the unrounded value; the CUDA fast path rounds
+        // through the working dtype (BF16: 900 -> 0.8984375); Metal rounds
+        // every request that has no v0.32 bytes to preserve.
+        let plain = Qwen21RequestShape::of(&request());
+        let mut referenced = request();
+        referenced.edit_images = Some(vec![png(255)]);
+        let referenced = Qwen21RequestShape::of(&referenced);
+        assert!(!Qwen21ExecPath::legacy().rounds_timestep(plain));
+        assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(plain));
+        assert!(!Qwen21ExecPath::metal(true).rounds_timestep(plain));
+        assert!(Qwen21ExecPath::metal(true).rounds_timestep(referenced));
         assert_eq!(
             super::super::scheduler::transformer_timestep(0.9, DType::BF16),
             0.8984375

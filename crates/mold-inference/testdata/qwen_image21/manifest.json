@@ -550,9 +550,9 @@
   {
    "file": "schedules.json",
    "location": "committed",
-   "sha256": "a3b194dbaeb82d02400ab8cd6906ca2f9c29603099ebb71c25bd1b9ccf89bfc6",
-   "bytes": 16557,
-   "description": "U11: FlowMatchEuler sigmas/timesteps/mu for base and turbo (shift_terminal None) cases"
+   "sha256": "19b8e12bdf27225285f1be3a2ac795c392609c452be6fef9425916e51ba32146",
+   "bytes": 20300,
+   "description": "U11: FlowMatchEuler sigmas/timesteps/mu for base and turbo (shift_terminal None) cases, plus the bf16 transformer timesteps t.to(bf16)/1000"
   },
   {
    "file": "templates.json",

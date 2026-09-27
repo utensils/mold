@@ -452,14 +452,18 @@ mod tests {
         error / peak.max(f32::MIN_POSITIVE)
     }
 
-    fn parity_inputs() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        let root = std::env::var_os("QWEN_IMAGE21_MODEL_ROOT")?;
-        let fixtures = std::env::var_os("QWEN_IMAGE21_FIXTURES")?;
-        Some((
-            std::path::PathBuf::from(root)
+    /// The VAE checkpoint and the capture directory. Run without them, a
+    /// parity test PANICS naming the variable rather than passing unrun.
+    fn parity_inputs() -> (std::path::PathBuf, std::path::PathBuf) {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .unwrap_or_else(|| panic!("{name} must be set to run this parity test"))
+        };
+        (
+            std::path::PathBuf::from(var("QWEN_IMAGE21_MODEL_ROOT"))
                 .join("shared/qwen-image21/vae/diffusion_pytorch_model.safetensors"),
-            std::path::PathBuf::from(fixtures),
-        ))
+            std::path::PathBuf::from(var("QWEN_IMAGE21_FIXTURES")),
+        )
     }
 
     /// P4 (stages): every encoder stage of a 64x96 RGBA crop — including each
@@ -468,9 +472,7 @@ mod tests {
     #[test]
     #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
     fn p4_encoder_stages_match_the_upstream_capture() {
-        let Some((vae_path, fixtures)) = parity_inputs() else {
-            return;
-        };
+        let (vae_path, fixtures) = parity_inputs();
         let device = Device::Cpu;
         let progress = crate::progress::ProgressReporter::default();
         let encoder =
@@ -518,9 +520,7 @@ mod tests {
     #[test]
     #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
     fn p4_encode_packed_matches_the_upstream_capture() {
-        let Some((vae_path, fixtures)) = parity_inputs() else {
-            return;
-        };
+        let (vae_path, fixtures) = parity_inputs();
         let device = Device::Cpu;
         let progress = crate::progress::ProgressReporter::default();
         let encoder =

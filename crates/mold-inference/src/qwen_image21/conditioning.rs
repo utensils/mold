@@ -313,9 +313,8 @@ mod tests {
     #[test]
     #[ignore = "requires QWEN_IMAGE21_FIXTURES"]
     fn references_resize_to_the_captured_pillow_bytes() {
-        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
-            return;
-        };
+        let fixtures = std::env::var_os("QWEN_IMAGE21_FIXTURES")
+            .expect("QWEN_IMAGE21_FIXTURES must be set to run this parity test");
         let captured = candle_core::safetensors::load(
             std::path::Path::new(&fixtures).join("pillow_reference_resize.safetensors"),
             &candle_core::Device::Cpu,

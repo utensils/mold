@@ -26,6 +26,17 @@ use std::sync::Arc;
 use anyhow::{ensure, Result};
 use candle_core::{DType, Device, Tensor};
 
+/// How [`QwenImage21JointLayout::rope_tables`] evaluates its angles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RopeAngles {
+    /// Upstream's arithmetic: inverse frequencies, angles and `cos`/`sin` all
+    /// in float32 (`transformer_qwenimage21.py:673-675`).
+    Upstream,
+    /// v0.32's: angles in f64, rounded once to f32. Kept only where archived
+    /// v0.32 bytes exist (`exec_path::Qwen21ExecPath::rope_angles`).
+    V032,
+}
+
 /// Each vision-language image slot stands for a 2x2 group of latent tokens
 /// (`T:38-39`, `_IMG_TOKENS_PER_SLOT`).
 pub(crate) const IMG_TOKENS_PER_SLOT: usize = 4;
@@ -429,25 +440,55 @@ impl QwenImage21JointLayout {
     /// interleaved complex-pair layout (`apply_rotary_emb_qwen(...,
     /// use_real=False)`), theta 10000 per axis.
     ///
-    /// Angles are evaluated in f64 and rounded once to f32, the rounding
-    /// boundary mold's text-to-image path has always had. Metal keeps F32
-    /// tables for its BF16 denoiser; other devices take `dtype`.
+    /// `angles` picks the arithmetic ([`RopeAngles`]): upstream's float32
+    /// (`T:673-675`), or v0.32's f64 angles rounded once to f32. Metal keeps
+    /// F32 tables for its BF16 denoiser; other devices take `dtype`.
     pub(crate) fn rope_tables(
         coords: &[[i32; 3]],
         axes_dims: [usize; 3],
+        angles: RopeAngles,
         dtype: DType,
         device: &Device,
     ) -> Result<(Tensor, Tensor)> {
         let half = axes_dims.iter().sum::<usize>() / 2;
         let mut cos = Vec::with_capacity(coords.len() * half);
         let mut sin = Vec::with_capacity(coords.len() * half);
-        for coordinate in coords {
-            for (axis, axis_dim) in axes_dims.iter().copied().enumerate() {
-                for index in (0..axis_dim).step_by(2) {
-                    let frequency = 1.0 / 10_000.0f64.powf(index as f64 / axis_dim as f64);
-                    let angle = coordinate[axis] as f64 * frequency;
-                    cos.push(angle.cos() as f32);
-                    sin.push(angle.sin() as f32);
+        match angles {
+            RopeAngles::V032 => {
+                for coordinate in coords {
+                    for (axis, axis_dim) in axes_dims.iter().copied().enumerate() {
+                        for index in (0..axis_dim).step_by(2) {
+                            let frequency = 1.0 / 10_000.0f64.powf(index as f64 / axis_dim as f64);
+                            let angle = coordinate[axis] as f64 * frequency;
+                            cos.push(angle.cos() as f32);
+                            sin.push(angle.sin() as f32);
+                        }
+                    }
+                }
+            }
+            RopeAngles::Upstream => {
+                // `rope_params` (`T:673-675`): `1.0 / torch.pow(theta,
+                // arange(0, dim, 2).to(float32).div(dim))`, an f32 outer
+                // product with the integer position, then `torch.polar` in
+                // f32.
+                let inverse: Vec<Vec<f32>> = axes_dims
+                    .iter()
+                    .map(|&axis_dim| {
+                        (0..axis_dim)
+                            .step_by(2)
+                            .map(|index| 1.0f32 / 10_000.0f32.powf(index as f32 / axis_dim as f32))
+                            .collect()
+                    })
+                    .collect();
+                for coordinate in coords {
+                    for (axis, frequencies) in inverse.iter().enumerate() {
+                        let position = coordinate[axis] as f32;
+                        for &frequency in frequencies {
+                            let angle = position * frequency;
+                            cos.push(angle.cos());
+                            sin.push(angle.sin());
+                        }
+                    }
                 }
             }
         }
@@ -765,6 +806,77 @@ mod tests {
                 })
                 .collect();
             assert_eq!(prefix_segments, captured.segments, "{case}");
+        }
+    }
+
+    /// Upstream's own tables (`p5_rope_freqs`, `QwenImage21Rope` captured in
+    /// float32 by `capture.py`) for every captured layout: the upstream arm
+    /// reproduces them bit for bit (measured: 0 of 3,167,360 values differ),
+    /// where v0.32's f64 angles differ in ~46% of values by up to 9e-6.
+    #[test]
+    #[ignore = "needs QWEN_IMAGE21_FIXTURES (the large-capture directory)"]
+    fn upstream_angles_reproduce_the_captured_rope_tables() {
+        let fixtures = std::path::PathBuf::from(
+            std::env::var_os("QWEN_IMAGE21_FIXTURES")
+                .expect("QWEN_IMAGE21_FIXTURES must name the large-capture directory"),
+        );
+        let captured = candle_core::safetensors::load(
+            fixtures.join("p5_rope_freqs.safetensors"),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qwen_image21");
+        let layouts =
+            candle_core::safetensors::load(dir.join("p5_layout.safetensors"), &Device::Cpu)
+                .unwrap();
+        let axes = [16, 56, 56];
+        for case in ["p6_pos", "p6_neg", "p8_pos", "t2i_p8"] {
+            let axis = |name: &str| layouts[&format!("{case}.{name}")].to_vec1::<i64>().unwrap();
+            let (frame, height, width) =
+                (axis("rope_frame"), axis("rope_height"), axis("rope_width"));
+            let coords: Vec<[i32; 3]> = (0..frame.len())
+                .map(|i| [frame[i] as i32, height[i] as i32, width[i] as i32])
+                .collect();
+            let expected = captured[&format!("{case}.rope_freqs")]
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut worst = [0f32; 2];
+            let mut mismatched = [0usize; 2];
+            for (slot, angles) in [RopeAngles::Upstream, RopeAngles::V032]
+                .into_iter()
+                .enumerate()
+            {
+                let (cos, sin) = QwenImage21JointLayout::rope_tables(
+                    &coords,
+                    axes,
+                    angles,
+                    DType::F32,
+                    &Device::Cpu,
+                )
+                .unwrap();
+                let cos = cos.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let sin = sin.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                for (index, (c, s)) in cos.iter().zip(&sin).enumerate() {
+                    for (actual, expected) in
+                        [(c, expected[2 * index]), (s, expected[2 * index + 1])]
+                    {
+                        let error = (actual - expected).abs();
+                        worst[slot] = worst[slot].max(error);
+                        mismatched[slot] += usize::from(actual.to_bits() != expected.to_bits());
+                    }
+                }
+            }
+            eprintln!(
+                "{case}: upstream arm worst {:.3e} ({} of {} values differ), v0.32 arm worst {:.3e} ({} differ)",
+                worst[0],
+                mismatched[0],
+                expected.len(),
+                worst[1],
+                mismatched[1]
+            );
+            assert_eq!(mismatched[0], 0, "{case}: worst {}", worst[0]);
         }
     }
 

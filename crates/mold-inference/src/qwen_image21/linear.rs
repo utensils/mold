@@ -39,7 +39,9 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use mold_candle::comfy_int8::{ComfyInt8ConvRotLinear, CONVROT_GROUP_SIZE};
 
 use crate::artifact_format::QwenImage21TransformerFormat;
-use crate::flux::lora_bypass::{apply_adapters, FusedSlice, LinearLoraAdapter};
+use crate::flux::lora_bypass::{
+    apply_adapters_sharing, move_adapters_sharing, FusedSlice, LinearLoraAdapter, LoraProjections,
+};
 use crate::quantized_linear::{parse_qmatmul_flag, QuantizedLinear, QuantizedLinearKind};
 
 /// Opt CUDA into candle's quantized `QMatMul` fast path for the GGUF tiers.
@@ -213,6 +215,16 @@ impl Q21Linear {
     /// This linear with its base weight on `device`; the adapter stack moves
     /// with it. The arm is preserved (see `QuantizedLinear::to_device`).
     pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        self.to_device_sharing(device, &mut std::collections::HashMap::new())
+    }
+
+    /// [`Self::to_device`], keeping adapter tensors shared with linears moved
+    /// through the same `moved` map one tensor after the move.
+    pub(crate) fn to_device_sharing(
+        &self,
+        device: &Device,
+        moved: &mut std::collections::HashMap<candle_core::TensorId, Tensor>,
+    ) -> Result<Self> {
         let weight = match &self.weight {
             Q21Weight::Dense(linear) => Q21Weight::Dense(candle_nn::Linear::new(
                 linear.weight().to_device(device)?,
@@ -236,17 +248,7 @@ impl Q21Linear {
                 bias: bias.as_ref().map(|b| b.to_device(device)).transpose()?,
             },
         };
-        let adapters = self
-            .adapters
-            .iter()
-            .map(|adapter| {
-                Ok(LinearLoraAdapter {
-                    down: adapter.down.to_device(device)?,
-                    up: adapter.up.to_device(device)?,
-                    ..adapter.clone()
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let adapters = move_adapters_sharing(&self.adapters, device, moved)?;
         Ok(Self {
             weight,
             in_features: self.in_features,
@@ -333,11 +335,21 @@ impl Q21Linear {
     }
 
     pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.forward_sharing(x, &mut LoraProjections::default())
+    }
+
+    /// [`Self::forward`], sharing adapter down projections of `x` through
+    /// `projections` with other linears fed the same input.
+    pub(crate) fn forward_sharing(
+        &self,
+        x: &Tensor,
+        projections: &mut LoraProjections,
+    ) -> Result<Tensor> {
         let out = self.base_forward(x)?;
         if self.adapters.is_empty() {
             Ok(out)
         } else {
-            apply_adapters(&self.adapters, x, out)
+            apply_adapters_sharing(&self.adapters, x, out, projections)
         }
     }
 }
@@ -427,10 +439,15 @@ impl Q21GateUp {
 
     pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
         Ok(match self {
-            Self::Split { gate, proj } => Self::Split {
-                gate: gate.to_device(device)?,
-                proj: proj.to_device(device)?,
-            },
+            Self::Split { gate, proj } => {
+                // One map for both halves: a fused `gate_up` LoRA's shared
+                // `down` must still be ONE tensor after the move.
+                let mut moved = std::collections::HashMap::new();
+                Self::Split {
+                    gate: gate.to_device_sharing(device, &mut moved)?,
+                    proj: proj.to_device_sharing(device, &mut moved)?,
+                }
+            }
             Self::Fused { gate_up, hidden } => Self::Fused {
                 gate_up: gate_up.to_device(device)?,
                 hidden: *hidden,
@@ -439,9 +456,19 @@ impl Q21GateUp {
     }
 
     /// `(gate_layer(x), proj(x))` — diffusers' names for the two halves.
+    ///
+    /// Both halves read the same `x`, so a ComfyUI fused `gate_up` LoRA —
+    /// one `down` shared by the gate and proj adapters (`comfy/lora.py:
+    /// 331-333` splits only the `up` rows) — projects `x @ downᵀ` once.
     pub(crate) fn forward(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         match self {
-            Self::Split { gate, proj } => Ok((gate.forward(x)?, proj.forward(x)?)),
+            Self::Split { gate, proj } => {
+                let mut projections = LoraProjections::default();
+                Ok((
+                    gate.forward_sharing(x, &mut projections)?,
+                    proj.forward_sharing(x, &mut projections)?,
+                ))
+            }
             Self::Fused { gate_up, hidden } => split_gate_up(&gate_up.forward(x)?, *hidden),
         }
     }

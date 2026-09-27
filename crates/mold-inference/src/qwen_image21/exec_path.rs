@@ -30,6 +30,7 @@
 
 use candle_core::Device;
 
+use super::layout::RopeAngles;
 use crate::attention::AttentionBackend;
 
 /// How the transformer attends its target (and cached-decode) queries.
@@ -66,12 +67,62 @@ pub(crate) struct Qwen21ExecPath {
     pub fused_adaln: bool,
     /// Build the rotary tables in F32 regardless of the working dtype.
     pub f32_rope_tables: bool,
-    /// Round the scheduler timestep to the latent dtype before dividing by
-    /// 1000, as upstream does (diffusers `pipeline_qwenimage21.py` casts
-    /// `t` to the latents' dtype before `timestep / 1000`). v0.32 passed the
-    /// unrounded f64, so `legacy()` and Metal keep `false`; the pipeline
-    /// reads this through `scheduler::transformer_timestep(sigma, dtype)`.
-    pub round_timestep_to_dtype: bool,
+    /// Whether the render follows upstream's rounding boundaries or v0.32's:
+    /// the scheduler timestep rounded to the latent dtype before dividing by
+    /// 1000 (`pipeline_qwenimage21.py:770,775` casts `t` to the latents' dtype
+    /// before `timestep / 1000`) and float32 rotary angles
+    /// (`transformer_qwenimage21.py:673-675`). A per-request decision: resolve
+    /// it with [`Self::rounds_timestep`] and [`Self::rope_angles`].
+    pub upstream_rounding: UpstreamRounding,
+}
+
+/// How a path decides between upstream's rounding boundaries and v0.32's:
+/// the transformer timestep rounded through the working dtype
+/// (`pipeline_qwenimage21.py:770,775`) and float32 rotary angles
+/// (`transformer_qwenimage21.py:673-675`).
+///
+/// v0.32 passed the unrounded f64 `timestep / 1000` and evaluated its rotary
+/// angles in f64. Its bytes are archived
+/// for exactly two cases — the legacy CUDA/CPU arithmetic and Metal's
+/// base-tier (bf16) plain text-to-image render — so only those keep it.
+/// Every render v0.32 could not make (a turbo tier, a quantized tier, a
+/// reference, a transparent background, a LoRA) has no bytes to preserve and
+/// follows upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpstreamRounding {
+    /// Never round: [`Qwen21ExecPath::legacy`], v0.32 byte for byte.
+    Never,
+    /// Always round: the CUDA fast path, which has no v0.32 bytes at all.
+    Always,
+    /// Metal: keep v0.32's unrounded value only for a request v0.32 could
+    /// render ([`Qwen21RequestShape::has_v032_bytes`]), round everything else.
+    UnlessV032Request,
+}
+
+/// The facts about a request that execution decisions read, resolved once
+/// per render from the [`GenerateRequest`](mold_core::GenerateRequest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Qwen21RequestShape {
+    /// v0.32 shipped exactly `qwen-image-2.1:bf16` plain text-to-image: no
+    /// reference images, no transparent background, no LoRA (v0.32 refused
+    /// every adapter). Only such a request has archived bytes to reproduce.
+    pub has_v032_bytes: bool,
+}
+
+impl Qwen21RequestShape {
+    pub(crate) fn of(req: &mold_core::GenerateRequest) -> Self {
+        let base_tier =
+            mold_core::manifest::resolve_model_name(&req.model) == "qwen-image-2.1:bf16";
+        let references = req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty());
+        let transparent = req.transparent_background == Some(true);
+        let lora = !req.caller_lora_stack().is_empty();
+        Self {
+            has_v032_bytes: base_tier && !references && !transparent && !lora,
+        }
+    }
 }
 
 impl Qwen21ExecPath {
@@ -85,12 +136,13 @@ impl Qwen21ExecPath {
             compact_modulation: false,
             fused_adaln: false,
             f32_rope_tables: false,
-            round_timestep_to_dtype: false,
+            upstream_rounding: UpstreamRounding::Never,
         }
     }
 
     /// Metal's shipped path. `fast` is `attention::metal_fast_path_enabled()`;
-    /// the rotary tables were F32 on Metal before either mode existed.
+    /// the rotary tables were F32 on Metal before either mode existed. Both
+    /// modes round the timestep except for a request with v0.32 bytes.
     pub(crate) const fn metal(fast: bool) -> Self {
         if fast {
             Self {
@@ -99,11 +151,12 @@ impl Qwen21ExecPath {
                 compact_modulation: true,
                 fused_adaln: false,
                 f32_rope_tables: true,
-                round_timestep_to_dtype: false,
+                upstream_rounding: UpstreamRounding::UnlessV032Request,
             }
         } else {
             Self {
                 f32_rope_tables: true,
+                upstream_rounding: UpstreamRounding::UnlessV032Request,
                 ..Self::legacy()
             }
         }
@@ -117,7 +170,28 @@ impl Qwen21ExecPath {
             compact_modulation: true,
             fused_adaln: true,
             f32_rope_tables: true,
-            round_timestep_to_dtype: true,
+            upstream_rounding: UpstreamRounding::Always,
+        }
+    }
+
+    /// Whether `request`'s denoise rounds its timestep through the working
+    /// dtype on this path (see [`UpstreamRounding`]).
+    pub(crate) const fn rounds_timestep(&self, request: Qwen21RequestShape) -> bool {
+        match self.upstream_rounding {
+            UpstreamRounding::Never => false,
+            UpstreamRounding::Always => true,
+            UpstreamRounding::UnlessV032Request => !request.has_v032_bytes,
+        }
+    }
+
+    /// The rotary-angle arithmetic `request` takes on this path: upstream's
+    /// float32 exactly where the timestep rounds, v0.32's f64 where archived
+    /// bytes are preserved.
+    pub(crate) const fn rope_angles(&self, request: Qwen21RequestShape) -> RopeAngles {
+        if self.rounds_timestep(request) {
+            RopeAngles::Upstream
+        } else {
+            RopeAngles::V032
         }
     }
 
@@ -215,9 +289,10 @@ mod tests {
             assert_eq!(path.fused_projection, fast, "fused_ops default");
             assert_eq!(path.compact_modulation, fast, "compact_modulation default");
             assert!(!path.fused_adaln, "Metal never fused adaLN");
-            assert!(
-                !path.round_timestep_to_dtype,
-                "Metal keeps its unrounded timestep"
+            assert_eq!(
+                path.upstream_rounding,
+                UpstreamRounding::UnlessV032Request,
+                "Metal keeps its unrounded timestep only where v0.32 bytes exist"
             );
             assert!(path.f32_rope_tables, "Metal tables were always F32");
         }
@@ -253,7 +328,7 @@ mod tests {
         assert!(!legacy.compact_modulation);
         assert!(!legacy.fused_adaln);
         assert!(!legacy.f32_rope_tables);
-        assert!(!legacy.round_timestep_to_dtype);
+        assert_eq!(legacy.upstream_rounding, UpstreamRounding::Never);
     }
 
     #[test]
@@ -262,7 +337,86 @@ mod tests {
         assert_eq!(fast.attention, TargetAttention::FastStill);
         assert!(fast.fused_projection && fast.compact_modulation);
         assert!(fast.fused_adaln && fast.f32_rope_tables);
-        assert!(fast.round_timestep_to_dtype);
+        assert_eq!(fast.upstream_rounding, UpstreamRounding::Always);
+    }
+
+    fn request(model: &str) -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a red ceramic teapot",
+            "model": model,
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 1.0,
+        }))
+        .expect("minimal request")
+    }
+
+    /// Only `qwen-image-2.1:bf16` plain text-to-image has v0.32 bytes; every
+    /// tier, reference, transparency or LoRA added since has none.
+    #[test]
+    fn only_a_base_tier_plain_render_has_v032_bytes() {
+        assert!(Qwen21RequestShape::of(&request("qwen-image-2.1:bf16")).has_v032_bytes);
+        assert!(Qwen21RequestShape::of(&request("qwen-image-2.1")).has_v032_bytes);
+        for model in [
+            "qwen-image-2.1-turbo:bf16",
+            "qwen-image-2.1:q8",
+            "qwen-image-2.1:int8-conv",
+            "qwen-image-2.1:fp8",
+        ] {
+            assert!(
+                !Qwen21RequestShape::of(&request(model)).has_v032_bytes,
+                "{model}"
+            );
+        }
+        let mut refs = request("qwen-image-2.1:bf16");
+        refs.edit_images = Some(vec![vec![0u8; 4]]);
+        assert!(!Qwen21RequestShape::of(&refs).has_v032_bytes);
+        let mut transparent = request("qwen-image-2.1:bf16");
+        transparent.transparent_background = Some(true);
+        assert!(!Qwen21RequestShape::of(&transparent).has_v032_bytes);
+        let mut lora = request("qwen-image-2.1:bf16");
+        lora.lora = Some(mold_core::LoraWeight {
+            path: "/tmp/adapter.safetensors".into(),
+            scale: 1.0,
+            expert: None,
+        });
+        assert!(!Qwen21RequestShape::of(&lora).has_v032_bytes);
+    }
+
+    /// Metal rounds wherever there are no v0.32 bytes to preserve, in both of
+    /// its modes; the legacy path never rounds, the CUDA fast path always does.
+    #[test]
+    fn upstream_rounding_is_decided_per_request() {
+        let v032 = Qwen21RequestShape {
+            has_v032_bytes: true,
+        };
+        let new = Qwen21RequestShape {
+            has_v032_bytes: false,
+        };
+        for fast in [true, false] {
+            let metal = Qwen21ExecPath::metal(fast);
+            assert!(!metal.rounds_timestep(v032));
+            assert!(metal.rounds_timestep(new));
+        }
+        assert!(!Qwen21ExecPath::legacy().rounds_timestep(v032));
+        assert!(!Qwen21ExecPath::legacy().rounds_timestep(new));
+        assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(v032));
+        assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(new));
+        // The rotary angles take the same decision.
+        assert_eq!(Qwen21ExecPath::legacy().rope_angles(new), RopeAngles::V032);
+        assert_eq!(
+            Qwen21ExecPath::cuda_fast().rope_angles(v032),
+            RopeAngles::Upstream
+        );
+        assert_eq!(
+            Qwen21ExecPath::metal(true).rope_angles(v032),
+            RopeAngles::V032
+        );
+        assert_eq!(
+            Qwen21ExecPath::metal(true).rope_angles(new),
+            RopeAngles::Upstream
+        );
     }
 
     #[test]

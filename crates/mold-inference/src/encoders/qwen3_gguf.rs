@@ -126,12 +126,49 @@ impl GgufQwen3Arch {
                 && arch.head_dim.is_multiple_of(2),
             "GGUF Qwen3 architecture is inconsistent: {arch:?}"
         );
+        if let Some(value) = find("rope.dimension_sections") {
+            validate_mrope_sections(value)?;
+        }
         Ok(arch)
     }
 
     fn kv_repeat(&self) -> usize {
         self.n_heads / self.n_kv_heads
     }
+}
+
+/// Refuse a GGUF whose `rope.dimension_sections` disagrees with the MRoPE
+/// split the multimodal forward applies (`QWEN3_VL_MROPE_SECTIONS`). llama.cpp
+/// writes four sections (T, H, W and an extra axis Qwen3-VL leaves at 0); the
+/// official Qwen3-VL-8B GGUFs carry `[24, 20, 20, 0]`.
+fn validate_mrope_sections(value: &gguf_file::Value) -> Result<()> {
+    let gguf_file::Value::Array(entries) = value else {
+        anyhow::bail!("GGUF rope.dimension_sections is not an array: {value:?}");
+    };
+    let sections = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .to_i32()
+                .map(i64::from)
+                .or_else(|_| entry.to_u32().map(i64::from))
+                .or_else(|_| entry.to_i64())
+                .or_else(|_| entry.to_u64().map(|v| v as i64))
+                .map_err(|_| {
+                    anyhow::anyhow!("GGUF rope.dimension_sections holds a non-integer: {entry:?}")
+                })
+        })
+        .collect::<Result<Vec<i64>>>()?;
+    let expected = qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS.map(|s| s as i64);
+    let matches = sections.len() >= 3
+        && sections[..3] == expected
+        && sections[3..].iter().all(|extra| *extra == 0);
+    anyhow::ensure!(
+        matches,
+        "GGUF rope.dimension_sections {sections:?} does not match the Qwen3-VL MRoPE sections \
+         {expected:?} this encoder implements"
+    );
+    Ok(())
 }
 
 // ── RMS Layer Norm ───────────────────────────────────────────────────────────
@@ -228,6 +265,35 @@ fn causal_mask(seq_len: usize, dtype: DType, device: &Device) -> Result<Tensor> 
         .map_err(Into::into)
 }
 
+/// The attention mask a forward applies.
+#[derive(Clone, Copy)]
+enum AttentionMask<'a> {
+    /// A caller-built additive `(B, 1, L, L)` mask (the text paths: plain
+    /// causal, or causal + key padding for left-padded prompt batches).
+    Additive(&'a Tensor),
+    /// Plain causal attention with the bias built ON the device per query
+    /// chunk, each chunk reading only the keys it can see — the multimodal
+    /// forward, whose sequence (ten 1024-px references are ~10k tokens) would
+    /// otherwise need a full `L x L` host mask (~424 MB of F32 at 10k). The
+    /// BF16 twin is `Bf16Qwen3Encoder`'s `forward_causal_with_tables`.
+    Causal,
+}
+
+/// The additive causal bias for query rows `start..start + rows` against keys
+/// `0..start + rows`, `(1, 1, rows, start + rows)` in `dtype`, built on
+/// `device`: key `j` is visible to query `start + r` iff `j <= start + r`.
+fn causal_chunk_bias(start: usize, rows: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    let keys = start + rows;
+    let key_index = Tensor::arange(0u32, keys as u32, device)?.reshape((1, keys))?;
+    let query_index = Tensor::arange(start as u32, keys as u32, device)?.reshape((rows, 1))?;
+    let visible = key_index.broadcast_le(&query_index)?;
+    let blocked = Tensor::full(f32::NEG_INFINITY, (rows, keys), device)?.to_dtype(dtype)?;
+    let zero = Tensor::zeros((rows, keys), dtype, device)?;
+    Ok(visible
+        .where_cond(&zero, &blocked)?
+        .reshape((1, 1, rows, keys))?)
+}
+
 // ── GQA repeat_kv ────────────────────────────────────────────────────────────
 
 /// Repeat KV heads to match Q head count for grouped-query attention.
@@ -268,6 +334,9 @@ struct Qwen3Attention {
     q_norm: RmsNorm,
     k_norm: RmsNorm,
     arch: GgufQwen3Arch,
+    /// Query rows per attention chunk ([`ATTENTION_QUERY_CHUNK`]; tests
+    /// override it to exercise several chunks on a short prompt).
+    query_chunk: usize,
 }
 
 impl Qwen3Attention {
@@ -276,7 +345,7 @@ impl Qwen3Attention {
         xs: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        mask: &Tensor,
+        mask: AttentionMask<'_>,
     ) -> Result<Tensor> {
         let (b, seq_len, _) = xs.dims3()?;
         let arch = self.arch;
@@ -318,16 +387,43 @@ impl Qwen3Attention {
         // the historical arithmetic.
         let scale = 1.0 / (arch.head_dim as f64).sqrt();
         let k_t = k.t()?;
-        let mut chunks = Vec::with_capacity(seq_len.div_ceil(ATTENTION_QUERY_CHUNK));
-        for start in (0..seq_len).step_by(ATTENTION_QUERY_CHUNK) {
-            let rows = ATTENTION_QUERY_CHUNK.min(seq_len - start);
-            let (q, mask) = if rows == seq_len {
-                (q.clone(), mask.clone())
+        let query_chunk = self.query_chunk.max(1);
+        let mut chunks = Vec::with_capacity(seq_len.div_ceil(query_chunk));
+        for start in (0..seq_len).step_by(query_chunk) {
+            let rows = query_chunk.min(seq_len - start);
+            let q = if rows == seq_len {
+                q.clone()
             } else {
-                (q.narrow(2, start, rows)?, mask.narrow(2, start, rows)?)
+                q.narrow(2, start, rows)?
             };
-            let scores = (q.matmul(&k_t)? * scale)?;
-            let scores = scores.broadcast_add(&mask)?;
+            let (scores, v) = match mask {
+                AttentionMask::Additive(mask) => {
+                    let mask = if rows == seq_len {
+                        mask.clone()
+                    } else {
+                        mask.narrow(2, start, rows)?
+                    };
+                    ((q.matmul(&k_t)? * scale)?.broadcast_add(&mask)?, v.clone())
+                }
+                AttentionMask::Causal => {
+                    // Only keys `0..start + rows` are visible to this chunk.
+                    let keys = start + rows;
+                    let k_seen = k_t.narrow(3, 0, keys)?;
+                    let v_seen = v.narrow(2, 0, keys)?;
+                    let scores = (q.matmul(&k_seen)? * scale)?;
+                    let scores = if rows > 1 {
+                        scores.broadcast_add(&causal_chunk_bias(
+                            start,
+                            rows,
+                            scores.dtype(),
+                            scores.device(),
+                        )?)?
+                    } else {
+                        scores
+                    };
+                    (scores, v_seen)
+                }
+            };
             let attn_weights = candle_nn::ops::softmax_last_dim(&scores)?;
             chunks.push(attn_weights.matmul(&v)?);
         }
@@ -362,7 +458,7 @@ impl Qwen3Block {
         xs: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        mask: &Tensor,
+        mask: AttentionMask<'_>,
     ) -> Result<Tensor> {
         // Self-attention with pre-norm and residual
         let normed = self.attn_norm.forward(xs)?;
@@ -529,6 +625,7 @@ impl GgufQwen3Encoder {
                 q_norm,
                 k_norm,
                 arch,
+                query_chunk: ATTENTION_QUERY_CHUNK,
             };
 
             let ffn = SwiGluFFN { gate, up, down };
@@ -607,7 +704,7 @@ impl GgufQwen3Encoder {
             }
         };
         for block in self.blocks.iter_mut() {
-            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            xs = block.forward(&xs, &cos, &sin, AttentionMask::Additive(&mask))?;
         }
         Ok(xs)
     }
@@ -648,9 +745,8 @@ impl GgufQwen3Encoder {
             qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS,
             xs.device(),
         )?;
-        let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
         for (layer, block) in self.blocks.iter_mut().enumerate() {
-            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            xs = block.forward(&xs, &cos, &sin, AttentionMask::Causal)?;
             if let Some(visual) = &visual {
                 xs = qwen3_vl_inject::apply_deepstack(&xs, visual, layer)?;
             }
@@ -674,7 +770,7 @@ impl GgufQwen3Encoder {
         // Run through layers, stop at second-to-last (return layer N_RETURN_LAYERS-1)
         let n_run = N_RETURN_LAYERS.min(self.blocks.len());
         for block in self.blocks[..n_run].iter_mut() {
-            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            xs = block.forward(&xs, &cos, &sin, AttentionMask::Additive(&mask))?;
         }
 
         Ok(xs)
@@ -725,7 +821,7 @@ impl GgufQwen3Encoder {
         let mut collected: Vec<Tensor> = Vec::with_capacity(layer_indices.len());
 
         for (i, block) in self.blocks[..n_run].iter_mut().enumerate() {
-            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            xs = block.forward(&xs, &cos, &sin, AttentionMask::Additive(&mask))?;
             if layer_indices.contains(&i) {
                 collected.push(xs.clone());
             }
@@ -741,6 +837,14 @@ impl GgufQwen3Encoder {
 }
 
 impl GgufQwen3Encoder {
+    /// Override the attention's query-chunk size (every block).
+    #[cfg(test)]
+    fn set_query_chunk(&mut self, rows: usize) {
+        for block in &mut self.blocks {
+            block.self_attn.query_chunk = rows;
+        }
+    }
+
     /// [`Self::park_to_cpu`] with the same-device short circuit removed.
     ///
     /// Split out for exactly the reason `wan::block_offload::rebuild_on` is:
@@ -926,6 +1030,24 @@ mod tests {
         GgufQwen3Encoder::from_tensors(tensors, metadata, &Device::Cpu).unwrap()
     }
 
+    /// [`tiny_encoder`] with every weight stored as F32. A quantized
+    /// `QMatMul` on the CPU re-quantizes its ACTIVATION to Q8_K, so a
+    /// last-ulp change in the attention output can flip an activation block's
+    /// rounding and move a row by percent; comparing two attention schedules
+    /// needs linears that pass an ulp through as an ulp.
+    fn dense_tiny_encoder() -> GgufQwen3Encoder {
+        let (tensors, metadata) = synthetic_checkpoint();
+        let dense = tensors
+            .into_iter()
+            .map(|(name, tensor)| {
+                let values = tensor.dequantize(&Device::Cpu).unwrap();
+                let widened = QTensor::quantize(&values, GgmlDType::F32).unwrap();
+                (name, Arc::new(widened))
+            })
+            .collect();
+        GgufQwen3Encoder::from_tensors(dense, metadata, &Device::Cpu).unwrap()
+    }
+
     /// Qwen3-VL-8B's own GGUF header (`Qwen/Qwen3-VL-8B-Instruct-GGUF`):
     /// `general.architecture = qwen3vl` and every hyperparameter under that
     /// prefix, including the 5e6 RoPE base the stock Qwen3 files do not use.
@@ -981,6 +1103,56 @@ mod tests {
             gguf_file::Value::U32(7),
         );
         assert!(GgufQwen3Arch::from_metadata(&bad).is_err());
+    }
+
+    /// The multimodal forward hard-codes Qwen3-VL-8B's MRoPE sections
+    /// (`QWEN3_VL_MROPE_SECTIONS`); a GGUF declaring different
+    /// `rope.dimension_sections` must be refused at load, not rendered with
+    /// the wrong frequency split. The official files carry `[24, 20, 20, 0]`
+    /// as an I32 array (read from `Qwen3VL-8B-Instruct-Q8_0.gguf` and
+    /// `-Q4_K_M.gguf`); llama.cpp writes four sections, the fourth unused
+    /// by Qwen3-VL.
+    #[test]
+    fn mrope_sections_are_validated_against_the_gguf_metadata() {
+        let sections = |values: &[i32]| {
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "general.architecture".to_string(),
+                gguf_file::Value::String("qwen3vl".to_string()),
+            );
+            metadata.insert(
+                "qwen3vl.rope.dimension_sections".to_string(),
+                gguf_file::Value::Array(values.iter().map(|v| gguf_file::Value::I32(*v)).collect()),
+            );
+            GgufQwen3Arch::from_metadata(&metadata)
+        };
+        assert!(sections(&[24, 20, 20, 0]).is_ok());
+        assert!(sections(&[24, 20, 20]).is_ok());
+        for bad in [
+            &[16, 24, 24, 0][..],
+            &[24, 20, 20, 8],
+            &[20, 20, 24, 0],
+            &[24, 20],
+        ] {
+            let error = sections(bad).unwrap_err().to_string();
+            assert!(
+                error.contains("dimension_sections"),
+                "{bad:?} refused without naming the key: {error}"
+            );
+        }
+        // A non-integer array is refused too.
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "qwen3vl.rope.dimension_sections".to_string(),
+            gguf_file::Value::Array(vec![gguf_file::Value::F32(24.0)]),
+        );
+        metadata.insert(
+            "general.architecture".to_string(),
+            gguf_file::Value::String("qwen3vl".to_string()),
+        );
+        assert!(GgufQwen3Arch::from_metadata(&metadata).is_err());
+        // Files that declare none (every stock Qwen3 GGUF) are unaffected.
+        assert!(GgufQwen3Arch::from_metadata(&HashMap::new()).is_ok());
     }
 
     /// The RoPE base is live: the same weights under a different
@@ -1144,35 +1316,136 @@ mod tests {
             .is_err());
     }
 
-    /// Chunking the attention's query rows is the same arithmetic.
+    /// The multimodal forward's per-chunk causal bias is exactly the rows
+    /// `start..start + rows` of the full causal mask, cut at the last key
+    /// those rows can see — never the full `L x L` host mask.
+    #[test]
+    fn the_per_chunk_causal_bias_is_the_full_masks_visible_block() {
+        let (seq, start, rows) = (11, 4, 3);
+        let full = causal_mask(seq, DType::F32, &Device::Cpu).unwrap();
+        let expected = full
+            .narrow(2, start, rows)
+            .unwrap()
+            .narrow(3, 0, start + rows)
+            .unwrap();
+        let bias = causal_chunk_bias(start, rows, DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(bias.dims(), [1, 1, rows, start + rows]);
+        assert_eq!(
+            bias.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            expected.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+        );
+        // The keys past the chunk are all masked in the full mask, so
+        // dropping them changes no softmax.
+        let past = full
+            .narrow(2, start, rows)
+            .unwrap()
+            .narrow(3, start + rows, seq - start - rows)
+            .unwrap();
+        assert!(past
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|v| *v == f32::NEG_INFINITY));
+    }
+
+    /// Every row of `many` within 1e-4 of its own peak in `one`. A chunk's
+    /// GEMM may take a different CPU kernel from the whole-sequence one (a
+    /// last-ulp score difference), and the sin-patterned synthetic weights sum
+    /// coherently over 4096 lanes, amplifying that ulp to ~1e-4 of a row's
+    /// peak; a masking or chunk-boundary error moves a row by O(1).
+    fn assert_rows_agree(path: &str, one: &[Vec<f32>], many: &[Vec<f32>]) {
+        assert_eq!(one.len(), many.len());
+        for (row, (a, b)) in one.iter().zip(many).enumerate() {
+            let peak = a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let diff = max_diff(std::slice::from_ref(a), std::slice::from_ref(b));
+            assert!(
+                diff <= 1e-4 * peak.max(1.0),
+                "{path} path: chunked row {row} diverges by {diff} (peak {peak})"
+            );
+        }
+    }
+
+    /// Chunking the attention's query rows is the same arithmetic, for EVERY
+    /// row: a prompt split into several chunks (the last one ragged) against
+    /// the same prompt run as one chunk, on the text path and on the
+    /// multimodal path (whose causal bias is built per chunk).
     #[test]
     fn chunked_attention_matches_one_chunk() {
-        let mut encoder = tiny_encoder();
-        let seq = ATTENTION_QUERY_CHUNK + 5;
+        let seq = 3 * 16 + 5;
         let ids = Tensor::from_vec(
             (0..seq as u32)
-                .map(|i| i % TEST_VOCAB as u32)
+                .map(|i| (i * 7 + 3) % TEST_VOCAB as u32)
                 .collect::<Vec<_>>(),
             (1, seq),
             &Device::Cpu,
         )
         .unwrap();
-        let chunked = encoder
-            .forward_final_pre_norm_with_attention(&ids, None)
-            .unwrap();
-        // The last row sees every key; recompute it on a prompt short enough
-        // to be one chunk by checking the first chunk's rows against a run
-        // truncated to them (causality makes row i depend on 0..=i only).
-        let head = ids.narrow(1, 0, 40).unwrap();
-        let short = encoder
-            .forward_final_pre_norm_with_attention(&head, None)
-            .unwrap();
-        assert!(
-            max_diff(
-                &to_rows(&chunked.narrow(1, 0, 40).unwrap()),
-                &to_rows(&short)
-            ) < 1e-5
+        let mut whole = dense_tiny_encoder();
+        whole.set_query_chunk(usize::MAX);
+        let mut chunked = dense_tiny_encoder();
+        chunked.set_query_chunk(16);
+
+        let one = to_rows(
+            &whole
+                .forward_final_pre_norm_with_attention(&ids, None)
+                .unwrap(),
         );
-        assert_eq!(chunked.dims(), [1, seq, TEST_DIM]);
+        let many = to_rows(
+            &chunked
+                .forward_final_pre_norm_with_attention(&ids, None)
+                .unwrap(),
+        );
+        assert_eq!(many.len(), seq);
+        assert_rows_agree("text", &one, &many);
+
+        // Unequal T/H/W axes and a visual block that straddles a chunk edge.
+        let t: Vec<u32> = (0..seq as u32)
+            .map(|i| if (10..22).contains(&i) { 10 } else { i })
+            .collect();
+        let h: Vec<u32> = (0..seq as u32)
+            .map(|i| {
+                if (10..22).contains(&i) {
+                    10 + (i - 10) / 4
+                } else {
+                    i
+                }
+            })
+            .collect();
+        let w: Vec<u32> = (0..seq as u32)
+            .map(|i| {
+                if (10..22).contains(&i) {
+                    10 + (i - 10) % 4
+                } else {
+                    i
+                }
+            })
+            .collect();
+        let mrope = [t, h, w];
+        let visual = VisualInjection {
+            positions: (10..22).collect(),
+            embeds: Tensor::from_vec(
+                (0..12 * TEST_DIM)
+                    .map(|i| ((i as f32) * 0.013).sin() * 0.1)
+                    .collect::<Vec<_>>(),
+                (12, TEST_DIM),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            deepstack: vec![],
+        };
+        let one = to_rows(
+            &whole
+                .forward_multimodal_final_pre_norm(&ids, Some(visual.clone()), &mrope)
+                .unwrap(),
+        );
+        let many = to_rows(
+            &chunked
+                .forward_multimodal_final_pre_norm(&ids, Some(visual), &mrope)
+                .unwrap(),
+        );
+        assert_eq!(many.len(), seq);
+        assert_rows_agree("multimodal", &one, &many);
     }
 }

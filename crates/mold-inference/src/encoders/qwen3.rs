@@ -338,6 +338,33 @@ impl Qwen3Encoder {
         })
     }
 
+    /// Wrap an already-built GGUF language model (tests: the GGUF code path
+    /// fed weights that were never quantized, to separate the path's own
+    /// arithmetic from the quantization error).
+    #[cfg(test)]
+    pub(crate) fn from_gguf_model(
+        model: GgufQwen3Encoder,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        bf16_config: &Qwen3BF16Config,
+    ) -> Result<Self> {
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
+        Ok(Self {
+            model: Some(Qwen3Model::Quantized(model)),
+            tokenizer,
+            device: device.clone(),
+            on_gpu: crate::device::is_gpu(device),
+            is_quantized: true,
+            encoder_paths: Vec::new(),
+            dtype: DType::F32,
+            bf16_config: *bf16_config,
+            parked_tensors: None,
+            parked_gguf: None,
+        })
+    }
+
     /// Encode a text prompt into Qwen3 embeddings.
     /// Applies the Qwen3 chat template, tokenizes, runs the forward pass,
     /// and moves the result to `target_device` with `target_dtype`.
