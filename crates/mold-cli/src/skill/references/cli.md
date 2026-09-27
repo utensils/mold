@@ -90,12 +90,54 @@ mold run flux2-klein-9b:q8 "The woman from image 1 wearing the eyeglasses from i
 
 The block also says what references do to the source image.
 FLUX.2 [klein] renders from a source image OR from references, never both in
-one pass, so `--reference` together with `--image` is refused. FLUX.2 [dev] and
-Qwen-Image-Edit have no source image at all: there the ordered group IS
-`--image`, repeated, and for Qwen-Image-Edit the first image is the thing being
-edited. `--reference` also carries MiniMax H3's Ref2VA inputs, which is why it
-additionally accepts `video=PATH` and `audio=PATH`; a bare path always means an
-image.
+one pass, so `--reference` together with `--image` is refused. FLUX.2 [dev],
+Qwen Image 2.1 and Qwen-Image-Edit have no source image at all: there the
+ordered group IS `--image`, repeated (or `--reference`, never both), and for
+Qwen-Image-Edit the first image is the thing being edited. `--reference` also
+carries MiniMax H3's Ref2VA inputs, which is why it additionally accepts
+`video=PATH` and `audio=PATH`; a bare path always means an image.
+
+## Qwen Image 2.1: references, transparency, WebP stills, turbo
+
+Qwen Image 2.1 edits from up to ten ordered reference images — PNG, JPEG or
+WebP, as the block's `formats` lists — and never flattens their alpha. It has
+no image the prompt must name as "the" target: say what to take from each
+("extract the lantern from image 1", "the jacket from image 1 on the person in
+image 2"). The block advertises `canvas: last-reference`, so with neither
+`--width` nor `--height` the output takes the LAST reference's aspect ratio at
+the model's default area on its 32 px grid; any explicit dimension wins.
+
+```bash
+mold run qwen-image-2.1:bf16 "Put the jacket from image 1 on the person in image 2" --image jacket.png --image person.jpg
+mold run qwen-image-2.1:bf16 "Extract the lantern from image 1" --image street.webp --transparent --output lantern.png
+```
+
+`--transparent` asks a model that advertises `capabilities.transparency` for
+a cut-out subject on a transparent background. Describe the subject alone —
+no scenery or backdrop; the engine wraps the prompt in the model's RGBA
+recipe and the stored prompt stays exactly what was typed. Alpha needs PNG
+(the default) or WebP; `--transparent --format jpeg` is refused before
+anything loads, as is `--transparent` on a model without the block. An
+RGBA reference keeps its alpha in a PNG or WebP output even without the flag.
+
+```bash
+mold run qwen-image-2.1:bf16 "A red paper lantern with a gold tassel" --transparent --format webp --output lantern.webp
+```
+
+`--format webp` renders a still WebP for every image model that lists it in
+its output formats (a video model's WebP stays an animation). `png` and
+`webp` keep alpha; `jpeg` cannot.
+
+`qwen-image-2.1-turbo` is the base weights plus Viggle's 6-step distilled
+LoRA: its profile FIXES six steps, guidance 1 and the turbo sigma schedule and
+hides the negative prompt, so do not pass `--steps` or `--guidance` to it.
+References, `--transparent` and your own `--lora` all ride on it. Every Qwen
+Image 2.1 tier, turbo included, is under the non-commercial Qwen Research
+License (`qwen-research`, see `mold licenses`).
+
+```bash
+mold run qwen-image-2.1-turbo "A lighthouse on a basalt cliff at dusk, oil painting" --seed 7
+```
 
 ## Image prompting (SD 1.5 and SDXL)
 
@@ -448,7 +490,7 @@ mold video-upscale cancel vu-abc123
 ```
 
 Some weights carry third-party terms mold will not accept on a user's behalf
-(PuLID's InsightFace models, every Hunyuan3D tier). `mold licenses` lists them
+(PuLID's InsightFace models, every Hunyuan3D tier, every Qwen Image 2.1 tier). `mold licenses` lists them
 and says which machine the answer is about — acceptance is recorded per Mold
 data root, so it belongs to the host that runs the pull, not necessarily this
 one. Never accept on the user's behalf: show the terms and let them choose.
@@ -488,6 +530,15 @@ The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
 `generate_mesh` is a ONE-SHOT render, not the durable 3-D workflow. A
 multi-stage workflow is `mold mesh-workflow` at the CLI and
 `/api/mesh-workflows` over HTTP; no MCP tool wraps it.
+
+`generate_image` and `generate_image_async` take `output_format` `png`,
+`jpeg` or `webp` (a still), `reference_images` — ordered base64 PNG, JPEG or
+WebP sent as `edit_images`, read only by a model whose
+`capabilities.reference_images` is adjustable, and sizing the canvas from the
+last one when the model advertises `canvas: last-reference` and no width or
+height is given — and `transparent_background: true` for a model advertising
+`capabilities.transparency` (png or webp only). Width and height must sit on
+the model's grid; the refusal names it ("multiples of 32" on Qwen Image 2.1).
 
 `generate_image`, `generate_image_async` and `generate_mesh` each take an
 optional `save_to_gallery`. Omit it and the render is filed in the host's
