@@ -695,8 +695,12 @@ jobs:
         # public engine changes. It was filtered to `minimax_h3::conditioner_cache`
         # until the unfiltered suite was repaired: with nothing running it, 16
         # `h3`-only assertions drifted red across #1010, #1464, #1601 and #1746.
+        # nextest, not `cargo test`: one process per test, so the suite's
+        # process-environment overrides (MOLD_*) cannot race across threads,
+        # and main's one retry reports a lone flake as FLAKY. Same test
+        # binary as `cargo test --lib`, so no extra compile.
         if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
-        run: cargo test -p mold-ai-inference --lib --features h3
+        run: cargo nextest run --profile main -p mold-ai-inference --lib --features h3
       # One lint pass over the optional-feature union replaces the former
       # per-feature clippy steps (PuLID x3, mesh, mDNS, the `mold` CLI
       # feature set) and the `h3,mp4` runtime compile check: `h3` is added

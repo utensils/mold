@@ -537,6 +537,14 @@ grep -Fq 'cargo nextest run --profile pr' <<< "$rust_gate" \
   || fail "nextest profiles are missing"
 grep -Fq '[profile.pr]' "$repo_root/.config/nextest.toml" \
   || fail "nextest has no pr profile"
+# The whole `mold-ai-inference` lib suite under public `h3` runs through
+# nextest (one process per test), never `cargo test`'s shared process: tests
+# that set process environment (MOLD_* overrides) race each other on threads.
+grep -Fq 'run: cargo nextest run --profile main -p mold-ai-inference --lib --features h3' <<< "$rust_gate" \
+  || fail "the public H3 inference suite does not run through nextest's main profile"
+if grep -Eq 'run: cargo test -p mold-ai-inference --lib --features h3[[:space:]]*$' <<< "$rust_gate"; then
+  fail "the public H3 inference suite runs in cargo test's shared process"
+fi
 grep -Fq 'name: Test (deterministic PR suite)' <<< "$rust_gate" \
   || fail "protected Rust status does not run deterministic workspace tests on pull requests"
 grep -Fq -- "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)" <<< "$rust_gate" \

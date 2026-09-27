@@ -258,6 +258,9 @@ mod tests {
             "MOLD_FLUX2_FP8_CACHE",
             "MOLD_QWEN_IMAGE21_DTYPE",
             "MOLD_QWEN_IMAGE21_QMATMUL",
+            // Retaining vs recomputing the prefix K/V moves BF16 pixels
+            // (upstream warns cached and uncached renders differ).
+            "MOLD_QWEN_IMAGE21_KV_CACHE",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),

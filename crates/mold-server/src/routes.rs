@@ -1139,10 +1139,29 @@ fn merge_request_warnings(
     admitted
 }
 
+/// Refuse a manifest tier this build's GPU backend cannot execute at all
+/// ([`mold_core::manifest::backend_refusal`]) — before a download is
+/// enqueued or a generation admitted, rather than after gigabytes land and
+/// the engine refuses them at load.
+fn require_server_backend_support(
+    model_name: &str,
+    backend: Option<mold_core::GpuBackend>,
+) -> Result<(), ApiError> {
+    match backend.and_then(|backend| mold_core::manifest::backend_refusal(model_name, backend)) {
+        Some(reason) => Err(ApiError::with_code(
+            reason,
+            "MODEL_BACKEND_UNSUPPORTED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )),
+        None => Ok(()),
+    }
+}
+
 pub(crate) async fn require_server_model_activation(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<String>, ApiError> {
+    require_server_backend_support(model_name, mold_inference::compiled_gpu_backend())?;
     let family = model_manager::family_for_model(state, model_name).await;
     mold_core::require_model_activation(model_name, family.as_deref())
         .map_err(ApiError::model_activation)?;
@@ -1193,6 +1212,7 @@ async fn require_server_model_acquisition(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<String>, ApiError> {
+    require_server_backend_support(model_name, mold_inference::compiled_gpu_backend())?;
     let family = model_manager::family_for_model(state, model_name).await;
     mold_core::require_model_acquisition(model_name, family.as_deref())
         .map_err(ApiError::model_activation)?;
@@ -11963,6 +11983,37 @@ mod tests {
     use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    /// A Metal server refuses an FP8 tier at the download and admission
+    /// doors with a 422 naming the reason, before any byte is fetched; CUDA
+    /// and CPU-only builds, and every other tier, pass.
+    #[test]
+    fn a_tier_the_backend_cannot_run_is_refused_before_download() {
+        let error = require_server_backend_support(
+            "qwen-image-2.1:fp8",
+            Some(mold_core::GpuBackend::Metal),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "MODEL_BACKEND_UNSUPPORTED");
+        assert_eq!(
+            error.error,
+            mold_core::manifest::QWEN_IMAGE21_FP8_METAL_REFUSAL
+        );
+        for (model, backend) in [
+            ("qwen-image-2.1:fp8", Some(mold_core::GpuBackend::Cuda)),
+            ("qwen-image-2.1:fp8", None),
+            (
+                "qwen-image-2.1:int8-conv",
+                Some(mold_core::GpuBackend::Metal),
+            ),
+        ] {
+            assert!(
+                require_server_backend_support(model, backend).is_ok(),
+                "{model} {backend:?}"
+            );
+        }
+    }
 
     #[test]
     fn hidden_mesh_workers_have_internal_generation_profiles() {

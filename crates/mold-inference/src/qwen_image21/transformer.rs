@@ -952,34 +952,116 @@ impl QwenImage21Transformer {
         }
         Ok(())
     }
+    /// Move every weight to `device`, all or nothing.
+    ///
+    /// Every moved copy is built before any field is replaced, so a failure
+    /// part-way (host RAM running out while parking for the decode, device
+    /// memory while restoring) leaves the transformer whole on the device it
+    /// started on rather than split across two, which every later forward
+    /// would reject as a device mismatch. The destination's peak is the same
+    /// either way — the whole transformer lands there — and the source keeps
+    /// its copies only until the swap.
     pub(crate) fn move_to_device(&mut self, device: &Device) -> Result<()> {
-        self.img_in = self.img_in.to_device(device)?;
-        self.time_text_embed.linear_1 = self.time_text_embed.linear_1.to_device(device)?;
-        self.time_text_embed.linear_2 = self.time_text_embed.linear_2.to_device(device)?;
-        self.txt_in.text_norm.weight = self.txt_in.text_norm.weight.to_device(device)?;
-        self.txt_in.in_layer = self.txt_in.in_layer.to_device(device)?;
-        self.txt_in.out_layer = self.txt_in.out_layer.to_device(device)?;
-        self.modulation = self.modulation.to_device(device)?;
-        for block in &mut self.blocks {
-            let attn = &mut block.attn;
-            attn.to_q = attn.to_q.to_device(device)?;
-            attn.to_k = attn.to_k.to_device(device)?;
-            attn.to_v = attn.to_v.to_device(device)?;
-            attn.to_out = attn.to_out.to_device(device)?;
-            attn.norm_q = attn.norm_q.to_device(device)?;
-            attn.norm_k = attn.norm_k.to_device(device)?;
-            block.mlp.gate_up = block.mlp.gate_up.to_device(device)?;
-            block.mlp.out = block.mlp.out.to_device(device)?;
+        struct MovedBlock {
+            to_q: Q21Linear,
+            to_k: Q21Linear,
+            to_v: Q21Linear,
+            to_out: Q21Linear,
+            norm_q: Tensor,
+            norm_k: Tensor,
+            gate_up: Q21GateUp,
+            out: Q21Linear,
         }
-        self.norm_out.linear = self.norm_out.linear.to_device(device)?;
-        self.proj_out = self.proj_out.to_device(device)?;
+        let img_in = self.img_in.to_device(device)?;
+        let linear_1 = self.time_text_embed.linear_1.to_device(device)?;
+        let linear_2 = self.time_text_embed.linear_2.to_device(device)?;
+        let text_norm = self.txt_in.text_norm.weight.to_device(device)?;
+        let in_layer = self.txt_in.in_layer.to_device(device)?;
+        let out_layer = self.txt_in.out_layer.to_device(device)?;
+        let modulation = self.modulation.to_device(device)?;
+        let mut blocks = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            let attn = &block.attn;
+            blocks.push(MovedBlock {
+                to_q: attn.to_q.to_device(device)?,
+                to_k: attn.to_k.to_device(device)?,
+                to_v: attn.to_v.to_device(device)?,
+                to_out: attn.to_out.to_device(device)?,
+                norm_q: attn.norm_q.to_device(device)?,
+                norm_k: attn.norm_k.to_device(device)?,
+                gate_up: block.mlp.gate_up.to_device(device)?,
+                out: block.mlp.out.to_device(device)?,
+            });
+            #[cfg(test)]
+            if MOVE_FAULT_AFTER_BLOCK.with(|fault| fault.get()) == Some(blocks.len() - 1) {
+                anyhow::bail!("injected move failure after block {}", blocks.len() - 1);
+            }
+        }
+        let norm_out = self.norm_out.linear.to_device(device)?;
+        let proj_out = self.proj_out.to_device(device)?;
+
+        // Nothing below can fail: commit.
+        self.img_in = img_in;
+        self.time_text_embed.linear_1 = linear_1;
+        self.time_text_embed.linear_2 = linear_2;
+        self.txt_in.text_norm.weight = text_norm;
+        self.txt_in.in_layer = in_layer;
+        self.txt_in.out_layer = out_layer;
+        self.modulation = modulation;
+        for (block, moved) in self.blocks.iter_mut().zip(blocks) {
+            let attn = &mut block.attn;
+            attn.to_q = moved.to_q;
+            attn.to_k = moved.to_k;
+            attn.to_v = moved.to_v;
+            attn.to_out = moved.to_out;
+            attn.norm_q = moved.norm_q;
+            attn.norm_k = moved.norm_k;
+            block.mlp.gate_up = moved.gate_up;
+            block.mlp.out = moved.out;
+        }
+        self.norm_out.linear = norm_out;
+        self.proj_out = proj_out;
         Ok(())
     }
 
-    /// Fail a denoise step whose prediction is not finite, naming this
-    /// checkpoint's tier and whether the QMatMul switch shaped it.
-    pub(crate) fn ensure_finite(&self, prediction: &Tensor, step: usize) -> Result<()> {
-        super::linear::ensure_finite_prediction(prediction, step, &self.tier, self.qmatmul_guard)
+    /// Where every weight lives, in a fixed order (tests).
+    #[cfg(test)]
+    fn weight_locations(&self) -> Vec<candle_core::DeviceLocation> {
+        let mut out = vec![
+            self.img_in.base_location(),
+            self.time_text_embed.linear_1.base_location(),
+            self.time_text_embed.linear_2.base_location(),
+            Some(self.txt_in.text_norm.weight.device().location()),
+            self.txt_in.in_layer.base_location(),
+            self.txt_in.out_layer.base_location(),
+            self.modulation.base_location(),
+        ];
+        for block in &self.blocks {
+            let attn = &block.attn;
+            out.extend([
+                attn.to_q.base_location(),
+                attn.to_k.base_location(),
+                attn.to_v.base_location(),
+                attn.to_out.base_location(),
+                Some(attn.norm_q.device().location()),
+                Some(attn.norm_k.device().location()),
+                block.mlp.out.base_location(),
+            ]);
+            out.extend(block.mlp.gate_up.base_locations());
+        }
+        out.push(self.norm_out.linear.base_location());
+        out.push(self.proj_out.base_location());
+        out.into_iter().flatten().collect()
+    }
+
+    /// The denoise loop's non-finite guard, naming this checkpoint's tier and
+    /// whether the QMatMul switch shaped it.
+    pub(crate) fn finite_guard(&self) -> super::linear::FiniteGuard<'_> {
+        super::linear::FiniteGuard::new(
+            super::linear::FINITE_GUARD_INTERVAL,
+            &self.tier,
+            self.qmatmul_guard,
+        )
     }
 
     /// Build from a dense `VarBuilder` (synthetic tests).
@@ -1015,6 +1097,11 @@ impl QwenImage21Transformer {
         // Resolved from where the weights landed (the text norm is always a
         // dense tensor on the load device).
         let exec = Qwen21ExecPath::resolve(txt_in.text_norm.weight.device());
+        tracing::debug!(
+            exec_path = exec.label(),
+            tier = %source.tier_label(),
+            "qwen-image-2.1 transformer execution path"
+        );
         let mut transformer = Self {
             exec,
             tier: source.tier_label(),
@@ -1235,6 +1322,14 @@ impl QwenImage21Transformer {
             .forward(&self.norm_out.forward(&target_hidden, &target_temb)?)
     }
 }
+#[cfg(test)]
+thread_local! {
+    /// Fail [`QwenImage21Transformer::move_to_device`] after moving this
+    /// block (0-based) — the injected host/device OOM of the park tests.
+    static MOVE_FAULT_AFTER_BLOCK: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1531,6 +1626,45 @@ mod tests {
             let error = max_relative_error(a, e);
             assert!(error < 1e-5, "t={t}: {error}");
         });
+    }
+
+    /// A move that fails part-way (host OOM parking for the decode, device
+    /// OOM restoring) must replace nothing: the transformer stays whole on
+    /// its original device, and a later move still completes.
+    fn assert_move_is_all_or_nothing(device: &Device) {
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        let mut transformer = tiny_transformer_on(cfg, device);
+        let before = transformer.weight_locations();
+        assert!(before.iter().all(|l| *l == device.location()));
+        MOVE_FAULT_AFTER_BLOCK.with(|fault| fault.set(Some(1)));
+        let err = transformer.move_to_device(&Device::Cpu).unwrap_err();
+        MOVE_FAULT_AFTER_BLOCK.with(|fault| fault.set(None));
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert_eq!(transformer.weight_locations(), before);
+        transformer.move_to_device(&Device::Cpu).unwrap();
+        assert!(transformer
+            .weight_locations()
+            .iter()
+            .all(|l| *l == Device::Cpu.location()));
+        transformer.move_to_device(device).unwrap();
+        assert_eq!(transformer.weight_locations(), before);
+    }
+
+    #[test]
+    fn a_failed_move_replaces_no_weight() {
+        assert_move_is_all_or_nothing(&Device::Cpu);
+    }
+
+    /// The same on a real device pair: a half-parked transformer would be
+    /// split across the card and host RAM.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_failed_park_leaves_the_transformer_on_the_card() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        assert_move_is_all_or_nothing(&device);
     }
 
     /// The engine resolves its path at construction: CPU is legacy.

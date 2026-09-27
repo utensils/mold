@@ -1,5 +1,5 @@
 //! CUDA dispatch for [`super::rms_norm_rope_i`].
-use candle::backend::BackendStorage;
+use candle::backend::{BackendDevice, BackendStorage};
 use candle::cuda_backend::cudarc::driver::{DeviceRepr, LaunchConfig, PushKernelArg};
 use candle::cuda_backend::WrapErr;
 use candle::{CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Tensor};
@@ -51,6 +51,13 @@ impl QkNormRope {
             candle::Storage::Cuda(storage) => storage,
             _ => candle::bail!("qk_norm_rope: sin table is not on the CUDA device"),
         };
+        // candle's op3 dispatch checks x/weight/cos share a device; `sin`
+        // rides on the op, so its device is checked here — a table from
+        // another device (or another stream's device) would otherwise be
+        // read by a kernel on x's stream.
+        if !sin_storage.device().same_device(&dev) {
+            candle::bail!("qk_norm_rope: sin table is on a different device than x");
+        }
         let (s0, s1) = offsets(sin_layout)?;
         let sin = sin_storage.as_cuda_slice::<f32>()?.slice(s0..s1);
         let stream = dev.cuda_stream();

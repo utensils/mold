@@ -37,20 +37,20 @@ also hold the vision tower), the RGBA VAE and the processor tokenizer. These
 are stored once under `shared/qwen-image21/` and reused by every tier, so a
 second tier downloads only its transformer.
 
-| Model                            | Transformer                   | Transformer size | Notes                                                         |
-| -------------------------------- | ----------------------------- | ---------------- | ------------------------------------------------------------- |
-| `qwen-image-2.1:bf16`            | Official BF16 shards          | 14.2 GB          | Reference quality; the bare-name default                      |
-| `qwen-image-2.1:int8-conv`       | Comfy-Org INT8 ConvRot (W8A8) | 7.3 GB           | About the same speed as BF16 on CUDA at half the weights      |
-| `qwen-image-2.1:fp8`             | unsloth row-scaled F8E4M3     | 7.1 GB           | Widened per forward                                           |
-| `qwen-image-2.1:q8`              | GGUF Q8_0                     | 7.7 GB           |                                                               |
-| `qwen-image-2.1:q6`              | GGUF Q6_K                     | 6.0 GB           |                                                               |
-| `qwen-image-2.1:q5`              | GGUF Q5_0                     | 5.1 GB           |                                                               |
-| `qwen-image-2.1:q4`              | GGUF Q4_K                     | 4.2 GB           |                                                               |
-| `qwen-image-2.1:q3`              | GGUF Q3_K                     | 3.3 GB           | Coherent; fine lettering is softer                            |
-| `qwen-image-2.1:q2`              | GGUF Q2_K                     | 2.6 GB           | Last resort for small cards: visibly degraded, text illegible |
-| `qwen-image-2.1-turbo:bf16`      | BF16 + Viggle 6-step LoRA     | 14.2 + 1.4 GB    | See [Turbo](#turbo)                                           |
-| `qwen-image-2.1-turbo:int8-conv` | INT8 ConvRot + Viggle LoRA    | 7.3 + 1.4 GB     |                                                               |
-| `qwen-image-2.1-turbo:q8`        | GGUF Q8_0 + Viggle LoRA       | 7.7 + 1.4 GB     |                                                               |
+| Model                            | Transformer                   | Transformer size | Notes                                                             |
+| -------------------------------- | ----------------------------- | ---------------- | ----------------------------------------------------------------- |
+| `qwen-image-2.1:bf16`            | Official BF16 shards          | 14.2 GB          | Reference quality; the bare-name default                          |
+| `qwen-image-2.1:int8-conv`       | Comfy-Org INT8 ConvRot (W8A8) | 7.3 GB           | About the same speed as BF16 on CUDA at half the weights          |
+| `qwen-image-2.1:fp8`             | unsloth row-scaled F8E4M3     | 7.1 GB           | Widened per forward; CUDA only (Metal refuses it before download) |
+| `qwen-image-2.1:q8`              | GGUF Q8_0                     | 7.7 GB           |                                                                   |
+| `qwen-image-2.1:q6`              | GGUF Q6_K                     | 6.0 GB           |                                                                   |
+| `qwen-image-2.1:q5`              | GGUF Q5_0                     | 5.1 GB           |                                                                   |
+| `qwen-image-2.1:q4`              | GGUF Q4_K                     | 4.2 GB           |                                                                   |
+| `qwen-image-2.1:q3`              | GGUF Q3_K                     | 3.3 GB           | Coherent; fine lettering is softer                                |
+| `qwen-image-2.1:q2`              | GGUF Q2_K                     | 2.6 GB           | Last resort for small cards: visibly degraded, text illegible     |
+| `qwen-image-2.1-turbo:bf16`      | BF16 + Viggle 6-step LoRA     | 14.2 + 1.4 GB    | See [Turbo](#turbo)                                               |
+| `qwen-image-2.1-turbo:int8-conv` | INT8 ConvRot + Viggle LoRA    | 7.3 + 1.4 GB     |                                                                   |
+| `qwen-image-2.1-turbo:q8`        | GGUF Q8_0 + Viggle LoRA       | 7.7 + 1.4 GB     |                                                                   |
 
 The shared runtime adds about 18.9 GB of downloads (text encoder 17.5 GB, VAE
 1.35 GB, tokenizer). The GGUF files come from stable-diffusion.cpp's author, so

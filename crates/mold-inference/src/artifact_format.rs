@@ -176,11 +176,105 @@ pub const QWEN_IMAGE21_GGUF_PREFIX: &str = "model.diffusion_model.";
 /// 72-byte JSON object; anything near this bound is not a marker.
 const MAX_COMFY_QUANT_MARKER_BYTES: usize = 4096;
 
+/// Entries in [`probe_qwen_image21_transformer`]'s process-wide cache. A host
+/// holds a handful of Qwen Image 2.1 tiers; the bound only keeps a
+/// pathological caller from growing it.
+const QWEN21_PROBE_CACHE_ENTRIES: usize = 16;
+
+/// What identifies one on-disk transformer artifact for the probe cache: its
+/// canonical path plus the metadata a rewrite or replacement changes (length,
+/// mtime and, on Unix, the inode an atomic rename swaps).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Qwen21ProbeKey {
+    path: std::path::PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: Option<(u64, u64)>,
+}
+
+impl Qwen21ProbeKey {
+    fn of(path: &Path) -> Option<Self> {
+        let path = std::fs::canonicalize(path).ok()?;
+        let metadata = std::fs::metadata(&path).ok()?;
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let inode = None;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            inode,
+            path,
+        })
+    }
+}
+
+type Qwen21ProbeCache =
+    std::sync::Mutex<std::collections::VecDeque<(Qwen21ProbeKey, QwenImage21TransformerFormat)>>;
+
+fn qwen21_probe_cache() -> &'static Qwen21ProbeCache {
+    static CACHE: std::sync::OnceLock<Qwen21ProbeCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+thread_local! {
+    static QWEN21_PROBE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Header reads this thread's probes performed (cache misses).
+#[cfg(test)]
+fn qwen21_probe_reads() -> usize {
+    QWEN21_PROBE_READS.with(std::cell::Cell::get)
+}
+
 /// Probe the transformer artifact at `path` (the first shard of a sharded
 /// checkpoint is enough: every shard of one checkpoint shares its encoding).
+///
+/// One request asks this several times (residency sizing, the loader, the
+/// tier planners), and an int8-conv checkpoint's answer reads hundreds of
+/// per-layer `.comfy_quant` records, so a successful answer is cached per
+/// file identity ([`Qwen21ProbeKey`]) in a small process-wide LRU. A failure
+/// is never cached: the next call re-reads the file.
 pub fn probe_qwen_image21_transformer(
     path: &Path,
 ) -> Result<QwenImage21TransformerFormat, ArtifactProbeFailure> {
+    let Some(key) = Qwen21ProbeKey::of(path) else {
+        return probe_qwen_image21_transformer_uncached(path);
+    };
+    {
+        let mut cache = qwen21_probe_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = cache.iter().position(|(cached, _)| *cached == key) {
+            let entry = cache.remove(index).expect("index is in range");
+            let format = entry.1;
+            cache.push_back(entry);
+            return Ok(format);
+        }
+    }
+    let format = probe_qwen_image21_transformer_uncached(path)?;
+    let mut cache = qwen21_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A stale entry for the same path (the file changed) is replaced, not
+    // kept beside the new one.
+    cache.retain(|(cached, _)| cached.path != key.path);
+    if cache.len() >= QWEN21_PROBE_CACHE_ENTRIES {
+        cache.pop_front();
+    }
+    cache.push_back((key, format));
+    Ok(format)
+}
+
+fn probe_qwen_image21_transformer_uncached(
+    path: &Path,
+) -> Result<QwenImage21TransformerFormat, ArtifactProbeFailure> {
+    #[cfg(test)]
+    QWEN21_PROBE_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = File::open(path).map_err(|_| ArtifactProbeFailure::Io)?;
     let mut magic = [0_u8; 4];
     file.read_exact(&mut magic)
@@ -917,6 +1011,74 @@ mod tests {
             probe_qwen_image21_transformer(&path),
             Ok(QwenImage21TransformerFormat::Bf16)
         );
+    }
+
+    /// A request resolves the transformer's format several times (residency
+    /// sizing, load, per-tier planning); the header is read once per file
+    /// identity, and a changed file — new length or mtime — is re-read.
+    #[test]
+    fn qwen21_probe_is_cached_per_file_identity_and_invalidated_on_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shard.safetensors");
+        let bf16 = [
+            ("img_in.weight", "BF16", vec![2, 2], vec![0; 8]),
+            ("txt_in.text_norm.weight", "F32", vec![1], vec![0; 4]),
+        ];
+        write_safetensors_records(&path, &bf16);
+        let before = qwen21_probe_reads();
+        for _ in 0..2 {
+            assert_eq!(
+                probe_qwen_image21_transformer(&path),
+                Ok(QwenImage21TransformerFormat::Bf16)
+            );
+        }
+        assert_eq!(qwen21_probe_reads() - before, 1, "second probe must hit");
+
+        // Rewrite in place as the int8 tier and move the mtime forward, so a
+        // coarse filesystem clock cannot hide the change.
+        write_safetensors_records(
+            &path,
+            &[
+                ("img_in.weight", "BF16", vec![2, 2], vec![0; 8]),
+                (
+                    "transformer_blocks.0.img_mlp.gate_up.weight",
+                    "I8",
+                    vec![2, 256],
+                    vec![0; 512],
+                ),
+                (
+                    "transformer_blocks.0.img_mlp.gate_up.weight_scale",
+                    "F32",
+                    vec![2, 1],
+                    vec![0; 8],
+                ),
+                (
+                    "transformer_blocks.0.img_mlp.gate_up.comfy_quant",
+                    "U8",
+                    vec![INT8_MARKER.len()],
+                    marker(INT8_MARKER),
+                ),
+            ],
+        );
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(
+            probe_qwen_image21_transformer(&path),
+            Ok(QwenImage21TransformerFormat::ComfyInt8ConvRot)
+        );
+        assert_eq!(qwen21_probe_reads() - before, 2);
+
+        // A failure is never cached: the file is re-read every time.
+        std::fs::write(&path, b"not a checkpoint").unwrap();
+        for _ in 0..2 {
+            assert!(probe_qwen_image21_transformer(&path).is_err());
+        }
+        assert_eq!(qwen21_probe_reads() - before, 4);
     }
 
     #[test]

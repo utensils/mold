@@ -3717,6 +3717,45 @@ fn qwen_image21_tiers() -> Vec<QwenImage21Tier> {
     ]
 }
 
+/// Why a Metal host cannot run `qwen-image-2.1:fp8`. Shared with the engine's
+/// load-time refusal (which answers by the checkpoint's format, for a renamed
+/// or config-registered file) so both doors say the same thing.
+pub const QWEN_IMAGE21_FP8_METAL_REFUSAL: &str = "qwen-image-2.1:fp8 needs CUDA: candle's Metal \
+     backend has no F8E4M3 cast kernel to widen its weights. Use qwen-image-2.1:int8-conv or a \
+     GGUF tier on Metal.";
+
+/// Manifest tiers a GPU backend cannot execute at all, by exact canonical
+/// name. Both are FP8 checkpoints whose engines widen F8E4M3 weights through a
+/// cast kernel candle's Metal backend does not have (Qwen Image 2.1's
+/// `Q21WeightSource::open`, Wan's `ScaledFp8Checkpoint::ensure_supported`);
+/// the engines still refuse by checkpoint format at load, and this table is
+/// what lets pull and admission refuse BEFORE the download.
+const BACKEND_REFUSED_TIERS: &[(&str, crate::GpuBackend)] = &[
+    ("qwen-image-2.1:fp8", crate::GpuBackend::Metal),
+    ("wan22-t2v-a14b:fp8", crate::GpuBackend::Metal),
+    ("wan22-i2v-a14b:fp8", crate::GpuBackend::Metal),
+];
+
+/// Why `backend` cannot execute the manifest tier `model`, or `None`.
+///
+/// The one authority `mold pull` (a local pull on a Metal build), the
+/// server's download routes and generation admission ask, so a Metal host
+/// refuses an FP8 tier before fetching gigabytes it can never load.
+pub fn backend_refusal(model: &str, backend: crate::GpuBackend) -> Option<String> {
+    let resolved = resolve_model_name(model);
+    let (name, _) = BACKEND_REFUSED_TIERS
+        .iter()
+        .find(|(name, refused)| *name == resolved && *refused == backend)?;
+    Some(if *name == "qwen-image-2.1:fp8" {
+        QWEN_IMAGE21_FP8_METAL_REFUSAL.to_string()
+    } else {
+        format!(
+            "{name} is fp8-scaled, which mold does not run on Metal — candle has no Metal fp8 \
+             widening kernel. Use a GGUF tier of this model instead."
+        )
+    })
+}
+
 /// The base tiers a turbo tag is offered on. Each turbo tag is the base
 /// tier's files plus the Viggle adapter, and shares the base tier's
 /// transformer bytes on disk (`storage_path`).
@@ -8691,6 +8730,44 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 
 #[cfg(test)]
 mod tests {
+    /// An FP8 tier needs an F8E4M3 widening kernel Metal does not have, so a
+    /// Metal host refuses it BEFORE downloading — by every spelling of the
+    /// name — while CUDA and every other tier are untouched.
+    #[test]
+    fn fp8_tiers_are_refused_on_metal_before_download() {
+        use crate::GpuBackend;
+        let refusal = super::backend_refusal("qwen-image-2.1:fp8", GpuBackend::Metal).unwrap();
+        assert_eq!(refusal, super::QWEN_IMAGE21_FP8_METAL_REFUSAL);
+        assert!(refusal.contains("int8-conv"), "{refusal}");
+        // The legacy dash spelling resolves to the same tier.
+        assert!(super::backend_refusal("qwen-image-2.1-fp8", GpuBackend::Metal).is_some());
+        for wan in ["wan22-t2v-a14b:fp8", "wan22-i2v-a14b:fp8"] {
+            let refusal = super::backend_refusal(wan, GpuBackend::Metal).unwrap();
+            assert!(
+                refusal.contains(wan) && refusal.contains("GGUF"),
+                "{refusal}"
+            );
+            assert!(super::backend_refusal(wan, GpuBackend::Cuda).is_none());
+        }
+        assert!(super::backend_refusal("qwen-image-2.1:fp8", GpuBackend::Cuda).is_none());
+        for runnable in [
+            "qwen-image-2.1:bf16",
+            "qwen-image-2.1:int8-conv",
+            "qwen-image-2.1:q8",
+            "wan22-t2v-a14b:q8",
+        ] {
+            assert!(
+                super::backend_refusal(runnable, GpuBackend::Metal).is_none(),
+                "{runnable}"
+            );
+        }
+        // Every refused name is a real manifest entry, so a rename cannot
+        // silently drop a refusal.
+        for name in super::BACKEND_REFUSED_TIERS.iter().map(|(name, _)| *name) {
+            assert!(super::find_manifest(name).is_some(), "{name}");
+        }
+    }
+
     /// `hunyuan3d-2.1:q4` is what plato advertises after `mold quantize`;
     /// no registry serves it, and a pull of it on another host must say so
     /// rather than "unknown model" (#1672).

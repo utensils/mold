@@ -239,6 +239,19 @@ pub fn compiled_backend_label() -> &'static str {
     }
 }
 
+/// The GPU backend this build executes on, or `None` for a CPU-only build.
+/// Pull and admission ask [`mold_core::manifest::backend_refusal`] with it, so
+/// a tier this build cannot run is refused before its download.
+pub fn compiled_gpu_backend() -> Option<mold_core::GpuBackend> {
+    if cfg!(feature = "cuda") {
+        Some(mold_core::GpuBackend::Cuda)
+    } else if cfg!(feature = "metal") {
+        Some(mold_core::GpuBackend::Metal)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod backend_label_tests {
     #[test]
