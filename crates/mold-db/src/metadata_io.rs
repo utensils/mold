@@ -220,6 +220,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         id_image_sha256s: None,
         true_cfg: None,
         cfg_start_step: None,
+        has_alpha: None,
     }
 }
 

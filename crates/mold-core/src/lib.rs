@@ -53,6 +53,7 @@ pub mod request_media;
 pub mod runpod;
 pub mod safetensors_probe;
 pub mod secure_file;
+pub mod still_image;
 pub mod time;
 pub mod types;
 pub mod validation;

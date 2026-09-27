@@ -204,7 +204,7 @@ async fn library_show(
 
 async fn preview_bytes(client: &MoldClient, image: &GalleryImage) -> Result<Vec<u8>> {
     let format = gallery_format(image);
-    if format.is_some_and(|value| value.is_video()) {
+    if format.is_some_and(|value| is_video_row(value, image)) {
         if let Some(bytes) = client.get_gallery_preview(&image.filename).await? {
             return Ok(bytes);
         }
@@ -872,6 +872,16 @@ fn filter_and_sort(
             .cmp(&a.timestamp)
             .then_with(|| a.filename.cmp(&b.filename))
     });
+}
+
+/// Whether a gallery row is a video. WebP is both a still and an animation
+/// container; a video render always records its `frames`, a still never
+/// does, so a WebP row without frames is a still (the web `mediaKind` rule).
+fn is_video_row(format: OutputFormat, row: &GalleryImage) -> bool {
+    match format {
+        OutputFormat::Webp => row.metadata.frames.is_some(),
+        other => other.is_video(),
+    }
 }
 
 fn gallery_format(row: &GalleryImage) -> Option<OutputFormat> {

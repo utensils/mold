@@ -3403,6 +3403,14 @@ pub struct OutputMetadata {
     /// print was not made by a workflow — or the host predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_workflow: Option<crate::mesh_workflow::MeshWorkflowProvenance>,
+    /// A fact about the stored artifact, not the request: `Some(true)` when
+    /// the saved still carries an alpha channel (at least one pixel below
+    /// full opacity). Set by the still encoder before the bytes are written,
+    /// so an embedded PNG chunk carries it, and re-derived from the
+    /// container header at publication (`apply_still_output`). Absent means
+    /// opaque, or a print from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_alpha: Option<bool>,
     pub version: String,
 }
 
@@ -3626,6 +3634,9 @@ impl OutputMetadata {
             fps: req.fps,
             chain_job_id: None,
             chain: None,
+            // A fact about the stored file; the encoder or the publication
+            // path (`apply_still_output`) records it.
+            has_alpha: None,
             version: version.into(),
         }
     }
@@ -3636,6 +3647,14 @@ impl OutputMetadata {
     pub fn apply_output_dimensions(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+    }
+
+    /// Record the still that was actually produced: its raster size and
+    /// whether its container carries alpha (`has_alpha`), read from the
+    /// encoded header so the gallery row describes the file that exists.
+    pub fn apply_still_output(&mut self, image: &ImageData) {
+        self.apply_output_dimensions(image.width, image.height);
+        self.has_alpha = crate::still_image::encoded_still_has_alpha(&image.data).then_some(true);
     }
 
     /// Record the video shape and runtime pipeline that actually completed.
@@ -3720,12 +3739,28 @@ impl OutputFormat {
         }
     }
 
-    /// Whether this format is a video/animation format.
+    /// Whether this format can carry a video/animation.
+    ///
+    /// This answers the REQUEST-side question — "may a video render be
+    /// delivered in this container" — so WebP is included. WebP is also a
+    /// still format (every still recipe advertises it), so a question about
+    /// an existing artifact must ask [`Self::is_video_artifact`] instead.
     pub fn is_video(&self) -> bool {
         matches!(
             self,
             OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4
         )
+    }
+
+    /// Whether these encoded bytes, stored in this format, are a
+    /// video/animation. A WebP is decided by its container (an `ANIM` chunk
+    /// or the `VP8X` animation flag); every other format by
+    /// [`Self::is_video`].
+    pub fn is_video_artifact(&self, bytes: &[u8]) -> bool {
+        match self {
+            OutputFormat::Webp => crate::still_image::webp_is_animated(bytes),
+            other => other.is_video(),
+        }
     }
 
     /// Whether this format carries audio samples and no raster frames.
@@ -6666,6 +6701,63 @@ mod tests {
         assert!(OutputFormat::Apng.is_video());
         assert!(OutputFormat::Mp4.is_video());
         assert!(!OutputFormat::Png.is_video());
+    }
+
+    #[test]
+    fn a_webp_artifact_is_a_video_only_when_its_container_animates() {
+        let still = b"RIFF\x0e\x00\x00\x00WEBPVP8 \x02\x00\x00\x00\x00\x00";
+        assert!(
+            OutputFormat::Webp.is_video(),
+            "a video may be delivered as WebP"
+        );
+        assert!(!OutputFormat::Webp.is_video_artifact(still));
+        let animated = b"RIFF\x16\x00\x00\x00WEBPANIM\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(OutputFormat::Webp.is_video_artifact(animated));
+        assert!(OutputFormat::Mp4.is_video_artifact(b""));
+        assert!(!OutputFormat::Png.is_video_artifact(b""));
+    }
+
+    #[test]
+    fn apply_still_output_records_the_container_alpha() {
+        let mut metadata = OutputMetadata::from_generate_request(
+            &serde_json::from_value::<GenerateRequest>(serde_json::json!({
+                "prompt": "p", "model": "flux-dev:q8", "width": 8, "height": 8,
+                "steps": 4, "guidance": 1.0, "batch_size": 1
+            }))
+            .unwrap(),
+            1,
+            None,
+            "test",
+        );
+        assert_eq!(metadata.has_alpha, None);
+        let mut rgba_png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        rgba_png.extend_from_slice(&13u32.to_be_bytes());
+        rgba_png.extend_from_slice(b"IHDR");
+        rgba_png.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 2, 8, 6, 0, 0, 0]);
+        let image = ImageData {
+            data: rgba_png,
+            format: OutputFormat::Png,
+            width: 4,
+            height: 2,
+            index: 0,
+        };
+        metadata.apply_still_output(&image);
+        assert_eq!((metadata.width, metadata.height), (4, 2));
+        assert_eq!(metadata.has_alpha, Some(true));
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["has_alpha"], true);
+
+        let opaque = ImageData {
+            data: vec![0xFF, 0xD8, 0xFF],
+            format: OutputFormat::Jpeg,
+            ..image
+        };
+        metadata.apply_still_output(&opaque);
+        assert_eq!(metadata.has_alpha, None);
+        assert!(serde_json::to_value(&metadata)
+            .unwrap()
+            .get("has_alpha")
+            .is_none());
     }
 
     #[test]

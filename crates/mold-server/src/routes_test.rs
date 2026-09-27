@@ -1265,6 +1265,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         }
     }
 
@@ -17905,6 +17906,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         };
         let mut rec = GenerationRecord::from_save(
             dir.path(),
@@ -18883,6 +18885,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         };
         let rec = GenerationRecord::from_save(
             dir.path(),

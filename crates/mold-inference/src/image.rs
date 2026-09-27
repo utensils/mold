@@ -32,7 +32,11 @@ pub(crate) fn update_output_metadata_size(
     }
 }
 
-/// Encode a candle tensor [3, H, W] of u8 values into PNG or JPEG bytes.
+/// Encode a candle tensor of u8 values into still image bytes.
+///
+/// `[3, H, W]` is an RGB render. `[4, H, W]` is an RGBA render (a decoder
+/// that emits alpha, e.g. Qwen Image 2.1's four-channel VAE): see
+/// [`encode_rgba_image`] for how its alpha reaches each container.
 pub(crate) fn encode_image(
     img: &Tensor,
     format: OutputFormat,
@@ -41,16 +45,109 @@ pub(crate) fn encode_image(
     metadata: Option<&OutputMetadata>,
 ) -> Result<Vec<u8>> {
     let (c, h, w) = img.dims3()?;
-    if c != 3 {
-        bail!("expected 3 channels, got {c}");
+    if c != 3 && c != 4 {
+        bail!("expected 3 (RGB) or 4 (RGBA) channels, got {c}");
     }
     let _ = (h, w); // dims used implicitly via from_raw
 
     let img_data = img.permute((1, 2, 0))?.flatten_all()?.to_vec1::<u8>()?;
+    if c == 4 {
+        let rgba_image = image::RgbaImage::from_raw(width, height, img_data)
+            .ok_or_else(|| anyhow::anyhow!("failed to create image from tensor data"))?;
+        return encode_rgba_image(&rgba_image, format, metadata);
+    }
     let rgb_image = image::RgbImage::from_raw(width, height, img_data)
         .ok_or_else(|| anyhow::anyhow!("failed to create image from tensor data"))?;
 
     encode_rgb_image(&rgb_image, format, metadata)
+}
+
+/// Whether any pixel of an RGBA image is less than fully opaque.
+pub(crate) fn rgba_has_alpha(rgba_image: &image::RgbaImage) -> bool {
+    rgba_image.pixels().any(|pixel| pixel[3] != u8::MAX)
+}
+
+/// Drop the alpha channel of an image whose every alpha byte is 255.
+fn opaque_rgba_to_rgb(rgba_image: &image::RgbaImage) -> image::RgbImage {
+    image::RgbImage::from_fn(rgba_image.width(), rgba_image.height(), |x, y| {
+        let [r, g, b, _] = rgba_image.get_pixel(x, y).0;
+        image::Rgb([r, g, b])
+    })
+}
+
+/// Composite an RGBA image over white, for a container with no alpha.
+///
+/// Straight (non-premultiplied) alpha, rounded to nearest — the "paste onto
+/// a white canvas" convention. A fully opaque pixel is returned unchanged.
+pub(crate) fn composite_over_white(rgba_image: &image::RgbaImage) -> image::RgbImage {
+    image::RgbImage::from_fn(rgba_image.width(), rgba_image.height(), |x, y| {
+        let [r, g, b, a] = rgba_image.get_pixel(x, y).0;
+        let a = u32::from(a);
+        let blend = |c: u8| -> u8 { ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8 };
+        image::Rgb([blend(r), blend(g), blend(b)])
+    })
+}
+
+/// Encode an RGBA still.
+///
+/// Alpha is inspected BEFORE any container is written, because the embedded
+/// provenance records it (`OutputMetadata::has_alpha`):
+///
+/// - every alpha byte 255: the alpha channel carries no information, so the
+///   image is encoded exactly as the RGB image it is — a PNG stays
+///   `ColorType::Rgb` and is byte-identical to an RGB render's.
+/// - otherwise PNG is written RGBA and WebP as a still with lossless alpha;
+///   JPEG, which has no alpha, is composited over white.
+pub(crate) fn encode_rgba_image(
+    rgba_image: &image::RgbaImage,
+    format: OutputFormat,
+    metadata: Option<&OutputMetadata>,
+) -> Result<Vec<u8>> {
+    if !rgba_has_alpha(rgba_image) {
+        return encode_rgb_image(&opaque_rgba_to_rgb(rgba_image), format, metadata);
+    }
+    match format {
+        OutputFormat::Png => {
+            let metadata = metadata.map(|metadata| metadata_with_alpha(metadata, true));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            write_png_color(
+                rgba_image.width(),
+                rgba_image.height(),
+                png::ColorType::Rgba,
+                rgba_image.as_raw(),
+                &mut buf,
+                metadata.as_ref(),
+                png_profile(),
+            )?;
+            Ok(buf.into_inner())
+        }
+        OutputFormat::Webp => crate::webp_still::encode_webp_still_rgba(
+            rgba_image,
+            crate::webp_still::WEBP_STILL_QUALITY,
+        ),
+        OutputFormat::Jpeg => {
+            // A JPEG carries no alpha, so the flattened pixels are what the
+            // file holds and its provenance must not claim alpha.
+            let metadata = metadata.map(|metadata| metadata_with_alpha(metadata, false));
+            encode_rgb_image(&composite_over_white(rgba_image), format, metadata.as_ref())
+        }
+        OutputFormat::Gif
+        | OutputFormat::Apng
+        | OutputFormat::Mp4
+        | OutputFormat::Wav
+        | OutputFormat::Glb
+        | OutputFormat::Obj => {
+            anyhow::bail!("{format} encoding is not supported for single images")
+        }
+    }
+}
+
+/// Provenance for a still, stamped with whether its stored pixels carry
+/// alpha.
+fn metadata_with_alpha(metadata: &OutputMetadata, has_alpha: bool) -> OutputMetadata {
+    let mut metadata = metadata.clone();
+    metadata.has_alpha = has_alpha.then_some(true);
+    metadata
 }
 
 pub(crate) fn encode_rgb_image(
@@ -62,9 +159,18 @@ pub(crate) fn encode_rgb_image(
     match format {
         OutputFormat::Png => write_png(rgb_image, &mut buf, metadata)?,
         OutputFormat::Jpeg => write_jpeg(rgb_image, &mut buf, metadata)?,
+        // A WebP STILL: libwebp's simple API, never the animation encoder, so
+        // the file is a plain `VP8 ` bitstream with no `ANIM` chunk. WebP
+        // carries no embedded provenance; the gallery row is the authority,
+        // exactly as for a video clip.
+        OutputFormat::Webp => {
+            return crate::webp_still::encode_webp_still_rgb(
+                rgb_image,
+                crate::webp_still::WEBP_STILL_QUALITY,
+            );
+        }
         OutputFormat::Gif
         | OutputFormat::Apng
-        | OutputFormat::Webp
         | OutputFormat::Mp4
         | OutputFormat::Wav
         | OutputFormat::Glb
@@ -171,8 +277,28 @@ fn write_png_with<W: std::io::Write>(
     metadata: Option<&OutputMetadata>,
     profile: PngEncoding,
 ) -> Result<()> {
-    let mut encoder = png::Encoder::new(writer, rgb_image.width(), rgb_image.height());
-    encoder.set_color(png::ColorType::Rgb);
+    write_png_color(
+        rgb_image.width(),
+        rgb_image.height(),
+        png::ColorType::Rgb,
+        rgb_image.as_raw(),
+        writer,
+        metadata,
+        profile,
+    )
+}
+
+fn write_png_color<W: std::io::Write>(
+    width: u32,
+    height: u32,
+    color: png::ColorType,
+    pixels: &[u8],
+    writer: W,
+    metadata: Option<&OutputMetadata>,
+    profile: PngEncoding,
+) -> Result<()> {
+    let mut encoder = png::Encoder::new(writer, width, height);
+    encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
     match profile {
         PngEncoding::Fast => {
@@ -199,7 +325,7 @@ fn write_png_with<W: std::io::Write>(
     }
 
     let mut png_writer = encoder.write_header()?;
-    png_writer.write_image_data(rgb_image.as_raw())?;
+    png_writer.write_image_data(pixels)?;
     png_writer.finish()?;
     Ok(())
 }
@@ -480,9 +606,9 @@ mod tests {
 
     #[test]
     fn test_encode_wrong_channels_fails() {
-        // 4-channel tensor should be rejected
-        let data = vec![0u8; 4 * 4 * 4];
-        let tensor = Tensor::from_vec(data, (4, 4, 4), &Device::Cpu)
+        // Only RGB (3) and RGBA (4) tensors are images.
+        let data = vec![0u8; 2 * 4 * 4];
+        let tensor = Tensor::from_vec(data, (2, 4, 4), &Device::Cpu)
             .unwrap()
             .to_dtype(DType::U8)
             .unwrap();
@@ -490,9 +616,149 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("expected 3 channels"),
+            msg.contains("expected 3 (RGB) or 4 (RGBA) channels"),
             "unexpected error: {msg}"
         );
+    }
+
+    /// A `[4, H, W]` tensor from RGBA planes (channel-first).
+    fn rgba_tensor(image: &image::RgbaImage) -> Tensor {
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        Tensor::from_vec(image.as_raw().clone(), (h, w, 4), &Device::Cpu)
+            .unwrap()
+            .permute((2, 0, 1))
+            .unwrap()
+            .contiguous()
+            .unwrap()
+    }
+
+    fn rgb_tensor(image: &image::RgbImage) -> Tensor {
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        Tensor::from_vec(image.as_raw().clone(), (h, w, 3), &Device::Cpu)
+            .unwrap()
+            .permute((2, 0, 1))
+            .unwrap()
+            .contiguous()
+            .unwrap()
+    }
+
+    /// A cut-out: an opaque square on a fully transparent black field, with
+    /// one half-transparent column.
+    fn cutout(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            if (width / 4..3 * width / 4).contains(&x) && (height / 4..3 * height / 4).contains(&y)
+            {
+                image::Rgba([220, 60, 20, 255])
+            } else if x == 0 {
+                image::Rgba([0, 0, 255, 128])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        })
+    }
+
+    #[test]
+    fn opaque_rgba_png_is_byte_identical_to_the_rgb_png() {
+        let rgb = synthetic_render(33, 21);
+        let rgba = image::RgbaImage::from_fn(33, 21, |x, y| {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            image::Rgba([r, g, b, 255])
+        });
+        let metadata = test_metadata();
+        for format in [OutputFormat::Png, OutputFormat::Jpeg] {
+            let from_rgb =
+                encode_image(&rgb_tensor(&rgb), format, 33, 21, Some(&metadata)).unwrap();
+            let from_rgba =
+                encode_image(&rgba_tensor(&rgba), format, 33, 21, Some(&metadata)).unwrap();
+            assert_eq!(
+                from_rgb, from_rgba,
+                "{format}: an all-opaque RGBA render must encode exactly as RGB"
+            );
+        }
+        let info = decode_png_info(
+            &encode_image(&rgba_tensor(&rgba), OutputFormat::Png, 33, 21, None).unwrap(),
+        );
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+    }
+
+    #[test]
+    fn transparent_rgba_png_keeps_its_alpha_and_records_it() {
+        let source = cutout(16, 12);
+        let metadata = test_metadata();
+        let bytes = encode_image(
+            &rgba_tensor(&source),
+            OutputFormat::Png,
+            16,
+            12,
+            Some(&metadata),
+        )
+        .unwrap();
+        assert_eq!(decode_png_info(&bytes).color_type, png::ColorType::Rgba);
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(decoded.as_raw(), source.as_raw(), "PNG alpha is lossless");
+        assert!(mold_core::still_image::encoded_still_has_alpha(&bytes));
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("\"has_alpha\":true"),
+            "embedded provenance records the alpha channel"
+        );
+    }
+
+    #[test]
+    fn transparent_rgba_jpeg_is_composited_over_white() {
+        let source = image::RgbaImage::from_fn(8, 8, |_, _| image::Rgba([0, 0, 0, 0]));
+        let bytes = encode_image(&rgba_tensor(&source), OutputFormat::Jpeg, 8, 8, None).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert!(
+            decoded
+                .pixels()
+                .all(|pixel| pixel.0.iter().all(|&c| c >= 250)),
+            "a fully transparent pixel lands on the white canvas"
+        );
+        assert_eq!(
+            composite_over_white(&image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([0, 100, 200, 128])
+            ))
+            .get_pixel(0, 0)
+            .0,
+            [127, 177, 227]
+        );
+    }
+
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_stills_encode_for_rgb_and_rgba_tensors() {
+        // The all-family fix: an ordinary three-channel render encodes as a
+        // still WebP instead of failing after the render.
+        let rgb = synthetic_render(24, 16);
+        let bytes = encode_image(&rgb_tensor(&rgb), OutputFormat::Webp, 24, 16, None).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[12..16], b"VP8 ");
+        assert!(!crate::webp_still::has_anim_chunk(&bytes));
+        assert!(!mold_core::still_image::webp_is_animated(&bytes));
+        assert!(!OutputFormat::Webp.is_video_artifact(&bytes));
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (24, 16));
+
+        let source = cutout(24, 16);
+        let bytes = encode_image(&rgba_tensor(&source), OutputFormat::Webp, 24, 16, None).unwrap();
+        assert!(matches!(&bytes[12..16], b"VP8X" | b"VP8L"));
+        assert!(!crate::webp_still::has_anim_chunk(&bytes));
+        assert!(mold_core::still_image::encoded_still_has_alpha(&bytes));
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        let alpha = |image: &image::RgbaImage| image.pixels().map(|p| p[3]).collect::<Vec<_>>();
+        assert_eq!(alpha(&decoded), alpha(&source));
+    }
+
+    #[cfg(not(feature = "webp"))]
+    #[test]
+    fn webp_stills_name_the_missing_feature() {
+        let rgb = synthetic_render(4, 4);
+        let err = encode_image(&rgb_tensor(&rgb), OutputFormat::Webp, 4, 4, None).unwrap_err();
+        assert!(err.to_string().contains("'webp' feature"), "{err}");
     }
 
     #[test]
@@ -605,6 +871,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         };
 
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, Some(&metadata)).unwrap();
@@ -804,6 +1071,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         });
 
         update_output_metadata_size(&mut metadata, 1008, 1008);
@@ -894,6 +1162,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         }
     }
 
@@ -1077,6 +1346,7 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
 

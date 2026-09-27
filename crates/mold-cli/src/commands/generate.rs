@@ -638,8 +638,9 @@ fn save_durable_batch_download(
     }
     // `bytes` is the artifact, and only a raster artifact can be previewed in
     // a terminal. A mesh and an audio print each have a sidecar tile, which
-    // their own save paths preview instead.
-    if preview && !format.is_video() && !format.is_audio() && !format.is_mesh() {
+    // their own save paths preview instead. The media kind is read off the
+    // bytes: a WebP still previews, an animated WebP is a video.
+    if preview && !format.is_video_artifact(bytes) && !format.is_audio() && !format.is_mesh() {
         preview_image(bytes);
     }
     Ok(())
