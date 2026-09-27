@@ -137,4 +137,13 @@ describe("RecentGrid", () => {
     expect(w.find("[data-test='recent-empty']").exists()).toBe(true);
     expect(w.findAll("[data-test='recent-tile']")).toHaveLength(0);
   });
+
+  it("puts a print that carries alpha on the checkerboard tile", () => {
+    const cutout = entry("cutout.png");
+    cutout.metadata = { ...cutout.metadata, has_alpha: true };
+    const w = mountGrid([entry("opaque.png"), cutout]);
+    const tiles = w.findAll("[data-test='recent-tile']");
+    expect(tiles[0]!.attributes("data-alpha")).toBeUndefined();
+    expect(tiles[1]!.attributes("data-alpha")).toBe("true");
+  });
 });

@@ -451,3 +451,24 @@ describe("ResultCanvas result action bar", () => {
     );
   });
 });
+
+describe("ResultCanvas alpha bed", () => {
+  it("puts a transparent print on the checkerboard, and only that print", () => {
+    const opaque = mount(ResultCanvas, {
+      props: { mode: "result", resultSrc: "data:image/png;base64,AAAA" },
+    });
+    expect(opaque.get("[data-test='canvas-image']").classes()).not.toContain(
+      "ms-alpha-bed",
+    );
+    const cutout = mount(ResultCanvas, {
+      props: {
+        mode: "result",
+        resultSrc: "data:image/png;base64,AAAA",
+        resultAlpha: true,
+      },
+    });
+    expect(cutout.get("[data-test='canvas-image']").classes()).toContain(
+      "ms-alpha-bed",
+    );
+  });
+});

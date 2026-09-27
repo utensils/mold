@@ -31,8 +31,21 @@ describe("mediaKind", () => {
 
   it("falls back to the filename extension when format is null/undefined", () => {
     expect(mediaKind(null, "clip.mp4")).toBe("video");
-    expect(mediaKind(undefined, "loop.webp")).toBe("animated");
+    expect(mediaKind(undefined, "loop.webp", { frames: 97 })).toBe("animated");
     expect(mediaKind(null, "still.jpg")).toBe("image");
+  });
+
+  it("reads a WebP with no frame metadata as a still image", () => {
+    // Still WebP is a real output for every image recipe now; only frame
+    // metadata marks an animation.
+    expect(mediaKind("webp", "cutout.webp")).toBe("image");
+    expect(mediaKind(undefined, "cutout.webp", {})).toBe("image");
+    expect(mediaKind("webp", "cutout.webp", { frames: null })).toBe("image");
+    expect(mediaKind("webp", "clip.webp", { video_frames: 49 })).toBe(
+      "animated",
+    );
+    // GIF and APNG remain animation containers whatever the metadata says.
+    expect(mediaKind("gif", "loop.gif")).toBe("animated");
   });
 
   it("defaults to 'image' when nothing identifies the media type", () => {

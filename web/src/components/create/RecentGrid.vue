@@ -15,6 +15,7 @@ import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
 import { thumbnailUrl } from "../../api";
 import { mediaKind, type GalleryImage } from "../../types";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 
 const props = withDefaults(
   defineProps<{
@@ -86,12 +87,12 @@ const overflow = computed(() =>
 );
 
 function isVideo(item: GalleryImage): boolean {
-  return mediaKind(item.format, item.filename) === "video";
+  return mediaKind(item.format, item.filename, item.metadata) === "video";
 }
 /** A mesh has no motion and no waveform — the gallery grid's own 3D badge is
  * the only thing that tells its square thumbnail apart from a still. */
 function isMesh(item: GalleryImage): boolean {
-  return mediaKind(item.format, item.filename) === "mesh";
+  return mediaKind(item.format, item.filename, item.metadata) === "mesh";
 }
 function tileAlt(item: GalleryImage): string {
   return item.metadata.prompt || item.filename;
@@ -125,6 +126,10 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
         :key="item.filename"
         :src="thumbnailUrl(item.filename)"
         :alt="tileAlt(item)"
+        :alpha="
+          mediaKind(item.format, item.filename, item.metadata) === 'image' &&
+          showsAlphaBed(item)
+        "
         :data-test="`recent-tile`"
         @open="emit('open', item)"
         @contextmenu.prevent.stop="openContextMenu(item, $event)"

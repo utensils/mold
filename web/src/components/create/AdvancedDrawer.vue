@@ -19,6 +19,14 @@ import Icon from "@ui/components/Icon.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import { outputFormatOptions } from "@studio/lib/outputFormat";
+import {
+  coerceFormatForTransparency,
+  TRANSPARENCY_LABEL,
+  TRANSPARENCY_NOTE,
+  TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+  transparencyControl,
+} from "@studio/lib/transparency";
 import Chip from "@ui/components/Chip.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
@@ -160,6 +168,37 @@ const h3Family = computed(() =>
   isMinimaxH3Identity(props.family, props.modelValue.model),
 );
 const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
+// Qwen Image 2.1's Transparent background toggle: rendered only where the
+// recipe advertises it adjustable (`capabilities.transparency`), and while it
+// is on JPEG stays VISIBLE but disabled with its reason.
+const transparency = computed(() => transparencyControl(caps.value));
+const formatOptions = computed(() =>
+  outputFormatOptions(
+    formats.value,
+    props.modelValue.transparentBackground,
+    transparency.value,
+  ).map((option) => ({
+    value: option.value,
+    label: option.label,
+    disabled: option.disabled,
+    title: option.reason ?? undefined,
+  })),
+);
+const formatNote = computed(() =>
+  formatOptions.value.some((option) => option.disabled)
+    ? TRANSPARENCY_UNAVAILABLE_FORMAT_REASON
+    : null,
+);
+function setTransparentBackground(on: boolean) {
+  // Turning it on moves a JPEG choice to the first alpha format so the form
+  // never holds a pair admission would refuse.
+  const coerced = coerceFormatForTransparency(
+    props.modelValue.outputFormat,
+    transparency.value,
+    on,
+  );
+  patch({ transparentBackground: on, outputFormat: coerced.format });
+}
 
 // Wan puts its solver in the recipe section below, next to the flow shift it
 // belongs with, so the generic section would otherwise render a second picker
@@ -716,18 +755,35 @@ function resetAdvanced() {
         :header-interactive="false"
         data-test="section-output"
       >
+        <div
+          v-if="transparency"
+          class="adv__field"
+          data-test="transparent-background-field"
+        >
+          <div class="adv__row">
+            <span class="adv__label">{{ TRANSPARENCY_LABEL }}</span>
+            <SwitchToggle
+              :model-value="modelValue.transparentBackground === true"
+              :label="TRANSPARENCY_LABEL"
+              data-test="transparent-background"
+              @update:model-value="setTransparentBackground"
+            />
+          </div>
+          <p class="adv__hint">{{ TRANSPARENCY_NOTE }}</p>
+        </div>
         <div class="adv__field">
           <label class="adv__label">File format</label>
           <SegmentedControl
             :model-value="modelValue.outputFormat"
-            :options="
-              formats.map((f) => ({ value: f, label: f.toUpperCase() }))
-            "
+            :options="formatOptions"
             label="File format"
             @update:model-value="
               patch({ outputFormat: $event as OutputFormat })
             "
           />
+          <p v-if="formatNote" class="adv__hint" data-test="format-note">
+            {{ formatNote }}
+          </p>
         </div>
         <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
              there is nothing to type here — the same reason the rail hides

@@ -40,7 +40,15 @@ import {
 } from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/videoDuration";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
-import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
+import {
+  pipelineForSettingsReuse,
+  transparentBackgroundForSettingsReuse,
+} from "@studio/lib/outputReuse";
+import {
+  coerceFormatForTransparency,
+  transparencyControl,
+  transparencyRequestFields,
+} from "@studio/lib/transparency";
 import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
@@ -181,6 +189,7 @@ function defaultForm(): GenerateFormState {
     referenceImages: [],
     exclusiveWell: null,
     referenceWeight: null,
+    transparentBackground: false,
     maskImage: null,
     controlImage: null,
     controlModel: "",
@@ -770,6 +779,9 @@ export function applyMetadataToForm(
     extendVideoPath: metadata.extend_video_path ?? "",
     extendOverlapFrames: metadata.extend_overlap_frames ?? null,
     pipeline: pipelineForSettingsReuse(metadata),
+    // The REQUEST's toggle, never `has_alpha`: an edit of a transparent
+    // reference keeps its alpha with the toggle off.
+    transparentBackground: transparentBackgroundForSettingsReuse(metadata),
     icLoraControl: metadata.ic_lora_control ?? null,
     retakeRange: metadata.retake_range ?? null,
     spatialUpscale: metadata.spatial_upscale ?? null,
@@ -1353,6 +1365,11 @@ export function useGenerateForm(): UseGenerateForm {
       // (or an older host), which is what keeps the field off the wire.
       const referenceWeightControl =
         capabilities.referenceImages?.weight ?? null;
+      // The transparent-background toggle the recipe advertises; `null`
+      // (an older host, or a recipe with no alpha output) keeps the field off
+      // the wire and leaves the format alone, while the form keeps the
+      // user's choice parked for the next model that takes it.
+      const transparency = transparencyControl(capabilities);
       // Wan's first/last-frame render (#779) rides the existing `keyframes`
       // contract: both stills travel there and `source_image` stays home —
       // the engine refuses a request carrying both, and admission counts
@@ -1435,12 +1452,19 @@ export function useGenerateForm(): UseGenerateForm {
         guidance: effectiveGenerationGuidance(capabilities, s.guidance),
         seed: s.seedMode === "random" ? null : s.seed,
         batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
-        output_format:
+        // JPEG has no alpha channel: while the toggle is on the format moves
+        // to the recipe's first alpha format rather than meeting admission's
+        // refusal (the picker shows JPEG disabled with the same reason).
+        output_format: coerceFormatForTransparency(
           coerceOutputFormatForRecipe(
             advertisedRecipeOnly(requestRecipe),
             family,
             s.outputFormat,
           ) ?? s.outputFormat,
+          transparency,
+          s.transparentBackground,
+        ).format,
+        ...transparencyRequestFields(s.transparentBackground, transparency),
         // Refused at admission on a recipe with no `mesh` block, and omitted
         // entirely while every control still equals the advertised default.
         mesh: capabilities.mesh
