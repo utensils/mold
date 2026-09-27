@@ -182,6 +182,60 @@ describe("notifications — downloads (G11b)", () => {
     expect(toasts().length).toBe(0);
     stop();
   });
+
+  // App.vue installs notifications before the downloads singleton has read
+  // `/api/downloads`, so the history present "at install" is empty and the
+  // first listing arrives a tick later. That listing is the same old history
+  // and must not replay one "installed …" toast per past pull on every page
+  // load — only a pull that completes after the baseline toasts.
+  it("treats the first loaded listing as the baseline, not as new installs", async () => {
+    const downloads = {
+      history: ref<DownloadJobWire[]>([]),
+      loaded: ref(false),
+    } as unknown as UseDownloads;
+    const stop = installNotifications({
+      jobs: ref<Job[]>([]),
+      downloads,
+      currentRouteName: () => "models",
+      hostPollMs: 1_000_000,
+    });
+
+    downloads.history.value = [
+      dljob({ id: "old1", model: "qwen-image-2.1:bf16" }),
+      dljob({ id: "old2", model: "qwen-image-2.1:q8" }),
+      dljob({ id: "old3", model: "sdxl:base", status: "failed" }),
+    ];
+    downloads.loaded.value = true;
+    await nextTick();
+    expect(toasts().length).toBe(0);
+
+    downloads.history.value = [
+      ...downloads.history.value,
+      dljob({ id: "new", model: "flux-dev:q4" }),
+    ];
+    await nextTick();
+    expect(toasts().map((t) => t.text)).toEqual(["installed flux-dev:q4"]);
+    stop();
+  });
+
+  it("an empty first listing still lets the next completion toast", async () => {
+    const downloads = {
+      history: ref<DownloadJobWire[]>([]),
+      loaded: ref(false),
+    } as unknown as UseDownloads;
+    const stop = installNotifications({
+      jobs: ref<Job[]>([]),
+      downloads,
+      currentRouteName: () => "models",
+      hostPollMs: 1_000_000,
+    });
+    downloads.loaded.value = true;
+    await nextTick();
+    downloads.history.value = [dljob({ id: "fresh" })];
+    await nextTick();
+    expect(toasts().map((t) => t.text)).toEqual(["installed flux-dev:q4"]);
+    stop();
+  });
 });
 
 describe("notifications — host offline (G11c)", () => {
