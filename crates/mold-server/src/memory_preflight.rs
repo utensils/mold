@@ -1726,7 +1726,10 @@ pub(crate) fn qwen_image21_eager_plan(
         host.total_bytes,
         host.spendable_bytes(),
         &[],
-        1,
+        Qwen21RequestFacts {
+            branches: 1,
+            ..Qwen21RequestFacts::default()
+        },
     )
 }
 
@@ -1740,6 +1743,7 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
     available_bytes: Option<u64>,
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    adapter_bytes: u64,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     let host = crate::h3_admission::current_h3_host_memory();
     qwen_image21_eager_plan_with_host(
@@ -1749,7 +1753,56 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
         host.total_bytes,
         host.spendable_bytes(),
         &qwen_image21_reference_dimensions(req, projection),
-        qwen_image21_prefix_branches(req),
+        Qwen21RequestFacts {
+            branches: qwen_image21_prefix_branches(req),
+            adapter_bytes,
+            text_encoder_on_host: qwen_image21_text_encoder_placed_on_host(req),
+        },
+    )
+}
+
+/// What a concrete request adds to the Qwen Image 2.1 plan beyond its canvas
+/// and references. `Default` is a plain text-to-image request.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Qwen21RequestFacts {
+    /// CFG branches that carry a prefix.
+    pub(crate) branches: usize,
+    /// The LoRA stack's device bytes ([`qwen_image21_adapter_bytes`]).
+    pub(crate) adapter_bytes: u64,
+    /// `advanced.qwen = cpu`: the encoder and its vision tower run on the
+    /// host.
+    pub(crate) text_encoder_on_host: bool,
+}
+
+/// The adapter stack's device bytes, priced exactly as the engine prices the
+/// stack it installs (`QwenImage21Engine::lora_entries` →
+/// `text_encoder_residency::lora_stack_bytes`): a turbo tier's distilled
+/// adapter first, then the caller's.
+pub(crate) fn qwen_image21_adapter_bytes(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    lora_paths: &[std::path::PathBuf],
+) -> u64 {
+    let turbo = mold_core::manifest::qwen_image21_turbo_schedule(&req.model)
+        .and(paths.distilled_lora.as_deref());
+    mold_inference::qwen_image21::text_encoder_residency::lora_stack_bytes(
+        turbo
+            .into_iter()
+            .chain(lora_paths.iter().map(std::path::PathBuf::as_path)),
+    )
+}
+
+/// Whether the request authored the Qwen3-VL encoder onto the host — the
+/// engine's own `effective_device_ref` over `advanced.qwen`, so the plan and
+/// the render place it identically.
+pub(crate) fn qwen_image21_text_encoder_placed_on_host(req: &GenerateRequest) -> bool {
+    matches!(
+        mold_inference::device::effective_device_ref(
+            req.placement.as_ref(),
+            |advanced| advanced.qwen.clone(),
+            true,
+        ),
+        mold_core::types::DeviceRef::Cpu
     )
 }
 
@@ -1827,12 +1880,12 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     host_total_bytes: u64,
     host_available_bytes: u64,
     references: &[(u32, u32)],
-    branches: usize,
+    facts: Qwen21RequestFacts,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
     let available = available_bytes.filter(|bytes| *bytes > 0)?;
-    let request = qwen_image21_render_request(paths, hint, references, branches);
+    let request = qwen_image21_render_request(paths, hint, references, facts.branches.max(1));
     let cache_budget = qwen_image21_cache_budget_for(paths, &request, Some(available));
     let phases = residency::render_phases(&request, cache_budget);
     let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
@@ -1848,9 +1901,13 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
         },
         usable_free_bytes: available,
         phases,
+        adapter_bytes: facts.adapter_bytes,
+        text_encoder_on_host: facts.text_encoder_on_host,
         host_total_bytes,
         host_available_bytes,
-        already_parked_bytes: 0,
+        // The park the engine holds for this model, credited exactly as the
+        // engine's own decision credits it.
+        already_parked_bytes: residency::parked_text_encoder_bytes(paths),
         keep_te_ram: mold_inference::device::keep_te_ram_mode(),
     })
     .ok()?;
@@ -1860,7 +1917,11 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     // An encoder that would only fit on the host makes every eager request a
     // CPU encode of an 8B model; Sequential (encoder alone on the card, then
     // the transformer) is the faster plan there.
-    (plan.choice.on_gpu() && plan.decision.eager_peak_bytes <= available).then_some(plan)
+    // An AUTHORED host placement is the operator's choice, not a fallback,
+    // and the eager engine honours it the same way.
+    ((plan.choice.on_gpu() || facts.text_encoder_on_host)
+        && plan.decision.eager_peak_bytes <= available)
+        .then_some(plan)
 }
 
 /// The SEQUENTIAL Qwen Image 2.1 plan's device peak for a concrete request —
@@ -1876,6 +1937,7 @@ pub(crate) fn qwen_image21_sequential_peak(
     available_bytes: Option<u64>,
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    adapter_bytes: u64,
 ) -> Option<u64> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
@@ -1892,9 +1954,11 @@ pub(crate) fn qwen_image21_sequential_peak(
         } else {
             residency::TeDevice::Cuda
         },
-        text_encoder_on_device: !paths.text_encoder_files.is_empty(),
+        text_encoder_on_device: !paths.text_encoder_files.is_empty()
+            && !qwen_image21_text_encoder_placed_on_host(req),
         usable_free_bytes: available,
         request: &request,
+        adapter_bytes,
     })
     .ok()
 }
@@ -2222,6 +2286,40 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     gemma_competes: bool,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> GenerationMemoryBudget {
+    let lora_paths = req
+        .caller_lora_stack()
+        .into_iter()
+        .map(|lora| std::path::PathBuf::from(lora.path))
+        .collect::<Vec<_>>();
+    estimate_generation_memory_for_request_with_loras(
+        req,
+        paths,
+        hint,
+        offload_policy,
+        available_memory_bytes,
+        request_has_lora,
+        gemma_competes,
+        projection,
+        &lora_paths,
+    )
+}
+
+/// [`estimate_generation_memory_for_request_with_projection`] with the
+/// adapter stack named explicitly — the planner's `effective_loras`, because a
+/// durable job's request is the SCRUBBED copy, which carries no `loras`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_generation_memory_for_request_with_loras(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    offload_policy: GenerationOffloadPolicy,
+    available_memory_bytes: Option<u64>,
+    request_has_lora: bool,
+    gemma_competes: bool,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    lora_paths: &[std::path::PathBuf],
+) -> GenerationMemoryBudget {
+    let qwen21_adapter_bytes = qwen_image21_adapter_bytes(req, paths, lora_paths);
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
@@ -2320,8 +2418,14 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // the workspace inside that decision is the whole render's, so it replaces
     // the generic `peak + activation` rather than adding to it. `None` is a
     // Sequential plan (or another family), which keeps the generic estimate.
-    let qwen21_plan =
-        qwen_image21_eager_plan_for_request(paths, hint, available_memory_bytes, req, projection);
+    let qwen21_plan = qwen_image21_eager_plan_for_request(
+        paths,
+        hint,
+        available_memory_bytes,
+        req,
+        projection,
+        qwen21_adapter_bytes,
+    );
     // Weight bytes the wan arm below discounted because parking can free them.
     // Kept so the plan can re-add them and ask the engine's own question — will
     // this render park? — rather than inferring it from the discounted peak.
@@ -2388,7 +2492,14 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 &qwen_image21_reference_dimensions(req, projection),
             ));
             let qwen21_sequential = if qwen21_plan.is_none() {
-                qwen_image21_sequential_peak(paths, hint, available_memory_bytes, req, projection)
+                qwen_image21_sequential_peak(
+                    paths,
+                    hint,
+                    available_memory_bytes,
+                    req,
+                    projection,
+                    qwen21_adapter_bytes,
+                )
             } else {
                 None
             };
@@ -6007,7 +6118,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("a 24 GB card plans the int8 tier eager");
         assert!(matches!(
@@ -6039,7 +6153,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("a 48 GB card plans bf16 eager");
         assert_eq!(
@@ -6115,7 +6232,10 @@ mod qwen_image21_residency_tests {
             256 * GIB,
             200 * GIB,
             &[(1024, 1024)],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("one reference plans eager");
         // The 1024² decode is ~7 GB under cuDNN (the CUDA build); a build that
@@ -6136,6 +6256,80 @@ mod qwen_image21_residency_tests {
         assert!(plan.decision.eager_peak_bytes <= 44 * GIB);
     }
 
+    /// The plan charges what the engine will hold: the request's LoRA stack
+    /// (and a turbo tier's distilled adapter) in every phase, and nothing on
+    /// the card for an encoder the request placed on the host.
+    #[test]
+    fn the_eager_plan_charges_adapters_and_honours_a_host_placed_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let plan = |facts: Qwen21RequestFacts| {
+            qwen_image21_eager_plan_with_host(
+                &paths,
+                hint(1024, 1024),
+                Some(64 * GIB),
+                256 * GIB,
+                200 * GIB,
+                &[],
+                facts,
+            )
+            .expect("plans eager")
+        };
+        let plain = plan(Qwen21RequestFacts {
+            branches: 1,
+            ..Default::default()
+        });
+        let adapted = plan(Qwen21RequestFacts {
+            branches: 1,
+            adapter_bytes: GIB,
+            ..Default::default()
+        });
+        assert_eq!(
+            adapted.decision.eager_peak_bytes,
+            plain.decision.eager_peak_bytes + GIB
+        );
+        let host = plan(Qwen21RequestFacts {
+            branches: 1,
+            text_encoder_on_host: true,
+            ..Default::default()
+        });
+        assert!(!host.choice.on_gpu());
+        assert!(host.decision.eager_peak_bytes < plain.decision.eager_peak_bytes);
+
+        // The stack is priced from the files: the caller's adapters, and a
+        // turbo tier's distilled one first.
+        let adapter = sized(dir.path(), "style.safetensors", 300_000_000);
+        let distilled = sized(dir.path(), "turbo.safetensors", 1_400_000_000);
+        let turbo_paths = ModelPaths {
+            distilled_lora: Some(distilled),
+            ..paths.clone()
+        };
+        let mut req = qwen21_request(0);
+        req.model = "qwen-image-2.1-turbo:bf16".into();
+        assert_eq!(
+            qwen_image21_adapter_bytes(&req, &turbo_paths, std::slice::from_ref(&adapter)),
+            1_700_000_000
+        );
+        req.model = "qwen-image-2.1:bf16".into();
+        assert_eq!(
+            qwen_image21_adapter_bytes(&req, &turbo_paths, &[adapter]),
+            300_000_000
+        );
+        // `advanced.qwen = cpu` is the engine's own placement reading.
+        let mut placed: GenerateRequest = qwen21_request(0);
+        placed.placement = Some(
+            serde_json::from_value(serde_json::json!({
+                "text_encoders": { "kind": "auto" },
+                "advanced": { "qwen": { "kind": "cpu" } }
+            }))
+            .unwrap(),
+        );
+        assert!(qwen_image21_text_encoder_placed_on_host(&placed));
+        assert!(!qwen_image21_text_encoder_placed_on_host(&qwen21_request(
+            0
+        )));
+    }
+
     /// References enter the eager plan through the engine's own phase sizing
     /// (`text_encoder_residency::render_phases`): they never lower the peak,
     /// and a 24 GB card cannot plan ten references eager at all.
@@ -6150,7 +6344,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("text-to-image plans eager");
         let extra = mold_inference::device::qwen_image21_reference_extra_bytes(
@@ -6172,7 +6369,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[(1536, 1024)],
-            2,
+            Qwen21RequestFacts {
+                branches: 2,
+                ..Default::default()
+            },
         )
         .filter(|plan| plan.decision.residency == plain.decision.residency)
         {
@@ -6185,7 +6385,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[(1536, 1024); 10],
-            2,
+            Qwen21RequestFacts {
+                branches: 2,
+                ..Default::default()
+            },
         )
         .is_none());
         assert_eq!(

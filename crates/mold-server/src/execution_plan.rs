@@ -3498,6 +3498,11 @@ fn build_plan(
         context.family,
     ));
     let request_has_lora = !context.effective_loras.is_empty();
+    let lora_paths = context
+        .effective_loras
+        .iter()
+        .map(|lora| lora.path.clone())
+        .collect::<Vec<_>>();
     let wan_block_offload_policy = mold_inference::wan::block_offload::AdmissionPolicy::from_values(
         device.backend,
         context
@@ -3544,21 +3549,21 @@ fn build_plan(
         .flatten();
     let total_peak_budget =
         device_budget.saturating_add(cuda_peak_baseline.map_or(0, |baseline| baseline.bytes));
-    let initial_memory =
-        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
-            context.request,
-            context.paths,
-            hint,
-            crate::memory_preflight::GenerationOffloadPolicy::new(
-                context.offload_requested,
-                wan_block_offload_policy,
-                device.backend == GpuBackend::Metal,
-            ),
-            Some(total_peak_budget),
-            request_has_lora,
-            gemma_competes,
-            context.projection,
-        );
+    let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
+        context.request,
+        context.paths,
+        hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            context.offload_requested,
+            wan_block_offload_policy,
+            device.backend == GpuBackend::Metal,
+        ),
+        Some(total_peak_budget),
+        request_has_lora,
+        gemma_competes,
+        context.projection,
+        &lora_paths,
+    );
     // A process-wide offload preference is advisory for concrete formats
     // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
     // The family capability gate above remains a typed error; this path-level
@@ -3621,21 +3626,21 @@ fn build_plan(
         })
         .all(|(_, cpu)| *cpu);
     let gpu_paths = gpu_resident_paths(context.paths, &placements);
-    let mut memory =
-        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
-            context.request,
-            &gpu_paths,
-            hint,
-            crate::memory_preflight::GenerationOffloadPolicy::new(
-                initial_memory.block_offload && !transformer_on_cpu,
-                wan_block_offload_policy,
-                device.backend == GpuBackend::Metal,
-            ),
-            Some(total_peak_budget),
-            request_has_lora,
-            gemma_competes,
-            context.projection,
-        );
+    let mut memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
+        context.request,
+        &gpu_paths,
+        hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            initial_memory.block_offload && !transformer_on_cpu,
+            wan_block_offload_policy,
+            device.backend == GpuBackend::Metal,
+        ),
+        Some(total_peak_budget),
+        request_has_lora,
+        gemma_competes,
+        context.projection,
+        &lora_paths,
+    );
     if memory.fits_available_memory != Some(true)
         && context.capabilities.supports_vae_cpu
         && context
@@ -3647,7 +3652,7 @@ fn build_plan(
     {
         placements.insert(ComponentRole::Vae, true);
         let gpu_paths = gpu_resident_paths(context.paths, &placements);
-        memory = crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
+        memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
             context.request,
             &gpu_paths,
             hint,
@@ -3660,6 +3665,7 @@ fn build_plan(
             request_has_lora,
             gemma_competes,
             context.projection,
+            &lora_paths,
         );
     }
     if memory.fits_available_memory != Some(true) {
@@ -3833,7 +3839,15 @@ fn build_plan(
                 hint,
                 Some(device_budget),
                 context.request,
-                None,
+                // The scrubbed durable request carries neither its reference
+                // bytes nor its adapters: both come from the plan's own
+                // projection and frozen stack, as the memory estimate reads them.
+                context.projection,
+                crate::memory_preflight::qwen_image21_adapter_bytes(
+                    context.request,
+                    context.paths,
+                    &lora_paths,
+                ),
             )
         })
         .flatten();
