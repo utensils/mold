@@ -53,7 +53,7 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 513 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 594 |
 | `qwen-image-2.1` | `qwen-image21` | `shared.md`, `families/qwen-image21.md` | 180 | 548 |
-| `qwen-image-2.1-turbo` | `qwen-image21` | `shared.md`, `families/qwen-image21.md` | 180 | 548 |
+| `qwen-image-2.1-turbo` | `qwen-image21` | `shared.md`, `families/qwen-image21.md`, `models/qwen-image-2.1-turbo.md` | 180 | 652 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
@@ -1117,6 +1117,7 @@ mold run qwen-image-2.1-turbo "A lighthouse on a basalt cliff at dusk, oil paint
 
 - https://huggingface.co/Qwen/Qwen-Image-2.1
 - https://github.com/QwenLM/Qwen-Image
+- https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo
 
 <!-- families/qwen-image-edit.md -->
 
@@ -2185,6 +2186,44 @@ mold run qwen-image-lightning:fp8-8step "A snowy mountain village at blue hour, 
 
 - https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py
 - https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning
+
+<!-- models/qwen-image-2.1-turbo.md -->
+
+Models: `qwen-image-2.1-turbo`.
+
+### Qwen Image 2.1 turbo prompting
+
+Covers `qwen-image-2.1-turbo`: the base weights plus Viggle's 6-step distilled
+adapter.
+
+#### Prompt style
+
+Write the same direct, complete description as for the base model, under
+180 words. The student was distilled against prompt-enhanced
+targets, so describing subject, setting, composition and lighting helps.
+
+#### Syntax
+
+Guidance is fixed at 1.0, so there is no negative prompt. Quoted text,
+ordinal references ("image 1") and transparency behave as on the base model.
+
+#### Pitfalls
+
+Small or long lettering garbles more often than with the 40-step base; keep
+it short and large. Complicated edits (several references, face swaps,
+identity-preserving changes) can ghost subjects; ask for one clear change.
+
+#### CLI
+
+```bash
+mold run qwen-image-2.1-turbo "A studio portrait of an old fisherman mending a net, warm rim light, 85mm" --seed 0
+mold run qwen-image-2.1-turbo:int8-conv "Replace the background with a sunset beach, keep the subject unchanged" --image portrait.png
+```
+
+#### Sources
+
+- https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo
+- https://huggingface.co/Qwen/Qwen-Image-2.1
 
 <!-- models/qwen-image-edit-lightning.md -->
 

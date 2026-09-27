@@ -140,6 +140,7 @@ export default defineConfig({
             { text: 'Z-Image', link: '/models/z-image' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
+            { text: 'Qwen Image 2.1', link: '/models/qwen-image-21' },
             { text: 'LTX Video', link: '/models/ltx2' },
             { text: 'MiniMax H3', link: '/models/minimax-h3' },
             { text: 'Wan Video', link: '/models/wan' },

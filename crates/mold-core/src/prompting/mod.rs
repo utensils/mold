@@ -317,6 +317,12 @@ pub const MODEL_LEAVES: &[ModelLeaf] = &[
         ]
     ),
     model_leaf!(
+        "qwen-image21",
+        "Qwen Image 2.1 turbo",
+        "qwen-image-2.1-turbo.md",
+        &["qwen-image-2.1-turbo"]
+    ),
+    model_leaf!(
         "qwen-image-edit",
         "Qwen-Image-Edit Lightning",
         "qwen-image-edit-lightning.md",

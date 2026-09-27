@@ -81,3 +81,4 @@ mold run qwen-image-2.1-turbo "A lighthouse on a basalt cliff at dusk, oil paint
 
 - https://huggingface.co/Qwen/Qwen-Image-2.1
 - https://github.com/QwenLM/Qwen-Image
+- https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo

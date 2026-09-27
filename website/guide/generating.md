@@ -111,6 +111,44 @@ mold run flux2-dev:bf16 \
 See [Flux.2](/models/flux2) for the gated checkpoint and runtime
 requirements.
 
+Qwen Image 2.1 edits and composes from up to ten ordered references (PNG, JPEG
+or WebP) with no special target image; name each by position in the prompt.
+With no `--width`/`--height`, the output takes the last reference's aspect
+ratio.
+
+```bash
+mold run qwen-image-2.1 --image jacket.png --image person.jpg \
+  "put the jacket from image 1 on the person in image 2"
+```
+
+See [Qwen Image 2.1](/models/qwen-image-21) for its tiers, turbo, and the
+non-commercial Qwen Research License.
+
+## Transparent Backgrounds
+
+Models that advertise `capabilities.transparency` — today Qwen Image 2.1 —
+can render a subject as a cut-out on a transparent background. Turn on
+**Transparent background** in Create, or pass `--transparent`:
+
+```bash
+mold run qwen-image-2.1 "a red paper lantern with a gold tassel" --transparent -o lantern.png
+```
+
+Describe the subject alone, with no scenery. The prompt you typed is what is
+stored; the model's RGBA wording is added by the engine. Alpha needs PNG or
+WebP, so a JPEG choice is refused (the apps switch it to PNG). Transparent
+prints are drawn over a checkerboard in the Library, the lightbox, and the
+result canvas on web, desktop, and mobile, and record `has_alpha` in their
+metadata.
+
+## Output Formats
+
+Stills are PNG by default. `--format jpeg` and `--format webp` (or an `-o`
+path ending in `.jpg` / `.webp`) are available for every image model; WebP
+needs a build with the `webp` feature, which every release build has. A WebP
+still is a single lossy frame with lossless alpha, not an animation. PNG and
+WebP keep an alpha channel; JPEG cannot.
+
 In Mold Studio, Qwen Image Edit uses the same Target image well as other
 source-driven models on web, desktop, and iPhone. Its ordered picture strip
 still adds and reorders References, while the Target offers contain, crop,
@@ -501,7 +539,8 @@ Set `MOLD_PREVIEW=1` to enable permanently.
 ## PNG Metadata
 
 Generated PNGs embed prompt, model, seed, size, steps, and a `mold:parameters`
-JSON chunk by default. Disable with:
+JSON chunk by default. WebP stills carry no embedded metadata; their
+provenance lives in the gallery database, as for video clips. Disable with:
 
 ```bash
 mold run "a cat" --no-metadata

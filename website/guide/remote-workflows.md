@@ -125,7 +125,13 @@ timeout-friendly `generate_image_async` / `generation_status` /
 on the server. The guides themselves are readable as `mold://prompting/<path>`
 resources (`mold://prompting/route/<model>` returns one model's full route).
 Generation tools accept a `loras` array using ids or paths
-returned by `list_loras`; object entries can omit `scale` to use `1.0`. Use the
+returned by `list_loras`; object entries can omit `scale` to use `1.0`. `generate_image` and `generate_image_async` take
+`output_format` `png`, `jpeg` or `webp` (a still), ordered `reference_images`
+(base64 PNG, JPEG or WebP, sent as `edit_images` to a model whose
+`capabilities.reference_images` is adjustable; with no width or height, a
+`canvas: last-reference` model sizes the canvas from the last one), and
+`transparent_background: true` for a model advertising
+`capabilities.transparency` (PNG or WebP only). Use the
 async generation flow for cold model loads or slow generations so LM Studio does
 not need to keep one tool call open until the image is finished. Set
 `MOLD_API_KEY` in the MCP process environment when the mold server requires one.
