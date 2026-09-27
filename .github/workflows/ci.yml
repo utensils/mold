@@ -242,6 +242,8 @@ jobs:
               - 'scripts/tests/bench-qwen-parse.sh'
               - 'scripts/bench-qwen21.sh'
               - 'scripts/tests/bench-qwen21-parse.sh'
+              - 'scripts/capture-qwen21-metal-uat.sh'
+              - 'scripts/tests/qwen21-metal-uat.sh'
               - 'scripts/regression-matrix.sh'
               - 'scripts/tests/regression-matrix-aggregate-failures.sh'
               - 'scripts/tests/regression-matrix-concurrency.sh'
@@ -548,6 +550,7 @@ jobs:
           bash scripts/tests/minimax-h3-attention-release-contract.sh
           bash scripts/tests/bench-qwen-parse.sh
           bash scripts/tests/bench-qwen21-parse.sh
+          bash scripts/tests/qwen21-metal-uat.sh
           bash scripts/tests/regression-matrix-aggregate-failures.sh
           bash scripts/tests/regression-matrix-concurrency.sh
           bash scripts/tests/regression-matrix-family-sizing.sh

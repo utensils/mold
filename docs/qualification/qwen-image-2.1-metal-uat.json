@@ -25,5 +25,78 @@
       "reported_total_seconds": 410.5,
       "sha256": "0e8fc93c5686a6f1c8107daf91a53e151bedc2bf8379e801612857e08fbc516b"
     }
-  ]
+  ],
+  "issue_1770_matrix": {
+    "status": "pending",
+    "note": "PR #1767's new paths were qualified on CUDA only. This matrix tracks the Apple Silicon run; every inference item stays pending until a guarded run of scripts/capture-qwen21-metal-uat.sh on a Metal host is reviewed and folded in here.",
+    "harness": "scripts/capture-qwen21-metal-uat.sh",
+    "items": [
+      {
+        "id": "release-build",
+        "check": "The Metal build compiles with the release feature set",
+        "how": "non-inference",
+        "status": "pending"
+      },
+      {
+        "id": "t2i-bf16-v032",
+        "check": "1024² text-to-image is byte-identical to v0.32",
+        "how": "capture-qwen21-metal-uat.sh t2i-bf16-v032 (+ QWEN21_UAT_V032_BIN)",
+        "status": "pending"
+      },
+      {
+        "id": "sdpa-timing",
+        "check": "Fast SDPA and fused-op timing did not regress against qwen-image-2.1-metal-performance.md",
+        "how": "official_metal_mode_benchmark (see the performance doc)",
+        "status": "pending"
+      },
+      {
+        "id": "references",
+        "check": "1, 3 and 10 references at ~1024²: correctness, peak memory against MetalMemorySnapshot, prefix-cache 512-token / 6 GiB rule",
+        "how": "capture-qwen21-metal-uat.sh refs-1 refs-3 refs-10",
+        "status": "pending"
+      },
+      {
+        "id": "alpha",
+        "check": "RGBA decode and the transparency recipe produce real alpha; RGBA only with the toggle on or an alpha-carrying reference",
+        "how": "capture-qwen21-metal-uat.sh transparent-toggle alpha-reference opaque-reference",
+        "status": "pending"
+      },
+      {
+        "id": "turbo-lora",
+        "check": "Turbo (qwen-image-2.1-turbo:bf16, 6 steps) and a user LoRA through the bypass adapters",
+        "how": "capture-qwen21-metal-uat.sh turbo-bf16 turbo-lora (QWEN21_UAT_LORA)",
+        "status": "pending"
+      },
+      {
+        "id": "tiers",
+        "check": "GGUF, INT8 ConvRot and FP8 (refused by name on Metal) each render or are marked unqualified",
+        "how": "capture-qwen21-metal-uat.sh tier-q4 tier-q8 tier-int8-conv tier-fp8",
+        "status": "pending"
+      },
+      {
+        "id": "2k",
+        "check": "2048² and 2752×1536 on unified memory incl. VAE decode peak and text-encoder parking",
+        "how": "capture-qwen21-metal-uat.sh 2k-square-q4 2k-square-bf16 2k-wide-bf16",
+        "status": "pending"
+      },
+      {
+        "id": "h3-erf-gelu",
+        "check": "H3 image-conditioned output on Metal against upstream (exact erf GELU in the vision mergers)",
+        "how": "manual: H3 Metal oracle, docs/qualification H3 records",
+        "status": "pending"
+      },
+      {
+        "id": "webp-still",
+        "check": "Still WebP encoding on macOS",
+        "how": "capture-qwen21-metal-uat.sh webp-still",
+        "status": "pending"
+      },
+      {
+        "id": "attn-math",
+        "check": "MOLD_ATTN=math still selects the old path",
+        "how": "capture-qwen21-metal-uat.sh t2i-bf16-attn-math",
+        "status": "pending"
+      }
+    ]
+  }
 }

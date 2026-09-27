@@ -298,6 +298,7 @@ if wants contracts; then
                   cuda-distribution-contract \
                   install-cuda-arch install-cpu aur-smoke-script cuda-qualification-contract \
                   minimax-h3-attention-release-contract bench-qwen-parse bench-qwen21-parse \
+                  qwen21-metal-uat \
                   regression-matrix-aggregate-failures regression-matrix-concurrency \
                   regression-matrix-family-sizing regression-matrix-source-image \
                   regression-matrix-transient-retry wan-regression-matrix \
