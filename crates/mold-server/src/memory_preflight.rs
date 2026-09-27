@@ -1693,6 +1693,45 @@ pub(crate) fn qwen_image21_eager_plan(
         available_bytes,
         host.total_bytes,
         host.spendable_bytes(),
+        0,
+    )
+}
+
+/// [`qwen_image21_eager_plan`] for a concrete request: a reference-conditioned
+/// render charges `device::qwen_image21_reference_extra_bytes` on top of the
+/// text-to-image denoise workspace, exactly as the engine's own residency
+/// decision does.
+pub(crate) fn qwen_image21_eager_plan_for_request(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
+    let host = crate::h3_admission::current_h3_host_memory();
+    let extra = hint
+        .filter(|h| h.family == ActivationFamily::QwenImage21Dit)
+        .map_or(0, |hint| {
+            mold_inference::device::qwen_image21_reference_extra_bytes(
+                req.width,
+                req.height,
+                hint.batch,
+                2,
+                &qwen_image21_reference_dimensions(req, projection),
+                if cfg_active(req.guidance) && req.negative_prompt.is_some() {
+                    2
+                } else {
+                    1
+                },
+            )
+        });
+    qwen_image21_eager_plan_with_host(
+        paths,
+        hint,
+        available_bytes,
+        host.total_bytes,
+        host.spendable_bytes(),
+        extra,
     )
 }
 
@@ -1702,6 +1741,7 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     available_bytes: Option<u64>,
     host_total_bytes: u64,
     host_available_bytes: u64,
+    reference_extra_bytes: u64,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
@@ -1721,7 +1761,7 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
             residency::TeDevice::Cuda
         },
         usable_free_bytes: available,
-        denoise_workspace_bytes: denoise,
+        denoise_workspace_bytes: denoise.saturating_add(reference_extra_bytes),
         decode_peak_bytes: decode,
         host_total_bytes,
         host_available_bytes,
@@ -2153,7 +2193,8 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // the workspace inside that decision is the whole render's, so it replaces
     // the generic `peak + activation` rather than adding to it. `None` is a
     // Sequential plan (or another family), which keeps the generic estimate.
-    let qwen21_plan = qwen_image21_eager_plan(paths, hint, available_memory_bytes);
+    let qwen21_plan =
+        qwen_image21_eager_plan_for_request(paths, hint, available_memory_bytes, req, projection);
     // Weight bytes the wan arm below discounted because parking can free them.
     // Kept so the plan can re-add them and ask the engine's own question — will
     // this render park? — rather than inferring it from the discounted peak.
@@ -2303,8 +2344,23 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     } else {
         peak
     };
+    // Qwen Image 2.1 decides Eager from the SAME request-aware plan it
+    // prices, so references that do not fit beside every resident component
+    // take the sequential phases. Identical to the budget answer for
+    // text-to-image, whose reference extra is zero.
+    let budget_strategy = if hint.is_some_and(|h| h.family == ActivationFamily::QwenImage21Dit)
+        && available_memory_bytes.is_some_and(|bytes| bytes > 0)
+    {
+        if qwen21_plan.is_some() {
+            mold_inference::LoadStrategy::Eager
+        } else {
+            mold_inference::LoadStrategy::Sequential
+        }
+    } else {
+        select_server_load_strategy_for_budget(paths, available_memory_bytes, hint)
+    };
     let load_strategy = request_aware_load_strategy(
-        select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
+        budget_strategy,
         paths,
         hint,
         request_has_lora,
@@ -5555,6 +5611,7 @@ mod qwen_image21_residency_tests {
             Some(22 * GIB),
             64 * GIB,
             48 * GIB,
+            0,
         )
         .expect("a 24 GB card plans the int8 tier eager");
         assert!(matches!(
@@ -5585,11 +5642,73 @@ mod qwen_image21_residency_tests {
             Some(44 * GIB),
             64 * GIB,
             48 * GIB,
+            0,
         )
         .expect("a 48 GB card plans bf16 eager");
         assert_eq!(
             plan.decision.residency,
             mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency::Resident
+        );
+    }
+
+    /// References enter the eager plan through the engine's own extra
+    /// (`qwen_image21_reference_extra_bytes`, added to the denoise
+    /// workspace): it never lowers the peak, and a 24 GB card cannot plan
+    /// ten references eager at all.
+    #[test]
+    fn references_charge_the_engines_extra_on_the_eager_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let plain = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            64 * GIB,
+            48 * GIB,
+            0,
+        )
+        .expect("text-to-image plans eager");
+        let extra = mold_inference::device::qwen_image21_reference_extra_bytes(
+            1024,
+            1024,
+            1,
+            2,
+            &[(1536, 1024)],
+            2,
+        );
+        assert!(extra > 4 * GIB);
+        // The reference workspace never lowers the plan's peak; with one
+        // reference the 1024² decode still dominates on this card.
+        if let Some(plan) = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            64 * GIB,
+            48 * GIB,
+            extra,
+        ) {
+            assert!(plan.decision.eager_peak_bytes >= plain.decision.eager_peak_bytes);
+        }
+        let ten = mold_inference::device::qwen_image21_reference_extra_bytes(
+            1024,
+            1024,
+            1,
+            2,
+            &[(1536, 1024); 10],
+            2,
+        );
+        assert!(qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(22 * GIB),
+            64 * GIB,
+            48 * GIB,
+            ten,
+        )
+        .is_none());
+        assert_eq!(
+            mold_inference::device::qwen_image21_reference_extra_bytes(1024, 1024, 1, 2, &[], 2),
+            0
         );
     }
 

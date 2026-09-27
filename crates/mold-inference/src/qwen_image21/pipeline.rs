@@ -23,6 +23,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::layout::QwenImage21JointLayout;
+use super::lora::{
+    build_registry as build_lora_registry, fingerprint as lora_fingerprint, Qwen21LoraEntry,
+};
 use super::reference::{
     encode_prompt_with_images, encode_vision, load_vision_tower, prepare_reference,
     PreparedReference, VisionFeatures,
@@ -60,7 +63,6 @@ struct LoadedQwenImage21 {
     text_device: Device,
     vae_device: Device,
     dtype: DType,
-    text_dtype: DType,
     vae_dtype: DType,
 }
 
@@ -69,6 +71,11 @@ pub struct QwenImage21Engine {
     base: EngineBase<LoadedQwenImage21>,
     /// Placement is request-scoped because it affects component construction.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// The LoRA stack installed on the RESIDENT (eager) transformer, as
+    /// `lora::fingerprint` — empty means none. It describes the transformer
+    /// that is resident, not the request: written where adapters are
+    /// installed, cleared wherever the transformer goes away.
+    active_lora: Vec<(u64, u64)>,
     /// Parity tests inject upstream's exact initial latents: torch's RNG is
     /// not mold's ChaCha stream, so a seed cannot reproduce them.
     #[cfg(test)]
@@ -128,6 +135,16 @@ pub(crate) fn positive_prompt(req: &GenerateRequest) -> Cow<'_, str> {
     }
 }
 
+/// CFG branches a request encodes: the conditional one, plus the negative
+/// when guidance is active and a negative prompt was given.
+pub(crate) fn reference_branches(req: &GenerateRequest) -> usize {
+    if cfg_active(req.guidance) && req.negative_prompt.is_some() {
+        2
+    } else {
+        1
+    }
+}
+
 /// The request warning when a kept alpha plane had to be flattened.
 pub(crate) fn alpha_warning(alpha: AlphaOutput, format: OutputFormat) -> Option<&'static str> {
     (alpha == AlphaOutput::Keep && format == OutputFormat::Jpeg).then_some(
@@ -147,6 +164,7 @@ impl QwenImage21Engine {
             pending_placement: None,
             #[cfg(test)]
             injected_latents: None,
+            active_lora: Vec::new(),
         }
     }
 
@@ -343,6 +361,20 @@ impl QwenImage21Engine {
             1,
             crate::device::dtype_bytes(vae_dtype),
         );
+        // References lengthen the joint sequence and add the encode phase;
+        // the planner adds exactly the same bytes.
+        let denoise_workspace_bytes = denoise_workspace_bytes.saturating_add(
+            crate::device::qwen_image21_reference_extra_bytes(
+                req.width,
+                req.height,
+                1,
+                2,
+                &crate::device::qwen_image21_reference_dimensions(
+                    req.edit_images.as_deref().unwrap_or_default(),
+                ),
+                reference_branches(req),
+            ),
+        );
         let decision = residency::decide(&residency::Qwen21TeBudget {
             device,
             usable_free_bytes,
@@ -461,6 +493,7 @@ impl QwenImage21Engine {
             .progress
             .stage_done(&text_label, text_start.elapsed());
 
+        self.active_lora.clear();
         self.base.loaded = Some(LoadedQwenImage21 {
             transformer,
             text_encoder,
@@ -473,7 +506,6 @@ impl QwenImage21Engine {
             text_device,
             vae_device,
             dtype,
-            text_dtype,
             vae_dtype,
         });
         Ok(())
@@ -525,14 +557,6 @@ impl QwenImage21Engine {
             !other_media && req.control_model.is_none() && req.mesh.is_none(),
             "Qwen Image 2.1 conditions on ordered reference images (edit_images) only; source, mask, identity, control, audio, video, and mesh inputs are not supported"
         );
-        anyhow::ensure!(
-            req.caller_lora_stack().is_empty(),
-            "Qwen Image 2.1 LoRA adapters are not implemented"
-        );
-        anyhow::ensure!(
-            mold_core::manifest::qwen_image21_turbo_schedule(&req.model).is_none(),
-            "Qwen Image 2.1 turbo tiers need their distilled adapter, which this build cannot apply yet"
-        );
         let format = req.resolved_output_format();
         anyhow::ensure!(
             matches!(
@@ -545,6 +569,63 @@ impl QwenImage21Engine {
             !(req.transparent_background == Some(true) && format == OutputFormat::Jpeg),
             "Qwen Image 2.1 cannot deliver a transparent background as JPEG; choose PNG or WebP"
         );
+        Ok(())
+    }
+
+    /// The render's LoRA stack, in installation order: a turbo tier's
+    /// distilled adapter first (at the recipe's scale), then the caller's.
+    fn lora_entries(&self, req: &GenerateRequest) -> Result<Vec<Qwen21LoraEntry>> {
+        let mut entries = Vec::new();
+        if let Some(turbo) = mold_core::manifest::qwen_image21_turbo_schedule(&req.model) {
+            let path = self
+                .base
+                .paths
+                .distilled_lora
+                .clone()
+                .filter(|path| path.is_file())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Qwen Image 2.1 turbo tier {} is missing its distilled adapter",
+                        req.model
+                    )
+                })?;
+            entries.push(Qwen21LoraEntry {
+                path,
+                scale: turbo.lora_scale,
+            });
+        }
+        entries.extend(
+            req.caller_lora_stack()
+                .into_iter()
+                .map(|lora| Qwen21LoraEntry {
+                    path: PathBuf::from(lora.path),
+                    scale: lora.scale,
+                }),
+        );
+        Ok(entries)
+    }
+
+    /// Install `entries` on `transformer` (an empty stack clears it).
+    fn install_lora(
+        progress: &ProgressReporter,
+        transformer: &mut QwenImage21Transformer,
+        entries: &[Qwen21LoraEntry],
+        compute: (&Device, DType),
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return transformer.install_lora(None);
+        }
+        let label = format!("Installing {} LoRA adapter(s)", entries.len());
+        progress.stage_start(&label);
+        let start = Instant::now();
+        let registry = build_lora_registry(entries, compute.0, compute.1)?;
+        transformer.install_lora(Some(&registry))?;
+        progress.stage_done(&label, start.elapsed());
+        progress.info(&format!(
+            "Qwen Image 2.1 LoRA bypass: {} linears, {:.2} GiB resident",
+            registry.len(),
+            registry.resident_bytes() as f64 / (1u64 << 30) as f64
+        ));
         Ok(())
     }
 
@@ -876,6 +957,7 @@ impl QwenImage21Engine {
         let progress = &self.base.progress;
 
         progress.info("Using sequential Qwen Image 2.1 loading (Qwen3-VL -> transformer -> VAE)");
+        let lora_entries = self.lora_entries(req)?;
         let references = Self::prepare_references(progress, req)?;
 
         // Phase 1: the Qwen3-VL text encoder (and, with references, its vision
@@ -899,7 +981,12 @@ impl QwenImage21Engine {
         let vision = if references.is_empty() {
             None
         } else {
-            let tower = Self::load_vision(progress, &text_paths, &text_device, text_dtype)?;
+            let tower = Self::load_vision(
+                progress,
+                &text_paths,
+                &text_device,
+                super::reference::vision_tower_dtype(),
+            )?;
             let features = Self::run_vision(progress, &tower, &references, &text_device)?;
             drop(tower);
             Some(features)
@@ -919,12 +1006,17 @@ impl QwenImage21Engine {
         let condition = if references.is_empty() {
             None
         } else {
-            let encoder = Self::load_vae_encoder(progress, &vae_path, &vae_device, vae_dtype)?;
+            let encoder = Self::load_vae_encoder(
+                progress,
+                &vae_path,
+                &vae_device,
+                super::reference::vae_encoder_dtype(),
+            )?;
             let blocks = Self::encode_references(
                 progress,
                 &encoder,
                 &references,
-                (&vae_device, vae_dtype),
+                (&vae_device, super::reference::vae_encoder_dtype()),
                 (&device, dtype),
             )?;
             drop(encoder);
@@ -939,8 +1031,9 @@ impl QwenImage21Engine {
         );
         progress.stage_start(&transformer_label);
         let transformer_start = Instant::now();
-        let transformer =
+        let mut transformer =
             QwenImage21Transformer::load(&transformer_paths, &device, dtype, progress)?;
+        Self::install_lora(progress, &mut transformer, &lora_entries, (&device, dtype))?;
         progress.stage_done(&transformer_label, transformer_start.elapsed());
         let initial_latents = self.take_initial_latents();
         let progress = &self.base.progress;
@@ -988,6 +1081,8 @@ impl QwenImage21Engine {
         let started = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
         let initial_latents = self.take_initial_latents();
+        let lora_entries = self.lora_entries(req)?;
+        let wanted_lora = lora_fingerprint(&lora_entries);
         let progress = &self.base.progress;
         let references = Self::prepare_references(progress, req)?;
         let loaded = self
@@ -1005,7 +1100,7 @@ impl QwenImage21Engine {
                     progress,
                     &loaded.text_paths,
                     &loaded.text_device,
-                    loaded.text_dtype,
+                    super::reference::vision_tower_dtype(),
                 )?);
             }
             if loaded.vae_encoder.is_none() {
@@ -1013,7 +1108,7 @@ impl QwenImage21Engine {
                     progress,
                     &loaded.vae_path,
                     &loaded.vae_device,
-                    loaded.vae_dtype,
+                    super::reference::vae_encoder_dtype(),
                 )?);
             }
         }
@@ -1039,11 +1134,24 @@ impl QwenImage21Engine {
                 progress,
                 encoder,
                 &references,
-                (&loaded.vae_device, loaded.vae_dtype),
+                (&loaded.vae_device, super::reference::vae_encoder_dtype()),
                 (&loaded.device, loaded.dtype),
             )?),
             _ => None,
         };
+        if self.active_lora != wanted_lora {
+            // Clear first: a failed install must not leave the previous
+            // stack answering for this request.
+            self.active_lora.clear();
+            loaded.transformer.install_lora(None)?;
+            Self::install_lora(
+                progress,
+                &mut loaded.transformer,
+                &lora_entries,
+                (&loaded.device, loaded.dtype),
+            )?;
+            self.active_lora = wanted_lora;
+        }
         let residency = Self::settle_text_encoder_residency(
             progress,
             &self.base.paths,
@@ -1089,6 +1197,7 @@ impl QwenImage21Engine {
         }
         if residency.transformer_decode == TransformerDecode::Drop {
             // Nothing survives this request: the next one loads afresh.
+            self.active_lora.clear();
             let loaded = self
                 .base
                 .loaded
@@ -1167,6 +1276,7 @@ impl InferenceEngine for QwenImage21Engine {
     }
 
     fn unload(&mut self) {
+        self.active_lora.clear();
         self.base.unload();
     }
 

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 
 use super::layout::QwenImage21JointLayout;
 use super::reference::{
@@ -278,7 +278,13 @@ fn p3(dtype: DType, suffix: &str, tolerance: f32) {
         &progress,
     )
     .unwrap();
-    let tower = load_vision_tower(&env.text_encoder(), &device, dtype, &progress).unwrap();
+    let tower = load_vision_tower(
+        &env.text_encoder(),
+        &device,
+        super::reference::vision_tower_dtype(),
+        &progress,
+    )
+    .unwrap();
     for (case, prompt, files) in p3_cases() {
         let conditioning: QwenImage21TextConditioning = if files.is_empty() {
             encode_t2i_prompts(&mut encoder, &[prompt.to_string()]).unwrap()
@@ -469,7 +475,13 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
     let device = device();
     let progress = ProgressReporter::default();
     let refs = references(&["ref_opaque.png"]);
-    let tower = load_vision_tower(&env.text_encoder(), &device, dtype, &progress).unwrap();
+    let tower = load_vision_tower(
+        &env.text_encoder(),
+        &device,
+        super::reference::vision_tower_dtype(),
+        &progress,
+    )
+    .unwrap();
     let vision = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
     drop(tower);
     let p2 = env.capture("p2_vision_fp32.safetensors");
@@ -713,4 +725,390 @@ fn calibration_reference_render() {
         &response.images[0].data,
     )
     .unwrap();
+}
+fn viggle(env: &Env, rank: usize) -> PathBuf {
+    env.fixtures.join(format!(
+        "../viggle/Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r{rank}.safetensors"
+    ))
+}
+
+fn p7(dtype: DType, suffix: &str, tolerance: f32) {
+    use super::lora::{build_registry, Qwen21LoraEntry};
+    let Some(env) = env() else { return };
+    let device = device();
+    let inputs = env.capture("p6_inputs.safetensors");
+    let outputs = env.capture(&format!("p7_lora_r128_{suffix}.safetensors"));
+    let truth = env.capture("p7_lora_r128_fp32.safetensors");
+    let slots =
+        bools(&load_capture(&testdata("p3_p6_pos_image_pad_mask.safetensors"))["image_pad_mask"]);
+    let text_len = slots.len();
+    let conditioning = QwenImage21TextConditioning {
+        embeddings: inputs["prompt_embeds"]
+            .to_device(&device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap(),
+        valid_tokens: vec![vec![true; text_len]],
+        image_slots: vec![slots.clone()],
+    };
+    let layout = QwenImage21JointLayout::build(
+        &slots,
+        &conditioning.valid_tokens,
+        &[(52, 78), (72, 58)],
+        (32, 32),
+    )
+    .unwrap();
+    let cond = inputs["cond_latents"]
+        .to_device(&device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let mut transformer = QwenImage21Transformer::load(
+        &env.transformer(),
+        &device,
+        dtype,
+        &ProgressReporter::default(),
+    )
+    .unwrap();
+    let registry = build_registry(
+        &[Qwen21LoraEntry {
+            path: viggle(&env, 128),
+            scale: 1.0,
+        }],
+        &device,
+        dtype,
+    )
+    .unwrap();
+    assert_eq!(registry.len(), 227);
+    transformer.install_lora(Some(&registry)).unwrap();
+    let timestep = f64::from(
+        outputs["timestep_a"]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()[0],
+    );
+    let latents = inputs["x_a"]
+        .to_device(&device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let mut branch = transformer
+        .prepare(
+            &conditioning,
+            layout,
+            Some(cond),
+            PrefixCacheDecision::Recompute,
+        )
+        .unwrap();
+    let actual = branch.forward(&latents, timestep).unwrap();
+    let target =
+        |set: &HashMap<String, Tensor>, name: &str| set[name].narrow(1, 9298 - 1024, 1024).unwrap();
+    // The adapter must actually move the prediction.
+    let (moved, _) = relative_error(
+        &target(&truth, "full_a_lora"),
+        &target(&truth, "full_a_no_lora"),
+    );
+    assert!(
+        moved > 1e-2,
+        "the Viggle adapter barely moves upstream's output"
+    );
+    let label = format!("full_a_lora {suffix}");
+    if dtype == DType::F32 {
+        check(&label, &actual, &target(&outputs, "full_a_lora"), tolerance);
+    } else {
+        check_against_truth(
+            &label,
+            &actual,
+            &target(&outputs, "full_a_lora"),
+            &target(&truth, "full_a_lora"),
+            tolerance,
+        );
+    }
+    // Clearing restores the base forward.
+    drop(branch);
+    transformer.install_lora(None).unwrap();
+}
+
+/// P7 fp32: one two-reference transformer forward with the Viggle r128
+/// adapter applied unmerged (PEFT upstream, bypass here).
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p7_fp32_lora_matches_the_upstream_capture() {
+    p7(DType::F32, "fp32", 1e-4);
+}
+
+/// P7 bf16.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p7_bf16_lora_matches_the_upstream_capture() {
+    // `tolerance` is the allowed ratio to upstream's own bf16 error.
+    p7(DType::BF16, "bf16", 1.5);
+}
+
+/// P8 (turbo, 6 steps): the turbo tier end to end — Viggle r256 installed by
+/// the engine from the tier's distilled adapter, the recipe's six sigmas with
+/// no terminal stretch — on upstream's injected noise, gated like P8 base.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p8_turbo_end_to_end_matches_the_upstream_capture() {
+    use crate::engine::{InferenceEngine, LoadStrategy};
+    let Some(env) = env() else { return };
+    let mut paths = engine_paths(&env);
+    paths.distilled_lora = Some(viggle(&env, 256));
+    let mut engine = super::QwenImage21Engine::new(
+        "qwen-image-2.1-turbo:bf16".to_string(),
+        paths,
+        LoadStrategy::Sequential,
+        0,
+    );
+    engine.inject_initial_latents(env.capture("p8_noise.safetensors")["latents"].clone());
+    if std::env::var_os("QWEN_IMAGE21_DIAG_EVENTS").is_some() {
+        engine.set_on_progress(Box::new(|event| eprintln!("EVENT {event:?}")));
+    }
+    let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+        "prompt": P8_PROMPT,
+        "model": "qwen-image-2.1-turbo:bf16",
+        "width": 512,
+        "height": 512,
+        "steps": 6,
+        "guidance": 1.0,
+        "seed": 1234,
+        "output_format": "png"
+    }))
+    .unwrap();
+    request.edit_images = Some(vec![std::fs::read(testdata("ref_opaque.png")).unwrap()]);
+    let response = engine.generate(&request).unwrap();
+    let decoded = image::load_from_memory(&response.images[0].data)
+        .unwrap()
+        .to_rgb8();
+    let ours = Tensor::from_vec(
+        decoded
+            .as_raw()
+            .iter()
+            .map(|byte| f32::from(*byte) / 255.0)
+            .collect::<Vec<_>>(),
+        (512, 512, 3),
+        &Device::Cpu,
+    )
+    .unwrap();
+    let rgb = |name: &str| {
+        env.capture(name)["decoded_rgba_float"]
+            .narrow(2, 0, 3)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+    };
+    let truth = rgb("p8_turbo6_fp32.safetensors");
+    let upstream_bf16 = rgb("p8_turbo6_bf16.safetensors");
+    let ours_psnr = psnr(&ours, &truth);
+    let theirs_psnr = psnr(&upstream_bf16, &truth);
+    eprintln!(
+        "P8 turbo6: mold vs fp32 {ours_psnr:.2} dB, upstream bf16 vs fp32 {theirs_psnr:.2} dB, mold vs upstream bf16 {:.2} dB",
+        psnr(&ours, &upstream_bf16)
+    );
+    std::fs::write(
+        std::env::temp_dir().join("qwen21_p8_turbo6_mold.png"),
+        &response.images[0].data,
+    )
+    .unwrap();
+    assert!(
+        ours_psnr >= theirs_psnr - 1.0,
+        "{ours_psnr} dB vs upstream's {theirs_psnr} dB"
+    );
+}
+/// P8 diagnostics: step-by-step latents of the base (4) and turbo (6)
+/// trajectories against both upstream captures, from upstream's own
+/// conditioning (P3 p8_pos) and condition latents (P4), isolating the
+/// denoise loop from the encoders. Set `QWEN_IMAGE21_DIAG_TURBO=1` for turbo
+/// and `QWEN_IMAGE21_DIAG_ROUND=1` to round the timestep like upstream.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p8_denoise_diagnostics() {
+    use super::lora::{build_registry, Qwen21LoraEntry};
+    use super::scheduler::{scheduler_for, ScheduleKind};
+    let Some(env) = env() else { return };
+    let turbo = std::env::var_os("QWEN_IMAGE21_DIAG_TURBO").is_some();
+    let round = std::env::var_os("QWEN_IMAGE21_DIAG_ROUND").is_some();
+    let dtype = DType::BF16;
+    let device = device();
+    let own_conditioning = std::env::var_os("QWEN_IMAGE21_DIAG_OWN_COND").is_some();
+    let own_latents = std::env::var_os("QWEN_IMAGE21_DIAG_OWN_LATENTS").is_some();
+    let conditioning = if own_conditioning {
+        let progress = ProgressReporter::default();
+        let mut encoder = Qwen3Encoder::load_bf16(
+            &env.text_encoder(),
+            &env.tokenizer(),
+            &device,
+            dtype,
+            &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+            &progress,
+        )
+        .unwrap();
+        let tower = load_vision_tower(
+            &env.text_encoder(),
+            &device,
+            super::reference::vision_tower_dtype(),
+            &progress,
+        )
+        .unwrap();
+        let refs = references(&["ref_opaque.png"]);
+        let vision = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
+        encode_prompt_with_images(&mut encoder, &vision, P8_PROMPT)
+            .unwrap()
+            .to_device_dtype(&device, dtype)
+            .unwrap()
+    } else {
+        let capture = env.capture("p3_p8_pos_bf16.safetensors");
+        let slots = bools(&capture["image_pad_mask"]);
+        let text_len = slots.len();
+        QwenImage21TextConditioning {
+            embeddings: capture["prompt_embeds"]
+                .to_device(&device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap(),
+            valid_tokens: vec![vec![true; text_len]],
+            image_slots: vec![slots],
+        }
+    };
+    let slots = conditioning.image_slots[0].clone();
+    let layout =
+        QwenImage21JointLayout::build(&slots, &conditioning.valid_tokens, &[(52, 78)], (32, 32))
+            .unwrap();
+    let cond = if own_latents {
+        let encoder = super::vae_encoder::QwenImage21VaeEncoder::load(
+            &env.vae(),
+            &device,
+            crate::engine::gpu_dtype(&device),
+            &ProgressReporter::default(),
+        )
+        .unwrap();
+        let reference = &references(&["ref_opaque.png"])[0];
+        let input = reference
+            .vae_input(&device, crate::engine::gpu_dtype(&device))
+            .unwrap();
+        let packed = encoder.encode_packed(&input).unwrap();
+        let (_, error) = relative_error(
+            &packed,
+            &env.capture("p4_vae_encode_fp32.safetensors")["opaque_packed"],
+        );
+        eprintln!("own condition latents vs fp32 capture: mean {error:.3e}");
+        packed.to_dtype(dtype).unwrap()
+    } else {
+        env.capture("p4_vae_encode_fp32.safetensors")["opaque_packed"]
+            .to_device(&device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap()
+    };
+    let mut transformer = QwenImage21Transformer::load(
+        &env.transformer(),
+        &device,
+        dtype,
+        &ProgressReporter::default(),
+    )
+    .unwrap();
+    let (name, steps, kind) = if turbo {
+        let registry = build_registry(
+            &[Qwen21LoraEntry {
+                path: viggle(&env, 256),
+                scale: 1.0,
+            }],
+            &device,
+            dtype,
+        )
+        .unwrap();
+        transformer.install_lora(Some(&registry)).unwrap();
+        (
+            "turbo6",
+            6,
+            ScheduleKind::for_model("qwen-image-2.1-turbo:bf16"),
+        )
+    } else {
+        ("base4", 4, ScheduleKind::Base)
+    };
+    let fp32 = env.capture(&format!("p8_{name}_fp32.safetensors"));
+    let bf16 = env.capture(&format!("p8_{name}_bf16.safetensors"));
+    let (mut scheduler, _) = scheduler_for(kind, steps, 1024);
+    let mut latents = env.capture("p8_noise.safetensors")["latents"]
+        .to_device(&device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let mut branch = transformer
+        .prepare(
+            &conditioning,
+            layout,
+            Some(cond),
+            PrefixCacheDecision::Retain,
+        )
+        .unwrap();
+    for step in 0..steps {
+        let timestep = super::pipeline::step_timestep(
+            scheduler.current_timestep(),
+            scheduler.current_sigma(),
+            dtype,
+            round,
+        );
+        let prediction = branch.forward(&latents, timestep).unwrap();
+        latents = scheduler.step(&prediction, &latents).unwrap();
+        let key = format!("step{step}_latents");
+        let (_, vs_fp32) = relative_error(&latents, &fp32[&key]);
+        let (_, vs_bf16) = relative_error(&latents, &bf16[&key]);
+        let (_, upstream) = relative_error(&bf16[&key], &fp32[&key]);
+        eprintln!(
+            "{name} step {step} t={timestep:.6}: mold vs fp32 {vs_fp32:.3e}, mold vs bf16 {vs_bf16:.3e}, upstream bf16 vs fp32 {upstream:.3e}"
+        );
+    }
+    // Decode mold's final latents and upstream's fp32 final latents through
+    // mold's VAE at the engine's dtype, and score both against the captures.
+    let vae_dtype = crate::engine::gpu_dtype(&device);
+    let vae = super::vae::QwenImage21Vae::load(
+        &env.vae(),
+        &device,
+        vae_dtype,
+        &ProgressReporter::default(),
+    )
+    .unwrap();
+    let decode = |latents: &Tensor| -> Tensor {
+        let decoded = vae
+            .decode_packed(&latents.to_dtype(vae_dtype).unwrap(), 32, 32)
+            .unwrap();
+        // [1, 4, H, W] in [-1, 1] -> [H, W, 3] in [0, 1].
+        ((decoded
+            .i(0)
+            .unwrap()
+            .narrow(0, 0, 3)
+            .unwrap()
+            .permute((1, 2, 0))
+            .unwrap()
+            + 1.0)
+            .unwrap()
+            / 2.0)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+    };
+    let rgb = |set: &HashMap<String, Tensor>| {
+        set["decoded_rgba_float"]
+            .narrow(2, 0, 3)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+    };
+    let ours = decode(&latents);
+    let fp32_final = decode(&fp32["final_latents"].to_device(&device).unwrap());
+    eprintln!(
+        "{name} decode: mold latents vs fp32 image {:.2} dB, upstream fp32 latents through mold VAE vs fp32 image {:.2} dB, upstream bf16 image vs fp32 {:.2} dB",
+        psnr(&ours, &rgb(&fp32)),
+        psnr(&fp32_final, &rgb(&fp32)),
+        psnr(&rgb(&bf16), &rgb(&fp32)),
+    );
 }

@@ -20,9 +20,13 @@
 //!    with `transformer.` (`"transformer.lora_alpha": 256`).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use candle_core::{DType, Device};
+
+use crate::flux::lora::{LoraAdapter, LoraSpec};
+use crate::flux::lora_bypass::{build_registry_with, BypassTarget, LoraRegistry};
 
 use super::transformer::QwenImage21TransformerConfig;
 
@@ -131,11 +135,8 @@ fn map_key_with(stem: &str, layers: usize) -> Result<Vec<Qwen21LoraTarget>> {
         );
     }
     let mut key = stem;
-    loop {
-        match PREFIXES.iter().find_map(|prefix| key.strip_prefix(prefix)) {
-            Some(rest) => key = rest,
-            None => break,
-        }
+    while let Some(rest) = PREFIXES.iter().find_map(|prefix| key.strip_prefix(prefix)) {
+        key = rest;
     }
     // Kohya: `lora_unet_<flattened>`.
     if let Some(flat) = key.strip_prefix("lora_unet_") {
@@ -219,6 +220,93 @@ pub(crate) fn map_adapter<'a>(
     Ok(mapped)
 }
 
+/// One adapter of a render's LoRA stack.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Qwen21LoraEntry {
+    pub path: PathBuf,
+    pub scale: f64,
+}
+
+impl Qwen21LoraEntry {
+    fn path_hash(&self) -> u64 {
+        crate::flux2::lora::lora_path_hash(&self.path.to_string_lossy())
+    }
+}
+
+/// Identity of an installed stack: path hash and scale BITS per adapter, in
+/// order (the `LoraFingerprint` rule every family's residency reads).
+pub(crate) fn fingerprint(entries: &[Qwen21LoraEntry]) -> Vec<(u64, u64)> {
+    entries
+        .iter()
+        .map(|entry| (entry.path_hash(), entry.scale.to_bits()))
+        .collect()
+}
+
+/// Load an adapter, giving every layer that carries no `.alpha` tensor the
+/// alpha its PEFT metadata names — the only place the Viggle files store it.
+pub(crate) fn load_adapter(path: &Path) -> Result<LoraAdapter> {
+    let mut adapter = LoraAdapter::load(path)?;
+    if let Some(metadata) = LoraMetadataScale::read(path)? {
+        for (stem, layer) in adapter.layers.iter_mut() {
+            if layer.alpha.is_none() {
+                layer.alpha = metadata.alpha_for(stem);
+            }
+        }
+    }
+    Ok(adapter)
+}
+
+fn bypass_target(target: Qwen21LoraTarget) -> BypassTarget {
+    match target.up_rows {
+        None => BypassTarget::Direct {
+            candle_key: target.candle_key,
+        },
+        Some(rows) => BypassTarget::Rows {
+            candle_key: target.candle_key,
+            up_rows: Some(rows),
+            out_offset: None,
+        },
+    }
+}
+
+/// Build the bypass registry for `entries` on `device` at `dtype`, keyed by
+/// the transformer's `<module>.weight` names
+/// ([`super::transformer::QwenImage21Transformer::install_lora`]). Every
+/// adapter is checked against the module table first, so a Qwen-Image 2512
+/// or text-encoder LoRA is refused before anything reaches the device.
+pub(crate) fn build_registry(
+    entries: &[Qwen21LoraEntry],
+    device: &Device,
+    dtype: DType,
+) -> Result<LoraRegistry> {
+    let adapters = entries
+        .iter()
+        .map(|entry| {
+            load_adapter(&entry.path)
+                .with_context(|| format!("failed to load LoRA {}", entry.path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (adapter, entry) in adapters.iter().zip(entries) {
+        map_adapter(adapter.layers.keys().map(String::as_str))
+            .with_context(|| format!("LoRA {}", entry.path.display()))?;
+    }
+    let specs: Vec<LoraSpec<'_>> = adapters
+        .iter()
+        .zip(entries)
+        .map(|(adapter, entry)| LoraSpec {
+            adapter,
+            scale: entry.scale,
+            path_hash: entry.path_hash(),
+        })
+        .collect();
+    build_registry_with(
+        &specs,
+        |stem| Ok(map_key(stem)?.into_iter().map(bypass_target).collect()),
+        &HashMap::new(),
+        device,
+        dtype,
+    )
+}
 /// PEFT's scale metadata (`LoraConfig` as `peft` serializes it into
 /// `lora_adapter_metadata`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -300,6 +388,7 @@ impl LoraMetadataScale {
 /// `user_scale · alpha / rank` for a layer whose `down` matrix has `rank`
 /// rows. A per-layer `.alpha` tensor wins, then the metadata, then no alpha
 /// (scale 1 per unit of `user_scale`, PEFT's `alpha = r` default).
+#[cfg(test)]
 pub(crate) fn effective_scale(
     user_scale: f64,
     rank: usize,

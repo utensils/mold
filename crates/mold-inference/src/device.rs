@@ -1126,22 +1126,71 @@ pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_by
         return 0;
     }
     let dtype = dtype_bytes as u64;
-    let weights = QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * dtype / 2
-        + QWEN_IMAGE21_VAE_ENCODER_F32_BYTES * dtype / 4;
+    // The vision tower and VAE encoder always run in F32
+    // (`qwen_image21::reference::{vision_tower_dtype, vae_encoder_dtype}`);
+    // only the language model follows the encoder working dtype.
+    const F32: u64 = 4;
+    let weights =
+        QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * F32 / 2 + QWEN_IMAGE21_VAE_ENCODER_F32_BYTES;
     // Vision: 16 heads over each image's patches, chunked at 2^28 elements;
-    // a chunk holds its scores and probabilities in the working dtype plus
-    // the F32 copy and the F32 softmax (`vision.rs` `VisionAttention`). This
-    // tile is most of the phase: the whole estimate is 4.5 GiB for one
-    // 1248x832 reference against 4.2 GiB measured, and 5.9 GiB for ten
-    // against 4.8 GiB.
+    // a chunk holds its F32 scores, probabilities and softmax
+    // (`vision.rs` `VisionAttention`). Calibrated on an L40S with a BF16
+    // tower (4.2-4.8 GiB above the resident text encoder for 1-10
+    // references); the F32 tower doubles its rows and weights.
     let patches = shape.largest_reference_patches as u64;
-    let vision_scores = (16 * patches * patches).min(1 << 28) * (2 * dtype + 8);
-    let rows = (shape.condition_tokens as u64) * QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES * dtype / 2;
+    let vision_scores = (16 * patches * patches).min(1 << 28) * (2 * F32 + 8);
+    let rows = (shape.condition_tokens as u64) * QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES * F32 / 2;
     let tokens = shape.language_tokens() as u64;
     let language_scores = (32 * tokens * tokens).min(1 << 28) * dtype * 2;
     weights + vision_scores + rows + language_scores
 }
 
+/// What a reference-conditioned request adds on top of the text-to-image
+/// denoise workspace the text-encoder residency plan charges
+/// (`qwen_image21::text_encoder_residency::render_workspace_bytes`): the
+/// longer joint sequence's workspace and the prefix cache it retains beyond
+/// the text-to-image estimate, plus the encode phase (the vision tower and
+/// VAE encoder an eager engine then keeps resident, and their working set).
+/// Zero without references, so a text-to-image plan does not move. The engine
+/// (`settle_text_encoder_residency`) and the planner both add exactly this.
+pub fn qwen_image21_reference_extra_bytes(
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: usize,
+    references: &[(u32, u32)],
+    branches: usize,
+) -> u64 {
+    if references.is_empty() {
+        return 0;
+    }
+    let shape = QwenImage21SequenceShape::for_request(width, height, references);
+    let base = activation_bytes(
+        width,
+        height,
+        batch,
+        dtype_bytes as u32,
+        ActivationFamily::QwenImage21Dit,
+    );
+    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes)
+        .saturating_sub(base)
+        .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
+}
+
+/// Header dimensions of encoded reference images; an unreadable header is
+/// the reference area itself (1024x1024), which every reference is resized to.
+pub fn qwen_image21_reference_dimensions(images: &[Vec<u8>]) -> Vec<(u32, u32)> {
+    images
+        .iter()
+        .map(|bytes| {
+            image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok())
+                .unwrap_or((1024, 1024))
+        })
+        .collect()
+}
 /// Scale a FLUX.2 activation budget by how much longer the sequence becomes
 /// once reference tokens are appended.
 ///
@@ -8203,6 +8252,6 @@ mod qwen_image21_sequence_sizing_tests {
         // The encode phase grows with the references and stays bounded.
         let one_encode = qwen_image21_encode_phase_bytes(one, 2);
         let ten_encode = qwen_image21_encode_phase_bytes(ten, 2);
-        assert!(one_encode > GIB && ten_encode > one_encode && ten_encode < 8 * GIB);
+        assert!(one_encode > GIB && ten_encode > one_encode && ten_encode < 12 * GIB);
     }
 }

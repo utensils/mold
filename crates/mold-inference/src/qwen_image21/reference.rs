@@ -116,6 +116,26 @@ pub(crate) fn prepare_decoded_reference(source: &RgbaImage) -> Result<PreparedRe
     Ok(PreparedReference { rgba, vision_rgb })
 }
 
+/// The vision tower's working dtype: F32 on every device.
+///
+/// Upstream runs it in the pipeline dtype, and in BF16 that one tower moves
+/// its merger output ~11% (mean) from the fp32 run — the dominant error of
+/// the whole bf16 conditioning, ten times the language model's own. F32
+/// costs ~1 GiB more for a tower that runs once per request, and brings the
+/// conditioning an order of magnitude closer to the fp32 reference.
+pub(crate) const fn vision_tower_dtype() -> DType {
+    DType::F32
+}
+
+/// The VAE encoder's working dtype: F32 on every device, for the same reason
+/// as [`vision_tower_dtype`]. In BF16 the condition latents sit 1.3% (mean)
+/// from the fp32 encode, and the 6-step turbo trajectory amplifies that into
+/// a 7 dB loss on P8 turbo; the encoder is 0.3 GB and runs once per
+/// reference.
+pub(crate) const fn vae_encoder_dtype() -> DType {
+    DType::F32
+}
+
 /// Tensors of the vision tower inside the Qwen3-VL text-encoder shards.
 pub(crate) fn is_vision_tensor(name: &str) -> bool {
     name.starts_with("model.visual.")
