@@ -969,7 +969,24 @@ mod tests {
         sha('f')
     }
 
+    /// The artifact report THIS build's reader stamps. `build_candidate`
+    /// validates against `cfg!(feature = "h3")` (#1010): a build that links the
+    /// public engine emits the public reader's claim, scope, decision and
+    /// activation (`private_qualification.rs`), so a candidate fixture shaped
+    /// for the private reader would be refused there before any of the checks
+    /// these tests exist to exercise.
     fn artifact_report() -> H3PrivateArtifactQualificationReport {
+        let mut report = private_artifact_report();
+        if cfg!(feature = "h3") {
+            report.claim_marker = "mold.minimax-h3.public-artifact-reader.v1";
+            report.decision = "verified-public-artifacts";
+            report.authorization_scope = "public-h3-integration";
+            report.public_activation = "supported-compact-fl2va-cuda";
+        }
+        report
+    }
+
+    fn private_artifact_report() -> H3PrivateArtifactQualificationReport {
         H3PrivateArtifactQualificationReport {
             schema: "mold.minimax-h3.private-artifact-qualification.v2",
             claim_marker: H3_PRIVATE_UAT_CLAIM_MARKER,
@@ -998,7 +1015,7 @@ mod tests {
 
     #[test]
     fn candidate_artifact_authority_matches_the_compiled_runtime() {
-        let mut private = artifact_report();
+        let mut private = private_artifact_report();
         validate_candidate_artifact_qualification(&private, false).unwrap();
         for field in ["decision", "claim", "scope", "activation"] {
             let mut changed = private.clone();

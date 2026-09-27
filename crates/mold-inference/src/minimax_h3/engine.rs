@@ -2114,6 +2114,15 @@ mod tests {
             engine.batch_execution_capability(),
             BatchExecutionCapability::SINGLETON_COOPERATIVE
         );
+        // A build that links `h3` advertises the family in the production
+        // registry, and the engine must agree with what it advertises (the
+        // generic factory test cannot construct H3 without a server-frozen
+        // authority, so this is where that agreement is pinned).
+        #[cfg(feature = "h3")]
+        assert_eq!(
+            crate::batch_execution_capability_for_family(contract::FAMILY),
+            Some(engine.batch_execution_capability())
+        );
         assert_eq!(engine.configured_execution_fingerprint(), Some(EXECUTION));
         let events = events.lock().unwrap();
         assert!(events.iter().any(|event| matches!(

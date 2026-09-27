@@ -1743,7 +1743,17 @@ mod tests {
                 !requirements.contains(&H3BackendRequirement::LicenseAuthorization),
                 "{model} must not be reported as a licensing refusal"
             );
-            assert!(requirements.contains(&H3BackendRequirement::RunnableCapabilityContract));
+            // The engine exists only in a build that links `h3` (#1010), and
+            // there only for the compact layouts; the `official-bf16`
+            // references have no engine arm on any build (#1319). The
+            // runtime is STILL refused here, by the attention and streaming
+            // requirements below, so the loader is never reached either way.
+            let runnable = cfg!(feature = "h3") && model == contract::FL2VA_COMFY;
+            assert_eq!(
+                requirements.contains(&H3BackendRequirement::RunnableCapabilityContract),
+                !runnable,
+                "{model}"
+            );
             assert!(requirements.contains(&H3BackendRequirement::QualifiedLosslessPackedAttention));
             assert!(
                 requirements.contains(&H3BackendRequirement::IntegratedBlockStreamingTransformer)
@@ -1754,7 +1764,10 @@ mod tests {
             );
             assert!(!called.load(Ordering::SeqCst));
         }
-        assert!(!contract::capabilities(Task::Fl2va).runtime_available);
+        assert_eq!(
+            contract::capabilities(Task::Fl2va).runtime_available,
+            cfg!(feature = "h3")
+        );
     }
 
     struct TinyTokenizer;

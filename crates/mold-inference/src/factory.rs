@@ -1135,6 +1135,35 @@ mod tests {
             for family in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
                 let mut frozen = FrozenEngineConfig::resolve(family, &Config::default());
                 refreeze_for_family(&mut frozen, family);
+                if mold_core::minimax_h3::is_family(family) {
+                    // H3 is advertised only by a build that links it (#1010),
+                    // and it never constructs from a generically resolved
+                    // config: dispatch requires the exact authority the server
+                    // freezes from a prepared attempt, so the reviewed model
+                    // must be refused here for THAT reason — never a licensing
+                    // one. Its engine's batch capability is pinned against this
+                    // registry entry by `minimax_h3::engine`'s adapter test.
+                    let error = create_engine_with_frozen_config(
+                        mold_core::minimax_h3::FL2VA_COMFY.to_string(),
+                        dummy_paths(),
+                        &frozen,
+                        LoadStrategy::Sequential,
+                        0,
+                        false,
+                        None,
+                    )
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("{family:?} constructed without a frozen server authority")
+                    })
+                    .to_string();
+                    assert!(
+                        error.contains("requires an exact frozen server authority")
+                            && !error.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+                        "{family}: {error}"
+                    );
+                    continue;
+                }
                 let engine = create_engine_with_frozen_config(
                     family.to_string(),
                     dummy_paths(),
@@ -1361,7 +1390,7 @@ mod tests {
         let mut paths = dummy_paths();
         paths.transformer = PathBuf::from("/models/MiniMax-H3/transformer.safetensors");
 
-        let error = create_engine_with_frozen_config(
+        let result = create_engine_with_frozen_config(
             "ordinary-checkpoint".into(),
             paths,
             &frozen,
@@ -1369,13 +1398,22 @@ mod tests {
             usize::MAX,
             false,
             None,
-        )
-        .err()
-        .expect("restricted artifact path must fail closed");
+        );
 
-        assert!(error
+        // Without the public engine an H3-named artifact is a compliance
+        // boundary. A build that links `h3` (#1010) classifies the same path
+        // as available (`mold_core::model_artifact_activation`), so the path
+        // name alone must not refuse an otherwise valid lazy construction.
+        #[cfg(not(feature = "h3"))]
+        assert!(result
+            .err()
+            .expect("restricted artifact path must fail closed")
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        #[cfg(feature = "h3")]
+        if let Err(error) = result {
+            panic!("a public H3 build must not refuse an H3-named path: {error:#}");
+        }
     }
 
     #[test]
@@ -1424,10 +1462,25 @@ mod tests {
             None,
         )
         .err()
-        .expect("a nested H3 artifact must fail closed before runtime checks");
+        .expect("a nested H3 artifact must still be refused");
+        // Without the public engine the nested artifact is refused on
+        // compliance grounds before any runtime check. A build that links `h3`
+        // (#1010) classifies it as available, so it reaches the same
+        // deliberate runtime mismatch as the ordinary artifact above.
+        #[cfg(not(feature = "h3"))]
         assert!(error
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        #[cfg(feature = "h3")]
+        assert!(
+            error
+                .to_string()
+                .contains("process-frozen attention/chunk/VAE authority")
+                && !error
+                    .to_string()
+                    .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            "{error:#}"
+        );
     }
 
     #[test]

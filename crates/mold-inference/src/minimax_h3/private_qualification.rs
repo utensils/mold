@@ -1548,8 +1548,17 @@ mod tests {
             "mold.minimax-h3.private-uat-artifact-reader.v1"
         );
         assert_eq!(H3_PRIVATE_AUTHORIZATION_SCOPE, "private-h3-uat");
-        assert!(!contract::capabilities(Task::Fl2va).runtime_available);
-        assert!(!contract::capabilities(Task::Ref2va).runtime_available);
+        // The private-UAT claim never implies a runtime: only a build that
+        // links the public engine (`h3`, #1010) reports one, for both released
+        // partitions (#825), and the artifact reader then stamps the PUBLIC
+        // marker and scope instead of these private ones.
+        for task in [Task::Fl2va, Task::Ref2va] {
+            assert_eq!(
+                contract::capabilities(task).runtime_available,
+                cfg!(feature = "h3"),
+                "{task:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
