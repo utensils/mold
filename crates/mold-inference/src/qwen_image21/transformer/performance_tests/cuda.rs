@@ -36,7 +36,7 @@ use candle_core::cuda_backend::cudarc::driver::CudaContext;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-const DEFAULT_PROMPT: &str = "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows";
+pub(super) const DEFAULT_PROMPT: &str = "A small red ceramic teapot on a sunlit wooden windowsill, editorial product photograph, soft morning shadows";
 
 pub(super) fn env_or<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
 where
@@ -173,7 +173,10 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
 /// carries only Metal-gated fast booleans, so on CUDA the one path it can run
 /// is legacy; any other mode is refused by name rather than silently measured
 /// as legacy.
-fn install_mode(transformer: &mut QwenImage21Transformer, mode: &BenchMode) -> Result<()> {
+pub(super) fn install_mode(
+    transformer: &mut QwenImage21Transformer,
+    mode: &BenchMode,
+) -> Result<()> {
     anyhow::ensure!(
         mode.path.is_legacy() && !mode.cfg_batch,
         "mode {} needs the transformer's Qwen21ExecPath wiring; this build runs only `legacy` on CUDA",
@@ -187,7 +190,7 @@ fn install_mode(transformer: &mut QwenImage21Transformer, mode: &BenchMode) -> R
     Ok(())
 }
 
-fn transformer_paths(root: &Path, tier: &str) -> Result<Vec<PathBuf>> {
+pub(super) fn transformer_paths(root: &Path, tier: &str) -> Result<Vec<PathBuf>> {
     match tier {
         "bf16" => Ok((1..=2)
             .map(|i| {
@@ -555,6 +558,7 @@ fn official_cuda_mode_benchmark() -> Result<()> {
             "compact_modulation": mode.path.compact_modulation,
             "fused_adaln": mode.path.fused_adaln,
             "f32_rope_tables": mode.path.f32_rope_tables,
+            "round_timestep_to_dtype": mode.path.round_timestep_to_dtype,
             "cfg_batch": mode.cfg_batch,
         },
         "tier": tier,
@@ -702,6 +706,73 @@ fn official_cuda_vae_decode_benchmark() -> Result<()> {
     std::fs::write(
         output.join(format!("receipt-{label}.json")),
         serde_json::to_vec_pretty(&receipt)?,
+    )?;
+    Ok(())
+}
+
+/// The design's "no effect" check for the fork's BF16 reduced-precision cuBLAS
+/// switch: in `gemm_strided_batched_bf16` it only changes the compute type
+/// from `CUBLAS_COMPUTE_32F` to `CUBLAS_COMPUTE_32F_FAST_16BF`, which for BF16
+/// inputs is the same arithmetic. Times the transformer's real GEMM shapes
+/// (M = 4,177 joint tokens at 1024², K/N from the 4096-wide projections and
+/// the 12,288-wide MLP) with the switch off and on, and records whether the
+/// outputs differ. The switch is process-global, so it is restored before
+/// returning and this test must run alone.
+#[test]
+#[ignore = "requires an idle, exclusive CUDA GPU; flips a process-global cuBLAS switch"]
+fn official_cuda_reduced_precision_gemm_benchmark() -> Result<()> {
+    use candle_core::cuda_backend::{gemm_reduced_precision_bf16, set_gemm_reduced_precision_bf16};
+    let output = PathBuf::from(std::env::var("QWEN_IMAGE21_BENCH_OUTPUT")?);
+    std::fs::create_dir_all(&output)?;
+    let device = Device::new_cuda(0)?;
+    let previous = gemm_reduced_precision_bf16();
+    let mut cells = Vec::new();
+    let result = (|| -> Result<()> {
+        for (m, k, n) in [
+            (4177usize, 4096usize, 4096usize),
+            (4177, 4096, 12288),
+            (4177, 12288, 4096),
+        ] {
+            let a = Tensor::randn(0f32, 1.0, (1, m, k), &device)?.to_dtype(DType::BF16)?;
+            let w = Tensor::randn(0f32, 0.02, (n, k), &device)?.to_dtype(DType::BF16)?;
+            let mut outputs = Vec::new();
+            let mut timings = Map::new();
+            for reduced in [false, true] {
+                set_gemm_reduced_precision_bf16(reduced);
+                for _ in 0..5 {
+                    a.broadcast_matmul(&w.t()?)?;
+                }
+                device.synchronize()?;
+                let iterations = 50;
+                let started = Instant::now();
+                let mut out = None;
+                for _ in 0..iterations {
+                    out = Some(a.broadcast_matmul(&w.t()?)?);
+                }
+                device.synchronize()?;
+                let ms = started.elapsed().as_secs_f64() * 1e3 / iterations as f64;
+                timings.insert(
+                    if reduced { "reduced_ms" } else { "default_ms" }.into(),
+                    json!(ms),
+                );
+                outputs.push(out.expect("iterations > 0").to_dtype(DType::F32)?);
+            }
+            let max_diff = (&outputs[0] - &outputs[1])?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            eprintln!("gemm {m}x{k}x{n}: {timings:?} max_diff={max_diff}");
+            cells.push(
+                json!({ "m": m, "k": k, "n": n, "timings": timings, "max_abs_diff": max_diff }),
+            );
+        }
+        Ok(())
+    })();
+    set_gemm_reduced_precision_bf16(previous);
+    result?;
+    std::fs::write(
+        output.join("receipt-reduced-precision-gemm.json"),
+        serde_json::to_vec_pretty(&json!({ "cells": cells }))?,
     )?;
     Ok(())
 }

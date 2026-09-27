@@ -16,7 +16,8 @@
 //! * **CUDA takes the fast path unless `MOLD_ATTN=math`.** The target goes
 //!   through `attention::attention_with_bias_for(FastStill, ..)` (FlashAttention
 //!   wherever the kernel is compiled in), plus the fused projection, F32 RoPE
-//!   tables, compact modulation and fused adaLN. `MOLD_ATTN=math` selects
+//!   tables, compact modulation, fused adaLN and the upstream dtype-rounded
+//!   timestep. `MOLD_ATTN=math` selects
 //!   [`Qwen21ExecPath::legacy`], which together with `MOLD_CONV=im2col`
 //!   reproduces the v0.32 bytes.
 //! * **CPU stays on the legacy path.** It has no fused kernel to gain from and
@@ -65,6 +66,12 @@ pub(crate) struct Qwen21ExecPath {
     pub fused_adaln: bool,
     /// Build the rotary tables in F32 regardless of the working dtype.
     pub f32_rope_tables: bool,
+    /// Round the scheduler timestep to the latent dtype before dividing by
+    /// 1000, as upstream does (diffusers `pipeline_qwenimage21.py` casts
+    /// `t` to the latents' dtype before `timestep / 1000`). v0.32 passed the
+    /// unrounded f64, so `legacy()` and Metal keep `false`; the pipeline
+    /// reads this through `scheduler::transformer_timestep(sigma, dtype)`.
+    pub round_timestep_to_dtype: bool,
 }
 
 impl Qwen21ExecPath {
@@ -78,6 +85,7 @@ impl Qwen21ExecPath {
             compact_modulation: false,
             fused_adaln: false,
             f32_rope_tables: false,
+            round_timestep_to_dtype: false,
         }
     }
 
@@ -91,6 +99,7 @@ impl Qwen21ExecPath {
                 compact_modulation: true,
                 fused_adaln: false,
                 f32_rope_tables: true,
+                round_timestep_to_dtype: false,
             }
         } else {
             Self {
@@ -108,6 +117,7 @@ impl Qwen21ExecPath {
             compact_modulation: true,
             fused_adaln: true,
             f32_rope_tables: true,
+            round_timestep_to_dtype: true,
         }
     }
 
@@ -205,6 +215,10 @@ mod tests {
             assert_eq!(path.fused_projection, fast, "fused_ops default");
             assert_eq!(path.compact_modulation, fast, "compact_modulation default");
             assert!(!path.fused_adaln, "Metal never fused adaLN");
+            assert!(
+                !path.round_timestep_to_dtype,
+                "Metal keeps its unrounded timestep"
+            );
             assert!(path.f32_rope_tables, "Metal tables were always F32");
         }
     }
@@ -239,6 +253,7 @@ mod tests {
         assert!(!legacy.compact_modulation);
         assert!(!legacy.fused_adaln);
         assert!(!legacy.f32_rope_tables);
+        assert!(!legacy.round_timestep_to_dtype);
     }
 
     #[test]
@@ -247,6 +262,7 @@ mod tests {
         assert_eq!(fast.attention, TargetAttention::FastStill);
         assert!(fast.fused_projection && fast.compact_modulation);
         assert!(fast.fused_adaln && fast.f32_rope_tables);
+        assert!(fast.round_timestep_to_dtype);
     }
 
     #[test]
