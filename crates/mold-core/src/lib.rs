@@ -85,10 +85,10 @@ pub use error::{MoldError, Result as MoldResult};
 pub use generation_profile::{
     generation_profile_default_output_format, generation_profile_for_manifest,
     generation_profile_for_manifest_with_defaults, materialize_generation_profile_output_default,
-    off_bucket_resolution_warning, prompt_requirement_for_family,
-    qualify_generation_profile_delivery, reference_images_for_recipe, reference_subject_label,
-    resolution_advisory, resolve_generation_profile, validate_dimensions_against_recipe,
-    validate_edit_images_against, validate_mesh_against_recipe,
+    negative_prompt_ignored_warning, off_bucket_resolution_warning, prompt_requirement_for_family,
+    qualify_generation_profile_delivery, recipe_for_request, reference_images_for_recipe,
+    reference_subject_label, resolution_advisory, resolve_generation_profile,
+    validate_dimensions_against_recipe, validate_edit_images_against, validate_mesh_against_recipe,
     validate_output_format_against_generation_profile, validate_request_against_generation_profile,
     validate_request_against_recipe, AspectGroup, ControlMode, FloatControl, FpsControl,
     GenerationCapabilitiesProfile, GenerationDefaultsProfile, GenerationDeliveryCapabilities,
@@ -132,20 +132,21 @@ pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
-    calculate_dimensions_ties_even, clamp_to_megapixel_limit, dimension_alignment_for_family,
-    dimension_alignment_for_model, dimension_warning, dimension_warning_composed,
-    family_supports_lora, fit_to_model_dimensions, fit_to_model_dimensions_aligned,
-    fit_to_target_area, fit_to_target_area_ties_even, fixed_fps_for_family,
-    frame_offset_for_family, largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition,
-    materialize_request_organization, min_frames_for_family, prompt_required_for,
-    prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
+    calculate_dimensions_ties_even, clamp_canvas_to_limits, clamp_to_megapixel_limit,
+    dimension_alignment_for_family, dimension_alignment_for_model, dimension_warning,
+    dimension_warning_composed, family_supports_lora, fit_to_model_dimensions,
+    fit_to_model_dimensions_aligned, fit_to_target_area, fit_to_target_area_ties_even,
+    fixed_fps_for_family, frame_offset_for_family, largest_ltx2_rung_within, last_reference_canvas,
+    ltx2_output_rung, ltx2_spatial_composition, materialize_request_organization,
+    min_frames_for_family, prompt_required_for, prompt_required_with_conditioning,
+    recommended_dimensions, recommended_dimensions_composed,
     require_generate_request_model_activation, sniff_image_input_format, validate_generate_request,
     validate_generate_request_fields, validate_generate_request_with_family,
     validate_generation_dimensions, validate_generation_dimensions_composed,
     validate_generation_dimensions_for_model, validate_request_organization,
     validate_resolved_generate_request_with_family, validate_upscale_request,
-    wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
-    RequestOrganization, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
+    wan_dimension_alignment, CanvasLimits, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
+    RequestOrganization, LAST_REFERENCE_CANVAS_AREA, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
 };
 pub use video_upscale::*;
 

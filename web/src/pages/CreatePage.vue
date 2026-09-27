@@ -1337,8 +1337,7 @@ watch(
     const next = referenceCanvasSize({
       canvas: capabilities.value.referenceImages?.canvas ?? null,
       references: stagedReferenceDimensions(form.state.value.imageAttachments),
-      defaults: recipe.defaults,
-      alignment: recipe.resolution.alignment,
+      resolution: recipe.resolution,
       intent: canvasIntent.value,
     });
     if (

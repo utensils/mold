@@ -1465,7 +1465,116 @@ pub fn calculate_dimensions_ties_even(target_area: u64, ratio: f64, align: u32) 
     (snap(width), snap(height))
 }
 
-/// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
+/// The pixel area a `canvas: last-reference` recipe sizes its default canvas
+/// to: upstream's `output_resolution` default of 1024, squared
+/// (`pipeline_qwenimage21.py:527` and `:621-623` at `e0abab83b`, which call
+/// `calculate_dimensions(output_resolution * output_resolution, ...)`).
+///
+/// Fixed, never the host's configured default size: a client and the server
+/// advisory must derive the same canvas from the same reference, and a local
+/// `[models]` override or a `model_prefs` row is a property of one machine.
+/// `studio/lib/referenceCanvas.ts` mirrors it (`LAST_REFERENCE_CANVAS_AREA`).
+pub const LAST_REFERENCE_CANVAS_AREA: u64 = 1024 * 1024;
+
+/// The admission bounds a derived canvas must land inside — the same numbers
+/// a recipe advertises in its `ResolutionProfile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasLimits {
+    pub alignment: u32,
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_pixels: u64,
+    pub max_axis: Option<u32>,
+}
+
+impl CanvasLimits {
+    /// The bounds a recipe advertises.
+    pub fn from_resolution(profile: &crate::generation_profile::ResolutionProfile) -> Self {
+        Self {
+            alignment: profile.alignment.max(1),
+            min_width: profile.min_width,
+            min_height: profile.min_height,
+            max_pixels: profile.max_pixels,
+            max_axis: profile.max_axis_pixels,
+        }
+    }
+
+    /// The bounds the single-pass recipe for `model` advertises, for a caller
+    /// holding no profile. Pinned against [`Self::from_resolution`] by a test.
+    pub fn for_model(model: &str, family: Option<&str>) -> Self {
+        let family = resolved_family(model, family);
+        let alignment = dimension_alignment_for_model(model, family);
+        Self {
+            alignment,
+            min_width: alignment.max(64),
+            min_height: alignment.max(64),
+            max_pixels: max_pixels_for_family(family),
+            max_axis: max_axis_pixels_for_family(family),
+        }
+    }
+}
+
+/// The default canvas a `canvas: last-reference` recipe (Qwen Image 2.1)
+/// takes from its LAST reference: that reference's aspect at
+/// [`LAST_REFERENCE_CANVAS_AREA`], rounded halves-to-even onto the grid by
+/// [`fit_to_target_area_ties_even`] exactly as upstream's
+/// `calculate_dimensions`, then brought inside the recipe's bounds by
+/// [`clamp_canvas_to_limits`].
+///
+/// The clamp is a DELIBERATE divergence from upstream, which caps nothing: a
+/// reference wider than about 7.3:1 derives a width past the 2752 px axis
+/// ceiling, and handing that to admission would refuse a size the user never
+/// chose. Every surface (CLI, MCP, Discord, the server's advisory, and
+/// `studio/lib/referenceCanvas.ts`) calls this one rule.
+pub fn last_reference_canvas(ref_w: u32, ref_h: u32, limits: CanvasLimits) -> (u32, u32) {
+    let (width, height) =
+        fit_to_target_area_ties_even(ref_w, ref_h, LAST_REFERENCE_CANVAS_AREA, limits.alignment);
+    clamp_canvas_to_limits(width, height, limits)
+}
+
+/// Bring an aligned canvas inside `limits`, keeping its aspect as closely as
+/// the grid allows. A canvas already inside is returned unchanged.
+///
+/// Integer arithmetic only, so the TypeScript mirror lands on the same cells:
+/// the long side walks down one grid cell at a time (starting at the axis
+/// ceiling), the short side follows by FLOORED proportion and is lifted to
+/// its minimum, until both the axis and the pixel ceilings hold.
+pub fn clamp_canvas_to_limits(width: u32, height: u32, limits: CanvasLimits) -> (u32, u32) {
+    let align = u64::from(limits.alignment.max(1));
+    let cells = |pixels: u32| u64::from(pixels) / align;
+    let min_cells = |pixels: u32| u64::from(pixels).div_ceil(align).max(1);
+    let fits = |w: u64, h: u64| {
+        w * h <= limits.max_pixels
+            && limits
+                .max_axis
+                .is_none_or(|axis| w <= u64::from(axis) && h <= u64::from(axis))
+    };
+    let (w, h) = (u64::from(width), u64::from(height));
+    if fits(w, h) {
+        return (width, height);
+    }
+    let landscape = w >= h;
+    let (long, short) = if landscape { (w, h) } else { (h, w) };
+    let (long_min, short_min) = if landscape {
+        (min_cells(limits.min_width), min_cells(limits.min_height))
+    } else {
+        (min_cells(limits.min_height), min_cells(limits.min_width))
+    };
+    let mut long_cells = (long / align).max(1);
+    if let Some(axis) = limits.max_axis {
+        long_cells = long_cells.min(cells(axis).max(1));
+    }
+    loop {
+        let short_cells = (long_cells * short / long).max(short_min);
+        let (lw, sh) = (long_cells * align, short_cells * align);
+        if fits(lw, sh) || long_cells <= long_min {
+            let (w, h) = if landscape { (lw, sh) } else { (sh, lw) };
+            return (w as u32, h as u32);
+        }
+        long_cells -= 1;
+    }
+}
+
 /// Identify a still reference image's container from its magic bytes.
 ///
 /// PNG (`\x89PNG`), JPEG (`FF D8`) and WebP (`RIFF....WEBP`). Used for
@@ -1487,6 +1596,8 @@ pub fn sniff_image_input_format(
     }
 }
 
+/// Check whether `data` starts with a recognized image format's magic bytes
+/// (PNG or JPEG).
 pub(crate) fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
     let is_jpeg = data.len() >= 2 && data[..2] == [0xFF, 0xD8];
@@ -8674,6 +8785,100 @@ mod tests {
         assert_eq!(
             fit_to_target_area_ties_even(100_000, 1, 1024 * 1024, 32).1,
             32
+        );
+    }
+
+    fn qwen21_limits() -> CanvasLimits {
+        CanvasLimits::for_model("qwen-image-2.1:bf16", Some("qwen-image21"))
+    }
+
+    #[test]
+    fn last_reference_canvas_is_upstream_inside_the_bounds() {
+        // Inside the bounds the rule is upstream's `calculate_dimensions`
+        // at 1024x1024, whatever the host's configured default size.
+        for (w, h) in [
+            (1920, 1080),
+            (4225, 4096),
+            (1080, 1920),
+            (3000, 2000),
+            (1, 1),
+        ] {
+            assert_eq!(
+                last_reference_canvas(w, h, qwen21_limits()),
+                fit_to_target_area_ties_even(w, h, 1024 * 1024, 32),
+                "{w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn last_reference_canvas_clamps_a_panorama_into_the_recipe() {
+        // Goldens shared with `studio/lib/referenceCanvas.test.ts`. Upstream
+        // would derive 2816x352 from 8000x1000, past the 2752 axis ceiling.
+        for ((w, h), expected) in [
+            ((8000, 1000), (2752, 320)),
+            ((1000, 8000), (320, 2752)),
+            // Right at the edge: upstream's own answer is already admitted.
+            ((7300, 1000), (2752, 384)),
+            ((100, 1), (2752, 64)),
+            ((100_000, 1), (2752, 64)),
+            ((1, 100_000), (64, 2752)),
+        ] {
+            let manifest = crate::manifest::find_manifest("qwen-image-2.1:bf16").unwrap();
+            let profile = crate::generation_profile::generation_profile_for_manifest(manifest);
+            let recipe = profile.default_recipe().unwrap();
+            let canvas = last_reference_canvas(w, h, qwen21_limits());
+            assert_eq!(canvas, expected, "{w}x{h}");
+            assert!(
+                crate::generation_profile::validate_dimensions_against_recipe(
+                    recipe, canvas.0, canvas.1
+                )
+                .is_ok(),
+                "{w}x{h} -> {canvas:?} must be admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_canvas_honours_the_pixel_ceiling_and_leaves_fitting_sizes_alone() {
+        let limits = CanvasLimits {
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 2_400 * 1_792,
+            max_axis: Some(2_752),
+        };
+        assert_eq!(clamp_canvas_to_limits(2400, 1792, limits), (2400, 1792));
+        let (w, h) = clamp_canvas_to_limits(2752, 2752, limits);
+        assert!(u64::from(w) * u64::from(h) <= limits.max_pixels);
+        assert_eq!((w, h), (2048, 2048));
+    }
+
+    /// Studio's mirror carries the same fixed area; there is no build step
+    /// that could keep the two in step, so read the source (the
+    /// `meshViewerCamera.ts` precedent). The goldens are shared too.
+    #[test]
+    fn studio_mirrors_the_last_reference_canvas_area() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../studio/lib/referenceCanvas.ts"
+        );
+        let source = std::fs::read_to_string(path).expect("studio/lib/referenceCanvas.ts");
+        assert_eq!(LAST_REFERENCE_CANVAS_AREA, 1024 * 1024);
+        assert!(
+            source.contains("export const LAST_REFERENCE_CANVAS_AREA = 1024 * 1024;"),
+            "studio/lib/referenceCanvas.ts must mirror LAST_REFERENCE_CANVAS_AREA"
+        );
+    }
+
+    #[test]
+    fn canvas_limits_for_model_match_the_advertised_recipe() {
+        let manifest = crate::manifest::find_manifest("qwen-image-2.1:bf16").unwrap();
+        let profile = crate::generation_profile::generation_profile_for_manifest(manifest);
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(
+            CanvasLimits::from_resolution(&recipe.resolution),
+            qwen21_limits()
         );
     }
 

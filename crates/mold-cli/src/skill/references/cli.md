@@ -105,8 +105,9 @@ no image the prompt must name as "the" target: say what to take from each
 ("extract the lantern from image 1", "the jacket from image 1 on the person in
 image 2"). The block advertises `canvas: last-reference`, so with neither
 `--width` nor `--height` the output takes the LAST reference's aspect ratio at
-the model's default area on its 32 px grid; any explicit dimension wins. The
-aspect is the UPRIGHT one: EXIF orientation is applied, so a portrait phone
+a fixed 1024x1024 area on its 32 px grid, clamped inside the recipe's size
+ceilings (a very wide panorama lands on 2752 px); any explicit dimension wins.
+The aspect is the UPRIGHT one: EXIF orientation is applied, so a portrait phone
 photo gives a portrait canvas. Each reference may be at most 16,384 px a side,
 100 MP and 200:1; a larger one is refused at submit, naming its position.
 

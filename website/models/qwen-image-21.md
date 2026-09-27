@@ -155,8 +155,13 @@ mold run qwen-image-2.1 "Put the jacket from image 1 on the person in image 2" \
   reference conditions on the colours it shows.
 - **Canvas**: the profile advertises `canvas: last-reference`. With neither
   `--width` nor `--height`, the output takes the **last** reference's upright
-  aspect ratio at the default area, on the 32 px grid. Any explicit size wins.
-  This is a client rule; the server renders exactly the size in the request.
+  aspect ratio (EXIF orientation applied) at a 1024×1024 area (upstream's
+  `output_resolution` default, whatever the host's configured default size),
+  on the 32 px grid, then brought inside the recipe's 2752 px axis and
+  2400×1792 area ceilings — so a panorama wider than about 7.3:1 derives e.g.
+  2752×320 instead of a size admission would refuse (upstream caps nothing;
+  the clamp is mold's). Any explicit size wins. This is a client rule; the
+  server renders exactly the size in the request.
 - **No source image**: references replace img2img, so `--strength`, `--mask`
   and ControlNet are not offered, and a `source_image` is refused with
   "uses edit_images instead of source_image".

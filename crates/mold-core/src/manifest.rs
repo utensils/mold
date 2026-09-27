@@ -525,11 +525,19 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
 /// Model names are sanitized: colons become dashes (e.g., `flux-schnell:q8` → `flux-schnell-q8`).
 /// HF filename paths (e.g., `text_encoder/model-00001-of-00003.safetensors`) are preserved as-is,
 /// creating subdirectories under the target directory.
-pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
-    // H3 Turbo tags are the base compact stack plus one shared adapter, so
-    // their model-specific files live in the base checkpoint's directory —
-    // a machine holding the base pulls only the adapter, and removal
-    // ref-counting protects the shared bytes in both directions.
+/// The directory (under the models dir) a manifest's model-specific files are
+/// stored in — its own sanitized name, except where another identity owns the
+/// bytes.
+///
+/// H3 Turbo tags are the base compact stack plus one shared adapter, so their
+/// model-specific files live in the base checkpoint's directory — a machine
+/// holding the base pulls only the adapter, and removal ref-counting protects
+/// the shared bytes in both directions. A Qwen Image 2.1 turbo tag is its base
+/// tier plus one adapter, so its transformer lives in the base tier's
+/// directory by the same rule. LTX-2.5 contract manifests have their own
+/// storage identity. The download seam's `.pulling` marker follows this too,
+/// so pulling a turbo tag never creates a directory nothing is stored in.
+pub fn storage_directory_name(manifest: &ModelManifest) -> String {
     let storage_name = if crate::ltx25_manifest::is_contract_manifest(&manifest.name) {
         crate::ltx25_manifest::storage_identity(&manifest.name)
     } else if manifest.family == crate::minimax_h3::FAMILY {
@@ -537,11 +545,13 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     } else {
         manifest.name.as_str()
     };
-    // A Qwen Image 2.1 turbo tag is its base tier plus one adapter, so its
-    // transformer lives in the base tier's directory — the H3 Turbo rule.
     let qwen21_turbo_base = qwen_image21_turbo_base(storage_name);
     let storage_name = qwen21_turbo_base.as_deref().unwrap_or(storage_name);
-    let sanitized_name = storage_name.replace(':', "-");
+    storage_name.replace(':', "-")
+}
+
+pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
+    let sanitized_name = storage_directory_name(manifest);
 
     // Paint uses facebook/dinov2-giant in addition to the CLIP tower shipped
     // inside Tencent's bundle. Give the external tower an unambiguous path:

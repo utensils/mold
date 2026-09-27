@@ -544,6 +544,11 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
+        // An older server drops `transparent_background` and renders
+        // opaque RGB; its own listing decides (`capabilities.transparency`).
+        crate::commands::generate::require_remote_transparency_contract(&self.client, &req)
+            .await
+            .map_err(|error| error.to_string())?;
         let CanonicalOutput { response, .. } = generate_canonically(&self.client, req).await?;
         let image = response
             .images
@@ -646,6 +651,11 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
+        // An older server drops `transparent_background` and renders
+        // opaque RGB; its own listing decides (`capabilities.transparency`).
+        crate::commands::generate::require_remote_transparency_contract(&self.client, &req)
+            .await
+            .map_err(|error| error.to_string())?;
         let job_id = self.jobs.create(&req).await?;
         let client = self.client.clone();
         let jobs = self.jobs.clone();
@@ -2913,15 +2923,10 @@ fn build_generate_request(
     );
     let align = mold_core::dimension_alignment_for_model(&model, family.as_deref());
     let (width, height) = match (args.width, args.height) {
-        (None, None) => last_reference_canvas_for(
-            family.as_deref(),
-            &model,
-            edit_images.as_deref(),
-            default_width,
-            default_height,
-            align,
-        )?
-        .unwrap_or((default_width, default_height)),
+        (None, None) => {
+            last_reference_canvas_for(family.as_deref(), &model, edit_images.as_deref())?
+                .unwrap_or((default_width, default_height))
+        }
         (width, height) => (
             width.unwrap_or(default_width),
             height.unwrap_or(default_height),
@@ -3049,16 +3054,14 @@ fn decode_mcp_reference_images(
 
 /// The default canvas when the recipe sizes it from the references
 /// (`capabilities.reference_images.canvas == last-reference`, Qwen Image
-/// 2.1) and the caller chose neither dimension: the LAST reference's aspect
-/// at the model's default area on its grid, halves rounded to even exactly as
-/// upstream's `calculate_dimensions`. The same rule `mold run` applies.
+/// 2.1) and the caller chose neither dimension:
+/// `mold_core::last_reference_canvas` — the LAST reference's aspect at
+/// upstream's fixed 1024x1024 area, clamped into the recipe's bounds. The
+/// same rule `mold run`, Discord, Studio and the server's advisory apply.
 fn last_reference_canvas_for(
     family: Option<&str>,
     model: &str,
     edit_images: Option<&[Vec<u8>]>,
-    default_width: u32,
-    default_height: u32,
-    align: u32,
 ) -> std::result::Result<Option<(u32, u32)>, String> {
     let (Some(family), Some(last)) = (family, edit_images.and_then(|images| images.last())) else {
         return Ok(None);
@@ -3070,11 +3073,10 @@ fn last_reference_canvas_for(
     }
     let (width, height) = mold_core::reference_image::oriented_dimensions(last)
         .map_err(|error| format!("the last reference image's size could not be read: {error}"))?;
-    Ok(Some(mold_core::validation::fit_to_target_area_ties_even(
+    Ok(Some(mold_core::last_reference_canvas(
         width,
         height,
-        u64::from(default_width) * u64::from(default_height),
-        align,
+        mold_core::CanvasLimits::for_model(model, Some(family)),
     )))
 }
 
@@ -6850,6 +6852,13 @@ mod tests {
             (req.width, req.height),
             mold_core::validation::fit_to_target_area_ties_even(1920, 1080, 1024 * 1024, 32)
         );
+
+        // A panorama past the 2752 px axis ceiling is clamped inside the
+        // recipe rather than handed to admission to refuse.
+        let pano = encoded_image(8000, 1000, image::ImageFormat::Png);
+        let req = build_generate_request(qwen21_args(json!({ "reference_images": [pano] })), None)
+            .unwrap();
+        assert_eq!((req.width, req.height), (2752, 320));
 
         // An explicit size wins; no references keeps the model default.
         let req = build_generate_request(

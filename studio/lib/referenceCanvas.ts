@@ -6,19 +6,28 @@
  * chosen size from a default one: the rule is a CLIENT rule and admission
  * stays exact. While the canvas intent is `model-default` — the user has not
  * picked a size — every surface sizes the canvas to the LAST reference's
- * aspect at the recipe's default pixel area, on its alignment grid. A manual
- * canvas never moves.
+ * aspect at upstream's fixed 1024x1024 area (`output_resolution` defaults to
+ * 1024, `pipeline_qwenimage21.py:527`, `:621-623`), on the recipe's grid,
+ * clamped into the recipe's advertised bounds. Never the recipe's default
+ * size: that is a host's configuration, and the server's advisory derives
+ * the canvas from the fixed area. A manual canvas never moves.
  *
- * The arithmetic is `mold_core::validation::fit_to_target_area_ties_even`,
- * which mirrors diffusers' `calculate_dimensions`
+ * This is `mold_core::validation::last_reference_canvas`, exactly:
+ * `fit_to_target_area_ties_even` mirrors diffusers' `calculate_dimensions`
  * (`pipeline_qwenimage21.py:149-156` at `e0abab83b`): `width = sqrt(area *
  * ratio)`, `height = width / ratio`, each rounded with Python's `round()` —
- * halves to EVEN — onto the grid. The CLI and the engine use the same rule, so
- * a client and the engine never land on different sides of a tie (a 4225x4096
- * reference is 1024x1024 upstream, 1056x1024 under half-away-from-zero).
+ * halves to EVEN — onto the grid, so a client and the engine never land on
+ * different sides of a tie (a 4225x4096 reference is 1024x1024 upstream,
+ * 1056x1024 under half-away-from-zero). `clampCanvasToLimits` is mold's
+ * deliberate divergence: upstream caps nothing, so a panorama wider than
+ * about 7.3:1 would derive a width past the 2752 px axis ceiling and be
+ * refused at admission for a size the user never chose.
  */
 
-import type { ReferenceCanvasRule } from "./generated/generationProfileV1";
+import type {
+  ReferenceCanvasRule,
+  ResolutionProfile,
+} from "./generated/generationProfileV1";
 import {
   orientedImageDimensionsFromBase64,
   type ImageDimensions,
@@ -51,6 +60,71 @@ export function fitToTargetAreaTiesEven(
   return { width: snap(width), height: snap(height) };
 }
 
+/** `mold_core::validation::LAST_REFERENCE_CANVAS_AREA`: upstream's 1024². */
+export const LAST_REFERENCE_CANVAS_AREA = 1024 * 1024;
+
+/** The advertised bounds a derived canvas must land inside. */
+export type CanvasLimits = Pick<
+  ResolutionProfile,
+  "alignment" | "min_width" | "min_height" | "max_pixels" | "max_axis_pixels"
+>;
+
+/**
+ * `mold_core::validation::clamp_canvas_to_limits`, exactly: integer cells
+ * only. The long side walks down one grid cell at a time from the axis
+ * ceiling, the short side follows by FLOORED proportion and is lifted to its
+ * minimum, until both the axis and the pixel ceilings hold. A canvas already
+ * inside is returned unchanged.
+ */
+export function clampCanvasToLimits(
+  width: number,
+  height: number,
+  limits: CanvasLimits,
+): ImageDimensions {
+  const align = Math.max(1, limits.alignment);
+  const axis = limits.max_axis_pixels ?? null;
+  const fits = (w: number, h: number) =>
+    w * h <= limits.max_pixels && (axis === null || (w <= axis && h <= axis));
+  if (fits(width, height)) return { width, height };
+  const landscape = width >= height;
+  const long = landscape ? width : height;
+  const short = landscape ? height : width;
+  const minCells = (pixels: number) => Math.max(1, Math.ceil(pixels / align));
+  const longMin = minCells(landscape ? limits.min_width : limits.min_height);
+  const shortMin = minCells(landscape ? limits.min_height : limits.min_width);
+  let longCells = Math.max(1, Math.floor(long / align));
+  if (axis !== null) {
+    longCells = Math.min(longCells, Math.max(1, Math.floor(axis / align)));
+  }
+  for (;;) {
+    const shortCells = Math.max(
+      Math.floor((longCells * short) / long),
+      shortMin,
+    );
+    const lw = longCells * align;
+    const sh = shortCells * align;
+    if (fits(lw, sh) || longCells <= longMin) {
+      return landscape ? { width: lw, height: sh } : { width: sh, height: lw };
+    }
+    longCells -= 1;
+  }
+}
+
+/** `mold_core::validation::last_reference_canvas`, exactly. */
+export function lastReferenceCanvas(
+  referenceWidth: number,
+  referenceHeight: number,
+  limits: CanvasLimits,
+): ImageDimensions {
+  const fitted = fitToTargetAreaTiesEven(
+    referenceWidth,
+    referenceHeight,
+    LAST_REFERENCE_CANVAS_AREA,
+    limits.alignment,
+  );
+  return clampCanvasToLimits(fitted.width, fitted.height, limits);
+}
+
 export interface ReferenceCanvasInput {
   /** The recipe's advertised rule; `null` is no rule, or an older server. */
   canvas: ReferenceCanvasRule | null | undefined;
@@ -59,10 +133,8 @@ export interface ReferenceCanvasInput {
    * could not be read.
    */
   references: readonly (ImageDimensions | null)[];
-  /** The recipe default canvas; its AREA is the target. */
-  defaults: ImageDimensions;
-  /** The recipe's resolution alignment (32 on Qwen Image 2.1). */
-  alignment: number;
+  /** The recipe's advertised `resolution`: its grid and its bounds. */
+  resolution: CanvasLimits;
   intent: CanvasIntent;
 }
 
@@ -83,12 +155,7 @@ export function referenceCanvasSize(
   if (input.references.length === 0) return null;
   const last = input.references[input.references.length - 1];
   if (!last) return null;
-  return fitToTargetAreaTiesEven(
-    last.width,
-    last.height,
-    input.defaults.width * input.defaults.height,
-    input.alignment,
-  );
+  return lastReferenceCanvas(last.width, last.height, input.resolution);
 }
 
 /** The strip's staged images, in any surface's own shape. */

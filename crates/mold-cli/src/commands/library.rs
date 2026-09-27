@@ -204,7 +204,13 @@ async fn library_show(
 
 async fn preview_bytes(client: &MoldClient, image: &GalleryImage) -> Result<Vec<u8>> {
     let format = gallery_format(image);
-    if format.is_some_and(|value| is_video_row(value, image)) {
+    // A WebP is sniffed: its own header says still or animation.
+    let webp = if format == Some(OutputFormat::Webp) {
+        Some(client.get_gallery_image(&image.filename).await?)
+    } else {
+        None
+    };
+    if format.is_some_and(|value| is_video_row(value, image, webp.as_deref())) {
         if let Some(bytes) = client.get_gallery_preview(&image.filename).await? {
             return Ok(bytes);
         }
@@ -213,7 +219,10 @@ async fn preview_bytes(client: &MoldClient, image: &GalleryImage) -> Result<Vec<
     if format.is_some_and(|value| value.is_audio()) {
         return client.get_gallery_thumbnail(&image.filename).await;
     }
-    client.get_gallery_image(&image.filename).await
+    match webp {
+        Some(bytes) => Ok(bytes),
+        None => client.get_gallery_image(&image.filename).await,
+    }
 }
 
 async fn library_title(
@@ -875,12 +884,16 @@ fn filter_and_sort(
 }
 
 /// Whether a gallery row is a video. WebP is both a still and an animation
-/// container; a video render always records its `frames`, a still never
-/// does, so a WebP row without frames is a still (the web `mediaKind` rule).
-fn is_video_row(format: OutputFormat, row: &GalleryImage) -> bool {
-    match format {
-        OutputFormat::Webp => row.metadata.frames.is_some(),
-        other => other.is_video(),
+/// container, so when the file's bytes are at hand the header decides
+/// (`OutputFormat::is_video_artifact`, the rule every other surface uses): an
+/// older animated WebP row recorded no `frames` and would otherwise read as a
+/// still. Without the bytes, a recorded `frames` is the fallback — a video
+/// render records it, a still never does (the web `mediaKind` rule).
+fn is_video_row(format: OutputFormat, row: &GalleryImage, bytes: Option<&[u8]>) -> bool {
+    match (format, bytes) {
+        (OutputFormat::Webp, Some(bytes)) => format.is_video_artifact(bytes),
+        (OutputFormat::Webp, None) => row.metadata.frames.is_some(),
+        (other, _) => other.is_video(),
     }
 }
 
@@ -1059,6 +1072,34 @@ mod tests {
             "collections": []
         }))
         .unwrap()
+    }
+
+    /// A WebP row is classed by its header when the bytes are at hand: an
+    /// older animated WebP recorded no `frames` and must still read as a
+    /// video; a still with a stray `frames` reads as a still. Without bytes,
+    /// the recorded `frames` decides.
+    #[test]
+    fn a_webp_row_is_classed_by_its_header() {
+        fn webp(chunk: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+            bytes.extend_from_slice(chunk);
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+        let animated = webp(b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let still = webp(b"VP8L", &[0x2f, 0, 0, 0, 0]);
+        let older = image("old.webp", 1, &[], false);
+        assert!(older.metadata.frames.is_none());
+        assert!(is_video_row(OutputFormat::Webp, &older, Some(&animated)));
+        assert!(!is_video_row(OutputFormat::Webp, &older, Some(&still)));
+        assert!(!is_video_row(OutputFormat::Webp, &older, None));
+        let mut recorded = older.clone();
+        recorded.metadata.frames = Some(24);
+        assert!(is_video_row(OutputFormat::Webp, &recorded, None));
+        assert!(!is_video_row(OutputFormat::Webp, &recorded, Some(&still)));
+        assert!(is_video_row(OutputFormat::Mp4, &older, None));
+        assert!(!is_video_row(OutputFormat::Png, &older, None));
     }
 
     /// Both export refusals answer locally, and the stem is what the

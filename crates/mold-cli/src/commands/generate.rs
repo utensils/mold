@@ -233,6 +233,77 @@ async fn require_remote_identity_capabilities(
     )
 }
 
+/// Refuse `--transparent` (and MCP's `transparent_background`) against the
+/// SERVER's recipe, not this binary's.
+///
+/// `transparent_background` is an additive field: a server that predates it
+/// (v0.32) deserializes the request, drops the field, and renders opaque RGB
+/// without a word. The server's model listing is the only authority on what
+/// it will honour, so it is asked before submitting, with the same rule
+/// Discord's `transparency_contract` applies: a listed model answers with ITS
+/// `capabilities.transparency` block, and a listed model whose profile carries
+/// none is an OLDER SERVER — refused with "update the server", never guessed
+/// from the local core decision. A model the server does not list falls back
+/// to the shared core decision (admission will answer for it). An
+/// unreachable server is left to the local fallback, where the local recipe
+/// decides; a reachable server that cannot list its models is read as older.
+pub(crate) async fn require_remote_transparency_contract(
+    client: &MoldClient,
+    request: &GenerateRequest,
+) -> Result<()> {
+    if request.transparent_background != Some(true) {
+        return Ok(());
+    }
+    let models = match client.list_models_extended().await {
+        Ok(models) => Some(models),
+        Err(error) if MoldClient::is_connection_error(&error) => return Ok(()),
+        Err(_) => None,
+    };
+    remote_transparency_decision(models.as_deref(), request, client.host())
+        .map_err(anyhow::Error::msg)
+}
+
+/// The pure half of [`require_remote_transparency_contract`]: `models` is the
+/// server's listing, `None` when a reachable server could not provide one.
+pub(crate) fn remote_transparency_decision(
+    models: Option<&[mold_core::ModelInfoExtended]>,
+    request: &GenerateRequest,
+    host: &str,
+) -> std::result::Result<(), String> {
+    if request.transparent_background != Some(true) {
+        return Ok(());
+    }
+    let wanted = mold_core::manifest::resolve_model_name(&request.model);
+    let older_server = || {
+        format!(
+            "{} The server at {host} does not advertise capabilities.transparency for \
+             '{}', so it would render an opaque image; update the server.",
+            mold_core::TRANSPARENCY_UNSUPPORTED_REASON,
+            request.model
+        )
+    };
+    let Some(models) = models else {
+        return Err(older_server());
+    };
+    let entry = models.iter().find(|entry| {
+        entry.info.name == request.model
+            || mold_core::manifest::resolve_model_name(&entry.info.name) == wanted
+    });
+    let contract = match entry {
+        Some(entry) => entry
+            .generation_profile
+            .as_ref()
+            .and_then(|profile| profile.default_recipe())
+            .and_then(|recipe| recipe.capabilities.transparency.clone())
+            .ok_or_else(older_server)?,
+        None => match mold_core::validation::resolved_family_for(&request.model) {
+            Some(family) => mold_core::transparency_for_recipe(family, &request.model),
+            None => return Ok(()),
+        },
+    };
+    mold_core::validate_transparency_against(&contract, request)
+}
+
 fn local_generation_delivery_capabilities() -> mold_core::GenerationDeliveryCapabilities {
     mold_core::GenerationDeliveryCapabilities::new(cfg!(feature = "mp4"), cfg!(feature = "webp"))
 }
@@ -336,13 +407,7 @@ fn effective_dimensions(
         return Ok((0, 0));
     }
     if width.is_none() && height.is_none() {
-        if let Some(canvas) = last_reference_canvas(
-            family,
-            model,
-            edit_images,
-            model_cfg.effective_width(config),
-            model_cfg.effective_height(config),
-        )? {
+        if let Some(canvas) = last_reference_canvas(family, model, edit_images)? {
             return Ok(canvas);
         }
     }
@@ -405,17 +470,16 @@ fn refuse_unrenderable_transparency(
 
 /// The default canvas for a recipe whose references size it
 /// (`capabilities.reference_images.canvas == last-reference`, Qwen Image
-/// 2.1): the LAST reference's aspect ratio at the model's default pixel area,
-/// on its grid, rounded halves-to-even exactly as upstream's
-/// `calculate_dimensions` does (`pipeline_qwenimage21.py:149-156`). `None`
-/// when the recipe has no such rule or the request carries no reference,
-/// leaving the ordinary default in force.
+/// 2.1): `mold_core::last_reference_canvas` — the LAST reference's aspect at
+/// upstream's fixed 1024x1024 area (never this host's configured default, so
+/// the server derives the same canvas), rounded halves-to-even as upstream's
+/// `calculate_dimensions` (`pipeline_qwenimage21.py:149-156`) and clamped
+/// into the recipe's bounds. `None` when the recipe has no such rule or the
+/// request carries no reference, leaving the ordinary default in force.
 fn last_reference_canvas(
     family: Option<&str>,
     model: &str,
     edit_images: Option<&[Vec<u8>]>,
-    default_width: u32,
-    default_height: u32,
 ) -> Result<Option<(u32, u32)>> {
     let Some(family) = family else {
         return Ok(None);
@@ -433,12 +497,10 @@ fn last_reference_canvas(
         mold_core::reference_image::oriented_dimensions(last).map_err(|error| {
             anyhow::anyhow!("failed to read the last reference image's size: {error}")
         })?;
-    let align = mold_core::dimension_alignment_for_model(model, Some(family));
-    Ok(Some(mold_core::validation::fit_to_target_area_ties_even(
+    Ok(Some(mold_core::last_reference_canvas(
         width,
         height,
-        u64::from(default_width) * u64::from(default_height),
-        align,
+        mold_core::CanvasLimits::for_model(model, Some(family)),
     )))
 }
 
@@ -1860,6 +1922,9 @@ pub async fn run(
         // predates the capability block and every identity-capable server
         // understands it.
         require_remote_identity_capabilities(ctx.client(), &req).await?;
+        // `--transparent` is additive too: an older server renders opaque
+        // RGB. Its model listing decides, not this binary's recipe.
+        require_remote_transparency_contract(ctx.client(), &req).await?;
 
         if !reference_uploads.is_empty() {
             // Upload sessions bind the complete request. Freeze a random seed
@@ -5202,6 +5267,108 @@ mod tests {
         request
     }
 
+    fn transparent_qwen_request() -> GenerateRequest {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a glass lantern",
+            "model": "qwen-image-2.1:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 1.0,
+        }))
+        .expect("the minimal generate-request wire shape");
+        request.transparent_background = Some(true);
+        request.output_format = Some(OutputFormat::Png);
+        request
+    }
+
+    fn listed_qwen(with_transparency: bool) -> mold_core::ModelInfoExtended {
+        let manifest = mold_core::manifest::find_manifest("qwen-image-2.1:bf16").unwrap();
+        let mut profile = mold_core::generation_profile_for_manifest(manifest);
+        if !with_transparency {
+            for recipe in &mut profile.recipes {
+                recipe.capabilities.transparency = None;
+            }
+        }
+        let mut entry: mold_core::ModelInfoExtended = serde_json::from_value(serde_json::json!({
+            "name": "qwen-image-2.1:bf16",
+            "family": "qwen-image21",
+            "size_gb": 1.0,
+            "is_loaded": false,
+            "hf_repo": "Qwen/Qwen-Image-2.1",
+            "default_steps": 40,
+            "default_guidance": 1.0,
+            "default_width": 1024,
+            "default_height": 1024,
+            "description": "test",
+        }))
+        .expect("a minimal model listing row");
+        entry.generation_profile = Some(profile);
+        entry
+    }
+
+    /// An older server lists the model but its profile carries no
+    /// `capabilities.transparency`: it would drop the field and render
+    /// opaque RGB, so the CLI refuses and says to update the server rather
+    /// than trusting its own recipe.
+    #[test]
+    fn an_older_server_without_the_transparency_block_is_refused() {
+        let request = transparent_qwen_request();
+        let error = remote_transparency_decision(
+            Some(&[listed_qwen(false)]),
+            &request,
+            "http://old-host:7680",
+        )
+        .unwrap_err();
+        assert!(error.contains("update the server"), "{error}");
+        assert!(error.contains("http://old-host:7680"), "{error}");
+        // A reachable server that could not list its models is older too.
+        let error =
+            remote_transparency_decision(None, &request, "http://old-host:7680").unwrap_err();
+        assert!(error.contains("update the server"), "{error}");
+        // A current server's block admits it, and still refuses JPEG in
+        // admission's own words.
+        remote_transparency_decision(Some(&[listed_qwen(true)]), &request, "h").unwrap();
+        let mut jpeg = request.clone();
+        jpeg.output_format = Some(OutputFormat::Jpeg);
+        let error =
+            remote_transparency_decision(Some(&[listed_qwen(true)]), &jpeg, "h").unwrap_err();
+        assert!(!error.contains("update the server"), "{error}");
+        // No toggle, no question.
+        let mut plain = request;
+        plain.transparent_background = None;
+        remote_transparency_decision(None, &plain, "h").unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_remote_transparency_probe_reads_the_servers_listing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![listed_qwen(false)]))
+            .mount(&server)
+            .await;
+        let error = require_remote_transparency_contract(
+            &MoldClient::new(&server.uri()),
+            &transparent_qwen_request(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("update the server"), "{error}");
+
+        // An unreachable host is left to the local fallback.
+        require_remote_transparency_contract(
+            &MoldClient::new("http://127.0.0.1:1"),
+            &transparent_qwen_request(),
+        )
+        .await
+        .expect("an unreachable host must not be turned into a hard refusal");
+    }
+
     /// A REACHABLE server that cannot answer the probe is the dangerous case,
     /// not the safe one: a build predating `/api/capabilities` answers 404 here
     /// and then accepts the generate request while dropping `id_images`. It
@@ -6531,6 +6698,35 @@ mod tests {
             .unwrap(),
             (1344, 768)
         );
+    }
+
+    /// The derived canvas is upstream's 1024x1024 area whatever this host's
+    /// configured default size is (the server advisory and every other
+    /// client derive it the same way), and a panorama past the recipe's axis
+    /// ceiling is clamped inside it rather than refused at admission.
+    #[test]
+    fn last_reference_canvas_ignores_the_local_default_and_clamps_panoramas() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1536),
+            default_height: Some(1536),
+            ..ModelConfig::default()
+        };
+        let dims = |images: &[Vec<u8>]| {
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "qwen-image-2.1:bf16",
+                Some("qwen-image21"),
+                None,
+                None,
+                None,
+                Some(images),
+            )
+            .unwrap()
+        };
+        assert_eq!(dims(&[png_with_dimensions(1920, 1080)]), (1376, 768));
+        assert_eq!(dims(&[png_with_dimensions(8000, 1000)]), (2752, 320));
     }
 
     /// Qwen Image 2.1 advertises `canvas: last-reference`: with neither

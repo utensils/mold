@@ -525,6 +525,14 @@ fn held_writer_leases(
     HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The roots THIS test thread took a writer lease for; see
+    /// [`release_gallery_writer_leases`].
+    static TEST_THREAD_LEASE_ROOTS: std::cell::RefCell<std::collections::HashSet<PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
 /// Hold the writer lease for this root until the process exits.
 ///
 /// Called from every door that opens the authority for WRITING —
@@ -541,6 +549,8 @@ pub(crate) fn hold_writer_lease(root: &Path) {
     if held.contains_key(root) {
         return;
     }
+    #[cfg(test)]
+    TEST_THREAD_LEASE_ROOTS.with(|roots| roots.borrow_mut().insert(root.to_path_buf()));
     match acquire_writer_lease(root) {
         Ok(lease) => {
             held.insert(root.to_path_buf(), Some(lease));
@@ -570,7 +580,23 @@ pub fn release_gallery_writer_leases() {
         let mut leases = held_writer_leases()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        std::mem::take(&mut *leases)
+        #[cfg(not(test))]
+        let taken = std::mem::take(&mut *leases);
+        // The test harness runs every test on its own thread in ONE process,
+        // so a test calling this process-wide release (as the server's
+        // shutdown does) would otherwise drain the leases of whichever tests
+        // happen to be running beside it — releasing a root out from under a
+        // test mid-assertion (the `status_reports_live_stale_and_no_writer`
+        // flake). Under test the "process" is the calling thread.
+        #[cfg(test)]
+        let taken = TEST_THREAD_LEASE_ROOTS.with(|roots| {
+            roots
+                .borrow_mut()
+                .drain()
+                .filter_map(|root| leases.remove_entry(&root))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
+        taken
     };
     for lease in held.into_values().flatten() {
         lease.release_and_remove();

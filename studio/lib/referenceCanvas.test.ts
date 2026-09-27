@@ -3,7 +3,9 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  clampCanvasToLimits,
   fitToTargetAreaTiesEven,
+  lastReferenceCanvas,
   referenceCanvasSize,
   roundHalfToEven,
   stagedReferenceDimensions,
@@ -78,11 +80,71 @@ describe("fitToTargetAreaTiesEven", () => {
   });
 });
 
+/** Qwen Image 2.1's advertised `resolution` bounds. */
+const qwen21 = {
+  alignment: 32,
+  min_width: 64,
+  min_height: 64,
+  max_pixels: 2400 * 1792,
+  max_axis_pixels: 2752,
+};
+
+describe("lastReferenceCanvas", () => {
+  // The SAME goldens `mold_core::validation`'s
+  // `last_reference_canvas_clamps_a_panorama_into_the_recipe` pins.
+  const goldens: [[number, number], [number, number]][] = [
+    [
+      [8000, 1000],
+      [2752, 320],
+    ],
+    [
+      [1000, 8000],
+      [320, 2752],
+    ],
+    [
+      [7300, 1000],
+      [2752, 384],
+    ],
+    [
+      [100, 1],
+      [2752, 64],
+    ],
+    [
+      [100_000, 1],
+      [2752, 64],
+    ],
+    [
+      [1, 100_000],
+      [64, 2752],
+    ],
+    [
+      [1920, 1080],
+      [1376, 768],
+    ],
+  ];
+  it.each(goldens)("%j -> %j", ([w, h], [ew, eh]) => {
+    expect(lastReferenceCanvas(w, h, qwen21)).toEqual({
+      width: ew,
+      height: eh,
+    });
+  });
+
+  it("honours the pixel ceiling and leaves a fitting canvas alone", () => {
+    expect(clampCanvasToLimits(2400, 1792, qwen21)).toEqual({
+      width: 2400,
+      height: 1792,
+    });
+    expect(clampCanvasToLimits(2752, 2752, qwen21)).toEqual({
+      width: 2048,
+      height: 2048,
+    });
+  });
+});
+
 describe("referenceCanvasSize", () => {
   const base = {
     canvas: "last-reference" as const,
-    defaults: { width: 1024, height: 1024 },
-    alignment: 32,
+    resolution: qwen21,
     intent: "model-default" as const,
   };
 
@@ -98,14 +160,22 @@ describe("referenceCanvasSize", () => {
     ).toEqual({ width: 1376, height: 768 });
   });
 
-  it("keeps the recipe default area, not the reference's own size", () => {
+  it("keeps upstream's 1024x1024 area, not the reference's own size", () => {
     expect(
       referenceCanvasSize({
         ...base,
-        defaults: { width: 1024, height: 1024 },
         references: [{ width: 4000, height: 3000 }],
       }),
     ).toEqual({ width: 1184, height: 896 });
+  });
+
+  it("clamps a panorama into the recipe's bounds", () => {
+    expect(
+      referenceCanvasSize({
+        ...base,
+        references: [{ width: 8000, height: 1000 }],
+      }),
+    ).toEqual({ width: 2752, height: 320 });
   });
 
   it("leaves the canvas alone with no references at all", () => {
@@ -206,10 +276,9 @@ describe("stagedReferenceDimensions", () => {
       referenceCanvasSize({
         canvas: "last-reference",
         references: [read!],
-        defaults: { width: 1024, height: 1024 },
-        alignment: 32,
+        resolution: qwen21,
         intent: "model-default",
       }),
-    ).toEqual(fitToTargetAreaTiesEven(48, 96, 1024 * 1024, 32));
+    ).toEqual(lastReferenceCanvas(48, 96, qwen21));
   });
 });

@@ -612,9 +612,23 @@ pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<b
 // ── Pull marker file (.pulling) ──────────────────────────────────────────────
 
 /// Relative path to a model's `.pulling` marker: `<sanitized-name>/.pulling`.
+///
+/// A manifest whose model-specific files are stored under ANOTHER identity's
+/// directory (`manifest::storage_directory_name` — the H3 and Qwen Image 2.1
+/// turbo tags, which stack an adapter on their base tier) keeps its marker in
+/// that directory as `.pulling-<sanitized-name>`: the marker is still its own,
+/// but pulling it no longer creates a `<sanitized-name>/` directory that
+/// nothing is ever stored in.
 pub fn pulling_marker_rel_path(model_name: &str) -> PathBuf {
     let canonical = crate::manifest::resolve_model_name(model_name);
-    PathBuf::from(canonical.replace(':', "-")).join(".pulling")
+    let own = canonical.replace(':', "-");
+    match crate::manifest::find_manifest(&canonical)
+        .map(crate::manifest::storage_directory_name)
+        .filter(|storage| *storage != own)
+    {
+        Some(storage) => PathBuf::from(storage).join(format!(".pulling-{own}")),
+        None => PathBuf::from(own).join(".pulling"),
+    }
 }
 
 /// Path to the `.pulling` marker for a model under an explicit models dir.
@@ -647,9 +661,22 @@ fn write_pulling_marker(model_name: &str) -> Result<(), DownloadError> {
 }
 
 /// Remove the `.pulling` marker (best-effort, ignores errors).
+///
+/// The directory the marker was written into is removed with it when that
+/// leaves it EMPTY (`remove_dir` refuses a non-empty one): a manifest whose
+/// files all route to `shared/` (a companion encoder) had its directory
+/// created for the marker alone, and would otherwise leave it behind.
 pub fn remove_pulling_marker(model_name: &str) {
-    let path = pulling_marker_path(model_name);
-    let _ = std::fs::remove_file(path);
+    remove_pulling_marker_in(&models_dir(), model_name);
+}
+
+/// [`remove_pulling_marker`] under an explicit models dir.
+pub fn remove_pulling_marker_in(models_dir: &Path, model_name: &str) {
+    let path = pulling_marker_path_in(models_dir, model_name);
+    let _ = std::fs::remove_file(&path);
+    if let Some(parent) = path.parent().filter(|parent| *parent != models_dir) {
+        let _ = std::fs::remove_dir(parent);
+    }
 }
 
 /// Check whether a model has an active `.pulling` marker (incomplete download).
@@ -1861,22 +1888,57 @@ fn require_download_space(
 /// server-side auto-pull must fail here rather than acquire restricted
 /// weights on the user's behalf. A Mold data root that cannot be resolved
 /// fails closed: unverifiable is not accepted.
+///
+/// Only files the pull would actually FETCH are gated: a file already complete
+/// on disk moves no bytes, so `mold pull` of an installed model (or an
+/// auto-pull that finds everything present) is a no-op success rather than a
+/// demand for consent to a download that never happens. This is the rule the
+/// server's `apply_download_license_acceptances` and the identity/paint
+/// dependency gates already apply; any file that would be downloaded is still
+/// refused until its licence is accepted.
 fn require_manifest_licenses_accepted(manifest: &ModelManifest) -> Result<(), DownloadError> {
-    require_manifest_licenses_accepted_in(manifest, crate::Config::mold_dir().as_deref())
+    require_manifest_licenses_accepted_in(
+        manifest,
+        crate::Config::mold_dir().as_deref(),
+        &models_dir(),
+    )
 }
 
-/// The pure half of the gate: decide against an explicit Mold data root.
+/// The pure half of the gate: decide against an explicit Mold data root and
+/// models directory.
 ///
-/// `None` is a root that could not be resolved, which fails closed —
-/// unverifiable is not accepted.
+/// `mold_home` `None` is a root that could not be resolved, which fails
+/// closed — unverifiable is not accepted.
 fn require_manifest_licenses_accepted_in(
     manifest: &ModelManifest,
     mold_home: Option<&std::path::Path>,
+    models_root: &Path,
 ) -> Result<(), DownloadError> {
     for file in &manifest.files {
+        if manifest_file_is_installed(models_root, manifest, file) {
+            continue;
+        }
         require_license_accepted(&manifest.name, &file.hf_filename, mold_home)?;
     }
     Ok(())
+}
+
+/// Whether a pull would reuse `file` rather than download it — the question
+/// [`find_existing_placed_file`] answers, asked without its migration side
+/// effects so a refused pull changes nothing on disk.
+fn manifest_file_is_installed(
+    models_root: &Path,
+    manifest: &ModelManifest,
+    file: &ModelFile,
+) -> bool {
+    crate::manifest::storage_path_candidates(manifest, file)
+        .into_iter()
+        .any(|candidate| {
+            installed_file_is_complete(&models_root.join(candidate), Some(file.size_bytes))
+        })
+        || cached_file_path_existing_only(models_root, &file.hf_repo, &file.hf_filename, None)
+            .and_then(|path| path.canonicalize().ok())
+            .is_some_and(|path| installed_file_is_complete(&path, Some(file.size_bytes)))
 }
 
 /// Refuse one manifest file whose license the user has not accepted.
@@ -3632,8 +3694,10 @@ mod tests {
         let manifest =
             crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
         let home = tempfile::tempdir().unwrap();
-        let gate =
-            |home: Option<&std::path::Path>| require_manifest_licenses_accepted_in(manifest, home);
+        let models = tempfile::tempdir().unwrap();
+        let gate = |home: Option<&std::path::Path>| {
+            require_manifest_licenses_accepted_in(manifest, home, models.path())
+        };
 
         let error = gate(Some(home.path())).expect_err("an unaccepted license refuses the pull");
         match &error {
@@ -3666,14 +3730,82 @@ mod tests {
         assert!(gate(None).is_err());
     }
 
+    /// Pulling a model whose files are all already installed downloads
+    /// nothing, so it needs no consent: `mold pull qwen-image-2.1:bf16` on a
+    /// complete install (and an auto-pull that finds it present) succeeds
+    /// before the licence is accepted. The same manifest with one file
+    /// missing still refuses, because that file would be fetched. Hunyuan3D
+    /// takes the same seam.
+    #[test]
+    fn an_installed_model_needs_no_license_to_pull_again() {
+        for name in [
+            "qwen-image-2.1:bf16",
+            "qwen-image-2.1-turbo:q8",
+            "hunyuan3d-2.1:fp16",
+        ] {
+            let manifest = crate::manifest::find_manifest(name).unwrap();
+            assert!(
+                !crate::license_acceptance::licenses_for_manifest(manifest).is_empty(),
+                "{name} is licence gated"
+            );
+            let home = tempfile::tempdir().unwrap();
+            let models = tempfile::tempdir().unwrap();
+            let gate = || {
+                require_manifest_licenses_accepted_in(manifest, Some(home.path()), models.path())
+            };
+            assert!(
+                gate().is_err(),
+                "{name}: nothing installed, the pull downloads"
+            );
+
+            let mut placed = Vec::new();
+            for file in &manifest.files {
+                let path = models
+                    .path()
+                    .join(crate::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(file.size_bytes)
+                    .unwrap();
+                placed.push(path);
+            }
+            gate().unwrap_or_else(|error| {
+                panic!("{name}: an installed model moves no bytes: {error}")
+            });
+
+            // One gated file missing again: that file would be fetched.
+            let gated = manifest
+                .files
+                .iter()
+                .position(|file| {
+                    crate::license_acceptance::licenses_for_manifest_file(
+                        &manifest.name,
+                        &file.hf_filename,
+                    )
+                    .next()
+                    .is_some()
+                })
+                .unwrap();
+            std::fs::remove_file(&placed[gated]).unwrap();
+            assert!(
+                gate().is_err(),
+                "{name}: a missing gated file still needs consent"
+            );
+        }
+    }
+
     #[test]
     fn unrestricted_manifests_are_never_license_gated() {
         for name in ["flux2-klein:q8", "controlnet-canny-sd15:fp16"] {
             let manifest = crate::manifest::find_manifest(name).unwrap();
             // Not even an unresolvable data root gates an unrestricted model.
-            require_manifest_licenses_accepted_in(manifest, None).unwrap_or_else(|error| {
-                panic!("{name} must not be license gated: {error}");
-            });
+            let models = tempfile::tempdir().unwrap();
+            require_manifest_licenses_accepted_in(manifest, None, models.path()).unwrap_or_else(
+                |error| {
+                    panic!("{name} must not be license gated: {error}");
+                },
+            );
         }
     }
 
@@ -3867,6 +3999,69 @@ mod tests {
             required_download_bytes_in(&manifest, temp.path(), false).unwrap(),
             0
         );
+    }
+
+    /// A turbo tag's files live in its base tier's directory, so its pull
+    /// marker does too: pulling `qwen-image-2.1-turbo:q8` (or an H3 Turbo
+    /// tag) must never create `qwen-image-2.1-turbo-q8/`, which nothing is
+    /// ever stored in. The marker is still the turbo tag's own, so the base
+    /// tier never reads as mid-pull, and an ordinary model keeps
+    /// `<name>/.pulling`.
+    #[test]
+    fn a_turbo_tags_pull_marker_follows_its_storage_route() {
+        let turbo = crate::manifest::find_manifest("qwen-image-2.1-turbo:q8").unwrap();
+        let transformer_dir = turbo
+            .files
+            .iter()
+            .map(|file| crate::manifest::storage_path(turbo, file))
+            .find(|path| !path.starts_with("shared"))
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .expect("the turbo tag stores a model-specific file");
+        assert_eq!(transformer_dir, PathBuf::from("qwen-image-2.1-q8"));
+        assert_eq!(
+            pulling_marker_rel_path("qwen-image-2.1-turbo:q8"),
+            PathBuf::from("qwen-image-2.1-q8").join(".pulling-qwen-image-2.1-turbo-q8")
+        );
+        assert_ne!(
+            pulling_marker_rel_path("qwen-image-2.1-turbo:q8"),
+            pulling_marker_rel_path("qwen-image-2.1:q8"),
+            "the base tier never reads as mid-pull because a turbo tag is"
+        );
+        assert_eq!(
+            pulling_marker_rel_path("qwen-image-2.1:q8"),
+            PathBuf::from("qwen-image-2.1-q8").join(".pulling")
+        );
+
+        // Every H3 Turbo tag likewise lands in its base checkpoint's dir.
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.family == crate::minimax_h3::FAMILY)
+        {
+            let marker = pulling_marker_rel_path(&manifest.name);
+            let dir = marker.parent().unwrap().to_string_lossy().into_owned();
+            assert_eq!(
+                dir,
+                crate::manifest::storage_directory_name(manifest),
+                "{}",
+                manifest.name
+            );
+        }
+
+        // Removing a marker drops the directory it leaves empty, never one
+        // that still holds a file.
+        let temp = tempfile::tempdir().unwrap();
+        let marker = pulling_marker_path_in(temp.path(), "clip-l");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "clip-l").unwrap();
+        remove_pulling_marker_in(temp.path(), "clip-l");
+        assert!(!marker.parent().unwrap().exists());
+        let marker = pulling_marker_path_in(temp.path(), "qwen-image-2.1-turbo:q8");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "turbo").unwrap();
+        std::fs::write(marker.parent().unwrap().join("weights.safetensors"), "w").unwrap();
+        remove_pulling_marker_in(temp.path(), "qwen-image-2.1-turbo:q8");
+        assert!(!marker.exists());
+        assert!(marker.parent().unwrap().exists());
     }
 
     #[test]

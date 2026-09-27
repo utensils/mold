@@ -438,11 +438,12 @@ pub enum ReferenceSourceRelation {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum ReferenceCanvasRule {
-    /// Take the LAST reference's aspect ratio at the recipe's default pixel
-    /// area and alignment: `validation::fit_to_target_area(last_w, last_h,
-    /// default_w * default_h, alignment)`. Qwen Image 2.1's
+    /// Take the LAST reference's aspect ratio at upstream's fixed 1024x1024
+    /// area (`validation::LAST_REFERENCE_CANVAS_AREA`) on the recipe's grid,
+    /// clamped into the recipe's `resolution` bounds:
+    /// `validation::last_reference_canvas`. Qwen Image 2.1's
     /// `calculate_dimensions` sizes the output from the last condition image
-    /// (diffusers `pipeline_qwenimage21.py`).
+    /// (diffusers `pipeline_qwenimage21.py:621-623`); the clamp is mold's.
     LastReference,
 }
 
@@ -1433,21 +1434,56 @@ pub fn validate_request_against_generation_profile(
     profile: &GenerationProfileSet,
     request: &crate::GenerateRequest,
 ) -> Result<(), String> {
-    let recipe = if let Some(pipeline) = request.pipeline {
+    validate_request_against_recipe(recipe_for_request(profile, request)?, request)
+}
+
+/// The recipe a request selects: its `pipeline`'s, else the default.
+pub fn recipe_for_request<'a>(
+    profile: &'a GenerationProfileSet,
+    request: &crate::GenerateRequest,
+) -> Result<&'a GenerationRecipeProfile, String> {
+    if let Some(pipeline) = request.pipeline {
         profile
             .recipes
             .iter()
             .find(|recipe| recipe.request_selector.pipeline == Some(pipeline))
-            .ok_or_else(|| format!("pipeline '{}' is not available for this model", pipeline))?
+            .ok_or_else(|| format!("pipeline '{}' is not available for this model", pipeline))
     } else {
         profile.default_recipe().ok_or_else(|| {
             format!(
                 "generation profile '{}' has no default recipe",
                 profile.profile_id
             )
-        })?
-    };
-    validate_request_against_recipe(recipe, request)
+        })
+    }
+}
+
+/// The advisory for a non-empty `negative_prompt` sent to a recipe that
+/// hides the control (`capabilities.negative_prompt.mode == Hidden`): the
+/// guidance-distilled and fixed-schedule tiers — Qwen Image 2.1 turbo, FLUX
+/// schnell, the Wan DMD ladder, MiniMax H3 — never run an unconditional
+/// branch, so the text conditions nothing.
+///
+/// A WARNING, never a refusal: older clients and saved drafts send the field
+/// regardless of the recipe, and refusing them would break prints that render
+/// exactly as intended. An empty string is the explicit opt-out and says
+/// nothing. Ask it on the CALLER's request, before any server-side default is
+/// materialized into it.
+pub fn negative_prompt_ignored_warning(
+    profile: &GenerationProfileSet,
+    request: &crate::GenerateRequest,
+) -> Option<String> {
+    let negative = request.negative_prompt.as_deref()?.trim();
+    if negative.is_empty() {
+        return None;
+    }
+    let recipe = recipe_for_request(profile, request).ok()?;
+    (recipe.capabilities.negative_prompt.mode == ControlMode::Hidden).then(|| {
+        format!(
+            "negative prompt ignored by this recipe: '{}' does not read a negative prompt",
+            request.model
+        )
+    })
 }
 
 pub fn validate_request_against_recipe(
@@ -3521,6 +3557,63 @@ mod tests {
         assert!(crate::validation::validate_generate_request(&req).is_err());
         assert_eq!(recipe.provenance.len(), 2);
         assert_eq!(recipe.provenance[1].kind, ProvenanceKind::MoldPolicy);
+    }
+
+    /// A recipe that hides the negative prompt warns, never refuses, when a
+    /// caller sends one anyway; a recipe that reads it and the empty-string
+    /// opt-out say nothing. Every Hidden-negative recipe answers the same.
+    #[test]
+    fn a_hidden_negative_prompt_is_an_advisory_not_a_refusal() {
+        let mut request: crate::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lantern",
+            "model": "qwen-image-2.1-turbo:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 6,
+            "guidance": 1.0,
+        }))
+        .unwrap();
+        request.negative_prompt = Some("blurry".to_string());
+        let profile_for = |name: &str| {
+            generation_profile_for_manifest(crate::manifest::find_manifest(name).unwrap())
+        };
+        let turbo = profile_for("qwen-image-2.1-turbo:q8");
+        let warning = negative_prompt_ignored_warning(&turbo, &request).unwrap();
+        assert!(
+            warning.starts_with("negative prompt ignored by this recipe"),
+            "{warning}"
+        );
+        assert!(validate_request_against_generation_profile(&turbo, &request).is_ok());
+
+        request.model = "qwen-image-2.1:q8".to_string();
+        assert_eq!(
+            negative_prompt_ignored_warning(&profile_for("qwen-image-2.1:q8"), &request),
+            None
+        );
+
+        request.model = "qwen-image-2.1-turbo:q8".to_string();
+        request.negative_prompt = Some("  ".to_string());
+        assert_eq!(negative_prompt_ignored_warning(&turbo, &request), None);
+        request.negative_prompt = None;
+        assert_eq!(negative_prompt_ignored_warning(&turbo, &request), None);
+
+        // The same rule for every recipe that hides the control.
+        request.negative_prompt = Some("blurry".to_string());
+        for manifest in crate::manifest::visible_manifests() {
+            let profile = generation_profile_for_manifest(manifest);
+            let Some(recipe) = profile.default_recipe() else {
+                continue;
+            };
+            request.model = manifest.name.clone();
+            request.pipeline = None;
+            let hidden = recipe.capabilities.negative_prompt.mode == ControlMode::Hidden;
+            assert_eq!(
+                negative_prompt_ignored_warning(&profile, &request).is_some(),
+                hidden,
+                "{}",
+                manifest.name
+            );
+        }
     }
 
     /// A turbo tag pins the distill's recipe — steps, guidance, no negative
