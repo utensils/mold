@@ -8,18 +8,36 @@
 //! lives in [`SegmentDispatch::attend_segment`]; that single function is the
 //! seam a fused or flash implementation plugs into, and the math arms below
 //! are the definition any such implementation must reproduce.
+//!
+//! Three backends, chosen by [`TargetAttention`] from the resolved
+//! [`super::exec_path::Qwen21ExecPath`]:
+//!
+//! - `Legacy` — v0.32: every segment through `attention::attention_with_bias`
+//!   (image-policy math, scale on the scores). The byte-identity reference.
+//! - `MetalSdpa` — Metal's fused SDPA for unbiased `Full` segments; the rest
+//!   is `Legacy`. Metal's shipped path, unchanged.
+//! - `FastStill` — FlashAttention wherever the kernel is compiled in and the
+//!   tensors are eligible (CUDA BF16/F16): a `CausalBottomRight` text segment
+//!   is `flash_attn_windowed(.., None, Some(0))`, whose causal mask is
+//!   bottom-right aligned exactly like the segment's; an unpadded `Full`
+//!   segment is plain `flash_attn`; a padded `Full` segment (batched CFG with
+//!   prompts of different lengths) packs each row's valid keys into ONE
+//!   `flash_attn_varlen` call. A padded causal segment — only a batched
+//!   prefill's text rows, run once per request — keeps the biased math path
+//!   under the FastStill scale placement, as does every ineligible tensor.
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 
+use super::exec_path::TargetAttention;
 use super::layout::{AttentionSegment, BlockCausalPlan, SegmentMask};
+use crate::attention::AttentionPolicy;
 
 /// Per-attention-module dispatch configuration.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SegmentDispatch {
-    /// Metal's fused SDPA for unbiased `Full` segments. Resolved once from
-    /// `MOLD_ATTN` at construction (`metal_fast_path_enabled`).
-    pub fused_target: bool,
+    /// The backend family, from the resolved execution path.
+    pub attention: TargetAttention,
     pub head_dim: usize,
 }
 
@@ -75,6 +93,9 @@ impl SegmentDispatch {
                 v.narrow(2, 0, segment.kv_len)?.contiguous()?,
             )
         };
+        if self.attention == TargetAttention::FastStill {
+            return self.fast_still_segment(&q_seg, &k_seg, &v_seg, segment, plan);
+        }
         let batch = q.dim(0)?;
         match segment.mask {
             SegmentMask::CausalBottomRight => {
@@ -109,11 +130,77 @@ impl SegmentDispatch {
         }
     }
 
+    /// The `FastStill` arm of [`Self::attend_segment`], on already-sliced
+    /// segment tensors.
+    fn fast_still_segment(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        segment: &AttentionSegment,
+        plan: &BlockCausalPlan,
+    ) -> Result<Tensor> {
+        const POLICY: AttentionPolicy = AttentionPolicy::FastStill;
+        let scale = self.scale();
+        let padding = plan.key_valid_prefix(segment.kv_len);
+        let flash = crate::attention::takes_flash(POLICY, q);
+        match (segment.mask, padding) {
+            (SegmentMask::CausalBottomRight, None) if flash => {
+                Ok(crate::attention::flash_causal_bottom_right(q, k, v, scale)?)
+            }
+            (SegmentMask::Full, None) => Ok(crate::attention::attention_with_bias_for(
+                POLICY, q, k, v, scale, None,
+            )?),
+            (SegmentMask::Full, Some(rows)) if flash => {
+                let key_index: Vec<Vec<u32>> = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .enumerate()
+                            .filter_map(|(index, valid)| valid.then_some(index as u32))
+                            .collect()
+                    })
+                    .collect();
+                Ok(crate::attention::flash_varlen_keys(
+                    q, k, v, &key_index, scale,
+                )?)
+            }
+            (SegmentMask::Full, Some(rows)) => {
+                let bias = key_padding_bias(&rows, q.dtype(), q.device())?;
+                Ok(crate::attention::attention_with_bias_for(
+                    POLICY,
+                    q,
+                    k,
+                    v,
+                    scale,
+                    Some(&bias),
+                )?)
+            }
+            (SegmentMask::CausalBottomRight, padding) => {
+                let bias = causal_bottom_right_bias(
+                    segment,
+                    padding.as_deref(),
+                    q.dim(0)?,
+                    q.dtype(),
+                    q.device(),
+                )?;
+                Ok(crate::attention::attention_with_bias_for(
+                    POLICY,
+                    q,
+                    k,
+                    v,
+                    scale,
+                    Some(&bias),
+                )?)
+            }
+        }
+    }
+
     /// An unmasked image block. Metal's fused SDPA handles the head widths it
     /// supports; everything else is the shared chunked math attention.
     pub(crate) fn full_unbiased(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
         let scale = self.scale();
-        if self.fused_target
+        if self.attention == TargetAttention::MetalSdpa
             && q.device().is_metal()
             && matches!(self.head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256)
         {
@@ -208,35 +295,39 @@ mod tests {
             let q = crate::engine::seeded_randn(7, &[2, 2, n, 8], &device, DType::F32).unwrap();
             let k = crate::engine::seeded_randn(8, &[2, 2, n, 8], &device, DType::F32).unwrap();
             let v = crate::engine::seeded_randn(9, &[2, 2, n, 8], &device, DType::F32).unwrap();
-            let dispatch = SegmentDispatch {
-                fused_target: false,
-                head_dim: 8,
-            };
-            let dense = crate::attention::attention_with_bias(
-                &q,
-                &k,
-                &v,
-                dispatch.scale(),
-                Some(&layout.dense_bias(2, &device).unwrap()),
-            )
-            .unwrap();
-            let planned = dispatch
-                .attend(&q, &k, &v, &layout.attention_plan(false))
+            // Every backend family: on CPU `FastStill` is its math fallback
+            // (scale folded into K), which must describe the same attention.
+            for attention in [TargetAttention::Legacy, TargetAttention::FastStill] {
+                let dispatch = SegmentDispatch {
+                    attention,
+                    head_dim: 8,
+                };
+                let dense = crate::attention::attention_with_bias(
+                    &q,
+                    &k,
+                    &v,
+                    dispatch.scale(),
+                    Some(&layout.dense_bias(2, &device).unwrap()),
+                )
                 .unwrap();
-            assert!(max_error(&planned, &dense) < 1e-5);
+                let planned = dispatch
+                    .attend(&q, &k, &v, &layout.attention_plan(false))
+                    .unwrap();
+                assert!(max_error(&planned, &dense) < 1e-5, "{attention:?}");
 
-            // A cached step queries the target rows against every key.
-            let prefix = layout.prefix_len();
-            let target_q = q
-                .narrow(2, prefix, n - prefix)
-                .unwrap()
-                .contiguous()
-                .unwrap();
-            let cached = dispatch
-                .attend(&target_q, &k, &v, &layout.attention_plan(true))
-                .unwrap();
-            let dense_target = dense.narrow(2, prefix, n - prefix).unwrap();
-            assert!(max_error(&cached, &dense_target) < 1e-5);
+                // A cached step queries the target rows against every key.
+                let prefix = layout.prefix_len();
+                let target_q = q
+                    .narrow(2, prefix, n - prefix)
+                    .unwrap()
+                    .contiguous()
+                    .unwrap();
+                let cached = dispatch
+                    .attend(&target_q, &k, &v, &layout.attention_plan(true))
+                    .unwrap();
+                let dense_target = dense.narrow(2, prefix, n - prefix).unwrap();
+                assert!(max_error(&cached, &dense_target) < 1e-5, "{attention:?}");
+            }
         }
     }
 
@@ -269,5 +360,78 @@ mod tests {
                 vec![true, false, true, true, true]
             ]
         );
+    }
+
+    /// The CUDA FastStill arms against the v0.32 math prefill, on a layout
+    /// with every segment kind (a causal text run split by a condition
+    /// image, the condition block, the target), uncached and cached, with
+    /// and without padded keys. Flash accumulates in F32 over BF16 inputs,
+    /// so it matches a math reference evaluated in F32 on the same BF16
+    /// values to BF16 rounding, and it must actually be the flash kernels
+    /// that ran. Skips without a CUDA device (CI has none).
+    #[cfg(feature = "flash-attn")]
+    #[test]
+    fn fast_still_flash_segments_match_the_math_prefill_on_cuda() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let slots = [
+            false, false, false, false, true, true, false, false, false, false,
+        ];
+        for valid in [
+            vec![vec![true; 10], vec![true; 10]],
+            vec![
+                vec![true, true, true, true, true, true, true, true, true, false],
+                vec![
+                    true, true, true, true, true, true, true, false, false, false,
+                ],
+            ],
+        ] {
+            let layout =
+                QwenImage21JointLayout::build(&slots, &valid, &[(2, 4)], (12, 16)).unwrap();
+            let n = layout.total_len();
+            let (heads, d) = (4, 128);
+            let bf16 = |seed| {
+                crate::engine::seeded_randn(seed, &[2, heads, n, d], &device, DType::BF16).unwrap()
+            };
+            let (q, k, v) = (bf16(31), bf16(32), bf16(33));
+            let f32 = |t: &Tensor| t.to_dtype(DType::F32).unwrap();
+            assert!(crate::attention::takes_flash(
+                crate::attention::AttentionPolicy::FastStill,
+                &q
+            ));
+            let legacy = SegmentDispatch {
+                attention: TargetAttention::Legacy,
+                head_dim: d,
+            };
+            let fast = SegmentDispatch {
+                attention: TargetAttention::FastStill,
+                head_dim: d,
+            };
+            for cached in [false, true] {
+                let plan = layout.attention_plan(cached);
+                let queries = if cached {
+                    let prefix = layout.prefix_len();
+                    q.narrow(2, prefix, n - prefix)
+                        .unwrap()
+                        .contiguous()
+                        .unwrap()
+                } else {
+                    q.clone()
+                };
+                let reference = legacy
+                    .attend(&f32(&queries), &f32(&k), &f32(&v), &plan)
+                    .unwrap();
+                let actual = fast.attend(&queries, &k, &v, &plan).unwrap();
+                assert_eq!(actual.dims(), reference.dims());
+                assert_eq!(actual.dtype(), DType::BF16);
+                let error = max_error(&f32(&actual), &reference);
+                assert!(
+                    error < 2e-2,
+                    "cached={cached} padded={}: {error}",
+                    valid[1].iter().any(|valid| !valid)
+                );
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@ pub mod gguf_mmap;
 pub mod ltx_video;
 pub mod metal_reduce;
 pub mod minimax_h3;
+pub mod qk_norm_rope;
 pub mod quantized;
 pub mod quantized_nn;
 pub mod qwen3_vl;

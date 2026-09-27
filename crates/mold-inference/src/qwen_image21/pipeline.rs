@@ -30,7 +30,7 @@ use super::reference::{
     encode_prompt_with_images, encode_vision, load_vision_tower, prepare_reference,
     PreparedReference, VisionFeatures,
 };
-use super::scheduler::{scheduler_for, transformer_timestep, ScheduleKind};
+use super::scheduler::{scheduler_for, step_timestep, ScheduleKind};
 use super::transformer::QwenImage21Transformer;
 use super::vae::QwenImage21Vae;
 use super::vae_encoder::QwenImage21VaeEncoder;
@@ -82,13 +82,6 @@ pub struct QwenImage21Engine {
     injected_latents: Option<Tensor>,
 }
 
-/// Whether the denoise loop rounds the transformer timestep through the
-/// working dtype as upstream does. It moves pixels (BF16: 900 -> 0.8984375),
-/// so it belongs to the execution path: `Qwen21ExecPath::legacy()` and Metal
-/// keep v0.32's unrounded value. Until the exec path supplies it, every render
-/// keeps v0.32's behaviour.
-const ROUND_TIMESTEP_TO_DTYPE: bool = false;
-
 /// The condition blocks of a reference-conditioned request: each
 /// reference's latent grid and their packed, normalized latents
 /// `[1, Σ h·w, 64]` in reference order, shared by both CFG branches.
@@ -102,25 +95,8 @@ pub(crate) struct DenoiseStart {
     pub(crate) seed: u64,
     /// Upstream's `latents=` (parity tests), else seeded noise.
     pub(crate) initial_latents: Option<Tensor>,
-    pub(crate) round_timestep_to_dtype: bool,
     /// Condition-image blocks; `None` is text-to-image.
     pub(crate) condition: Option<ConditionBlocks>,
-}
-
-/// The normalized timestep the transformer receives. Unrounded is v0.32's
-/// `scheduler_timestep / 1000` in f64; rounded is upstream's
-/// `t.to(latents.dtype) / 1000` ([`transformer_timestep`]).
-pub(crate) fn step_timestep(
-    scheduler_timestep: f64,
-    sigma: f64,
-    dtype: DType,
-    round_to_dtype: bool,
-) -> f64 {
-    if round_to_dtype {
-        transformer_timestep(sigma, dtype)
-    } else {
-        scheduler_timestep / 1000.0
-    }
 }
 
 /// The positive prompt the encoder reads: the model card's RGBA recipe
@@ -356,6 +332,7 @@ impl QwenImage21Engine {
             _ => 0,
         };
         let (denoise_workspace_bytes, decode_peak_bytes) = residency::render_workspace_bytes(
+            residency::transformer_format(paths),
             req.width,
             req.height,
             1,
@@ -365,6 +342,7 @@ impl QwenImage21Engine {
         // the planner adds exactly the same bytes.
         let denoise_workspace_bytes = denoise_workspace_bytes.saturating_add(
             crate::device::qwen_image21_reference_extra_bytes(
+                residency::transformer_format(paths),
                 req.width,
                 req.height,
                 1,
@@ -754,7 +732,6 @@ impl QwenImage21Engine {
         let DenoiseStart {
             seed,
             initial_latents,
-            round_timestep_to_dtype,
             condition,
         } = start;
         let latent_height = req.height as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
@@ -790,6 +767,7 @@ impl QwenImage21Engine {
             }
         };
 
+        let exec_path = transformer.exec_path();
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
@@ -842,12 +820,10 @@ impl QwenImage21Engine {
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
-            let timestep = step_timestep(
-                scheduler.current_timestep(),
-                scheduler.current_sigma(),
-                dtype,
-                round_timestep_to_dtype,
-            );
+            // The diffusion transformer takes normalized `[0, 1]` time. The
+            // fast path rounds it through the working dtype exactly as
+            // upstream divides it; the v0.32 path keeps its f64 value.
+            let timestep = step_timestep(&scheduler, dtype, exec_path.round_timestep_to_dtype);
             let conditional_prediction = prepared[0].forward(&latents, timestep)?;
             let prediction = if let Some(negative) = prepared.get_mut(1) {
                 progress.checkpoint()?;
@@ -1047,7 +1023,6 @@ impl QwenImage21Engine {
             DenoiseStart {
                 seed,
                 initial_latents,
-                round_timestep_to_dtype: ROUND_TIMESTEP_TO_DTYPE,
                 condition,
             },
         )?;
@@ -1170,7 +1145,6 @@ impl QwenImage21Engine {
             DenoiseStart {
                 seed,
                 initial_latents,
-                round_timestep_to_dtype: ROUND_TIMESTEP_TO_DTYPE,
                 condition,
             },
         )?;
@@ -1401,10 +1375,16 @@ mod tests {
     }
 
     #[test]
-    fn timestep_rounding_is_opt_in_and_default_keeps_v032() {
-        const { assert!(!ROUND_TIMESTEP_TO_DTYPE) };
-        assert_eq!(step_timestep(900.0, 0.9, DType::BF16, false), 0.9);
-        assert_eq!(step_timestep(900.0, 0.9, DType::BF16, true), 0.8984375);
+    fn timestep_rounding_belongs_to_the_exec_path() {
+        use crate::qwen_image21::exec_path::Qwen21ExecPath;
+        // v0.32 (legacy, Metal, CPU) keeps the unrounded value; only the
+        // CUDA fast path rounds through the working dtype (BF16: 900 -> 0.8984375).
+        assert!(!Qwen21ExecPath::legacy().round_timestep_to_dtype);
+        assert!(Qwen21ExecPath::cuda_fast().round_timestep_to_dtype);
+        assert_eq!(
+            super::super::scheduler::transformer_timestep(0.9, DType::BF16),
+            0.8984375
+        );
     }
 
     #[test]

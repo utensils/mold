@@ -936,7 +936,10 @@ pub fn activation_bytes(
         // when CFG is active, so this factor covers per-batch overhead.
         ActivationFamily::SdxlUnet => 173.0,
         // Qwen-Image dit: similar dual-stream structure to SDXL.
-        ActivationFamily::QwenImageDit | ActivationFamily::QwenImage21Dit => 173.0,
+        ActivationFamily::QwenImageDit => 173.0,
+        // Qwen Image 2.1 is priced per joint token instead (below); this
+        // factor is never read for it.
+        ActivationFamily::QwenImage21Dit => 173.0,
         // Wuerstchen v2: cascade Stage B has a chunky conv stack — ~67%
         // above FLUX.
         ActivationFamily::Wuerstchen => 217.0,
@@ -963,16 +966,110 @@ pub fn activation_bytes(
         // until a bespoke wan admission model lands with the 14B tier.
         ActivationFamily::WanVideo => 130.0,
     };
+    if family == ActivationFamily::QwenImage21Dit {
+        // Canvas-only callers know no prompt, so the joint sequence carries
+        // the legacy retained-prefix length, and the retained K/V of both
+        // CFG branches is charged on top exactly as before.
+        let joint = area / QWEN_IMAGE21_PIXELS_PER_TOKEN
+            + crate::qwen_image21::LEGACY_PREFIX_CACHE_TOKENS as u64;
+        return qwen_image21_activation_bytes(
+            joint,
+            batch,
+            dtype_bytes,
+            crate::attention::AttentionBackend::resolve_effective_for(
+                crate::attention::AttentionPolicy::FastStill,
+            ),
+        )
+        .saturating_add(crate::qwen_image21::prefix_cache_budget_bytes(batch));
+    }
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
-    /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
-    /// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
-    const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
-    let prefix_cache = if family == ActivationFamily::QwenImage21Dit {
-        crate::qwen_image21::prefix_cache_budget_bytes(batch)
-    } else {
-        0
+    raw.max(ACTIVATION_FLOOR_BYTES)
+}
+
+/// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
+/// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
+const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
+
+/// One Qwen Image 2.1 latent token is a 16x16 pixel cell.
+const QWEN_IMAGE21_PIXELS_PER_TOKEN: u64 = 256;
+
+/// Qwen Image 2.1 denoise workspace per joint token (text prefix, condition
+/// images and target together) in BF16, above the resident weights, with no
+/// score matrix: the 12,288-wide SwiGLU intermediates, Q/K/V and the F32
+/// LayerNorm and RoPE copies of one block. Fitted to the peak increments the
+/// CUDA harness sampled on an L40S under FlashAttention (0.91 GB at 1024²,
+/// 0.94 GB at 1344x768 with CFG, 3.52 GB at 2048², 3.56 GB at 2752x1536;
+/// `docs/qualification/qwen-image-2.1-cuda-performance.md`).
+const QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN: u64 = 235_000;
+
+/// Query rows per chunk of the CUDA math attention
+/// (`attention::cuda_query_chunk_rows` for these sequence lengths).
+const QWEN_IMAGE21_ATTENTION_QUERY_CHUNK: u64 = 512;
+
+/// Peak denoise workspace of a Qwen Image 2.1 forward over `joint_tokens`
+/// (prefix + target) for `batch` rows in one forward, at `dtype_bytes` per
+/// element, under the attention backend that will actually run
+/// ([`AttentionBackend::resolve_effective_for`]). Math attention adds one
+/// query chunk's score tile over every key; FlashAttention materializes none.
+/// The retained prefix cache is NOT included — callers add
+/// `qwen_image21::prefix_cache_bytes` for the prefix they retain.
+pub fn qwen_image21_activation_bytes(
+    joint_tokens: u64,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    use crate::attention::AttentionBackend;
+    let batch = u64::from(batch.max(1));
+    let dtype = u64::from(dtype_bytes.max(1));
+    let tokens = QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN
+        .saturating_mul(joint_tokens)
+        .saturating_mul(dtype)
+        / 2;
+    let score_tile = match backend {
+        AttentionBackend::Flash => 0,
+        AttentionBackend::Math => {
+            let heads = crate::qwen_image21::transformer::QwenImage21TransformerConfig::official()
+                .num_attention_heads as u64;
+            QWEN_IMAGE21_ATTENTION_QUERY_CHUNK
+                .min(joint_tokens)
+                .saturating_mul(heads)
+                .saturating_mul(joint_tokens)
+                .saturating_mul(dtype)
+        }
     };
-    raw.max(ACTIVATION_FLOOR_BYTES).saturating_add(prefix_cache)
+    tokens
+        .saturating_add(score_tile)
+        .saturating_mul(batch)
+        .max(ACTIVATION_FLOOR_BYTES)
+}
+
+/// Extra denoise workspace per joint token of the `int8-conv` tier's W8A8
+/// linears (the I8-quantized activation and the I32 accumulator of the
+/// 12,288-wide MLP projections) over the BF16 GEMMs
+/// [`QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN`] was fitted to. Fitted to the
+/// fast-path peaks the CUDA harness sampled on an L40S: int8-conv exceeded
+/// bf16 by 0.44 GB at 1024² and 2.18 GB at 2048² and 2752x1536.
+const QWEN_IMAGE21_INT8_LINEAR_BYTES_PER_TOKEN: u64 = 95_000;
+
+/// Tier-specific denoise workspace of a Qwen Image 2.1 transformer, on top of
+/// [`qwen_image21_activation_bytes`]. Only the `int8-conv` tier's activation
+/// quantization scales with the sequence; the GGUF dequant and FP8 widen arms
+/// hold one widened weight at a time (at most 12,288x4,096 BF16, ~100 MB),
+/// which the retained-prefix budget beside this estimate already covers.
+/// `None` (an unreadable header) charges nothing extra, like BF16.
+pub fn qwen_image21_linear_workspace_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    joint_tokens: u64,
+    batch: u32,
+) -> u64 {
+    use crate::artifact_format::QwenImage21TransformerFormat as Format;
+    match format {
+        Some(Format::ComfyInt8ConvRot) => QWEN_IMAGE21_INT8_LINEAR_BYTES_PER_TOKEN
+            .saturating_mul(joint_tokens)
+            .saturating_mul(u64::from(batch.max(1))),
+        _ => 0,
+    }
 }
 
 /// The token shape of one Qwen Image 2.1 request: what its joint sequence,
@@ -1153,7 +1250,14 @@ pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_by
 /// VAE encoder an eager engine then keeps resident, and their working set).
 /// Zero without references, so a text-to-image plan does not move. The engine
 /// (`settle_text_encoder_residency`) and the planner both add exactly this.
+///
+/// `format` is the transformer tier: the `int8-conv` tier's W8A8 workspace
+/// ([`qwen_image21_linear_workspace_bytes`]) scales with every joint token,
+/// and the text-to-image denoise term already charges it for the text and
+/// target rows, so this adds exactly the CONDITION rows — one estimate over
+/// the whole joint sequence, never the text rows twice.
 pub fn qwen_image21_reference_extra_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
     width: u32,
     height: u32,
     batch: u32,
@@ -1174,6 +1278,11 @@ pub fn qwen_image21_reference_extra_bytes(
     );
     qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes)
         .saturating_sub(base)
+        .saturating_add(qwen_image21_linear_workspace_bytes(
+            format,
+            shape.condition_tokens as u64,
+            batch,
+        ))
         .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
 }
 
@@ -7150,12 +7259,16 @@ mod tests {
     #[cfg(not(feature = "metal"))]
     #[test]
     fn vram_load_delta_is_saturating_sub() {
-        // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0
-        // for any N. This locks in the saturating semantic — a flaky reading
-        // (post < pre) must never panic or wrap.
-        assert_eq!(vram_load_delta(0, 0), 0);
-        assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
+        // A baseline above any possible reading saturates to zero on every
+        // build: a flaky reading (post < pre) must never panic or wrap.
         assert_eq!(vram_load_delta(0, u64::MAX), 0);
+        // Without CUDA, vram_in_use_bytes(0) == 0, so every baseline gives 0.
+        // A CUDA build run on a machine with a visible GPU reads real usage,
+        // so only the saturating half is portable there.
+        if !cfg!(feature = "cuda") {
+            assert_eq!(vram_load_delta(0, 0), 0);
+            assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
+        }
     }
 
     // --- estimate_peak_memory: single-file convention must not double-count ---
@@ -7942,6 +8055,163 @@ mod tests {
 }
 
 #[cfg(test)]
+mod qwen_image21_activation_tests {
+    use super::qwen_image21_activation_bytes;
+    use crate::attention::AttentionBackend;
+
+    /// Peak denoise increments above the resident transformer sampled by
+    /// `official_cuda_mode_benchmark` on an L40S (BF16, one row per forward,
+    /// prefix cached): `(joint tokens, backend, measured)`. The estimate must
+    /// cover each; FlashAttention within 15%, math (whose score tile partly
+    /// reuses freed MLP buffers) within 25%.
+    const MEASURED: [(u64, AttentionBackend, u64); 8] = [
+        (4096 + 81, AttentionBackend::Flash, 905_969_664),
+        (4032 + 33, AttentionBackend::Flash, 939_524_096),
+        (16384 + 81, AttentionBackend::Flash, 3_523_215_360),
+        (16512 + 81, AttentionBackend::Flash, 3_556_769_792),
+        (4096 + 81, AttentionBackend::Math, 905_969_664),
+        (4032 + 33, AttentionBackend::Math, 939_524_096),
+        (16384 + 81, AttentionBackend::Math, 3_690_987_520),
+        (16512 + 81, AttentionBackend::Math, 3_657_433_088),
+    ];
+
+    #[test]
+    fn the_token_estimate_covers_every_measured_denoise() {
+        for (tokens, backend, measured) in MEASURED {
+            let estimate = qwen_image21_activation_bytes(tokens, 1, 2, backend);
+            assert!(
+                estimate >= measured,
+                "{tokens} {backend:?}: {estimate} < {measured}"
+            );
+            let slack = match backend {
+                AttentionBackend::Flash => 1.15,
+                AttentionBackend::Math => 1.25,
+            };
+            assert!(
+                estimate as f64 <= measured as f64 * slack,
+                "{tokens} {backend:?}: {estimate} is loose against {measured}"
+            );
+        }
+    }
+
+    /// A reference-conditioned `int8-conv` render charges the W8A8 workspace
+    /// for its condition rows on top of what the text-to-image term already
+    /// charged for the text and target rows: one estimate over the whole
+    /// joint sequence. BF16 and text-to-image requests are unchanged.
+    #[test]
+    fn the_int8_workspace_composes_with_the_reference_sequence() {
+        use super::{
+            qwen_image21_linear_workspace_bytes, qwen_image21_reference_extra_bytes,
+            QwenImage21SequenceShape,
+        };
+        use crate::artifact_format::QwenImage21TransformerFormat as Format;
+        let refs = [(1536, 1024), (1024, 1024)];
+        let bf16 =
+            qwen_image21_reference_extra_bytes(Some(Format::Bf16), 1024, 1024, 1, 2, &refs, 2);
+        assert_eq!(
+            bf16,
+            qwen_image21_reference_extra_bytes(None, 1024, 1024, 1, 2, &refs, 2)
+        );
+        let int8 = qwen_image21_reference_extra_bytes(
+            Some(Format::ComfyInt8ConvRot),
+            1024,
+            1024,
+            1,
+            2,
+            &refs,
+            2,
+        );
+        let shape = QwenImage21SequenceShape::for_request(1024, 1024, &refs);
+        let text_to_image = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
+        let condition = qwen_image21_linear_workspace_bytes(
+            Some(Format::ComfyInt8ConvRot),
+            shape.condition_tokens as u64,
+            1,
+        );
+        assert!(condition > 0);
+        assert_eq!(int8, bf16 + condition);
+        // Text-to-image term + reference term = the whole joint sequence.
+        assert_eq!(
+            qwen_image21_linear_workspace_bytes(
+                Some(Format::ComfyInt8ConvRot),
+                text_to_image.joint_tokens() as u64,
+                1
+            ) + condition,
+            qwen_image21_linear_workspace_bytes(
+                Some(Format::ComfyInt8ConvRot),
+                shape.joint_tokens() as u64,
+                1
+            )
+        );
+        assert_eq!(
+            qwen_image21_reference_extra_bytes(
+                Some(Format::ComfyInt8ConvRot),
+                1024,
+                1024,
+                1,
+                2,
+                &[],
+                2
+            ),
+            0
+        );
+    }
+
+    /// The `int8-conv` tier's W8A8 linears quantize every activation to I8
+    /// and accumulate in I32 before rescaling, which BF16 GEMMs never
+    /// materialize. Measured on the L40S under the fast path (peak increment
+    /// above the resident transformer, bf16 then int8-conv at the same
+    /// canvas): 0.805 / 1.242 GB at 1024², 3.121 / 5.302 GB at 2048²,
+    /// 3.154 / 5.335 GB at 2752x1536. The BF16 estimate plus the tier's
+    /// linear workspace must cover every int8 measurement within 15%.
+    #[test]
+    fn the_int8_tier_workspace_covers_its_measured_denoise() {
+        use super::qwen_image21_linear_workspace_bytes;
+        use crate::artifact_format::QwenImage21TransformerFormat as Format;
+        for (tokens, measured) in [
+            (4096 + 81, 1_241_513_984u64),
+            (16384 + 81, 5_301_600_256),
+            (16512 + 81, 5_335_154_688),
+        ] {
+            let estimate = qwen_image21_activation_bytes(tokens, 1, 2, AttentionBackend::Flash)
+                + qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), tokens, 1);
+            assert!(estimate >= measured, "{tokens}: {estimate} < {measured}");
+            assert!(
+                estimate as f64 <= measured as f64 * 1.15,
+                "{tokens}: {estimate} is loose against {measured}"
+            );
+        }
+        for format in [None, Some(Format::Bf16)] {
+            assert_eq!(qwen_image21_linear_workspace_bytes(format, 16593, 1), 0);
+        }
+        assert_eq!(
+            qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), 16593, 2),
+            2 * qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), 16593, 1)
+        );
+    }
+
+    #[test]
+    fn batch_and_dtype_scale_and_flash_drops_the_score_tile() {
+        let one = qwen_image21_activation_bytes(16593, 1, 2, AttentionBackend::Flash);
+        assert_eq!(
+            qwen_image21_activation_bytes(16593, 2, 2, AttentionBackend::Flash),
+            2 * one
+        );
+        assert_eq!(
+            qwen_image21_activation_bytes(16593, 1, 4, AttentionBackend::Flash),
+            2 * one
+        );
+        let math = qwen_image21_activation_bytes(16593, 1, 2, AttentionBackend::Math);
+        assert_eq!(math - one, 512 * 32 * 16593 * 2);
+        // Condition images lengthen the joint sequence, and the price follows.
+        assert!(
+            qwen_image21_activation_bytes(4177 + 4 * 4096, 1, 2, AttentionBackend::Flash)
+                > 4 * qwen_image21_activation_bytes(4177, 1, 2, AttentionBackend::Flash)
+        );
+    }
+}
+
+#[cfg(test)]
 mod qwen_image21_vae_decode_peak_tests {
     use super::qwen_image21_vae_decode_peak_bytes;
     use crate::conv_policy::ConvBackend;
@@ -8239,18 +8509,34 @@ mod qwen_image21_sequence_sizing_tests {
                 >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2)
                     - qwen_image21_prefix_cache_bytes(one, 2, 2)
         );
-        // The L40S fit: denoise workspace for 3 and 10 references (recomputed
-        // prefix, BF16) covers the measured 2,865 and 7,985 MiB, within 25%.
+        // The L40S evidence, two samplers. The reference renders' phase
+        // samples (3 and 10 references, recomputed prefix, BF16 math) held
+        // 2,865 and 7,985 MiB of denoise workspace: the estimate must never
+        // admit below them. The CUDA harness's 250 us background sampler,
+        // which catches the in-forward peak a phase sample misses, measured
+        // the same joint-row forward at 3,690,987,520 B for 16,465 tokens
+        // under math and 3,154,116,608 B for 16,593 under FlashAttention
+        // (`docs/qualification/qwen-image-2.1-cuda-performance.json`); the
+        // estimate stays within 25% of that per-token rate at the reference
+        // sequence's own length, under whichever backend this build runs.
         let mib = |bytes: u64| bytes as f64 / (1u64 << 20) as f64;
-        for (count, measured) in [(3usize, 2_865.0), (10, 7_985.0)] {
+        let harness_rate = match crate::attention::AttentionBackend::resolve_effective_for(
+            crate::attention::AttentionPolicy::FastStill,
+        ) {
+            crate::attention::AttentionBackend::Math => 3_690_987_520.0 / 16_465.0,
+            crate::attention::AttentionBackend::Flash => 3_154_116_608.0 / 16_593.0,
+        };
+        for (count, phase_sampled) in [(3usize, 2_865.0), (10, 7_985.0)] {
             let shape =
                 QwenImage21SequenceShape::for_request(1024, 1024, &vec![(1536, 1024); count]);
             let estimate = mib(qwen_image21_reference_activation_bytes(
                 base, shape, 2, 1, 2,
             ));
+            let harness = mib((harness_rate * shape.joint_tokens() as f64) as u64);
             assert!(
-                estimate >= measured && estimate <= measured * 1.25,
-                "{count} references: {estimate:.0} MiB vs {measured} measured"
+                estimate >= phase_sampled && estimate >= harness && estimate <= harness * 1.25,
+                "{count} references: {estimate:.0} MiB vs {phase_sampled} phase-sampled, \
+                 {harness:.0} at the harness rate"
             );
         }
         // The encode phase grows with the references and stays bounded.

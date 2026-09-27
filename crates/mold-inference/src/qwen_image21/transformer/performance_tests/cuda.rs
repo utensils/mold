@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | `QWEN_IMAGE21_MODEL_ROOT` | the models directory (`$MOLD_HOME/models`) | required |
 //! | `QWEN_IMAGE21_BENCH_OUTPUT` | receipt/artifact directory | required |
-//! | `QWEN_IMAGE21_BENCH_MODE` | `legacy`, `flash`, `ops`, `fast`, `fast-cfgbatch` | `legacy` |
+//! | `QWEN_IMAGE21_BENCH_MODE` | `legacy`, `flash`, `ops`, `fast` | `legacy` |
 //! | `QWEN_IMAGE21_BENCH_TIER` | transformer tier | `bf16` |
 //! | `QWEN_IMAGE21_BENCH_WIDTH` / `_HEIGHT` | canvas, multiples of 32 | 1024 |
 //! | `QWEN_IMAGE21_BENCH_GUIDANCE` | true-CFG scale | 1.0 |
@@ -125,19 +125,21 @@ impl Drop for PeakSampler {
     }
 }
 
-/// A named harness mode: the execution path it asks the transformer to run,
-/// and whether guided steps batch both CFG branches into one forward.
+/// A named harness mode: the execution path it asks the transformer to run.
+///
+/// There is no batched-CFG mode: `official_cuda_cfg_batch_probe` measured
+/// its best case (equal-length rows, no key padding) 3–6% SLOWER than two
+/// batch-1 forwards at every canvas, so the engine keeps sequential CFG (A8).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BenchMode {
     pub name: &'static str,
     pub path: Qwen21ExecPath,
-    pub cfg_batch: bool,
 }
 
 pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
     let legacy = Qwen21ExecPath::legacy();
-    let (name, path, cfg_batch) = match name {
-        "legacy" => ("legacy", legacy, false),
+    let (name, path) = match name {
+        "legacy" => ("legacy", legacy),
         // FlashAttention alone; every elementwise op stays legacy.
         "flash" => (
             "flash",
@@ -145,7 +147,6 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
                 attention: TargetAttention::FastStill,
                 ..legacy
             },
-            false,
         ),
         // The fused elementwise ops alone; attention stays legacy math.
         "ops" => (
@@ -154,55 +155,50 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
                 attention: TargetAttention::Legacy,
                 ..Qwen21ExecPath::cuda_fast()
             },
-            false,
         ),
-        "fast" => ("fast", Qwen21ExecPath::cuda_fast(), false),
-        "fast-cfgbatch" => ("fast-cfgbatch", Qwen21ExecPath::cuda_fast(), true),
-        other => anyhow::bail!(
-            "QWEN_IMAGE21_BENCH_MODE={other}: expected legacy, flash, ops, fast, or fast-cfgbatch"
-        ),
+        "fast" => ("fast", Qwen21ExecPath::cuda_fast()),
+        other => {
+            anyhow::bail!("QWEN_IMAGE21_BENCH_MODE={other}: expected legacy, flash, ops, or fast")
+        }
     };
-    Ok(BenchMode {
-        name,
-        path,
-        cfg_batch,
-    })
+    Ok(BenchMode { name, path })
 }
 
-/// Put `mode` into effect on a loaded transformer. The v0.32 transformer
-/// carries only Metal-gated fast booleans, so on CUDA the one path it can run
-/// is legacy; any other mode is refused by name rather than silently measured
-/// as legacy.
-pub(super) fn install_mode(
-    transformer: &mut QwenImage21Transformer,
-    mode: &BenchMode,
-) -> Result<()> {
-    anyhow::ensure!(
-        mode.path.is_legacy() && !mode.cfg_batch,
-        "mode {} needs the transformer's Qwen21ExecPath wiring; this build runs only `legacy` on CUDA",
-        mode.name
-    );
-    transformer.compact_modulation = false;
-    for block in &mut transformer.blocks {
-        block.attn.dispatch.fused_target = false;
-        block.attn.fused_ops = false;
-    }
-    Ok(())
+/// Put `mode` into effect on a loaded transformer.
+pub(super) fn install_mode(transformer: &mut QwenImage21Transformer, mode: &BenchMode) {
+    transformer.set_exec_path(mode.path);
 }
 
 pub(super) fn transformer_paths(root: &Path, tier: &str) -> Result<Vec<PathBuf>> {
-    match tier {
-        "bf16" => Ok((1..=2)
+    if tier == "bf16" {
+        return Ok((1..=2)
             .map(|i| {
                 root.join(format!(
                     "qwen-image-2.1-bf16/transformer/diffusion_pytorch_model-{i:05}-of-00002.safetensors"
                 ))
             })
-            .collect()),
-        other => anyhow::bail!(
-            "QWEN_IMAGE21_BENCH_TIER={other}: this build loads only the bf16 transformer"
-        ),
+            .collect());
     }
+    // Quantized tiers load from `QWEN_IMAGE21_BENCH_TIER_DIR` (a directory
+    // holding the pinned upstream files under their published names), so
+    // the harness can time a tier on a host that has not installed it.
+    let dir = PathBuf::from(std::env::var("QWEN_IMAGE21_BENCH_TIER_DIR").map_err(|_| {
+        anyhow::anyhow!("QWEN_IMAGE21_BENCH_TIER={tier} needs QWEN_IMAGE21_BENCH_TIER_DIR")
+    })?);
+    let file = match tier {
+        "int8-conv" => "qwen_image_2.1_int8_convrot.safetensors",
+        "fp8" => "Qwen-Image-2.1-FP8.safetensors",
+        "q8" => "qwen_image_2.1-Q8_0.gguf",
+        "q6" => "qwen_image_2.1-Q6_K.gguf",
+        "q5" => "qwen_image_2.1-Q5_0.gguf",
+        "q4" => "qwen_image_2.1-Q4_K.gguf",
+        "q3" => "qwen_image_2.1-Q3_K.gguf",
+        "q2" => "qwen_image_2.1-Q2_K.gguf",
+        other => anyhow::bail!(
+            "QWEN_IMAGE21_BENCH_TIER={other}: expected bf16, int8-conv, fp8 or q2..q8"
+        ),
+    };
+    Ok(vec![dir.join(file)])
 }
 
 pub(super) fn parse_conv(raw: &str) -> Result<ConvBackend> {
@@ -406,7 +402,7 @@ fn official_cuda_mode_benchmark() -> Result<()> {
         crate::qwen_image21::transformer_dtype(&device),
         &progress,
     )?;
-    install_mode(&mut transformer, &mode)?;
+    install_mode(&mut transformer, &mode);
     device.synchronize()?;
     phases.insert(
         "transformer_load_seconds".into(),
@@ -453,7 +449,11 @@ fn official_cuda_mode_benchmark() -> Result<()> {
     device.synchronize()?;
     let denoise_started = Instant::now();
     for step in 0..executed_steps {
-        let timestep = scheduler.current_timestep() / 1000.0;
+        let timestep = crate::qwen_image21::scheduler::step_timestep(
+            &scheduler,
+            dtype,
+            mode.path.round_timestep_to_dtype,
+        );
         device.synchronize()?;
         let step_started = Instant::now();
         let conditional_prediction = conditional.forward(&latents, timestep)?;
@@ -569,7 +569,6 @@ fn official_cuda_mode_benchmark() -> Result<()> {
             "fused_adaln": mode.path.fused_adaln,
             "f32_rope_tables": mode.path.f32_rope_tables,
             "round_timestep_to_dtype": mode.path.round_timestep_to_dtype,
-            "cfg_batch": mode.cfg_batch,
         },
         "tier": tier,
         "width": width,
@@ -783,6 +782,117 @@ fn official_cuda_reduced_precision_gemm_benchmark() -> Result<()> {
     std::fs::write(
         output.join("receipt-reduced-precision-gemm.json"),
         serde_json::to_vec_pretty(&json!({ "cells": cells }))?,
+    )?;
+    Ok(())
+}
+/// A8 measured gate: the UPPER BOUND of batched CFG on this card. Both rows
+/// of one batch-2 forward carry the same prompt, so the batch needs no key
+/// padding at all — the cheapest a real batched guided step could ever be —
+/// and its cached decode time is compared against two batch-1 decodes. A
+/// real negative prompt of another length would add varlen packing on top.
+#[test]
+#[ignore = "requires installed Qwen Image 2.1 weights and an idle, exclusive CUDA GPU"]
+fn official_cuda_cfg_batch_probe() -> Result<()> {
+    let root = PathBuf::from(std::env::var("QWEN_IMAGE21_MODEL_ROOT")?);
+    let output = PathBuf::from(std::env::var("QWEN_IMAGE21_BENCH_OUTPUT")?);
+    std::fs::create_dir_all(&output)?;
+    let sizes = std::env::var("QWEN_IMAGE21_BENCH_SIZES")
+        .unwrap_or_else(|_| "1024x1024,1344x768,2048x2048".into());
+    let device = Device::new_cuda(0)?;
+    let dtype = crate::engine::gpu_dtype(&device);
+    let progress = ProgressReporter::default();
+    let shared = root.join("shared/qwen-image21");
+    let conditioning = {
+        let text_paths = (1..=4)
+            .map(|i| shared.join(format!("text_encoder/model-{i:05}-of-00004.safetensors")))
+            .collect::<Vec<_>>();
+        let mut encoder = crate::encoders::qwen3::Qwen3Encoder::load_bf16(
+            &text_paths,
+            &shared.join("processor/tokenizer.json"),
+            &device,
+            dtype,
+            &crate::encoders::qwen3_bf16::Qwen3BF16Config::qwen3_image_21_text_encoder(),
+            &progress,
+        )?;
+        encode_t2i_prompts(&mut encoder, &[DEFAULT_PROMPT.to_string()])?
+            .to_device_dtype(&device, dtype)?
+    };
+    let doubled = QwenImage21TextConditioning {
+        embeddings: Tensor::cat(&[&conditioning.embeddings, &conditioning.embeddings], 0)?,
+        valid_tokens: [
+            conditioning.valid_tokens.clone(),
+            conditioning.valid_tokens.clone(),
+        ]
+        .concat(),
+        image_slots: [
+            conditioning.image_slots.clone(),
+            conditioning.image_slots.clone(),
+        ]
+        .concat(),
+    };
+    let transformer = QwenImage21Transformer::load(
+        &transformer_paths(&root, "bf16")?,
+        &device,
+        crate::qwen_image21::transformer_dtype(&device),
+        &progress,
+    )?;
+    let retain = crate::qwen_image21::PrefixCacheDecision::Retain;
+    let mut cells = Vec::new();
+    for size in sizes.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (width, height) = size
+            .split_once('x')
+            .ok_or_else(|| anyhow::anyhow!("size {size} is not WxH"))?;
+        let (lh, lw) = (
+            height.parse::<usize>()? / QWEN_IMAGE_21_VAE_SCALE_FACTOR,
+            width.parse::<usize>()? / QWEN_IMAGE_21_VAE_SCALE_FACTOR,
+        );
+        let latents = crate::engine::seeded_randn(
+            210001,
+            &[1, lh * lw, QWEN_IMAGE_21_LATENT_CHANNELS],
+            &device,
+            dtype,
+        )?;
+        let pair = Tensor::cat(&[&latents, &latents], 0)?;
+        let time = |forward: &mut dyn FnMut() -> Result<Tensor>| -> Result<f64> {
+            forward()?; // prefill and warm-up
+            forward()?;
+            device.synchronize()?;
+            let mut samples = Vec::new();
+            for _ in 0..6 {
+                let started = Instant::now();
+                forward()?;
+                device.synchronize()?;
+                samples.push(started.elapsed().as_secs_f64());
+            }
+            Ok(median(&samples).expect("six samples"))
+        };
+        let mut single = transformer.prepare_t2i(&conditioning, lh, lw, retain)?;
+        let mut negative = transformer.prepare_t2i(&conditioning, lh, lw, retain)?;
+        let sequential = time(&mut || {
+            single.forward(&latents, 0.5)?;
+            negative.forward(&latents, 0.5)
+        })?;
+        drop((single, negative));
+        let mut batched_branch = transformer.prepare_t2i(&doubled, lh, lw, retain)?;
+        let batched = time(&mut || batched_branch.forward(&pair, 0.5))?;
+        drop(batched_branch);
+        let gain = 1.0 - batched / sequential;
+        eprintln!(
+            "cfg batch {size}: two B=1 {sequential:.4}s, one B=2 {batched:.4}s, gain {gain:.3}"
+        );
+        cells.push(json!({
+            "canvas": size,
+            "two_batch1_seconds": sequential,
+            "one_batch2_seconds": batched,
+            "gain": gain,
+        }));
+    }
+    std::fs::write(
+        output.join("receipt-cfg-batch-probe.json"),
+        serde_json::to_vec_pretty(&json!({
+            "exec_path": transformer.exec_path().label(),
+            "cells": cells,
+        }))?,
     )?;
     Ok(())
 }

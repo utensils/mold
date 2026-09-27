@@ -83,12 +83,122 @@ transformer.
 
 ### M5 gates (L40S, BF16, warm denoise)
 
-| Case | v0.32 | Required | Fast path |
+Harness denoise seconds, 40 steps, `fast` mode (`Qwen21ExecPath::cuda_fast()`:
+FlashAttention through the joint-layout segment dispatch, the fused
+q/k RMSNorm + transpose + F32 RoPE kernel, cached F32 RoPE tables, compact
+modulation, fused adaLN, dtype-rounded timestep). Every gate passes.
+
+| Case | v0.32 | Required | Fast path | Speedup |
+|---|---:|---:|---:|---:|
+| 1024² g1 | 38.9 s | ≤ 22 s (stretch ≤ 18.5 s) | **15.2 s** | 2.56x |
+| 1344x768 g4 + negative | 76.7 s | ≤ 42 s | **31.0 s** | 2.47x |
+| 2048² g1 | 525.5 s | ≤ 85 s | **82.6 s** | 6.4x |
+| 2752x1536 g1 | 536.9 s | ≤ 90 s | **85.9 s** | 6.2x |
+
+The CLI agrees end to end (the branch binary, forced local, `--no-expand`,
+cold process, GPU 2): 1024² denoise 15.0 s / total 15.8 s; 1344x768 g4 +
+negative 29.6 s / 30.4 s; 2752x1536 82.4 s / 97.6 s. At 2K the CLI total also
+covers loading the weights, encoding, and parking the BF16 text encoder in
+host RAM so the decode fits beside the transformer.
+
+## Fast path
+
+### Per-mode ablation (harness, steady step median)
+
+| Case | `legacy` | `flash` | `fast` |
 |---|---:|---:|---:|
-| 1024² g1 | 38.9 s | ≤ 22 s (stretch ≤ 18.5 s) | *measured with the transformer wiring* |
-| 1344x768 g4 + negative | 76.7 s | ≤ 42 s | *measured with the transformer wiring* |
-| 2048² g1 | 525.5 s | ≤ 85 s | *measured with the transformer wiring* |
-| 2752x1536 g1 | 536.9 s | ≤ 90 s | *measured with the transformer wiring* |
+| 1024² g1 | 0.968 s | 0.569 s | 0.373 s |
+| 1344x768 g4 + negative (both branches) | 1.902 s | 1.137 s | 0.753 s |
+| 2048² g1 | 13.13 s | 2.98 s | 2.07 s |
+| 2752x1536 g1 | 13.40 s | 3.04 s | 2.15 s |
+
+Flash alone is the 2K fix (4.4x per step); the fused elementwise work is
+another 1.5x on top at every size. The denoise peak increment above the
+resident transformer is 0.81 GB at 1024², 0.97 GB for the guided 1344x768
+case and 3.1–3.2 GB at 2K (legacy: 0.91 / 0.94 / 3.7 GB).
+
+### Determinism and byte identity
+
+- `fast` is deterministic: two harness runs at 1024² (seed 210001) and at
+  1344x768 g4 give the same decoded RGB (`c7ea2be9…bb13c2`,
+  `f799c54c…d3b1a0`).
+- `legacy` on the merged branch still reproduces the v0.32 RGB hash
+  `a6d45454…525df6`.
+- The branch binary under `MOLD_ATTN=math MOLD_CONV=im2col` reproduced all
+  three v0.32 reference PNGs **byte for byte** (`f1fa6bc2…`, `0b0a1d9b…`,
+  `518bd8e7…`), not only their pixels.
+- The fast images were checked visually: the "MOLD & FLOUR" lettering is
+  exact and the fox render keeps its composition and fur detail. Pixels move
+  relative to v0.32, as FastStill accepts.
+
+#### Re-verified after merging reference conditioning, transparency and LoRA
+
+Branch `5a0a7675` (the M4+M6 merge), `mold run --local` on GPU 2, cold
+process, `nvidia-smi` sampled every 100 ms:
+
+| Render | Denoise | Peak (MiB, process) | Result |
+|---|---:|---:|---|
+| `MOLD_ATTN=math MOLD_CONV=im2col`, 1024² s210001 | 38.2 s | 41,975 | PNG `f1fa6bc2…` — identical to v0.32 |
+| same, s210002 | 38.4 s | 41,975 | PNG `0b0a1d9b…` — identical |
+| same, 1344x768 g4 + negative, s7 | 74.6 s | 41,751 | PNG `518bd8e7…` — identical |
+| fast, 1024² s210001 | **15.2 s** | 34,683 | gate ≤ 22 s met |
+| fast, 1 reference (fox), 1024² | 17.3 s | 35,323 | fox from the reference in front of a teal storefront |
+| fast, 3 references, g4 + negative | 167.4 s | 35,803 | fox, bakery and bicycle composed; lettering exact |
+| fast, `--transparent` teapot | 15.4 s | 34,523 | RGBA; background alpha 0, subject 255 |
+
+Every image was viewed. The three-reference guided render recomputes its
+16.8k-token prefix every step in both branches (the request-only cache rule
+retains nothing past the legacy bound), which is why it costs 4.2 s/step.
+
+### Batched CFG (A8): not adopted
+
+`official_cuda_cfg_batch_probe` measures the upper bound of batching both
+CFG branches: one batch-2 cached forward of two equal-length rows (no key
+padding, no varlen packing) against two batch-1 forwards.
+
+| Canvas | Two batch-1 | One batch-2 | Gain |
+|---|---:|---:|---:|
+| 1024² | 0.735 s | 0.780 s | −6.1% |
+| 1344x768 | 0.741 s | 0.787 s | −6.1% |
+| 2048² | 4.121 s | 4.257 s | −3.3% |
+
+Each batch-1 forward already fills the L40S (M = 4,096 rows per GEMM), so a
+batch only adds work. The design's gate was ≥ 5% at a token count; the best
+case is negative everywhere, so the engine keeps sequential CFG and no
+`MOLD_QWEN_IMAGE21_CFG_BATCH` switch exists.
+
+### Native 2K presets (M8)
+
+All seven upstream presets, 40 steps, g1, seed 210001, `fast` mode, cuDNN VAE.
+"Peak inc." is the denoise peak above the resident transformer; "VAE peak" is
+the decode's increment after the transformer drop.
+
+| Tier | Canvas | Steady step | Denoise | Peak inc. | VAE decode | VAE peak |
+|---|---|---:|---:|---:|---:|---:|
+| bf16 | 2048x2048 | 2.071 s | 82.6 s | 3.12 GB | 3.92 s | 27.2 GB |
+| bf16 | 2400x1792 | 2.176 s | 87.1 s | 3.19 GB | 3.92 s | 28.1 GB |
+| bf16 | 1792x2400 | 2.181 s | 87.4 s | 3.19 GB | 3.87 s | 28.1 GB |
+| bf16 | 2528x1696 | 2.173 s | 86.8 s | 3.19 GB | 3.86 s | 28.0 GB |
+| bf16 | 1696x2528 | 2.177 s | 87.2 s | 3.19 GB | 3.87 s | 28.0 GB |
+| bf16 | 2752x1536 | 2.146 s | 85.9 s | 3.15 GB | 3.83 s | 27.6 GB |
+| bf16 | 1536x2752 | 2.122 s | 85.5 s | 3.15 GB | 3.83 s | 27.6 GB |
+| int8-conv | 1024x1024 | 0.371 s | 15.3 s | 1.24 GB | 1.95 s | 6.5 GB |
+| int8-conv | 2048x2048 | 1.996 s | 81.2 s | 5.30 GB | 4.27 s | 22.5 GB |
+| int8-conv | 2752x1536 | 2.037 s | 82.4 s | 5.34 GB | 3.74 s | 22.7 GB |
+
+- Every render was finite and every PNG was checked visually: the lettering
+  is exact in all ten and each composition fits its aspect.
+- The resident transformer is 14.84 GB (bf16) and 7.82 GB (int8-conv).
+- The 2752x1536 preset is 16,512 tokens, past the scheduler's 8,192
+  `max_seq`; the dynamic shift extrapolates unclamped as diffusers does.
+- `device::qwen_image21_activation_bytes` (token-based, backend-aware) is
+  fitted to the `flash`-mode peaks, which the `fast` path stays under.
+- The int8-conv tier's W8A8 linears peak 0.44 GB (1024²) to 2.18 GB (2K)
+  above bf16: they quantize every activation to I8 and accumulate in I32.
+  `device::qwen_image21_linear_workspace_bytes` charges that (95 KB per joint
+  token) wherever the checkpoint header is int8-conv — the engine's
+  text-encoder residency decision and both server estimates — and a unit test
+  holds the sum to each int8 measurement within 15%.
 
 ## VAE decode
 
@@ -131,7 +241,10 @@ transformer is dropped, with a 2-step schedule.
   through the decode. Adding a 27.6 GB decode gives about 59 GB. At 2K the
   text-encoder residency decision (`text_encoder_residency::decide`) has to
   park the encoder, or the transformer has to be released before the decode.
-  This contradicts the design's "48 GB stays Resident at 2K" row.
+  This contradicted the design's "48 GB stays Resident at 2K" row, and the
+  shipped decision follows the measurement: at 2K the encoder parks in host
+  RAM for the denoise (the 2752x1536 CLI render above logs the park), and the
+  transformer is released for the decode when the card still cannot hold it.
 
 `device::qwen_image21_vae_decode_peak_bytes(width, height, conv_backend,
 vae_dtype_bytes)` is fitted to the worst of both columns:
@@ -221,9 +334,9 @@ The environment contract is at the top of
 - plus `QWEN_IMAGE21_BENCH_SIZES` and `_CONVS` for
   `official_cuda_vae_decode_benchmark`.
 
-Modes are `legacy`, `flash`, `ops`, `fast` and `fast-cfgbatch`. Until the
-transformer consumes `Qwen21ExecPath`, only `legacy` runs; the other modes
-are refused by name.
+Modes are `legacy`, `flash`, `ops` and `fast`. `official_cuda_cfg_batch_probe`
+is the A8 measurement and `official_cuda_vae_decode_benchmark` the decode
+calibration.
 
 `scripts/bench-qwen21.sh --host http://127.0.0.1:7681 --gates` runs the
 server end-to-end matrix and applies the M5 gates to the median denoise time.

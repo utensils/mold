@@ -98,10 +98,51 @@ pub(crate) fn transformer_timestep(sigma: f64, dtype: DType) -> f64 {
     }
 }
 
+/// The normalized timestep for the scheduler's current step.
+///
+/// `round_to_dtype` is `Qwen21ExecPath::round_timestep_to_dtype`: the fast
+/// path follows upstream through [`transformer_timestep`], while the v0.32
+/// path (`MOLD_ATTN=math`, Metal, CPU) keeps the f64 `current_timestep() /
+/// 1000` it has always passed, so its bytes do not move.
+pub(crate) fn step_timestep(
+    scheduler: &QwenImage21Scheduler,
+    dtype: DType,
+    round_to_dtype: bool,
+) -> f64 {
+    if round_to_dtype {
+        transformer_timestep(scheduler.current_sigma(), dtype)
+    } else {
+        scheduler.current_timestep() / 1000.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::qwen_image::sampling::calculate_shift;
+
+    /// The unrounded arm is exactly v0.32's expression for every step and
+    /// dtype; the rounded arm is `transformer_timestep`.
+    #[test]
+    fn step_timestep_keeps_the_legacy_expression_unless_rounding() {
+        let (mut scheduler, _) = scheduler_for(ScheduleKind::Base, 40, 4096);
+        let latents =
+            candle_core::Tensor::zeros((1, 4096, 64), DType::F32, &candle_core::Device::Cpu)
+                .unwrap();
+        for _ in 0..scheduler.num_steps() {
+            for dtype in [DType::BF16, DType::F16, DType::F32] {
+                assert_eq!(
+                    step_timestep(&scheduler, dtype, false).to_bits(),
+                    (scheduler.current_timestep() / 1000.0).to_bits()
+                );
+                assert_eq!(
+                    step_timestep(&scheduler, dtype, true).to_bits(),
+                    transformer_timestep(scheduler.current_sigma(), dtype).to_bits()
+                );
+            }
+            scheduler.step(&latents, &latents).unwrap();
+        }
+    }
 
     #[derive(serde::Deserialize)]
     struct Fixture {

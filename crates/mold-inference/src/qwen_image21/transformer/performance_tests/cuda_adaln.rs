@@ -135,7 +135,7 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
         dtype,
         &progress,
     )?;
-    install_mode(&mut transformer, &bench_mode("legacy")?)?;
+    install_mode(&mut transformer, &bench_mode("legacy")?);
     let eps = transformer.cfg.eps;
     let inner = transformer.cfg.inner_dim();
     let (lh, lw) = (64usize, 64usize);
@@ -152,13 +152,14 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
         &conditioning.valid_tokens,
         (lh, lw),
     )?;
-    let plan = layout.attention_plan(false);
     let (rope_cos, rope_sin) = crate::qwen_image21::layout::QwenImage21JointLayout::rope_tables(
         layout.rope(),
         transformer.cfg.axes_dims_rope,
         dtype,
         &device,
     )?;
+    let plan = layout.attention_plan(false);
+    let prefix_len = layout.prefix_len();
     let mut sites = Vec::new();
     let mut worst = (0f64, String::new());
     let mut worst_hand = 0f64;
@@ -204,7 +205,7 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
                         &rope_cos,
                         &rope_sin,
                         &plan,
-                        text_len,
+                        prefix_len,
                         LayerCache::Disabled,
                     )?;
                     (
@@ -237,11 +238,11 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
             }
             hidden = block.forward_block_causal(
                 &hidden,
-                &per_token,
+                &BlockModulation::PerToken(per_token.clone()),
                 &rope_cos,
                 &rope_sin,
                 &plan,
-                text_len,
+                prefix_len,
                 LayerCache::Disabled,
             )?;
         }

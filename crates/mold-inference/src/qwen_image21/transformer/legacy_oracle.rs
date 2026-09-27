@@ -34,7 +34,7 @@ fn target_attention(
     bias: Option<&Tensor>,
 ) -> Result<Tensor> {
     let scale = (1.0 / (attn.head_dim as f64).sqrt()) as f32;
-    if attn.dispatch.fused_target
+    if attn.dispatch.attention == crate::qwen_image21::exec_path::TargetAttention::MetalSdpa
         && q.device().is_metal()
         && bias.is_none()
         && matches!(attn.head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256)
@@ -343,7 +343,7 @@ pub(super) fn forward_with_cache(
         .unsqueeze(1)?
         .broadcast_as((batch, text_len, 4 * inner))?;
     let per_token_modulation = if cached {
-        if latents.device().is_metal() && transformer.compact_modulation {
+        if latents.device().is_metal() && transformer.exec.compact_modulation {
             real_row
         } else {
             real

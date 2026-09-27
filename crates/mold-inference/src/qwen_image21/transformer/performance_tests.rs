@@ -136,11 +136,16 @@ fn official_metal_mode_benchmark() -> Result<()> {
     let phase = Instant::now();
     let mut transformer =
         QwenImage21Transformer::load(&transformer_paths, &device, dtype, &progress)?;
-    transformer.compact_modulation = fused_ops;
-    for block in &mut transformer.blocks {
-        block.attn.dispatch.fused_target = fused_target;
-        block.attn.fused_ops = fused_ops;
-    }
+    transformer.set_exec_path(crate::qwen_image21::exec_path::Qwen21ExecPath {
+        attention: if fused_target {
+            crate::qwen_image21::exec_path::TargetAttention::MetalSdpa
+        } else {
+            crate::qwen_image21::exec_path::TargetAttention::Legacy
+        },
+        fused_projection: fused_ops,
+        compact_modulation: fused_ops,
+        ..crate::qwen_image21::exec_path::Qwen21ExecPath::metal(false)
+    });
     device.synchronize()?;
     let seconds = phase.elapsed().as_secs_f64();
     eprintln!("mode={mode} phase=transformer_load seconds={seconds:.4}");

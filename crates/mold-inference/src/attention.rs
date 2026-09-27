@@ -455,6 +455,123 @@ pub fn attention_with_bias_for(
     }
 }
 
+/// Whether a call under `policy` with query `q` runs FlashAttention: the
+/// policy resolves to flash, the kernel is compiled in, and the tensor is
+/// eligible (CUDA, F16/BF16, a supported head dim). Callers with masks flash
+/// can express natively (bottom-right causal, packed varlen keys) branch on
+/// this instead of building an additive bias.
+pub(crate) fn takes_flash(policy: AttentionPolicy, q: &Tensor) -> bool {
+    flash_compiled()
+        && AttentionBackend::resolve_for(policy) == AttentionBackend::Flash
+        && flash_is_eligible(q)
+}
+
+/// Bottom-right-aligned causal FlashAttention over BHSD tensors: query row
+/// `i` of `q` `[B, H, Sq, D]` sees keys `[0, Skv - Sq + i]` of `k`/`v`
+/// `[B, H, Skv, D]` (`candle-flash-attn/kernels/mask.h`,
+/// `row + max_seqlen_k - max_seqlen_q`). Only reachable where
+/// [`takes_flash`] is true.
+#[cfg(feature = "flash-attn")]
+pub(crate) fn flash_causal_bottom_right(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    candle_flash_attn::flash_attn_windowed(
+        &to_flash_layout(q)?,
+        &to_flash_layout(k)?,
+        &to_flash_layout(v)?,
+        scale,
+        None,
+        Some(0),
+    )?
+    .transpose(1, 2)?
+    .contiguous()
+}
+
+#[cfg(not(feature = "flash-attn"))]
+pub(crate) fn flash_causal_bottom_right(
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _scale: f32,
+) -> Result<Tensor> {
+    candle_core::bail!("FlashAttention is not compiled into this build")
+}
+
+/// Unmasked FlashAttention of `q` `[B, H, Sq, D]` against only the VALID keys
+/// of each batch row: `key_index[b]` lists the key positions row `b` keeps,
+/// in order. Rows are packed and run as one `flash_attn_varlen` call, which
+/// is exactly a per-row dense call over the kept keys — the same operation as
+/// an additive `-inf` key-padding bias. Only reachable where [`takes_flash`]
+/// is true.
+#[cfg(feature = "flash-attn")]
+pub(crate) fn flash_varlen_keys(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_index: &[Vec<u32>],
+    scale: f32,
+) -> Result<Tensor> {
+    let (batch, heads, q_len, head_dim) = q.dims4()?;
+    if key_index.len() != batch || key_index.iter().any(Vec::is_empty) {
+        candle_core::bail!("varlen attention needs at least one valid key per batch row");
+    }
+    let device = q.device();
+    // [B, H, S, D] -> [B*S, H, D], rows of one sample contiguous.
+    let q_packed = q
+        .transpose(1, 2)?
+        .contiguous()?
+        .reshape((batch * q_len, heads, head_dim))?;
+    let pack_keys = |t: &Tensor| -> Result<Tensor> {
+        // [B, H, S, D] -> [B, S, H, D] once, so each row is a contiguous
+        // `[S, H, D]` whose valid keys `index_select` gathers.
+        let bshd = t.transpose(1, 2)?.contiguous()?;
+        let mut rows = Vec::with_capacity(batch);
+        for (b, keep) in key_index.iter().enumerate() {
+            let index = Tensor::from_slice(keep, keep.len(), device)?;
+            rows.push(bshd.get(b)?.index_select(&index, 0)?);
+        }
+        Tensor::cat(&rows, 0)?.contiguous()
+    };
+    let (k_packed, v_packed) = (pack_keys(k)?, pack_keys(v)?);
+    let mut cu_q = Vec::with_capacity(batch + 1);
+    let mut cu_k = Vec::with_capacity(batch + 1);
+    cu_q.push(0u32);
+    cu_k.push(0u32);
+    for keep in key_index {
+        cu_q.push(cu_q.last().copied().unwrap_or(0) + q_len as u32);
+        cu_k.push(cu_k.last().copied().unwrap_or(0) + keep.len() as u32);
+    }
+    let max_k = key_index.iter().map(Vec::len).max().unwrap_or(0);
+    let out = candle_flash_attn::flash_attn_varlen(
+        &q_packed,
+        &k_packed,
+        &v_packed,
+        &Tensor::from_vec(cu_q, batch + 1, device)?,
+        &Tensor::from_vec(cu_k, batch + 1, device)?,
+        q_len,
+        max_k,
+        scale,
+        false,
+    )?;
+    out.reshape((batch, q_len, heads, head_dim))?
+        .transpose(1, 2)?
+        .contiguous()
+}
+
+#[cfg(not(feature = "flash-attn"))]
+pub(crate) fn flash_varlen_keys(
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _key_index: &[Vec<u32>],
+    _scale: f32,
+) -> Result<Tensor> {
+    candle_core::bail!("FlashAttention is not compiled into this build")
+}
+
 /// Pure predicate so the dispatch is testable without a GPU.
 pub(crate) fn bias_forces_math(bias: Option<&Tensor>) -> bool {
     bias.is_some()

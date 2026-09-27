@@ -1047,12 +1047,7 @@ fn p8_denoise_diagnostics() {
         )
         .unwrap();
     for step in 0..steps {
-        let timestep = super::pipeline::step_timestep(
-            scheduler.current_timestep(),
-            scheduler.current_sigma(),
-            dtype,
-            round,
-        );
+        let timestep = super::scheduler::step_timestep(&scheduler, dtype, round);
         let prediction = branch.forward(&latents, timestep).unwrap();
         latents = scheduler.step(&prediction, &latents).unwrap();
         let key = format!("step{step}_latents");
