@@ -108,6 +108,9 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // candle's QMatMul kernels. Numerics, transient memory and step latency
     // all differ, so the two arms never share a fingerprint or timing bucket.
     "MOLD_QWEN_IMAGE21_QMATMUL",
+    // Qwen Image 2.1 prefix K/V retention: upstream warns that cached and
+    // uncached renders differ in BF16, so the decision moves pixels.
+    "MOLD_QWEN_IMAGE21_KV_CACHE",
     // #1045: caching the widened BF16 FP8 weights trades VRAM for a per-forward
     // cast, so residency and step latency both change — a cached run must not
     // share a learned-timing bucket with one that widened every forward.

@@ -43,6 +43,12 @@ pub(crate) enum QwenShiftPolicy {
     /// `use_dynamic_shifting=false` with `shift_terminal=null`: one fixed
     /// shift, no resolution dependence, and no terminal stretch.
     Fixed { shift: f64 },
+    /// `use_dynamic_shifting=true` with `shift_terminal=null`: mu is still
+    /// derived from the image sequence length, but the terminal stretch is
+    /// skipped. Viggle's Qwen Image 2.1 turbo distill runs the base scheduler
+    /// config with exactly this override ("the base config's
+    /// `shift_terminal: 0.02` would wreck the last step").
+    DynamicNoTerminal,
 }
 
 /// Resolve the shift policy from the resolved model name.
@@ -61,7 +67,10 @@ pub(crate) fn shift_policy_for_model(model_name: &str) -> QwenShiftPolicy {
     QwenShiftPolicy::DynamicResolution
 }
 
-fn calculate_shift(image_seq_len: usize) -> f64 {
+/// `calculate_shift` (`pipeline_qwenimage21.py:61-71`) with the checkpoint's
+/// scheduler constants: linear in the sequence length and UNCLAMPED, so a 2K
+/// canvas extrapolates past `MAX_SHIFT` (16,512 tokens -> mu 1.3194).
+pub(crate) fn calculate_shift(image_seq_len: usize) -> f64 {
     let m = (MAX_SHIFT - BASE_SHIFT) / (MAX_IMAGE_SEQ_LEN - BASE_IMAGE_SEQ_LEN) as f64;
     let b = BASE_SHIFT - m * BASE_IMAGE_SEQ_LEN as f64;
     image_seq_len as f64 * m + b
@@ -107,7 +116,7 @@ impl QwenImageScheduler {
     pub fn new(num_inference_steps: usize, image_seq_len: usize, policy: QwenShiftPolicy) -> Self {
         // diffusers:
         // sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-        let mut sigmas: Vec<f64> = if num_inference_steps == 1 {
+        let sigmas: Vec<f64> = if num_inference_steps == 1 {
             vec![1.0]
         } else {
             let start = 1.0;
@@ -117,7 +126,19 @@ impl QwenImageScheduler {
                 .map(|i| start + step * i as f64)
                 .collect()
         };
+        Self::with_base_sigmas(&sigmas, image_seq_len, policy)
+    }
 
+    /// Build a schedule from caller-supplied base sigmas — the pipeline's
+    /// `sigmas=` argument (`pipeline_qwenimage21.py:723`, `retrieve_timesteps`)
+    /// — shifted under `policy` with a final 0 appended. `new` is this over the
+    /// default linspace, so the default schedule is unchanged.
+    pub fn with_base_sigmas(
+        base_sigmas: &[f64],
+        image_seq_len: usize,
+        policy: QwenShiftPolicy,
+    ) -> Self {
+        let mut sigmas = base_sigmas.to_vec();
         match policy {
             QwenShiftPolicy::DynamicResolution => {
                 let mu = calculate_shift(image_seq_len);
@@ -133,6 +154,12 @@ impl QwenImageScheduler {
                 // `shift_terminal` is null on a fixed-shift checkpoint, so
                 // diffusers skips `stretch_shift_to_terminal` entirely.
             }
+            QwenShiftPolicy::DynamicNoTerminal => {
+                let mu = calculate_shift(image_seq_len);
+                for sigma in &mut sigmas {
+                    *sigma = time_shift_exponential(mu, 1.0, *sigma);
+                }
+            }
         }
         sigmas.push(0.0);
 
@@ -140,6 +167,11 @@ impl QwenImageScheduler {
             sigmas,
             step_index: 0,
         }
+    }
+
+    /// The sigma of the step about to run.
+    pub fn current_sigma(&self) -> f64 {
+        self.sigmas[self.step_index]
     }
 
     pub fn current_timestep(&self) -> f64 {

@@ -137,7 +137,7 @@ fn official_metal_mode_benchmark() -> Result<()> {
         QwenImage21Transformer::load(&transformer_paths, &device, dtype, &progress)?;
     transformer.compact_modulation = fused_ops;
     for block in &mut transformer.blocks {
-        block.attn.fused_target = fused_target;
+        block.attn.dispatch.fused_target = fused_target;
         block.attn.fused_ops = fused_ops;
     }
     device.synchronize()?;
@@ -155,7 +155,13 @@ fn official_metal_mode_benchmark() -> Result<()> {
     let mut latents = (noise * scheduler.initial_sigma())?;
     let total_steps = scheduler.num_steps();
     let executed_steps = limit.min(total_steps);
-    let mut prepared = transformer.prepare_t2i(&conditioning, 64, 64);
+    let decision = super::super::PrefixCachePolicy::resolve_for_device(
+        &[conditioning.sequence_length()],
+        1,
+        dtype,
+        &device,
+    )[0];
+    let mut prepared = transformer.prepare_t2i(&conditioning, 64, 64, decision)?;
     let mut predictions = Vec::new();
     let mut step_receipts = Vec::with_capacity(executed_steps);
     device.synchronize()?;

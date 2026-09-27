@@ -12,7 +12,9 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::{Linear, VarBuilder};
 use std::path::PathBuf;
 
-use super::QwenImage21TextConditioning;
+use super::attention::SegmentDispatch;
+use super::layout::{BlockCausalPlan, QwenImage21JointLayout};
+use super::{PrefixCacheDecision, QwenImage21TextConditioning};
 
 /// Official `transformer/config.json` geometry for Qwen/Qwen-Image-2.1.
 #[derive(Debug, Clone)]
@@ -90,6 +92,13 @@ impl QwenImage21TransformerConfig {
     }
 }
 
+/// Every bias-free projection in the checkpoint is built here, and only here,
+/// so swapping the linear representation (quantized storage, a LoRA adapter
+/// slot) is one change rather than one per module.
+fn linear(in_dim: usize, out_dim: usize, vb: VarBuilder<'_>) -> Result<Linear> {
+    Ok(candle_nn::linear_no_bias(in_dim, out_dim, vb)?)
+}
+
 /// Zero-centered RMS norm used by `txt_in.text_norm`.
 ///
 /// The checkpoint stores `scale - 1`, so the effective learned multiplier is
@@ -155,8 +164,8 @@ impl TextProjection {
         let inner = cfg.inner_dim();
         Ok(Self {
             text_norm: ZeroCenterRmsNorm::new(cfg.context_in_dim, cfg.eps, vb.pp("text_norm"))?,
-            in_layer: candle_nn::linear_no_bias(cfg.context_in_dim, inner, vb.pp("in_layer"))?,
-            out_layer: candle_nn::linear_no_bias(inner, inner, vb.pp("out_layer"))?,
+            in_layer: linear(cfg.context_in_dim, inner, vb.pp("in_layer"))?,
+            out_layer: linear(inner, inner, vb.pp("out_layer"))?,
         })
     }
 
@@ -179,8 +188,8 @@ struct TimestepEmbedder {
 impl TimestepEmbedder {
     fn new(inner_dim: usize, vb: VarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            linear_1: candle_nn::linear_no_bias(256, inner_dim, vb.pp("linear_1"))?,
-            linear_2: candle_nn::linear_no_bias(inner_dim, inner_dim, vb.pp("linear_2"))?,
+            linear_1: linear(256, inner_dim, vb.pp("linear_1"))?,
+            linear_2: linear(inner_dim, inner_dim, vb.pp("linear_2"))?,
             inner_dim,
         })
     }
@@ -230,9 +239,9 @@ struct SwiGlu {
 impl SwiGlu {
     fn new(dim: usize, mlp_dim: usize, vb: VarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            proj: candle_nn::linear_no_bias(dim, mlp_dim, vb.pp("proj"))?,
-            gate_layer: candle_nn::linear_no_bias(dim, mlp_dim, vb.pp("gate_layer"))?,
-            out: candle_nn::linear_no_bias(mlp_dim, dim, vb.pp("out"))?,
+            proj: linear(dim, mlp_dim, vb.pp("proj"))?,
+            gate_layer: linear(dim, mlp_dim, vb.pp("gate_layer"))?,
+            out: linear(mlp_dim, dim, vb.pp("out"))?,
         })
     }
 
@@ -262,7 +271,7 @@ enum LayerCache<'a> {
 }
 
 struct Attention {
-    fused_target: bool,
+    dispatch: SegmentDispatch,
     fused_ops: bool,
     to_q: Linear,
     to_k: Linear,
@@ -279,48 +288,21 @@ impl Attention {
     fn new(cfg: &QwenImage21TransformerConfig, vb: VarBuilder<'_>) -> Result<Self> {
         let inner = cfg.inner_dim();
         Ok(Self {
-            fused_target: crate::attention::metal_fast_path_enabled(),
+            dispatch: SegmentDispatch {
+                fused_target: crate::attention::metal_fast_path_enabled(),
+                head_dim: cfg.attention_head_dim,
+            },
             fused_ops: crate::attention::metal_fast_path_enabled(),
-            to_q: candle_nn::linear_no_bias(inner, inner, vb.pp("to_q"))?,
-            to_k: candle_nn::linear_no_bias(inner, inner, vb.pp("to_k"))?,
-            to_v: candle_nn::linear_no_bias(inner, inner, vb.pp("to_v"))?,
-            to_out: candle_nn::linear_no_bias(inner, inner, vb.pp("to_out").pp("0"))?,
+            to_q: linear(inner, inner, vb.pp("to_q"))?,
+            to_k: linear(inner, inner, vb.pp("to_k"))?,
+            to_v: linear(inner, inner, vb.pp("to_v"))?,
+            to_out: linear(inner, inner, vb.pp("to_out").pp("0"))?,
             norm_q: vb.pp("norm_q").get(cfg.attention_head_dim, "weight")?,
             norm_k: vb.pp("norm_k").get(cfg.attention_head_dim, "weight")?,
             heads: cfg.num_attention_heads,
             head_dim: cfg.attention_head_dim,
             eps: cfg.eps,
         })
-    }
-
-    /// Image queries are non-causal and usually unmasked. Keep the small
-    /// causal prefix and padded batches on math rather than expanding a mask
-    /// to the full score matrix or changing its negative-infinity semantics.
-    fn target_attention(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        bias: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let scale = (1.0 / (self.head_dim as f64).sqrt()) as f32;
-        if self.fused_target
-            && q.device().is_metal()
-            && bias.is_none()
-            && matches!(self.head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256)
-        {
-            return candle_nn::ops::sdpa(
-                &q.contiguous()?,
-                &k.contiguous()?,
-                &v.contiguous()?,
-                None,
-                false,
-                scale,
-                1.0,
-            )
-            .map_err(Into::into);
-        }
-        crate::attention::attention_with_bias(q, k, v, scale, bias).map_err(Into::into)
     }
 
     fn normalize_heads(&self, xs: &Tensor, weight: &Tensor) -> Result<Tensor> {
@@ -340,92 +322,22 @@ impl Attention {
             .map_err(Into::into)
     }
 
-    fn t2i_prefix_bias(
-        valid_tokens: &[Vec<bool>],
-        dtype: DType,
-        device: &Device,
-    ) -> Result<Tensor> {
-        let batch = valid_tokens.len();
-        let text_len = valid_tokens.first().map_or(0, Vec::len);
-        anyhow::ensure!(text_len > 0, "Qwen Image 2.1 text conditioning is empty");
-        let mut values = Vec::with_capacity(batch * text_len * text_len);
-        for (batch_index, row) in valid_tokens.iter().enumerate() {
-            anyhow::ensure!(
-                row.len() == text_len,
-                "Qwen Image 2.1 text-mask row {batch_index} has {}, expected {text_len}",
-                row.len()
-            );
-            for query in 0..text_len {
-                for (key, valid) in row.iter().enumerate() {
-                    values.push(if key <= query && *valid {
-                        0.0
-                    } else {
-                        f32::NEG_INFINITY
-                    });
-                }
-            }
-        }
-        Tensor::from_vec(values, (batch, 1, text_len, text_len), device)?
-            .to_dtype(dtype)
-            .map_err(Into::into)
-    }
-
-    /// Target rows see every target token and every *valid* text token.
-    /// Return `None` when every text row is valid so the attention dispatcher
-    /// remains eligible for its no-bias optimized path.
-    fn t2i_target_bias(
-        valid_tokens: &[Vec<bool>],
-        target_tokens: usize,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<Option<Tensor>> {
-        let batch = valid_tokens.len();
-        let text_len = valid_tokens.first().map_or(0, Vec::len);
-        if valid_tokens
-            .iter()
-            .all(|row| row.iter().all(|value| *value))
-        {
-            return Ok(None);
-        }
-        let mut values = Vec::with_capacity(batch * (text_len + target_tokens));
-        for (batch_index, row) in valid_tokens.iter().enumerate() {
-            anyhow::ensure!(
-                row.len() == text_len,
-                "Qwen Image 2.1 text-mask row {batch_index} has {}, expected {text_len}",
-                row.len()
-            );
-            values.extend(
-                row.iter()
-                    .map(|valid| if *valid { 0.0 } else { f32::NEG_INFINITY }),
-            );
-            values.extend(std::iter::repeat_n(0.0, target_tokens));
-        }
-        Ok(Some(
-            Tensor::from_vec(values, (batch, 1, 1, text_len + target_tokens), device)?
-                .to_dtype(dtype)?,
-        ))
-    }
-
-    fn forward_t2i(
+    /// One attention layer over a joint sequence (or, on a cached step, over
+    /// the target block alone) under the block-causal `plan`.
+    ///
+    /// `prefix_len` is the number of leading joint positions a prefill
+    /// retains; on a cached step `hidden_states` holds only the target block
+    /// and the retained prefix K/V is prepended before `plan` runs.
+    fn forward_block_causal(
         &self,
         hidden_states: &Tensor,
         rope_cos: &Tensor,
         rope_sin: &Tensor,
-        valid_tokens: &[Vec<bool>],
+        plan: &BlockCausalPlan,
+        prefix_len: usize,
         cache: LayerCache<'_>,
     ) -> Result<Tensor> {
         let (batch, sequence, inner) = hidden_states.dims3()?;
-        let text_len = valid_tokens.first().map_or(0, Vec::len);
-        let cached = matches!(cache, LayerCache::Reuse(_));
-        anyhow::ensure!(
-            text_len > 0 && (cached || text_len < sequence),
-            "Qwen Image 2.1 joint sequence needs non-empty text and target-image blocks"
-        );
-        let target_tokens = if cached {
-            sequence
-        } else {
-            sequence - text_len
-        };
         anyhow::ensure!(
             inner == self.heads * self.head_dim,
             "Qwen Image 2.1 attention inner width mismatch"
@@ -487,55 +399,25 @@ impl Attention {
             (q, k, v)
         };
 
-        match cache {
+        let (k, v) = match cache {
             LayerCache::Extract(layers) => {
                 // A contiguous view can still retain the full joint allocation
-                // (notably with one head). Copy only the immutable prefix.
+                // (notably with one head). Copy only the immutable prefix
+                // (`transformer_qwenimage21.py:340-349` clones for the same
+                // reason).
                 layers.push(PrefixKv {
-                    key: k.narrow(2, 0, text_len)?.force_contiguous()?,
-                    value: v.narrow(2, 0, text_len)?.force_contiguous()?,
+                    key: k.narrow(2, 0, prefix_len)?.force_contiguous()?,
+                    value: v.narrow(2, 0, prefix_len)?.force_contiguous()?,
                 });
+                (k, v)
             }
-            LayerCache::Reuse(prefix) => {
-                let k = Tensor::cat(&[&prefix.key, &k], 2)?;
-                let v = Tensor::cat(&[&prefix.value, &v], 2)?;
-                let bias =
-                    Self::t2i_target_bias(valid_tokens, target_tokens, q.dtype(), q.device())?;
-                let context = self.target_attention(&q, &k, &v, bias.as_ref())?;
-                return self
-                    .to_out
-                    .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
-                    .map_err(Into::into);
-            }
-            LayerCache::Disabled => {}
-        }
-
-        // The prefix's own attention is causal, whereas target-image rows are
-        // fully bidirectional within their block and see the complete prefix.
-        // Splitting those two calls is algebraically identical to the model's
-        // block-causal mask and avoids ever allocating an N-by-N score matrix
-        // for the tiny text prefix.
-        // Candle Metal matmul requires the physical tensor extent to match
-        // the view it receives. A `narrow` retains the full joint sequence's
-        // backing allocation (the target is a suffix after text), so make
-        // each independently-attended segment contiguous before dispatch.
-        let prefix_q = q.narrow(2, 0, text_len)?.contiguous()?;
-        let prefix_k = k.narrow(2, 0, text_len)?.contiguous()?;
-        let prefix_v = v.narrow(2, 0, text_len)?.contiguous()?;
-        let prefix_bias = Self::t2i_prefix_bias(valid_tokens, q.dtype(), q.device())?;
-        let prefix = crate::attention::attention_with_bias(
-            &prefix_q,
-            &prefix_k,
-            &prefix_v,
-            (1.0 / (self.head_dim as f64).sqrt()) as f32,
-            Some(&prefix_bias),
-        )?;
-
-        let target_q = q.narrow(2, text_len, target_tokens)?.contiguous()?;
-        let target_bias =
-            Self::t2i_target_bias(valid_tokens, target_tokens, q.dtype(), q.device())?;
-        let target = self.target_attention(&target_q, &k, &v, target_bias.as_ref())?;
-        let context = Tensor::cat(&[&prefix, &target], 2)?;
+            LayerCache::Reuse(prefix) => (
+                Tensor::cat(&[&prefix.key, &k], 2)?,
+                Tensor::cat(&[&prefix.value, &v], 2)?,
+            ),
+            LayerCache::Disabled => (k, v),
+        };
+        let context = self.dispatch.attend(&q, &k, &v, plan)?;
         self.to_out
             .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
             .map_err(Into::into)
@@ -572,13 +454,15 @@ impl TransformerBlock {
         Ok((normalized.broadcast_mul(&(scale + 1.0)?)?, gate))
     }
 
-    fn forward_t2i(
+    #[allow(clippy::too_many_arguments)]
+    fn forward_block_causal(
         &self,
         hidden_states: &Tensor,
         modulation: &Tensor,
         rope_cos: &Tensor,
         rope_sin: &Tensor,
-        valid_tokens: &[Vec<bool>],
+        plan: &BlockCausalPlan,
+        prefix_len: usize,
         cache: LayerCache<'_>,
     ) -> Result<Tensor> {
         let dim = hidden_states.dim(D::Minus1)?;
@@ -590,9 +474,14 @@ impl TransformerBlock {
         let mod2 = modulation.narrow(D::Minus1, 2 * dim, 2 * dim)?;
 
         let (normalized, gate) = Self::modulate(self.norm1.forward(hidden_states)?, &mod1)?;
-        let attn = self
-            .attn
-            .forward_t2i(&normalized, rope_cos, rope_sin, valid_tokens, cache)?;
+        let attn = self.attn.forward_block_causal(
+            &normalized,
+            rope_cos,
+            rope_sin,
+            plan,
+            prefix_len,
+            cache,
+        )?;
         let hidden_states = (hidden_states + gate.tanh()?.broadcast_mul(&attn)?)?;
 
         let (normalized, gate) = Self::modulate(self.norm2.forward(&hidden_states)?, &mod2)?;
@@ -618,7 +507,7 @@ impl AdaFinalNorm {
     fn new(dim: usize, eps: f64, vb: VarBuilder<'_>) -> Result<Self> {
         Ok(Self {
             norm: LayerNormNoParams::new(eps),
-            linear: candle_nn::linear_no_bias(dim, dim, vb.pp("linear"))?,
+            linear: linear(dim, dim, vb.pp("linear"))?,
         })
     }
 
@@ -634,10 +523,9 @@ impl AdaFinalNorm {
 }
 
 /// Dense Qwen Image 2.1 transformer loaded from its two official safetensor
-/// shards.  This first native path intentionally supports text-to-image only;
-/// image-conditioned generation additionally needs Qwen3-VL's vision tower
-/// and is rejected by the engine rather than silently treating an image as
-/// text-only conditioning.
+/// shards. It runs any [`QwenImage21JointLayout`]: text-to-image is the layout
+/// with no condition images, and a reference-conditioned request lays its
+/// condition latents into the text stream where the Qwen3-VL image slots were.
 pub(crate) struct QwenImage21Transformer {
     compact_modulation: bool,
     cfg: QwenImage21TransformerConfig,
@@ -650,40 +538,63 @@ pub(crate) struct QwenImage21Transformer {
     proj_out: Linear,
 }
 
-/// One conditioning branch of one denoise request. The borrow ties the cache
-/// to its exact transformer and immutable prompt; nothing survives the request.
-pub(crate) struct PreparedT2i<'a> {
+/// Rotary tables of one branch, built once per request rather than on every
+/// step: the full joint sequence for the prefill, and the target rows for
+/// cached steps.
+struct BranchRope {
+    dtype: DType,
+    full: (Tensor, Tensor),
+    target: (Tensor, Tensor),
+}
+
+/// One conditioning branch of one denoise request: its layout, its condition
+/// latents (shared by both CFG branches), and its prefix-cache decision. The
+/// borrow ties the cache to its exact transformer and immutable prompt;
+/// nothing survives the request.
+pub(crate) struct PreparedBranch<'a> {
     transformer: &'a QwenImage21Transformer,
     conditioning: &'a QwenImage21TextConditioning,
-    height: usize,
-    width: usize,
+    layout: QwenImage21JointLayout,
+    cond_latents: Option<Tensor>,
+    cache_policy: PrefixCacheDecision,
+    rope: Option<BranchRope>,
     layers: Vec<PrefixKv>,
 }
 
-impl PreparedT2i<'_> {
+impl PreparedBranch<'_> {
+    #[cfg(test)]
+    pub(crate) fn layout(&self) -> &QwenImage21JointLayout {
+        &self.layout
+    }
+
+    /// Predict the flow for `latents` `[B, target_tokens, 64]` at normalized
+    /// `timestep`.
     pub(crate) fn forward(&mut self, latents: &Tensor, timestep: f64) -> Result<Tensor> {
-        // Keep the retained allocation within the admission budget. Longer
-        // prompts still render in full; they simply recompute their prefix.
-        if self.conditioning.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS {
-            return self.transformer.forward_with_cache(
+        ensure_branch_rope(
+            &mut self.rope,
+            &self.layout,
+            self.transformer.cfg.axes_dims_rope,
+            latents.dtype(),
+            latents.device(),
+        )?;
+        let rope = self.rope.as_ref().expect("rope tables were just built");
+        let forward = |cache| {
+            self.transformer.forward_layout(
                 latents,
+                self.cond_latents.as_ref(),
                 timestep,
                 self.conditioning,
-                self.height,
-                self.width,
-                PrefixCache::Disabled,
-            );
+                &self.layout,
+                rope,
+                cache,
+            )
+        };
+        if self.cache_policy == PrefixCacheDecision::Recompute {
+            return forward(PrefixCache::Disabled);
         }
         if self.layers.is_empty() {
             let mut layers = Vec::with_capacity(self.transformer.blocks.len());
-            let result = self.transformer.forward_with_cache(
-                latents,
-                timestep,
-                self.conditioning,
-                self.height,
-                self.width,
-                PrefixCache::Extract(&mut layers),
-            )?;
+            let result = forward(PrefixCache::Extract(&mut layers))?;
             // Publish only a complete, successful prefill.
             self.layers = layers;
             Ok(result)
@@ -693,32 +604,109 @@ impl PreparedT2i<'_> {
                 key.dtype() == latents.dtype() && key.device().same_device(latents.device()),
                 "Qwen Image 2.1 cached denoise cannot change device or dtype"
             );
-            self.transformer.forward_with_cache(
-                latents,
-                timestep,
-                self.conditioning,
-                self.height,
-                self.width,
-                PrefixCache::Reuse(&self.layers),
-            )
+            forward(PrefixCache::Reuse(&self.layers))
         }
     }
 }
 
+/// Build (or rebuild, when the dtype or device changed) a branch's rotary
+/// tables from its layout. Caching them is value-identical: the tables are a
+/// pure function of the layout.
+fn ensure_branch_rope(
+    rope: &mut Option<BranchRope>,
+    layout: &QwenImage21JointLayout,
+    axes_dims: [usize; 3],
+    dtype: DType,
+    device: &Device,
+) -> Result<()> {
+    let stale = rope
+        .as_ref()
+        .is_none_or(|rope| rope.dtype != dtype || !rope.full.0.device().same_device(device));
+    if !stale {
+        return Ok(());
+    }
+    let (cos, sin) = QwenImage21JointLayout::rope_tables(layout.rope(), axes_dims, dtype, device)?;
+    let prefix = layout.prefix_len();
+    let target = layout.target_tokens();
+    let target_tables = (
+        cos.narrow(0, prefix, target)?.contiguous()?,
+        sin.narrow(0, prefix, target)?.contiguous()?,
+    );
+    *rope = Some(BranchRope {
+        dtype,
+        full: (cos, sin),
+        target: target_tables,
+    });
+    Ok(())
+}
+
 impl QwenImage21Transformer {
+    /// Prepare one branch of a request.
+    ///
+    /// `cond_latents` are the packed, normalized condition-image latents
+    /// `[B, Σ h·w, 64]` in caller order (`pipeline_qwenimage21.py:476`); they
+    /// must be present exactly when the layout has condition images.
+    pub(crate) fn prepare<'a>(
+        &'a self,
+        conditioning: &'a QwenImage21TextConditioning,
+        layout: QwenImage21JointLayout,
+        cond_latents: Option<Tensor>,
+        cache_policy: PrefixCacheDecision,
+    ) -> Result<PreparedBranch<'a>> {
+        anyhow::ensure!(
+            layout.text_len() == conditioning.sequence_length(),
+            "Qwen Image 2.1 layout covers {} text rows but the conditioning has {}",
+            layout.text_len(),
+            conditioning.sequence_length()
+        );
+        match &cond_latents {
+            Some(latents) => {
+                let (batch, tokens, channels) = latents.dims3()?;
+                anyhow::ensure!(
+                    batch == conditioning.batch_size()
+                        && tokens == layout.condition_tokens()
+                        && channels == self.cfg.in_channels,
+                    "Qwen Image 2.1 condition latents {:?} do not match the layout's {} tokens",
+                    latents.dims(),
+                    layout.condition_tokens()
+                );
+            }
+            None => anyhow::ensure!(
+                layout.condition_tokens() == 0,
+                "Qwen Image 2.1 layout has condition images but no condition latents"
+            ),
+        }
+        Ok(PreparedBranch {
+            transformer: self,
+            conditioning,
+            layout,
+            cond_latents,
+            cache_policy,
+            rope: None,
+            layers: Vec::new(),
+        })
+    }
+
+    /// Prepare a text-to-image branch.
     pub(crate) fn prepare_t2i<'a>(
         &'a self,
         conditioning: &'a QwenImage21TextConditioning,
-        height: usize,
-        width: usize,
-    ) -> PreparedT2i<'a> {
-        PreparedT2i {
-            transformer: self,
-            conditioning,
-            height,
-            width,
-            layers: Vec::new(),
-        }
+        latent_height: usize,
+        latent_width: usize,
+        cache_policy: PrefixCacheDecision,
+    ) -> Result<PreparedBranch<'a>> {
+        anyhow::ensure!(
+            conditioning
+                .image_slots
+                .iter()
+                .all(|row| row.iter().all(|slot| !*slot)),
+            "Qwen Image 2.1 conditioning carries image slots; prepare it with its reference layout"
+        );
+        let layout = QwenImage21JointLayout::text_to_image(
+            &conditioning.valid_tokens,
+            (latent_height, latent_width),
+        )?;
+        self.prepare(conditioning, layout, None, cache_policy)
     }
 
     pub(crate) fn load(
@@ -743,11 +731,11 @@ impl QwenImage21Transformer {
     ) -> Result<Self> {
         cfg.validate()?;
         let inner = cfg.inner_dim();
-        let img_in = candle_nn::linear_no_bias(cfg.in_channels, inner, vb.pp("img_in"))?;
+        let img_in = linear(cfg.in_channels, inner, vb.pp("img_in"))?;
         let time_text_embed =
             TimestepEmbedder::new(inner, vb.pp("time_text_embed").pp("timestep_embedder"))?;
         let txt_in = TextProjection::new(&cfg, vb.pp("txt_in"))?;
-        let modulation = candle_nn::linear_no_bias(inner, 4 * inner, vb.pp("modulation").pp("1"))?;
+        let modulation = linear(inner, 4 * inner, vb.pp("modulation").pp("1"))?;
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         for index in 0..cfg.num_layers {
             blocks.push(TransformerBlock::new(
@@ -756,7 +744,7 @@ impl QwenImage21Transformer {
             )?);
         }
         let norm_out = AdaFinalNorm::new(inner, cfg.eps, vb.pp("norm_out"))?;
-        let proj_out = candle_nn::linear_no_bias(inner, cfg.out_channels, vb.pp("proj_out"))?;
+        let proj_out = linear(inner, cfg.out_channels, vb.pp("proj_out"))?;
         Ok(Self {
             compact_modulation: crate::attention::metal_fast_path_enabled(),
             cfg,
@@ -770,93 +758,58 @@ impl QwenImage21Transformer {
         })
     }
 
-    /// Build 3-axis RoPE for a text prefix followed by one target image block.
-    ///
-    /// The frame coordinate advances across text and freezes at the text cursor
-    /// for the image. Height and width are centred around zero inside the image
-    /// block. This is the upstream `QwenImage21Rope` rule specialized only to
-    /// the text-to-image layout.
-    fn t2i_rope(
+    /// Assemble the joint hidden states (`transformer_qwenimage21.py:905-923`):
+    /// `txt_in` over the Qwen3-VL rows, `img_in` over `[cond…, target]`, and
+    /// one `index_select` that drops each image slot's text row and lays the
+    /// latents in its place. Text-to-image's gather is the identity, which is
+    /// exactly the concatenation it has always been.
+    fn assemble_joint(
         &self,
-        text_len: usize,
-        latent_height: usize,
-        latent_width: usize,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<(Tensor, Tensor)> {
-        anyhow::ensure!(
-            latent_height > 0 && latent_width > 0,
-            "Qwen Image 2.1 latent dimensions must be positive"
-        );
-        let target_len = latent_height * latent_width;
-        let mut coords = Vec::with_capacity(text_len + target_len);
-        for index in 0..text_len {
-            let position = index as i32;
-            coords.push([position, position, position]);
-        }
-        let frame = text_len as i32;
-        let h_start = -(latent_height as i32 - latent_height as i32 / 2);
-        let w_start = -(latent_width as i32 - latent_width as i32 / 2);
-        for height in 0..latent_height {
-            for width in 0..latent_width {
-                coords.push([frame, h_start + height as i32, w_start + width as i32]);
-            }
-        }
-
-        let mut cos = Vec::with_capacity(coords.len() * (self.cfg.attention_head_dim / 2));
-        let mut sin = Vec::with_capacity(coords.len() * (self.cfg.attention_head_dim / 2));
-        for coordinate in coords {
-            for (axis, axis_dim) in self.cfg.axes_dims_rope.iter().copied().enumerate() {
-                for index in (0..axis_dim).step_by(2) {
-                    let frequency = 1.0 / 10_000.0f64.powf(index as f64 / axis_dim as f64);
-                    let angle = coordinate[axis] as f64 * frequency;
-                    cos.push(angle.cos() as f32);
-                    sin.push(angle.sin() as f32);
-                }
-            }
-        }
-        let sequence = text_len + target_len;
-        // Qualify the Metal BF16 candidate with full-precision rotary tables.
-        // Other backends retain their existing rounding boundary.
-        let dtype = if device.is_metal() { DType::F32 } else { dtype };
-        Ok((
-            Tensor::from_vec(cos, (sequence, self.cfg.attention_head_dim / 2), device)?
-                .to_dtype(dtype)?,
-            Tensor::from_vec(sin, (sequence, self.cfg.attention_head_dim / 2), device)?
-                .to_dtype(dtype)?,
-        ))
-    }
-
-    /// Denoise a packed `[B, H*W, 64]` text-to-image latent tensor.
-    ///
-    /// `timestep` is normalized to `[0, 1]`, matching the Diffusers transformer's
-    /// call (`scheduler_timestep / 1000`).
-    #[cfg(test)]
-    fn forward_t2i(
-        &self,
+        text: &Tensor,
+        cond_latents: Option<&Tensor>,
         latents: &Tensor,
-        timestep: f64,
-        conditioning: &QwenImage21TextConditioning,
-        latent_height: usize,
-        latent_width: usize,
+        layout: &QwenImage21JointLayout,
     ) -> Result<Tensor> {
-        self.forward_with_cache(
-            latents,
-            timestep,
-            conditioning,
-            latent_height,
-            latent_width,
-            PrefixCache::Disabled,
-        )
+        let text = self.txt_in.forward(text)?;
+        let images = match cond_latents {
+            Some(cond) => self.img_in.forward(&Tensor::cat(
+                &[
+                    &cond
+                        .to_device(latents.device())?
+                        .to_dtype(latents.dtype())?,
+                    latents,
+                ],
+                1,
+            )?)?,
+            None => self.img_in.forward(latents)?,
+        };
+        let joint = Tensor::cat(&[&text, &images], 1)?;
+        if layout.gather_is_identity() {
+            return Ok(joint);
+        }
+        let index = Tensor::from_slice(
+            layout.gather_index(),
+            layout.gather_index().len(),
+            latents.device(),
+        )?;
+        Ok(joint.index_select(&index, 1)?)
     }
 
-    fn forward_with_cache(
+    /// Denoise a packed `[B, target_tokens, 64]` latent under `layout`.
+    ///
+    /// `timestep` is normalized to `[0, 1]`, matching the Diffusers
+    /// transformer's call (`scheduler_timestep / 1000`). On a cached step
+    /// (`PrefixCache::Reuse`) only the target block runs through the blocks,
+    /// against the retained prefix K/V.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_layout(
         &self,
         latents: &Tensor,
+        cond_latents: Option<&Tensor>,
         timestep: f64,
         conditioning: &QwenImage21TextConditioning,
-        latent_height: usize,
-        latent_width: usize,
+        layout: &QwenImage21JointLayout,
+        rope: &BranchRope,
         mut cache: PrefixCache<'_>,
     ) -> Result<Tensor> {
         let cached = matches!(cache, PrefixCache::Reuse(_));
@@ -867,28 +820,20 @@ impl QwenImage21Transformer {
             self.cfg.in_channels
         );
         anyhow::ensure!(
-            target_tokens == latent_height.saturating_mul(latent_width),
-            "Qwen Image 2.1 packed latent length {target_tokens} does not match {latent_height}x{latent_width}"
+            target_tokens == layout.target_tokens(),
+            "Qwen Image 2.1 packed latent length {target_tokens} does not match the layout's {} target tokens",
+            layout.target_tokens()
         );
         anyhow::ensure!(
             conditioning.batch_size() == batch,
             "Qwen Image 2.1 text batch {} does not match latent batch {batch}",
             conditioning.batch_size()
         );
-        anyhow::ensure!(
-            conditioning.image_slots.iter().all(|row| row.iter().all(|slot| !*slot)),
-            "Qwen Image 2.1 image conditioning is not implemented yet; use text-to-image without reference media"
-        );
-
         let text_len = conditioning.sequence_length();
-        anyhow::ensure!(text_len > 0, "Qwen Image 2.1 text conditioning is empty");
         anyhow::ensure!(
-            conditioning.valid_tokens.len() == batch
-                && conditioning
-                    .valid_tokens
-                    .iter()
-                    .all(|row| row.len() == text_len && row[0]),
-            "Qwen Image 2.1 requires a right-padded text mask with a valid first token"
+            text_len == layout.text_len(),
+            "Qwen Image 2.1 text conditioning has {text_len} rows but the layout reads {}",
+            layout.text_len()
         );
         let text = conditioning
             .embeddings
@@ -902,30 +847,20 @@ impl QwenImage21Transformer {
             "Qwen Image 2.1 text embedding shape does not match its checkpoint contract"
         );
 
-        let target = self.img_in.forward(latents)?;
+        let prefix_len = layout.prefix_len();
         let mut hidden_states = if cached {
-            target
+            self.img_in.forward(latents)?
         } else {
-            Tensor::cat(&[&self.txt_in.forward(&text)?, &target], 1)?
+            self.assemble_joint(&text, cond_latents, latents, layout)?
         };
-        let (rope_cos, rope_sin) = self.t2i_rope(
-            text_len,
-            latent_height,
-            latent_width,
-            latents.dtype(),
-            latents.device(),
-        )?;
-        let (rope_cos, rope_sin) = if cached {
-            (
-                rope_cos.narrow(0, text_len, target_tokens)?.contiguous()?,
-                rope_sin.narrow(0, text_len, target_tokens)?.contiguous()?,
-            )
-        } else {
-            (rope_cos, rope_sin)
-        };
+        let (rope_cos, rope_sin) = if cached { &rope.target } else { &rope.full };
+        let plan = layout.attention_plan(cached);
 
-        // `causal_condition`: text positions take a dedicated t=0 modulation
-        // row, while target image positions take each sample's real timestep.
+        // `causal_condition` (`transformer_qwenimage21.py:238-254, 926-937`):
+        // every prefix position — text AND condition image — takes a
+        // dedicated t=0 modulation row, while target positions take each
+        // sample's real timestep. The target is always the last block, so the
+        // per-token rows are `[t=0 prefix; real target]`.
         let mut timesteps = vec![timestep; batch];
         timesteps.push(0.0);
         let temb = self
@@ -940,7 +875,7 @@ impl QwenImage21Transformer {
         let zero = modulation
             .narrow(0, batch, 1)?
             .unsqueeze(1)?
-            .broadcast_as((batch, text_len, 4 * inner))?;
+            .broadcast_as((batch, prefix_len, 4 * inner))?;
         let per_token_modulation = if cached {
             // Every target position shares a timestep. Keep the row compact
             // so each block's scale and tanh execute once per feature, rather
@@ -960,28 +895,76 @@ impl QwenImage21Transformer {
                 PrefixCache::Reuse(layers) => LayerCache::Reuse(&layers[index]),
                 PrefixCache::Disabled => LayerCache::Disabled,
             };
-            hidden_states = block.forward_t2i(
+            hidden_states = block.forward_block_causal(
                 &hidden_states,
                 &per_token_modulation,
-                &rope_cos,
-                &rope_sin,
-                &conditioning.valid_tokens,
+                rope_cos,
+                rope_sin,
+                &plan,
+                prefix_len,
                 layer_cache,
             )?;
         }
+        // Only the target rows are kept (`pipeline_qwenimage21.py:784`), so
+        // `norm_out`/`proj_out` run on the target alone.
         let target_hidden =
-            hidden_states.narrow(1, if cached { 0 } else { text_len }, target_tokens)?;
+            hidden_states.narrow(1, if cached { 0 } else { prefix_len }, target_tokens)?;
         let target_temb = temb.narrow(0, 0, batch)?;
         self.proj_out
             .forward(&self.norm_out.forward(&target_hidden, &target_temb)?)
             .map_err(Into::into)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    impl QwenImage21Transformer {
+        /// Uncached text-to-image forward through the layout path.
+        fn forward_t2i(
+            &self,
+            latents: &Tensor,
+            timestep: f64,
+            conditioning: &QwenImage21TextConditioning,
+            latent_height: usize,
+            latent_width: usize,
+        ) -> Result<Tensor> {
+            let layout = QwenImage21JointLayout::text_to_image(
+                &conditioning.valid_tokens,
+                (latent_height, latent_width),
+            )?;
+            self.forward_uncached(latents, None, timestep, conditioning, &layout)
+        }
+
+        /// Uncached forward of any layout.
+        fn forward_uncached(
+            &self,
+            latents: &Tensor,
+            cond_latents: Option<&Tensor>,
+            timestep: f64,
+            conditioning: &QwenImage21TextConditioning,
+            layout: &QwenImage21JointLayout,
+        ) -> Result<Tensor> {
+            let mut rope = None;
+            ensure_branch_rope(
+                &mut rope,
+                layout,
+                self.cfg.axes_dims_rope,
+                latents.dtype(),
+                latents.device(),
+            )?;
+            self.forward_layout(
+                latents,
+                cond_latents,
+                timestep,
+                conditioning,
+                layout,
+                rope.as_ref().unwrap(),
+                PrefixCache::Disabled,
+            )
+        }
+    }
 
     fn tiny_config() -> QwenImage21TransformerConfig {
         QwenImage21TransformerConfig {
@@ -1020,6 +1003,14 @@ mod tests {
     fn tiny_transformer_on(
         cfg: QwenImage21TransformerConfig,
         device: &Device,
+    ) -> QwenImage21Transformer {
+        tiny_transformer_dtype(cfg, device, DType::F32)
+    }
+
+    fn tiny_transformer_dtype(
+        cfg: QwenImage21TransformerConfig,
+        device: &Device,
+        dtype: DType,
     ) -> QwenImage21Transformer {
         let inner = cfg.inner_dim();
         let mut map = HashMap::new();
@@ -1088,7 +1079,7 @@ mod tests {
             .into_iter()
             .map(|(name, value)| (name, value.to_device(device).unwrap()))
             .collect();
-        let vb = VarBuilder::from_tensors(map, DType::F32, device);
+        let vb = VarBuilder::from_tensors(map, dtype, device);
         QwenImage21Transformer::from_var_builder(cfg, vb).unwrap()
     }
 
@@ -1145,8 +1136,12 @@ mod tests {
         };
         let positive = make_conditioning(3, 21);
         let negative = make_conditioning(5, 22);
-        let mut positive_cache = transformer.prepare_t2i(&positive, 2, 2);
-        let mut negative_cache = transformer.prepare_t2i(&negative, 2, 2);
+        let mut positive_cache = transformer
+            .prepare_t2i(&positive, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
+        let mut negative_cache = transformer
+            .prepare_t2i(&negative, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
         let mut first_keys = Vec::new();
         for (step, time) in [1.0, 0.7, 0.3, 0.01].iter().enumerate() {
             let latents =
@@ -1182,9 +1177,15 @@ mod tests {
                 assert_eq!(keys, first_keys);
             }
         }
-        assert!(transformer.prepare_t2i(&positive, 2, 2).layers.is_empty());
+        assert!(transformer
+            .prepare_t2i(&positive, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap()
+            .layers
+            .is_empty());
         let invalid = Tensor::zeros((2, 5, 4), DType::F32, device).unwrap();
-        let mut fresh = transformer.prepare_t2i(&positive, 2, 2);
+        let mut fresh = transformer
+            .prepare_t2i(&positive, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
         assert!(fresh.forward(&invalid, 1.0).is_err());
         assert!(fresh.layers.is_empty());
         assert!(positive_cache.forward(&invalid, 1.0).is_err());
@@ -1206,7 +1207,9 @@ mod tests {
             image_slots: vec![vec![false; 3]],
         };
         let latents = Tensor::ones((1, 4, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut cache = transformer.prepare_t2i(&conditioning, 2, 2);
+        let mut cache = transformer
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
         cache.forward(&latents, 1.0).unwrap();
         for tensor in [&cache.layers[0].key, &cache.layers[0].value] {
             let (storage, layout) = tensor.storage_and_layout();
@@ -1228,9 +1231,9 @@ mod tests {
     }
 
     #[test]
-    fn long_prefix_falls_back_without_truncation_or_retention() {
+    fn recompute_decision_matches_full_forward_without_retention() {
         let transformer = tiny_transformer();
-        let length = super::super::PREFIX_CACHE_MAX_TOKENS + 1;
+        let length = super::super::LEGACY_PREFIX_CACHE_TOKENS + 1;
         let conditioning = QwenImage21TextConditioning {
             embeddings: crate::engine::seeded_randn(21, &[1, length, 8], &Device::Cpu, DType::F32)
                 .unwrap(),
@@ -1238,16 +1241,21 @@ mod tests {
             image_slots: vec![vec![false; length]],
         };
         let latents = Tensor::ones((1, 4, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut cache = transformer.prepare_t2i(&conditioning, 2, 2);
-        assert_close(
-            &cache.forward(&latents, 0.5).unwrap(),
-            &transformer
-                .forward_t2i(&latents, 0.5, &conditioning, 2, 2)
-                .unwrap(),
-        );
-        assert!(cache.layers.is_empty());
+        let mut cache = transformer
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Recompute)
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                flat(&cache.forward(&latents, 0.5).unwrap()),
+                flat(
+                    &transformer
+                        .forward_t2i(&latents, 0.5, &conditioning, 2, 2)
+                        .unwrap()
+                )
+            );
+            assert!(cache.layers.is_empty());
+        }
     }
-
     #[test]
     fn prefix_cache_budget_is_additive_and_bounds_both_float32_cfg_branches() {
         use crate::device::{activation_bytes, ActivationFamily};
@@ -1289,8 +1297,12 @@ mod tests {
             valid_tokens: vec![vec![true, true, false], vec![true; 3]],
             image_slots: vec![vec![false; 3]; 2],
         };
-        let mut expected = reference.prepare_t2i(&conditioning, 2, 2);
-        let mut actual = compact.prepare_t2i(&conditioning, 2, 2);
+        let mut expected = reference
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
+        let mut actual = compact
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
         for time in [1.0, 0.7, 0.3] {
             let latents = crate::engine::seeded_randn(32, &[2, 4, 4], &device, DType::F32).unwrap();
             let diff = (actual.forward(&latents, time).unwrap()
@@ -1327,8 +1339,12 @@ mod tests {
             valid_tokens: vec![vec![true, true, false], vec![true; 3]],
             image_slots: vec![vec![false; 3]; 2],
         };
-        let mut expected = reference.prepare_t2i(&conditioning, 2, 2);
-        let mut actual = optimized.prepare_t2i(&conditioning, 2, 2);
+        let mut expected = reference
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
+        let mut actual = optimized
+            .prepare_t2i(&conditioning, 2, 2, PrefixCacheDecision::Retain)
+            .unwrap();
         for (step, time) in [1.0, 0.7, 0.3].into_iter().enumerate() {
             let latents =
                 crate::engine::seeded_randn(26 + step as u64, &[2, 4, 4], &device, DType::F32)
@@ -1343,19 +1359,20 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn fused_target_attention_matches_math_with_rectangular_keys() {
+        use super::super::layout::{AttentionSegment, SegmentMask};
         let device = crate::device::metal_device(0).unwrap();
-        let mut transformer = tiny_transformer_on(tiny_config(), &device);
-        let attn = &mut transformer.blocks[0].attn;
-        attn.head_dim = 128;
-        attn.fused_target = true;
+        let mut dispatch = SegmentDispatch {
+            fused_target: true,
+            head_dim: 128,
+        };
         for dtype in [DType::F32, DType::BF16] {
             let q = crate::engine::seeded_randn(21, &[2, 2, 17, 128], &device, dtype).unwrap();
             let k = crate::engine::seeded_randn(22, &[2, 2, 29, 128], &device, dtype).unwrap();
             let v = crate::engine::seeded_randn(23, &[2, 2, 29, 128], &device, dtype).unwrap();
-            let actual = attn.target_attention(&q, &k, &v, None).unwrap();
-            attn.fused_target = false;
-            let expected = attn.target_attention(&q, &k, &v, None).unwrap();
-            attn.fused_target = true;
+            dispatch.fused_target = true;
+            let actual = dispatch.full_unbiased(&q, &k, &v).unwrap();
+            dispatch.fused_target = false;
+            let expected = dispatch.full_unbiased(&q, &k, &v).unwrap();
             let error = (actual.to_dtype(DType::F32).unwrap()
                 - expected.to_dtype(DType::F32).unwrap())
             .unwrap()
@@ -1369,7 +1386,21 @@ mod tests {
                 error < if dtype == DType::F32 { 1e-5 } else { 0.02 },
                 "{dtype:?}: {error}"
             );
-            // A real padded batch must preserve the math mask semantics.
+            // A real padded batch must preserve the math mask semantics even
+            // with the fused path enabled.
+            dispatch.fused_target = true;
+            let key_valid: Vec<Vec<bool>> =
+                (0..2).map(|_| (0..29).map(|i| i != 28).collect()).collect();
+            let plan = BlockCausalPlan {
+                segments: vec![AttentionSegment {
+                    q_start: 0,
+                    q_len: 17,
+                    kv_len: 29,
+                    mask: SegmentMask::Full,
+                }],
+                key_valid: Some(key_valid.into()),
+            };
+            let actual = dispatch.attend(&q, &k, &v, &plan).unwrap();
             let bias = Tensor::from_vec(
                 (0..58)
                     .map(|i| if i % 29 == 28 { f32::NEG_INFINITY } else { 0.0 })
@@ -1380,7 +1411,6 @@ mod tests {
             .unwrap()
             .to_dtype(dtype)
             .unwrap();
-            let actual = attn.target_attention(&q, &k, &v, Some(&bias)).unwrap();
             let expected =
                 crate::attention::attention_with_bias(&q, &k, &v, 1.0 / 128f32.sqrt(), Some(&bias))
                     .unwrap();
@@ -1397,7 +1427,6 @@ mod tests {
             assert_eq!(error, 0.0);
         }
     }
-
     /// Opt-in real-checkpoint parity and timing probe. No downloads or writes.
     /// QWEN_IMAGE21_MODEL_ROOT points at an existing mold models directory.
     #[cfg(feature = "metal")]
@@ -1429,13 +1458,15 @@ mod tests {
             .join(". ");
         let conditioning = super::super::encode_t2i_prompts(&mut encoder, &[prompt])?;
         anyhow::ensure!(
-            conditioning.sequence_length() <= super::super::PREFIX_CACHE_MAX_TOKENS,
+            conditioning.sequence_length() <= super::super::LEGACY_PREFIX_CACHE_TOKENS,
             "benchmark prompt exceeds cache retention bound"
         );
         drop(encoder);
         let paths = (1..=2).map(|i| root.join(format!("qwen-image-2.1-bf16/transformer/diffusion_pytorch_model-{i:05}-of-00002.safetensors"))).collect::<Vec<_>>();
         let transformer = QwenImage21Transformer::load(&paths, &device, DType::F32, &progress)?;
-        let mut cache = transformer.prepare_t2i(&conditioning, 64, 64);
+        let mut cache = transformer
+            .prepare_t2i(&conditioning, 64, 64, PrefixCacheDecision::Retain)
+            .unwrap();
         let mut scheduler = super::super::scheduler::QwenImage21Scheduler::new(
             40,
             4096,
@@ -1491,21 +1522,37 @@ mod tests {
         Ok(())
     }
 
+    /// U3: the text-to-image layout's rotary tables equal v0.32's
+    /// `t2i_rope`, bit for bit, at every working dtype.
     #[test]
-    fn t2i_rope_centers_target_image_coordinates() {
+    fn t2i_layout_rope_equals_the_legacy_t2i_rope() {
         let transformer = tiny_transformer();
-        let (cos, sin) = transformer
-            .t2i_rope(3, 2, 2, DType::F32, &Device::Cpu)
-            .unwrap();
-        assert_eq!(cos.dims(), &[7, 4]);
-        assert_eq!(sin.dims(), &[7, 4]);
-        // Target's first axis is frozen at the text cursor (3); h/w axes
-        // differ across the target grid, so the complete rows must not all be
-        // identical even though every target token shares its frame position.
-        assert_ne!(
-            cos.get(3).unwrap().to_vec1::<f32>().unwrap(),
-            cos.get(4).unwrap().to_vec1::<f32>().unwrap()
-        );
+        for (text_len, height, width) in [(3, 2, 2), (7, 4, 6), (1, 6, 2)] {
+            let valid = vec![vec![true; text_len]];
+            let layout = QwenImage21JointLayout::text_to_image(&valid, (height, width)).unwrap();
+            for dtype in [DType::F32, DType::BF16] {
+                let (cos, sin) = QwenImage21JointLayout::rope_tables(
+                    layout.rope(),
+                    transformer.cfg.axes_dims_rope,
+                    dtype,
+                    &Device::Cpu,
+                )
+                .unwrap();
+                let (legacy_cos, legacy_sin) = legacy_oracle::t2i_rope(
+                    &transformer,
+                    text_len,
+                    height,
+                    width,
+                    dtype,
+                    &Device::Cpu,
+                )
+                .unwrap();
+                for (actual, expected) in [(cos, legacy_cos), (sin, legacy_sin)] {
+                    assert_eq!(actual.dtype(), expected.dtype());
+                    assert_eq!(flat(&actual), flat(&expected));
+                }
+            }
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -1513,28 +1560,26 @@ mod tests {
     fn metal_rope_keeps_f32_tables_for_bf16_latents() {
         let transformer = tiny_transformer();
         let device = crate::device::metal_device(0).unwrap();
-        let (expected_cos, expected_sin) = transformer
-            .t2i_rope(3, 2, 2, DType::F32, &Device::Cpu)
-            .unwrap();
-        let (cos, sin) = transformer.t2i_rope(3, 2, 2, DType::BF16, &device).unwrap();
+        let layout = QwenImage21JointLayout::text_to_image(&[vec![true; 3]], (2, 2)).unwrap();
+        let axes = transformer.cfg.axes_dims_rope;
+        let (expected_cos, expected_sin) =
+            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::F32, &Device::Cpu)
+                .unwrap();
+        let (cos, sin) =
+            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::BF16, &device).unwrap();
         for (actual, expected) in [(cos, expected_cos), (sin, expected_sin)] {
             assert_eq!(actual.dtype(), DType::F32);
             assert_eq!(
-                actual
-                    .to_device(&Device::Cpu)
-                    .unwrap()
-                    .to_vec2::<f32>()
-                    .unwrap(),
-                expected.to_vec2::<f32>().unwrap()
+                flat(&actual.to_device(&Device::Cpu).unwrap()),
+                flat(&expected)
             );
         }
-        let (cos, sin) = transformer
-            .t2i_rope(3, 2, 2, DType::BF16, &Device::Cpu)
-            .unwrap();
+        let (cos, sin) =
+            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::BF16, &Device::Cpu)
+                .unwrap();
         assert_eq!(cos.dtype(), DType::BF16);
         assert_eq!(sin.dtype(), DType::BF16);
     }
-
     #[test]
     fn tiny_t2i_forward_preserves_packed_latent_shape() {
         let transformer = tiny_transformer();
@@ -1557,29 +1602,566 @@ mod tests {
             .all(|value| value.is_finite()));
     }
 
+    fn flat(tensor: &Tensor) -> Vec<f32> {
+        tensor
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    }
+
+    fn padded_and_unpadded(length: usize, device: &Device) -> Vec<QwenImage21TextConditioning> {
+        vec![
+            QwenImage21TextConditioning {
+                embeddings: crate::engine::seeded_randn(41, &[2, length, 8], device, DType::F32)
+                    .unwrap(),
+                valid_tokens: vec![
+                    (0..length).map(|i| i + 2 < length).collect(),
+                    vec![true; length],
+                ],
+                image_slots: vec![vec![false; length]; 2],
+            },
+            QwenImage21TextConditioning {
+                embeddings: crate::engine::seeded_randn(42, &[1, length, 8], device, DType::F32)
+                    .unwrap(),
+                valid_tokens: vec![vec![true; length]],
+                image_slots: vec![vec![false; length]],
+            },
+        ]
+    }
+
+    /// The layout-generalized text-to-image forward is BITWISE the frozen
+    /// v0.32 forward, uncached and across cached steps, padded or not, in
+    /// F32 and BF16 — archived seeds keep their bytes.
     #[test]
-    fn t2i_target_bias_only_masks_padded_text_keys() {
-        let bias = Attention::t2i_target_bias(
-            &[vec![true, false], vec![true, true]],
-            4,
-            DType::F32,
-            &Device::Cpu,
+    fn t2i_forward_is_bitwise_the_frozen_legacy_forward() {
+        // Candle's CPU matmul has no BF16 kernel; F16 exercises the same
+        // half-precision rounding boundaries. The accelerator variants below
+        // cover BF16 on CUDA and Metal.
+        legacy_parity(&Device::Cpu, &[DType::F32, DType::F16]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn t2i_forward_is_bitwise_the_frozen_legacy_forward_on_cuda() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        legacy_parity(&device, &[DType::F32, DType::BF16]);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn t2i_forward_is_bitwise_the_frozen_legacy_forward_on_metal() {
+        let device = crate::device::metal_device(0).unwrap();
+        legacy_parity(&device, &[DType::F32, DType::BF16]);
+    }
+
+    fn legacy_parity(device: &Device, dtypes: &[DType]) {
+        let device = device.clone();
+        for &dtype in dtypes {
+            for heads in [1, 2] {
+                let mut cfg = tiny_config();
+                cfg.num_layers = 3;
+                cfg.num_attention_heads = heads;
+                let transformer = tiny_transformer_dtype(cfg, &device, dtype);
+                for conditioning in padded_and_unpadded(5, &device) {
+                    let conditioning = conditioning.to_device_dtype(&device, dtype).unwrap();
+                    let batch = conditioning.batch_size();
+                    let mut branch = transformer
+                        .prepare_t2i(&conditioning, 2, 4, PrefixCacheDecision::Retain)
+                        .unwrap();
+                    let mut legacy_layers: Vec<PrefixKv> = Vec::new();
+                    for (step, time) in [1.0, 0.6, 0.2].into_iter().enumerate() {
+                        let latents = crate::engine::seeded_randn(
+                            50 + step as u64,
+                            &[batch, 8, 4],
+                            &device,
+                            dtype,
+                        )
+                        .unwrap();
+                        let uncached = transformer
+                            .forward_t2i(&latents, time, &conditioning, 2, 4)
+                            .unwrap();
+                        let legacy_uncached = legacy_oracle::forward_with_cache(
+                            &transformer,
+                            &latents,
+                            time,
+                            &conditioning,
+                            2,
+                            4,
+                            legacy_oracle::LegacyCache::Disabled,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            flat(&uncached),
+                            flat(&legacy_uncached),
+                            "{dtype:?} uncached"
+                        );
+
+                        let cached = branch.forward(&latents, time).unwrap();
+                        let legacy_cached = if legacy_layers.is_empty() {
+                            let mut layers = Vec::new();
+                            let out = legacy_oracle::forward_with_cache(
+                                &transformer,
+                                &latents,
+                                time,
+                                &conditioning,
+                                2,
+                                4,
+                                legacy_oracle::LegacyCache::Extract(&mut layers),
+                            )
+                            .unwrap();
+                            legacy_layers = layers;
+                            out
+                        } else {
+                            legacy_oracle::forward_with_cache(
+                                &transformer,
+                                &latents,
+                                time,
+                                &conditioning,
+                                2,
+                                4,
+                                legacy_oracle::LegacyCache::Reuse(&legacy_layers),
+                            )
+                            .unwrap()
+                        };
+                        assert_eq!(
+                            flat(&cached),
+                            flat(&legacy_cached),
+                            "{dtype:?} cached step {step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// One reference image (2x4 latents = two slots) between text rows, with
+    /// positive and negative prompts of different lengths and padding.
+    struct ReferenceCase {
+        positive: QwenImage21TextConditioning,
+        negative: QwenImage21TextConditioning,
+        cond_latents: Tensor,
+    }
+
+    fn reference_case(device: &Device) -> ReferenceCase {
+        let conditioning = |slots: Vec<bool>, pad: [usize; 2], seed| {
+            let length = slots.len();
+            QwenImage21TextConditioning {
+                embeddings: crate::engine::seeded_randn(seed, &[2, length, 8], device, DType::F32)
+                    .unwrap(),
+                valid_tokens: pad
+                    .iter()
+                    .map(|pad| (0..length).map(|i| i + pad < length).collect())
+                    .collect(),
+                image_slots: vec![slots; 2],
+            }
+        };
+        ReferenceCase {
+            positive: conditioning(
+                vec![false, false, true, true, false, false, false],
+                [1, 0],
+                61,
+            ),
+            negative: conditioning(
+                vec![false, true, true, false, false, false, false, false, false],
+                [2, 1],
+                62,
+            ),
+            cond_latents: crate::engine::seeded_randn(63, &[2, 8, 4], device, DType::F32).unwrap(),
+        }
+    }
+
+    fn reference_layout(conditioning: &QwenImage21TextConditioning) -> QwenImage21JointLayout {
+        QwenImage21JointLayout::build(
+            &conditioning.image_slots[0],
+            &conditioning.valid_tokens,
+            &[(2, 4)],
+            (2, 2),
         )
         .unwrap()
-        .unwrap();
-        let rows = bias
-            .squeeze(1)
-            .unwrap()
-            .squeeze(1)
-            .unwrap()
-            .to_vec2::<f32>()
+    }
+
+    /// A deliberately naive, layout-free forward written from upstream's
+    /// transformer (`transformer_qwenimage21.py`): repeat/overwrite the image
+    /// slots row by row (`:905-923`), label blocks from the shapes
+    /// (`:808-850`), lay RoPE out with `QwenImage21Rope.forward`'s cursor walk
+    /// (`:677-710`), select modulation rows per token (`:238-254`), and
+    /// attend densely under `mask_mod` (`:292-296`).
+    fn naive_forward(
+        transformer: &QwenImage21Transformer,
+        latents: &Tensor,
+        cond_latents: &Tensor,
+        timestep: f64,
+        conditioning: &QwenImage21TextConditioning,
+        cond_shapes: &[(usize, usize)],
+        target: (usize, usize),
+    ) -> Tensor {
+        let device = latents.device();
+        let batch = latents.dim(0).unwrap();
+        let slots = &conditioning.image_slots[0];
+        let text = transformer
+            .txt_in
+            .forward(&conditioning.embeddings)
             .unwrap();
-        assert_eq!(rows[0][0], 0.0);
-        assert_eq!(rows[0][1], f32::NEG_INFINITY);
-        assert!(rows[0][2..].iter().all(|value| *value == 0.0));
-        assert!(rows[1].iter().all(|value| *value == 0.0));
+        let images = transformer
+            .img_in
+            .forward(&Tensor::cat(&[cond_latents, latents], 1).unwrap())
+            .unwrap();
+        // Joint position -> Some(VL text row) | None (image token).
+        let mut joint: Vec<Option<usize>> = Vec::new();
+        for (row, slot) in slots.iter().enumerate() {
+            if *slot {
+                joint.extend([None; 4]);
+            } else {
+                joint.push(Some(row));
+            }
+        }
+        let target_tokens = target.0 * target.1;
+        joint.extend(std::iter::repeat_n(None, target_tokens));
+        let total = joint.len();
+        let mut rows = Vec::new();
+        let mut image_row = 0;
+        for position in &joint {
+            match position {
+                Some(row) => rows.push(text.narrow(1, *row, 1).unwrap()),
+                None => {
+                    rows.push(images.narrow(1, image_row, 1).unwrap());
+                    image_row += 1;
+                }
+            }
+        }
+        let mut hidden = Tensor::cat(&rows, 1).unwrap();
+
+        let shapes: Vec<(usize, usize)> = cond_shapes
+            .iter()
+            .copied()
+            .chain(std::iter::once(target))
+            .collect();
+        let image_positions: Vec<usize> = (0..total).filter(|&p| joint[p].is_none()).collect();
+        let mut image_ids = vec![-1i64; total];
+        let mut cursor_id = 0;
+        for (block, (h, w)) in shapes.iter().enumerate() {
+            for _ in 0..h * w {
+                image_ids[image_positions[cursor_id]] = block as i64;
+                cursor_id += 1;
+            }
+        }
+        let target_mask: Vec<bool> = (0..total)
+            .map(|p| image_ids[p] == shapes.len() as i64 - 1)
+            .collect();
+
+        // QwenImage21Rope.forward.
+        let is_image: Vec<bool> = joint.iter().map(Option::is_none).collect();
+        let (mut frame, mut image_h, mut image_w) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut cursor, mut position) = (0usize, 0i32);
+        for &(h, w) in &shapes {
+            let block_start = (cursor..total).find(|&p| is_image[p]).unwrap();
+            let text_len = block_start - cursor;
+            frame.extend((0..text_len).map(|i| position + i as i32));
+            position += text_len as i32;
+            cursor = block_start + h * w;
+            frame.extend(std::iter::repeat_n(position, h * w));
+            position += h.max(w) as i32;
+            let (h, w) = (h as i32, w as i32);
+            for y in -(h - h / 2)..h / 2 {
+                for x in -(w - w / 2)..w / 2 {
+                    image_h.push(y);
+                    image_w.push(x);
+                }
+            }
+        }
+        frame.extend((0..total - cursor).map(|i| position + i as i32));
+        let mut coords: Vec<[i32; 3]> = frame.iter().map(|&f| [f, f, f]).collect();
+        for (index, &p) in image_positions.iter().enumerate() {
+            coords[p][1] = image_h[index];
+            coords[p][2] = image_w[index];
+        }
+        let (cos, sin) = QwenImage21JointLayout::rope_tables(
+            &coords,
+            transformer.cfg.axes_dims_rope,
+            DType::F32,
+            device,
+        )
+        .unwrap();
+
+        // Dense mask; joint text positions map in order onto VL text rows.
+        let mut bias = Vec::new();
+        for row in 0..batch {
+            let valid: Vec<bool> = joint
+                .iter()
+                .map(|p| p.is_none_or(|r| conditioning.valid_tokens[row][r]))
+                .collect();
+            for q in 0..total {
+                for kv in 0..total {
+                    let same = image_ids[q] >= 0 && image_ids[q] == image_ids[kv];
+                    bias.push(if (q >= kv || same) && valid[kv] {
+                        0.0f32
+                    } else {
+                        f32::NEG_INFINITY
+                    });
+                }
+            }
+        }
+        let bias = Tensor::from_vec(bias, (batch, 1, total, total), device).unwrap();
+
+        let mut timesteps = vec![timestep; batch];
+        timesteps.push(0.0);
+        let temb = transformer
+            .time_text_embed
+            .forward(&timesteps, DType::F32, device)
+            .unwrap();
+        let modulation = transformer
+            .modulation
+            .forward(&candle_nn::Activation::Silu.forward(&temb).unwrap())
+            .unwrap();
+        let per_token = Tensor::stack(
+            &(0..batch)
+                .map(|b| {
+                    Tensor::cat(
+                        &target_mask
+                            .iter()
+                            .map(|&is_target| {
+                                modulation
+                                    .narrow(0, if is_target { b } else { batch }, 1)
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>(),
+                        0,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            0,
+        )
+        .unwrap();
+
+        let heads = transformer.cfg.num_attention_heads;
+        let head_dim = transformer.cfg.attention_head_dim;
+        let inner = transformer.cfg.inner_dim();
+        for block in &transformer.blocks {
+            let mod1 = per_token.narrow(D::Minus1, 0, 2 * inner).unwrap();
+            let mod2 = per_token.narrow(D::Minus1, 2 * inner, 2 * inner).unwrap();
+            let (normalized, gate) =
+                TransformerBlock::modulate(block.norm1.forward(&hidden).unwrap(), &mod1).unwrap();
+            let attn = &block.attn;
+            let project = |linear: &Linear| {
+                linear
+                    .forward(&normalized)
+                    .unwrap()
+                    .reshape((batch, total, heads, head_dim))
+                    .unwrap()
+                    .transpose(1, 2)
+                    .unwrap()
+            };
+            let rope = |x: Tensor| {
+                crate::wan::model::rope::apply_rope(&x.transpose(1, 2).unwrap(), &cos, &sin)
+                    .unwrap()
+                    .transpose(1, 2)
+                    .unwrap()
+                    .contiguous()
+                    .unwrap()
+            };
+            let q = rope(
+                attn.normalize_heads(&project(&attn.to_q), &attn.norm_q)
+                    .unwrap(),
+            );
+            let k = rope(
+                attn.normalize_heads(&project(&attn.to_k), &attn.norm_k)
+                    .unwrap(),
+            );
+            let v = project(&attn.to_v).contiguous().unwrap();
+            let context = crate::attention::attention_with_bias(
+                &q,
+                &k,
+                &v,
+                (1.0 / (head_dim as f64).sqrt()) as f32,
+                Some(&bias),
+            )
+            .unwrap();
+            let attn_out = attn
+                .to_out
+                .forward(
+                    &context
+                        .transpose(1, 2)
+                        .unwrap()
+                        .reshape((batch, total, inner))
+                        .unwrap(),
+                )
+                .unwrap();
+            hidden = (&hidden + gate.tanh().unwrap().broadcast_mul(&attn_out).unwrap()).unwrap();
+            let (normalized, gate) =
+                TransformerBlock::modulate(block.norm2.forward(&hidden).unwrap(), &mod2).unwrap();
+            hidden = (&hidden
+                + gate
+                    .tanh()
+                    .unwrap()
+                    .broadcast_mul(&block.mlp.forward(&normalized).unwrap())
+                    .unwrap())
+            .unwrap();
+        }
+        let target_hidden = hidden
+            .narrow(1, total - target_tokens, target_tokens)
+            .unwrap();
+        transformer
+            .proj_out
+            .forward(
+                &transformer
+                    .norm_out
+                    .forward(&target_hidden, &temb.narrow(0, 0, batch).unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+    }
+
+    /// U5: a forward with a condition block equals the naive dense oracle.
+    #[test]
+    fn condition_block_forward_matches_the_naive_dense_oracle() {
+        let device = Device::Cpu;
+        for heads in [1, 2] {
+            let mut cfg = tiny_config();
+            cfg.num_layers = 3;
+            cfg.num_attention_heads = heads;
+            let transformer = tiny_transformer_on(cfg, &device);
+            let case = reference_case(&device);
+            for conditioning in [&case.positive, &case.negative] {
+                let layout = reference_layout(conditioning);
+                for time in [1.0, 0.4] {
+                    let latents =
+                        crate::engine::seeded_randn(70, &[2, 4, 4], &device, DType::F32).unwrap();
+                    let actual = transformer
+                        .forward_uncached(
+                            &latents,
+                            Some(&case.cond_latents),
+                            time,
+                            conditioning,
+                            &layout,
+                        )
+                        .unwrap();
+                    let expected = naive_forward(
+                        &transformer,
+                        &latents,
+                        &case.cond_latents,
+                        time,
+                        conditioning,
+                        &[(2, 4)],
+                        (2, 2),
+                    );
+                    assert_close(&actual, &expected);
+                }
+            }
+        }
+    }
+
+    /// U5: prefix-cache parity with a condition block, across steps and both
+    /// CFG branches (which have different text lengths but share the
+    /// condition latents).
+    #[test]
+    fn condition_block_cache_matches_full_forward_across_steps_and_branches() {
+        let device = Device::Cpu;
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        cfg.num_attention_heads = 2;
+        let transformer = tiny_transformer_on(cfg, &device);
+        let case = reference_case(&device);
+        let mut branches: Vec<_> = [&case.positive, &case.negative]
+            .into_iter()
+            .map(|conditioning| {
+                transformer
+                    .prepare(
+                        conditioning,
+                        reference_layout(conditioning),
+                        Some(case.cond_latents.clone()),
+                        PrefixCacheDecision::Retain,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for (step, time) in [1.0, 0.7, 0.3, 0.01].into_iter().enumerate() {
+            let latents =
+                crate::engine::seeded_randn(80 + step as u64, &[2, 4, 4], &device, DType::F32)
+                    .unwrap();
+            for branch in &mut branches {
+                let expected = transformer
+                    .forward_uncached(
+                        &latents,
+                        Some(&case.cond_latents),
+                        time,
+                        branch.conditioning,
+                        branch.layout(),
+                    )
+                    .unwrap();
+                let actual = branch.forward(&latents, time).unwrap();
+                assert_close(&actual, &expected);
+                let prefix = branch.layout().prefix_len();
+                assert_eq!(branch.layers.len(), 3);
+                for layer in &branch.layers {
+                    // Text AND condition-image tokens are retained.
+                    assert_eq!(layer.key.dims(), &[2, 2, prefix, 8]);
+                }
+            }
+        }
+        assert_eq!(branches[0].layout().prefix_len(), 5 + 8);
+        assert_eq!(branches[1].layout().prefix_len(), 7 + 8);
+    }
+
+    /// U6: condition-image rows modulate from the t=0 row, so the prefix a
+    /// prefill retains does not depend on the step's timestep.
+    #[test]
+    fn condition_rows_take_the_t0_modulation_row() {
+        let device = Device::Cpu;
+        let transformer = tiny_transformer();
+        let case = reference_case(&device);
+        let extract = |time: f64| {
+            let mut branch = transformer
+                .prepare(
+                    &case.positive,
+                    reference_layout(&case.positive),
+                    Some(case.cond_latents.clone()),
+                    PrefixCacheDecision::Retain,
+                )
+                .unwrap();
+            let latents = crate::engine::seeded_randn(90, &[2, 4, 4], &device, DType::F32).unwrap();
+            branch.forward(&latents, time).unwrap();
+            flat(&branch.layers[0].key)
+        };
+        assert_eq!(extract(1.0), extract(0.25));
+    }
+
+    #[test]
+    fn prepare_refuses_mismatched_condition_latents() {
+        let device = Device::Cpu;
+        let transformer = tiny_transformer();
+        let case = reference_case(&device);
+        let layout = reference_layout(&case.positive);
+        assert!(transformer
+            .prepare(
+                &case.positive,
+                layout.clone(),
+                None,
+                PrefixCacheDecision::Retain
+            )
+            .is_err());
+        let short = case.cond_latents.narrow(1, 0, 4).unwrap();
+        assert!(transformer
+            .prepare(
+                &case.positive,
+                layout,
+                Some(short),
+                PrefixCacheDecision::Retain
+            )
+            .is_err());
+        assert!(transformer
+            .prepare_t2i(&case.positive, 2, 2, PrefixCacheDecision::Retain)
+            .is_err());
     }
 }
+
+#[cfg(test)]
+mod legacy_oracle;
 
 #[cfg(all(test, feature = "metal"))]
 mod performance_tests;

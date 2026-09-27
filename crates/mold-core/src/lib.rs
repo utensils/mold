@@ -124,9 +124,10 @@ pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
-    clamp_to_megapixel_limit, dimension_alignment_for_family, dimension_alignment_for_model,
-    dimension_warning, dimension_warning_composed, family_supports_lora, fit_to_model_dimensions,
-    fit_to_model_dimensions_aligned, fit_to_target_area, fixed_fps_for_family,
+    calculate_dimensions_ties_even, clamp_to_megapixel_limit, dimension_alignment_for_family,
+    dimension_alignment_for_model, dimension_warning, dimension_warning_composed,
+    family_supports_lora, fit_to_model_dimensions, fit_to_model_dimensions_aligned,
+    fit_to_target_area, fit_to_target_area_ties_even, fixed_fps_for_family,
     frame_offset_for_family, largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition,
     materialize_request_organization, min_frames_for_family, prompt_required_for,
     prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
