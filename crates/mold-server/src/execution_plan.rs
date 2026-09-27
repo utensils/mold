@@ -4077,11 +4077,11 @@ fn build_plan(
         context.effective_loras,
         memory.block_offload,
     );
-    let warm_reuse_fingerprint = execution_fingerprint(
+    let warm_reuse_fingerprint = warm_reuse_fingerprint(
         context.model,
         device,
         context.effective,
-        &load_plan_independent_components(&components),
+        &components,
         context.engine_config,
         context.effective_loras,
         memory.block_offload,
@@ -5851,6 +5851,49 @@ fn load_plan_independent_components(
             )
         })
         .collect()
+}
+
+/// Families whose engine installs the request's adapter stack per render on a
+/// resident transformer instead of merging it at build time.
+///
+/// Qwen Image 2.1 carries every LoRA in bypass slots (`plan.md`: "LoRA is
+/// always bypass, never merged ... every tier takes adapters without
+/// rebuilds"); `qwen_image21::pipeline` compares the wanted stack with its
+/// `active_lora` and swaps the slots in place. Its warm engine therefore
+/// serves any stack, and rebuilding it for one would reload the whole
+/// transformer to arrive at the state an in-place install reaches in a second.
+fn adapters_install_per_request(family: &str) -> bool {
+    family == "qwen-image21"
+}
+
+/// [`ResolvedExecutionPlan::warm_reuse_fingerprint`]: the exact identity with
+/// the load plan normalised away and, for a family that installs adapters per
+/// request ([`adapters_install_per_request`]), the adapter stack too.
+fn warm_reuse_fingerprint(
+    model: &str,
+    device: &DeviceFact,
+    effective: &EffectivePlacement,
+    components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+    engine_config: &mold_inference::FrozenEngineConfig,
+    effective_loras: &[PlannedLora],
+    offload: bool,
+) -> String {
+    let mut components = load_plan_independent_components(components);
+    let effective_loras = if adapters_install_per_request(&engine_config.family) {
+        components.retain(|role, _| !matches!(role, ComponentRole::Lora(_)));
+        &[]
+    } else {
+        effective_loras
+    };
+    execution_fingerprint(
+        model,
+        device,
+        effective,
+        &components,
+        engine_config,
+        effective_loras,
+        offload,
+    )
 }
 
 fn execution_fingerprint(
@@ -10007,6 +10050,128 @@ mod tests {
             warm_of(&cold, &engine_config, &adapter),
             "the adapter stack still invalidates a warm engine"
         );
+    }
+
+    /// Qwen Image 2.1 installs its adapter stack per request into bypass
+    /// slots on the resident transformer (`qwen_image21::pipeline`'s
+    /// `active_lora`), so a warm engine serves a request whose LoRA stack
+    /// differs from the one it was built under. Its WARM identity is
+    /// therefore blind to the stack — adding, removing or rescaling an
+    /// adapter must not tear down and reload 28 GB of weights — while the
+    /// EXACT identity (residency, grants, provenance) still records it, and
+    /// every other family keeps rebuilding on an adapter change.
+    #[test]
+    fn a_qwen_image21_warm_engine_serves_any_adapter_stack() {
+        let device = DeviceFact {
+            total_vram_bytes: None,
+            cuda_peak_baseline: None,
+            id: "cuda:stable-device".into(),
+            ordinal: 0,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 9)),
+            available_vram_bytes: 46 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Auto,
+            )]),
+        };
+        let transformer = ComponentExecutionPlan {
+            role: ComponentRole::Transformer,
+            artifact_path: PathBuf::from("/models/qwen-image-2.1-bf16/transformer"),
+            content_fingerprint: ContentFingerprint("qwen21-transformer".into()),
+            dtype: Some(PlannedDType::Bf16),
+            quantization: None,
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::Resident,
+            predicted_vram_bytes: 15 * GIB,
+            predicted_host_bytes: 0,
+        };
+        let lora_component = |path: &str, content: &str| ComponentExecutionPlan {
+            role: ComponentRole::Lora(0),
+            artifact_path: PathBuf::from(path),
+            content_fingerprint: ContentFingerprint(content.into()),
+            dtype: None,
+            quantization: None,
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::Resident,
+            predicted_vram_bytes: GIB,
+            predicted_host_bytes: 0,
+        };
+        let adapter = |path: &str, content: &str, scale: f64| PlannedLora {
+            path: PathBuf::from(path),
+            scale_bits: scale.to_bits(),
+            content_fingerprint: ContentFingerprint(content.into()),
+        };
+        let bare = BTreeMap::from([(ComponentRole::Transformer, transformer.clone())]);
+        let with_style = BTreeMap::from([
+            (ComponentRole::Transformer, transformer.clone()),
+            (
+                ComponentRole::Lora(0),
+                lora_component("/loras/style.safetensors", "style"),
+            ),
+        ]);
+        let style_half = [adapter("/loras/style.safetensors", "style", 0.5)];
+        let style_full = [adapter("/loras/style.safetensors", "style", 0.8)];
+
+        for (model, family, request_scoped) in [
+            ("qwen-image-2.1:bf16", "qwen-image21", true),
+            ("flux2-dev:q8", "flux2", false),
+            ("qwen-image:q8", "qwen-image", false),
+        ] {
+            let config = frozen_config_for_family(family);
+            let warm = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+                        loras: &[PlannedLora]| {
+                warm_reuse_fingerprint(
+                    model, &device, &effective, components, &config, loras, false,
+                )
+            };
+            let exact = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+                         loras: &[PlannedLora]| {
+                execution_fingerprint(
+                    model, &device, &effective, components, &config, loras, false,
+                )
+            };
+            assert_ne!(
+                exact(&bare, &[]),
+                exact(&with_style, &style_half),
+                "{family}: the exact identity always records the adapter stack"
+            );
+            let same = |a: String, b: String| a == b;
+            assert_eq!(
+                same(warm(&bare, &[]), warm(&with_style, &style_half)),
+                request_scoped,
+                "{family}: adding an adapter to a warm engine"
+            );
+            assert_eq!(
+                same(
+                    warm(&with_style, &style_half),
+                    warm(&with_style, &style_full)
+                ),
+                request_scoped,
+                "{family}: rescaling an adapter on a warm engine"
+            );
+            assert_eq!(
+                same(warm(&with_style, &style_full), warm(&bare, &[])),
+                request_scoped,
+                "{family}: removing an adapter from a warm engine"
+            );
+            // The exemption is exactly the adapter stack: the checkpoint
+            // under it still invalidates the warm engine for every family.
+            let replaced = BTreeMap::from([(
+                ComponentRole::Transformer,
+                ComponentExecutionPlan {
+                    content_fingerprint: ContentFingerprint("replaced".into()),
+                    ..transformer.clone()
+                },
+            )]);
+            assert_ne!(
+                warm(&bare, &[]),
+                warm(&replaced, &[]),
+                "{family}: a replaced checkpoint still rebuilds"
+            );
+        }
     }
 
     #[test]
