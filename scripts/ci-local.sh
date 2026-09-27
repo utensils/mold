@@ -381,14 +381,15 @@ if wants gpu; then
           cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
         step "gpu: hermetic CUDA H3 server suite" \
           bash scripts/test-h3-cuda-server.sh
-        # The conditioner cache is INERT under `h3-private-uat`, so the rust
-        # lane's H3 foundations step never exercises an enabled cache. It runs
-        # here under the shipping `h3-cuda` edge (the attention release contract
-        # refuses a bare `h3` recipe in this file; GitHub CI's host runner takes
-        # the same module filter with the bare feature, which that contract does not scan). Module-filtered because
-        # the unfiltered `h3` graph carries private-UAT-only fixtures.
-        step "gpu: CUDA MiniMax H3 conditioner cache (enabled)" \
-          cargo test -p mold-ai-inference --lib --features h3-cuda minimax_h3::conditioner_cache
+        # The whole inference lib suite under the shipping `h3-cuda` edge (the
+        # attention release contract refuses a bare `h3` recipe in this file;
+        # GitHub CI's host runner runs the same suite with the bare feature,
+        # which that contract does not scan). It covers the conditioner cache
+        # ENABLED (inert under `h3-private-uat`), every assertion the public
+        # engine changes, and the live-CUDA / flash-attn tests no hosted
+        # runner can reach.
+        step "gpu: CUDA MiniMax H3 inference lib suite" \
+          cargo test -p mold-ai-inference --lib --features h3-cuda
         # The capture adapters compile only under `cuda`, so the CPU rust suite
         # above never sees them.
         for bin in h3_qwen_layer50_capture h3_visual_vae_capture \

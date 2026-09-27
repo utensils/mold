@@ -700,9 +700,14 @@ pub fn production_family_capability_for_family(
         .find(|entry| entry.family == family || entry.aliases.contains(&family))
 }
 
-/// The registry's own family name for `family`, resolving a registered alias
-/// (`flux.2` -> `flux2`, `ltx2.3` -> `ltx2`). An unregistered name is returned
-/// unchanged, so a caller's own fallback applies to it.
+/// The canonical engine family for `family`, resolving the factory's aliases
+/// (`flux.2`, `flux2-klein`, `ltx-2`, `ltx2.3`, `sd3.5`, …) through this
+/// registry — the same table `create_engine_with_frozen_config` dispatches on,
+/// pinned to the factory's match arms by
+/// `family_batch_registry_resolves_factory_aliases_and_rejects_runtime_drift`.
+/// Every per-family policy table (attention, convolution, activation budget)
+/// keys on the answer, so an alias can never take a different policy from the
+/// engine it constructs. An unregistered family is returned unchanged.
 pub fn canonical_production_family(family: &str) -> &str {
     production_family_capability_for_family(family).map_or(family, |entry| entry.family)
 }

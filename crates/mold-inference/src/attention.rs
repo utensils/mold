@@ -205,9 +205,11 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 /// built from. Freezing the image answer for a video render would describe
 /// different arithmetic from the one the renderer runs.
 pub fn policy_for_family(family: &str) -> AttentionPolicy {
-    // A registered alias is answered as its family (`flux.2` -> `flux2`).
+    // Keyed on the CANONICAL engine family, so every factory alias
+    // (`flux.2`, `flux2-klein`, `ltx-2`, `ltx2.3`) takes the policy of the
+    // engine it constructs.
     match crate::batch::canonical_production_family(family) {
-        "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
+        "wan" | "ltx2" => AttentionPolicy::Video,
         // FLUX.1, FLUX.2 and Qwen Image 2.1. See `AttentionPolicy::FastStill`;
         // the convolution side mirrors this list in
         // `conv_policy::policy_for_family`. Qwen Image 2.1 joined because its
@@ -1244,33 +1246,6 @@ mod tests {
         assert_eq!(max_abs_diff(&keys, &fast), 0.0);
     }
 
-    /// A registered family alias IS its family: the factory builds the same
-    /// engine for `flux.2` as for `flux2` and for `ltx2.3` as for `ltx2`, so
-    /// the policy the plan freezes (and the conv scope a VAE runs under) must
-    /// be the same too. `ltx2.3` and `flux.2` used to fall through to `Image`
-    /// and freeze math for a render the engine ran on flash.
-    #[test]
-    fn every_registered_alias_takes_its_familys_policy() {
-        for entry in crate::production_batch_capabilities() {
-            for alias in entry.aliases {
-                assert_eq!(
-                    policy_for_family(alias),
-                    policy_for_family(entry.family),
-                    "alias {alias:?} of {:?}",
-                    entry.family
-                );
-                assert_eq!(
-                    crate::conv_policy::policy_for_family(alias),
-                    crate::conv_policy::policy_for_family(entry.family),
-                    "conv alias {alias:?} of {:?}",
-                    entry.family
-                );
-            }
-        }
-        assert_eq!(policy_for_family("flux.2"), AttentionPolicy::FastStill);
-        assert_eq!(policy_for_family("ltx2.3"), AttentionPolicy::Video);
-    }
-
     #[test]
     fn attention_with_no_bias_matches_plain_attention() {
         let (q, k, v) = rand_qkv((1, 2, 8, 16));
@@ -1668,7 +1643,7 @@ mod tests {
     /// `Video` — no more, and no less.
     #[test]
     fn the_family_policy_covers_the_video_call_sites() {
-        for family in ["wan", "ltx2", "ltx-2", "ltx-2.3"] {
+        for family in ["wan", "ltx2", "ltx-2", "ltx2.3"] {
             assert_eq!(
                 policy_for_family(family),
                 AttentionPolicy::Video,
@@ -1778,6 +1753,57 @@ mod tests {
     /// The mapping is what `FrozenEngineConfig` freezes, so a family listed
     /// here and dispatched under another policy would describe different
     /// arithmetic from the one that runs.
+    /// Every factory alias takes the policy of the engine it constructs. The
+    /// tables once matched literal strings, so `flux.2` / `flux2-klein` fell
+    /// through to `Image` while the factory built a FLUX.2 engine, and the
+    /// real LTX-2.3 alias `ltx2.3` fell through while a never-dispatched
+    /// `ltx-2.3` was listed instead. The frozen plan records this answer
+    /// (and the server's execution-plan fingerprint calls the same function),
+    /// so an alias that disagreed described arithmetic the renderer never ran.
+    #[test]
+    fn every_factory_alias_takes_its_engine_family_policy() {
+        let fast_still = ["flux", "flux2", "qwen-image21"];
+        let video = ["wan", "ltx2"];
+        for entry in crate::production_family_capabilities() {
+            for alias in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
+                assert_eq!(
+                    crate::batch::canonical_production_family(alias),
+                    entry.family
+                );
+                let expected = if fast_still.contains(&entry.family) {
+                    AttentionPolicy::FastStill
+                } else if video.contains(&entry.family) {
+                    AttentionPolicy::Video
+                } else {
+                    AttentionPolicy::Image
+                };
+                assert_eq!(policy_for_family(alias), expected, "{alias}");
+                assert_eq!(
+                    crate::conv_policy::policy_for_family(alias),
+                    match expected {
+                        AttentionPolicy::FastStill => crate::conv_policy::ConvPolicy::FastStill,
+                        AttentionPolicy::Video => crate::conv_policy::ConvPolicy::Video,
+                        AttentionPolicy::Image => crate::conv_policy::ConvPolicy::Image,
+                    },
+                    "{alias}"
+                );
+                assert_eq!(
+                    crate::device::activation_family_for(alias),
+                    crate::device::activation_family_for(entry.family),
+                    "{alias}"
+                );
+            }
+        }
+        // The aliases this was written for, by name, so a registry edit that
+        // drops one cannot make the loop above vacuous.
+        for alias in ["flux.2", "flux2-klein"] {
+            assert_eq!(policy_for_family(alias), AttentionPolicy::FastStill);
+        }
+        for alias in ["ltx-2", "ltx2.3"] {
+            assert_eq!(policy_for_family(alias), AttentionPolicy::Video);
+        }
+    }
+
     #[test]
     fn flux_families_take_the_fast_still_policy() {
         for family in ["flux", "flux2", "qwen-image21"] {
@@ -1787,7 +1813,7 @@ mod tests {
                 "{family} renders under the fast-still dispatch"
             );
         }
-        for family in ["wan", "ltx2", "ltx-2", "ltx-2.3"] {
+        for family in ["wan", "ltx2", "ltx-2", "ltx2.3"] {
             assert_eq!(policy_for_family(family), AttentionPolicy::Video);
         }
         for family in [

@@ -875,72 +875,176 @@ mod tests {
         assert!(max < 1e-7, "swap-via-set_adapters drifted: {max}");
     }
 
+    /// Compare the BF16 bypass forward (`inner(x) + s·(x·Aᵀ)·Bᵀ`) against the
+    /// BF16 merged forward (`x·(W + s·B·A)ᵀ`) on the same BF16 operands, with
+    /// the bypass scale multiplied by `bypass_scale_factor` (1.0 for the real
+    /// comparison; anything else is the negative control).
+    ///
+    /// Returns `(worst per-element difference in BF16 ulps of that element's
+    /// magnitude scale, fitted systematic slope of the difference against the
+    /// exact LoRA term)`.
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    fn bf16_bypass_vs_merged(device: &Device, bypass_scale_factor: f32) -> (f32, f32) {
+        let out_dim = 64;
+        let in_dim = 48;
+        let rank = 8;
+        let tokens = 32;
+        let inner_cpu = make_linear(out_dim, in_dim, true);
+        let (down_cpu, up_cpu) = make_lora_pair(out_dim, rank, in_dim, 1.0);
+        let scale = 0.7f32;
+
+        let to_bf16 = |t: &Tensor| t.to_device(device).unwrap().to_dtype(DType::BF16).unwrap();
+        // The exact reference works on the SAME BF16-rounded operands, widened
+        // back to F32 on the host, so operand quantization is not part of the
+        // measured difference.
+        let to_host_f32 = |t: &Tensor| {
+            t.to_dtype(DType::F32)
+                .unwrap()
+                .to_device(&Device::Cpu)
+                .unwrap()
+        };
+        let weight = to_bf16(inner_cpu.weight());
+        let bias = to_bf16(inner_cpu.bias().unwrap());
+        let down = to_bf16(&down_cpu);
+        let up = to_bf16(&up_cpu);
+        let x = to_bf16(&make_input(1, tokens, in_dim));
+
+        let merged_delta = up.matmul(&down).unwrap().affine(scale as f64, 0.0).unwrap();
+        let merged = Linear::new((&weight + &merged_delta).unwrap(), Some(bias.clone()));
+        let lora = LoraLinear::WithAdapters {
+            inner: Linear::new(weight.clone(), Some(bias.clone())),
+            adapters: vec![LinearLoraAdapter {
+                down: down.clone(),
+                up: up.clone(),
+                scale: scale * bypass_scale_factor,
+                fused_slice: None,
+            }],
+        };
+        let a = to_host_f32(&lora.forward(&x).unwrap())
+            .flatten_all()
+            .unwrap();
+        let b = to_host_f32(&merged.forward(&x).unwrap())
+            .flatten_all()
+            .unwrap();
+
+        let (x, weight, bias, down, up) = (
+            to_host_f32(&x).squeeze(0).unwrap(),
+            to_host_f32(&weight),
+            to_host_f32(&bias),
+            to_host_f32(&down),
+            to_host_f32(&up),
+        );
+        // Signed exact LoRA term, and the absolute-value magnitudes every
+        // rounding in either path is proportional to (the standard forward
+        // error form: |x|·|W|ᵀ + |b| for the base, s·(|x|·|A|ᵀ)·|B|ᵀ for the
+        // adapter).
+        let lora_term = x
+            .matmul(&down.t().unwrap())
+            .unwrap()
+            .matmul(&up.t().unwrap())
+            .unwrap()
+            .affine(scale as f64, 0.0)
+            .unwrap();
+        let (xa, wa, da, ua) = (
+            x.abs().unwrap(),
+            weight.abs().unwrap(),
+            down.abs().unwrap(),
+            up.abs().unwrap(),
+        );
+        let magnitude = (xa
+            .matmul(&wa.t().unwrap())
+            .unwrap()
+            .broadcast_add(&bias.abs().unwrap()))
+        .unwrap()
+        .add(
+            &xa.matmul(&da.t().unwrap())
+                .unwrap()
+                .matmul(&ua.t().unwrap())
+                .unwrap()
+                .affine(scale as f64, 0.0)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let a = a.to_vec1::<f32>().unwrap();
+        let b = b.to_vec1::<f32>().unwrap();
+        let lora_term = lora_term.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let magnitude = magnitude.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        // One BF16 ulp at magnitude m: 8 significant bits, so 2^(e - 7).
+        let bf16_ulp = |m: f32| 2f32.powi(m.log2().floor() as i32 - 7);
+        let worst_ulps = a
+            .iter()
+            .zip(&b)
+            .zip(&magnitude)
+            .map(|((a, b), m)| (a - b).abs() / bf16_ulp(*m))
+            .fold(0f32, f32::max);
+        let (num, den) =
+            a.iter()
+                .zip(&b)
+                .zip(&lora_term)
+                .fold((0f64, 0f64), |(num, den), ((a, b), l)| {
+                    (
+                        num + f64::from(a - b) * f64::from(*l),
+                        den + f64::from(*l) * f64::from(*l),
+                    )
+                });
+        (worst_ulps, (num / den) as f32)
+    }
+
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[test]
     fn test_bf16_tolerance() {
-        // BF16 has ~7-bit mantissa; merged-vs-bypass should still match
-        // within ~1e-2 because the only divergence is two extra rounds
-        // in the bypass path (matmul-down, matmul-up, then add). CPU
-        // candle has no BF16 matmul kernel, so this test is gated on
-        // a real GPU build — when run on cargo test --features metal
-        // (or cuda) it picks the available accelerator.
+        // CPU candle has no BF16 matmul kernel, so this test is gated on a
+        // real GPU build and skips when the runner has no accelerator.
         let device = if candle_core::Device::cuda_if_available(0).is_ok() {
             candle_core::Device::cuda_if_available(0).unwrap()
         } else if let Ok(m) = candle_core::Device::new_metal(0) {
             m
         } else {
-            // Build feature-gated this test, but the runner may still
-            // not have a usable accelerator; skip silently then.
             return;
         };
-        let out_dim = 8;
-        let in_dim = 6;
-        let rank = 3;
-        let inner_cpu = make_linear(out_dim, in_dim, true);
-        let (down_cpu, up_cpu) = make_lora_pair(out_dim, rank, in_dim, 1.0);
-        let scale = 0.7f32;
 
-        let to_bf16 = |t: &Tensor| t.to_device(&device).unwrap().to_dtype(DType::BF16).unwrap();
-        let inner = Linear::new(to_bf16(inner_cpu.weight()), inner_cpu.bias().map(&to_bf16));
-        let down = to_bf16(&down_cpu);
-        let up = to_bf16(&up_cpu);
-        let merged_delta = up.matmul(&down).unwrap().affine(scale as f64, 0.0).unwrap();
-        let merged = Linear::new(
-            (inner.weight() + &merged_delta).unwrap(),
-            inner.bias().cloned(),
-        );
+        // The bound is in BF16 ulps, never an absolute epsilon: an absolute
+        // 1e-2 is below one ulp for any output past 2.0 (one rounding step at
+        // |x| in [4, 8) is 0.03125), so it failed on CUDA whenever the two
+        // paths rounded one step apart. Each path rounds a handful of times —
+        // bypass: base matmul, down matmul, up matmul, scale, add; merged:
+        // B·A, scale, W + Δ, matmul — each at most half an ulp of a quantity
+        // bounded by the element's magnitude scale |x|·|W|ᵀ + |b| +
+        // s·(|x|·|A|ᵀ)·|B|ᵀ. Four ulps of that scale covers both paths' half
+        // ulps with room to spare and still flags any divergence of a few
+        // percent on a single element.
+        const MAX_ULPS: f32 = 4.0;
+        // A real bypass/merge divergence (a wrong scale, a transposed factor,
+        // a dropped adapter) is SYSTEMATIC, while rounding differences are
+        // unbiased. Fitting the difference against the exact LoRA term over
+        // all 2,048 outputs therefore resolves a scale error far below one
+        // ulp: on CUDA (L40S) rounding alone measures a slope of -4.7e-4
+        // and one ulp, while a 1% scale error measures a slope of 1.05e-2 but
+        // only three ulps — the per-element bound alone would pass it. A
+        // quarter of a percent sits 5x above the noise and 4x below the
+        // divergence.
+        const MAX_SLOPE: f32 = 2.5e-3;
 
-        let lora = LoraLinear::WithAdapters {
-            inner,
-            adapters: vec![LinearLoraAdapter {
-                down,
-                up,
-                scale,
-                fused_slice: None,
-            }],
-        };
-        let x = to_bf16(&make_input(1, 4, in_dim));
-        let a = lora.forward(&x).unwrap().to_dtype(DType::F32).unwrap();
-        let b = merged.forward(&x).unwrap().to_dtype(DType::F32).unwrap();
-        let b = b.to_device(&candle_core::Device::Cpu).unwrap();
-        let max = max_abs_diff(&a.to_device(&candle_core::Device::Cpu).unwrap(), &b);
-        // RELATIVE to the output's magnitude: these outputs reach ~5, where
-        // one BF16 ulp is already 0.03125, so an absolute 1e-2 bound fails on
-        // a single rounding difference (as it did on CUDA). A few roundings
-        // are well inside 1% of the peak.
-        let peak = b
-            .abs()
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .max(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
+        let (ulps, slope) = bf16_bypass_vs_merged(&device, 1.0);
         assert!(
-            max / peak < 1e-2,
-            "bf16 bypass vs merged: {max} against a peak of {peak}"
+            ulps <= MAX_ULPS,
+            "bf16 bypass vs merged: {ulps} ulps (bound {MAX_ULPS})"
         );
+        assert!(
+            slope.abs() <= MAX_SLOPE,
+            "bf16 bypass vs merged: systematic slope {slope} (bound {MAX_SLOPE})"
+        );
+
+        // Negative control: the same comparison must REJECT a bypass whose
+        // scale is off by 1%, or the bounds above prove nothing.
+        for factor in [1.01f32, 0.99] {
+            let (ulps, slope) = bf16_bypass_vs_merged(&device, factor);
+            assert!(
+                ulps > MAX_ULPS || slope.abs() > MAX_SLOPE,
+                "a {factor}x bypass scale passed: {ulps} ulps, slope {slope}"
+            );
+        }
     }
 
     /// The registry reports the device bytes it is holding, summed over

@@ -23,6 +23,12 @@ const FACTORY_FAMILIES: &[&str] = &[
     "wan",
     "wuerstchen",
     "hunyuan3d",
+    // The hidden mesh preprocessing workers close the registry in the builds
+    // that compile them.
+    #[cfg(feature = "mesh-matting")]
+    "hunyuan3d-matting",
+    #[cfg(feature = "mesh-delight")]
+    "hunyuan3d-delight",
 ];
 
 #[test]

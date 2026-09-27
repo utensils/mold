@@ -2785,7 +2785,9 @@ pub fn usable_free_for_residency(
 /// unknown slugs — the FLUX factor is the most common diffusion default and
 /// errs toward a conservative-but-not-over-budget estimate.
 pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
-    match family_slug {
+    // Canonical engine family: an alias (`flux.2`, `sd3.5`, `ltx2.3`, …)
+    // must be priced as the engine it constructs, not as the FLUX fallback.
+    match crate::batch::canonical_production_family(family_slug) {
         "flux" => ActivationFamily::FluxDit,
         "flux2" => ActivationFamily::Flux2Dit,
         "sd3" => ActivationFamily::Sd3Mmdit,
@@ -2795,7 +2797,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image21" => ActivationFamily::QwenImage21Dit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
-        "hunyuan3d" | "hunyuan-3d" => ActivationFamily::Hunyuan3dShape,
+        "hunyuan3d" => ActivationFamily::Hunyuan3dShape,
         // LTX-Video (0.9.6 / 0.9.8 2B or 13B): loads the entire transformer
         // into VRAM during each generate call. The file-size-based preflight
         // applies normally — the 13B BF16 checkpoint is ~26 GB and must be
@@ -2804,7 +2806,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         // LTX-2 (19B / 22B): streaming-loaded transformer — only a couple of
         // blocks are GPU-resident at peak, so the preflight skips the
         // file-size estimate and uses a fixed streaming cap instead.
-        "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        "ltx2" => ActivationFamily::Ltx2Video,
         // Wan 2.1/2.2: fully GPU-resident transformer at every shipped size —
         // 1.3B, 5B, and both A14B experts, which are resident one at a time
         // rather than streamed. The file-size preflight applies in full, and
@@ -7920,19 +7922,6 @@ mod tests {
         assert_eq!(report.global_free_drop(), Some(0));
     }
 
-    /// The pool high-water marks a probe reads are ONE counter per device for
-    /// the whole process, and `enter` rearms them. The lib suite runs tests on
-    /// parallel threads, so a second live probe rearming mid-phase erased the
-    /// first one's peak (the flaky `each_cuda_phase_measures_only_its_own_peak`
-    /// "big peak" failure). Every test that opens a live probe holds this.
-    static LIVE_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn live_probe_lock() -> std::sync::MutexGuard<'static, ()> {
-        LIVE_PROBE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Memory the pool holds reserved but unused is this process's to
     /// allocate: it counts beside the driver's free bytes, the operator
     /// reserve still comes off the top, and nothing underflows.
@@ -7946,8 +7935,6 @@ mod tests {
 
     #[test]
     fn a_probe_on_a_gpuless_build_finishes_as_unavailable() {
-        // Under the `cuda` feature this probe is live and rearms the marks.
-        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("vae_decode");
         let report = probe.finish();
 
@@ -7959,13 +7946,32 @@ mod tests {
         }
     }
 
-    /// The pool high-water mark these probes read and rearm is ONE counter
-    /// per device per process, so two live-CUDA probe tests running on
-    /// parallel test threads rearm each other's peak (`cargo test`; nextest
-    /// runs each test in its own process and never sees this). Production
-    /// has one job per device, so only the harness needs the serialization.
+    /// The pool counters a live probe reads and rearms are ONE set per device
+    /// per PROCESS, and every test that allocates on the card moves them. On
+    /// parallel `cargo test` threads a probe test therefore measured other
+    /// tests' allocations: a lock among the probe tests alone still failed
+    /// about one run in four when an unrelated CUDA test freed memory inside
+    /// the phase. Each live probe test re-runs itself as a single-test child
+    /// process, which is exactly what nextest gives it; production has one
+    /// job per device, so only the harness needs this.
     #[cfg(feature = "cuda")]
-    static CUDA_POOL_PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn in_own_process(test: &str) -> bool {
+        const CHILD: &str = "MOLD_TEST_CUDA_PROBE_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("device::tests::{test}"),
+                "--test-threads=1",
+            ])
+            .env(CHILD, test)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{test} failed in its own process");
+        false
+    }
 
     /// Live check that the pool attributes really describe Mold's own
     /// allocations. Skipped (not failed) when no CUDA device is present, the
@@ -7973,13 +7979,12 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn a_cuda_probe_measures_the_allocation_made_inside_the_phase() {
-        let _serial = CUDA_POOL_PROBE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !in_own_process("a_cuda_probe_measures_the_allocation_made_inside_the_phase") {
+            return;
+        }
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
-        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("test_alloc");
         let tensor =
             candle_core::Tensor::zeros((256, 1024, 1024), candle_core::DType::F32, &device)
@@ -8011,13 +8016,12 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn each_cuda_phase_measures_only_its_own_peak() {
-        let _serial = CUDA_POOL_PROBE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !in_own_process("each_cuda_phase_measures_only_its_own_peak") {
+            return;
+        }
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
-        let _live = live_probe_lock();
         let big = PhaseVramProbe::enter("big");
         {
             let _tensor =
@@ -8076,13 +8080,12 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn a_nested_cuda_probe_never_erases_its_parents_peak() {
-        let _serial = CUDA_POOL_PROBE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !in_own_process("a_nested_cuda_probe_never_erases_its_parents_peak") {
+            return;
+        }
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
-        let _live = live_probe_lock();
         let outer = PhaseVramProbe::enter("outer");
         {
             let _tensor =
