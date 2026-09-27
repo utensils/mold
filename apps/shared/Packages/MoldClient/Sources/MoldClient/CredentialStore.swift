@@ -10,7 +10,9 @@ import Foundation
 ///
 /// Every call throws rather than returning nil for a failure: a locked store
 /// read back as "no key" is how a later save once deleted every key (review
-/// 05-H5). `nil` means the machine has no key, and nothing else.
+/// 05-H5). `nil` means the machine has no key, and nothing else -- so saving an
+/// empty key is a clear, never a stored `""` (`HostPersistence.setAPIKey`'s
+/// rule on the Mac). Every conformance keeps that.
 public protocol CredentialStore: Sendable {
     func apiKey(for host: UUID) throws -> String?
     func setAPIKey(_ key: String, for host: UUID) throws
@@ -23,6 +25,7 @@ extension SecretStore: CredentialStore {
     }
 
     public func setAPIKey(_ key: String, for host: UUID) throws {
+        guard !key.isEmpty else { return try clearAPIKey(for: host) }
         try set(key, for: Self.remoteAPIKeyName(for: host))
     }
 

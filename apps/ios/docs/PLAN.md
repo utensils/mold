@@ -481,8 +481,8 @@ Each user-visible PR gets a `changelog.d/companion-*.md` fragment. M0, M1 and th
 
 ## Critical files
 
-- `apps/macos/Packages/MoldClient/Package.swift`, `Sources/MoldClient/{SecretStore,MoldHome,MobilePairingPayload,MediaToken}.swift`
-- `apps/macos/Packages/MoldStyle/Sources/MoldStyle/Chrome.swift`
+- `apps/shared/Packages/MoldClient/Package.swift`, `Sources/MoldClient/{SecretStore,CredentialStore,MobilePairingPayload,MediaToken}.swift`
+- `apps/shared/Packages/MoldStyle/Sources/MoldStyle/Chrome.swift`
 - `apps/macos/project.yml`, `apps/macos/Makefile`: package paths and lint extraction
 - `apps/macos/Sources/Mold/Mesh/*`: MoldMesh extraction
 - `apps/macos/Sources/Mold/AppStores.swift`: composition-root pattern to mirror

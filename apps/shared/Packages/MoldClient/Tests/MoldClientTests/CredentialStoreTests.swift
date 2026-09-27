@@ -36,6 +36,18 @@ struct CredentialStoreTests {
         #expect(try credentials.apiKey(for: second) == "two")
     }
 
+    /// `nil` means "no key" and nothing else, so an empty field saved through
+    /// the protocol is a clear -- the rule `HostPersistence.setAPIKey` already
+    /// keeps on the Mac. A blank key read back as `""` would be sent as an
+    /// empty `X-Api-Key`.
+    @Test func anEmptyKeyIsAClear() throws {
+        let credentials = try store()
+        let host = UUID()
+        try credentials.setAPIKey("k", for: host)
+        try credentials.setAPIKey("", for: host)
+        #expect(try credentials.apiKey(for: host) == nil)
+    }
+
     /// The protocol is a view over the Mac's existing names, not a new file
     /// format: a key saved through it is the one `SecretStore` already reads.
     @Test func secretStoreUsesItsPerHostName() throws {

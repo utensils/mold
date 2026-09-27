@@ -10,7 +10,7 @@ import Testing
 /// needs a second host.
 ///
 /// This walks every source and test file this app ships -- the app target,
-/// both packages' `Sources` and `Tests` -- and fails if the retired name
+/// both shared packages' `Sources` and `Tests`, and the iOS companion's -- and fails if the retired name
 /// appears anywhere, in any case. Spelling it out here would itself be an
 /// offence, so it is built from two halves at runtime instead.
 struct PrivateHostnameTests {
@@ -45,9 +45,19 @@ struct PrivateHostnameTests {
         ]
         let packages = macos.appending(path: "../shared/Packages")
         let names = (try? FileManager.default.contentsOfDirectory(at: packages, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        // Named, not just counted: the app target alone clears `> 100`, so a
+        // move that loses the packages would otherwise scan nothing and pass.
+        let found = Set(names.map(\.lastPathComponent))
+        #expect(found.isSuperset(of: ["MoldClient", "MoldStyle"]), "shared packages not found at \(packages.path)")
         for package in names {
             roots.append(package.appending(path: "Sources"))
             roots.append(package.appending(path: "Tests"))
+        }
+        // The iOS companion ships under the same rule.
+        let ios = macos.appending(path: "../ios")
+        if FileManager.default.fileExists(atPath: ios.path(percentEncoded: false)) {
+            roots.append(ios.appending(path: "Sources"))
+            roots.append(ios.appending(path: "Tests"))
         }
 
         var files: [URL] = []
