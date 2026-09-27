@@ -18,6 +18,8 @@ struct Sidebar: View {
     /// arrangement `destination` itself already uses.
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) private var selectedMachine = ""
 
+    @AppStorage("sidebarCollectionsExpanded", store: AppStorageSuite.defaults) private var collectionsExpanded = true
+
     @State private var renaming: CollectionShelf?
     @State private var isCreating = false
     @State private var pendingDestruction: LibraryActions.Destruction?
@@ -39,9 +41,14 @@ struct Sidebar: View {
             Section("Library") {
                 shelfRow(.all)
                 shelfRow(.favorites)
-                ForEach(library.shelves) { shelf in
-                    CollectionRow(shelf: shelf, renaming: $renaming)
-                        .tag(SidebarRow.shelf(.collection(slug: shelf.slug)))
+                DisclosureGroup("Collections", isExpanded: $collectionsExpanded) {
+                    ForEach(library.shelves) { shelf in
+                        CollectionRow(shelf: shelf, renaming: $renaming)
+                            .tag(SidebarRow.shelf(.collection(slug: shelf.slug)))
+                    }
+                    Button("New Collection…", systemImage: "plus") { isCreating = true }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
                 }
                 shelfRow(.trash)
                     // Present and inert on an empty trash, not absent: the
@@ -53,9 +60,6 @@ struct Sidebar: View {
                         LibraryActions(hosts: hosts, library: library,
                                        confirmDestruction: confirmDestruction).emptyTrash()
                     }
-                Button("New Collection…", systemImage: "plus") { isCreating = true }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
             }
 
             Section("Machines") {

@@ -130,63 +130,19 @@ the model controls, and the length slider. A sequence is now something you scrip
   Inference normalizes the source into Hunyuan3D space, performs Tencent's
   deterministic 81,920-point surface/edge sampling and farthest-point
   selection, encodes to 4,096x64 latents, samples the posterior from the request
-  seed, then decodes and extracts a new surface. The web and desktop 3-D Studio
-  submit the same durable request and use reference-upload leases for large
-  meshes. This path is independent of the optional `mesh-texture` feature.
-  The Studio's **Run workflow on** picker binds every read, mutation, upload,
-  poll and result fetch to one explicit host target (including its API key),
-  and a host change remounts the workflow state so identities never cross
-  machines. A recipe without `mesh_texture` disables PBR authoring while
-  leaving geometry-only Text to 3-D available. Signed macOS desktop builds
+  seed, then decodes and extracts a new surface. Durable workflows are API/CLI-only; apps retain ordinary image-to-mesh
+  generation, viewing and export. This path is independent of `mesh-texture`.
+  Signed macOS desktop builds
   compile the complete mesh feature set with Metal (the private fused `h3`
   feature remains CUDA-only), guarded by the PR-native feature graph and the
   desktop distribution contract test.
 
-- **A print knows which 3-D workflow made it.** Every stage of a durable mesh
-  workflow is admitted as an ORDINARY generation, so its queue row and its
-  published print are otherwise indistinguishable from a hand-authored render:
-  the row routed to New image, which cannot resume a workflow, and a
-  text-to-3-D run left its source picture, its matted and delighted copies and
-  its mesh in the gallery as four unrelated prints. `MeshWorkflowProvenance`
-  (`job_id`, `mode`, `role`, `stage_index`) is stamped in
-  `mesh_workflow_runner::admit_child`, the one place that knows both the
-  workflow and the stage. It rides `GenerateRequest`, so the live queue entry —
-  whose `metadata` IS the request — and the finished print carry the same
-  answer, and `queue_media`'s exhaustive sanitizer retains it so a replayed
-  stage still publishes into the run that owns it. It is server-minted and
-  REFUSED on `/api/generate`, `/api/generate/stream` and
-  `/api/generation-batches`: a client able to mint it could route another
-  person's queue row into the 3-D Studio and file a stranger's print inside
-  their run. `studio/lib/meshWorkflowProvenance.ts` is the one client reading —
-  `role: "final_glb"` names the run's LEAD, and ABSENCE is an ordinary print or
-  an older host, never a refusal.
-
-  Two things read it. ROUTING: a workflow's queue row opens
-  `/create/3d?workflow=<id>&host=<hostId>` rather than New image, which cannot
-  resume a durable workflow at all — the host rides the link because a workflow
-  lives on ONE machine, and the host is taken from the COPY that carries the
-  provenance, never the merged print's `sourceKey` (an auto-saved remote output
-  lands in this Mac's gallery and would name the wrong machine). And the
-  desktop LIBRARY: `studio/lib/meshWorkflowGroup.ts` indexes a run once per data
-  change beside `organizationIndex`, and `collapseToLeads` hides its steps
-  behind the tile led by its `final_glb`. That rule is about REACHABILITY, not
-  about which filters are active: **a step may be hidden only where the lead
-  that would open it is in the same list**, so it runs LAST in `filtered`, over
-  the set the grid is about to draw. Enumerating the filters that should switch
-  it off instead (favourites, then tags, then the query, then albums) kept
-  reproducing one bug per filter, and could not have reached the `Pictures`
-  chip, which excludes the mesh BY KIND and so left a whole run with no tile at
-  all. Consequently a marked or searched-for step always stands, `Pictures`
-  shows a run's pictures, `3-D` keeps it one stacked tile, and plain browsing
-  collapses. `collectionCounts` takes the same rule, because a shelf card's
-  number is a promise about what opening it shows. Entering a run goes through
-  the store's `openWorkflowRun`, which moves the scope to Everything and drops
-  the narrowing that led you there — `openWorkflowId` launders the id away in
-  every other scope, so an id written alone is a menu entry that does nothing.
-  TRASH IS NOT COLLAPSED and the index is live-only: every trashed print
-  carries its own purge countdown and its own Restore, and hiding one behind a
-  lead would let retention purge something nobody was shown. Web and the phone
-  still list every stage separately.
+- **Workflow provenance survives Studio retirement.** `MeshWorkflowProvenance`
+  (`job_id`, `mode`, `role`, `stage_index`) is server-minted in
+  `mesh_workflow_runner::admit_child`, rides queue and gallery metadata, and is
+  refused on public generation submission routes. API/CLI workflows remain
+  durable. Apps show every historical stage as an ordinary print, with no
+  workflow routing, authoring, run grouping, or reopening actions.
 
 - **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
 

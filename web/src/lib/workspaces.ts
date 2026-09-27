@@ -15,7 +15,7 @@ export const WORKSPACES: Workspace[] = [
     label: "New image",
     icon: "create",
     path: "/create",
-    match: ["create", "mesh-workflow"],
+    match: ["create"],
     keywords: ["create", "generate", "compose", "clip", "3-D"],
   },
   {

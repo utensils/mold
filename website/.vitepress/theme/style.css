@@ -212,6 +212,11 @@
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
 }
 
+.platform-download--primary {
+  border-color: var(--vp-c-brand-1);
+  background: color-mix(in srgb, var(--vp-c-brand-1) 10%, var(--vp-c-bg-soft));
+}
+
 .platform-download img {
   width: 2rem;
   height: 2rem;

@@ -113,7 +113,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .hide_others()
         .show_all()
         .separator();
+    #[cfg(target_os = "macos")]
     let app_menu = app_menu.quit().build()?;
+    #[cfg(not(target_os = "macos"))]
+    let app_menu = app_menu.build()?;
 
     let mut file = SubmenuBuilder::new(app, "File");
     for (id, label, key) in FILE_MENU_ITEMS {
@@ -123,6 +126,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         }
         file = file.item(&item.build(app)?);
     }
+    // Linux does not support Tauri's predefined Quit. Use an explicit
+    // application command on both non-Mac targets, in their File menu.
+    #[cfg(not(target_os = "macos"))]
+    let file = file.separator().item(
+        &MenuItemBuilder::with_id("app:quit", if cfg!(windows) { "Exit" } else { "Quit" })
+            .accelerator(accelerator("Q"))
+            .build(app)?,
+    );
     let file = file
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?)
@@ -237,6 +248,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
     app.on_menu_event(move |app, event| {
         let id = event.id().0.clone();
         match id.as_str() {
+            "app:quit" => app.exit(0),
             "devtools" => {
                 use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {

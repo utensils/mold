@@ -13,8 +13,6 @@
     "studio": {
       "entry": [
         "index.ts",
-        "components/MeshWorkflowStudio.vue",
-        "components/MeshWorkflowHostPicker.vue",
         "components/HeldQueueTransferDialog.vue",
         "**/*.test.ts"
       ],

@@ -36,13 +36,7 @@ extension RunCanvas {
         case .loading:
             ProgressView("Fetching what you made…")
         case let .picture(image):
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .onTapGesture(perform: togglePrompt)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityHint("Hides the prompt so the picture fills the pane")
+            ZoomableImage(image: image, identity: resultFilename ?? "result", onClick: togglePrompt)
                 // The big picture offers the same menu as its strip tile.
                 .modifier(OptionalResultMenu(result: selectedResult(in: outcome), actions: actions))
         case let .clip(player):

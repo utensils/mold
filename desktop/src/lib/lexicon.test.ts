@@ -44,7 +44,7 @@ function quoted(source: string): string[] {
 describe("lexicon — destinations", () => {
   it("titles every route in the lexicon", () => {
     const titles = [...routerSource.matchAll(/meta: \{ title: "([^"]+)" \}/g)].map((m) => m[1]);
-    expect(titles).toEqual([...DESTINATIONS, "3-D studio", "Settings"]);
+    expect(titles).toEqual([...DESTINATIONS, "Settings"]);
   });
 
   it("labels the sidebar's five destinations in the lexicon, in ⌘1–⌘5 order", () => {
@@ -52,7 +52,7 @@ describe("lexicon — destinations", () => {
     expect(labels.filter((label) => DESTINATIONS.includes(label as never))).toEqual([
       ...DESTINATIONS,
     ]);
-    expect(labels).toContain("3-D studio");
+    expect(labels).not.toContain("3-D studio");
   });
 
   it("names the native View menu's destinations exactly like the sidebar", () => {

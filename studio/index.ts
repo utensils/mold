@@ -14,3 +14,7 @@ export * from "./lib/generationLifecycle";
 export * from "./lib/generationMedia";
 export * from "./lib/targetStreamSlots";
 export * from "./lib/outputKind";
+
+export { autoGrowRows } from "./lib/autogrow";
+export { isGenerationModel } from "./lib/generationModels";
+export type { MeshWorkflowProvenance } from "./lib/meshWorkflowProvenance";

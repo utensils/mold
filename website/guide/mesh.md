@@ -305,28 +305,14 @@ artifacts it retained — settled only, so cancel or wait first.
 The web SPA, the desktop app, and the iPhone app all generate and view meshes
 now — not only the CLI and Discord.
 
-Web and desktop include a dedicated **3-D Studio** at `/create/3d`. **Text to
-3-D** first renders a source image with any installed image model, then removes
-its background, optionally removes baked lighting and highlights, and builds
-the Hunyuan3D mesh; it can optionally paint PBR materials. **Texture a mesh** accepts GLB or OBJ plus an appearance image and
-publishes a textured GLB. These are durable server workflows: image, matting,
-delight, shape, paint, and finalization are checkpointed, a shutdown parks unfinished
-work, and **Resume** continues the same child job after restart. Settled
-workflow-owned inputs and stage copies remain available until **Delete workflow
-data** releases them; deleting the Library print remains a separate action.
-On the desktop app the settings rail carries **Settings | Recent**. Recent
-lists that machine's past workflows — what each one made, what stage it is on
-or how it ended, and how long ago — and one click brings its whole recipe back:
-the mode, both styles and every stage setting. A supplied mesh cannot come back
-(a file is not something an app can re-open for you), so Rebuild and Add
-texture say which file to choose again. **New workflow** on the toolbar starts
-fresh without forgetting the machine or the styles you are using.
+The apps use ordinary 3-D generation in Create. To start from text, generate
+an image first, then attach it as the source for a Hunyuan3D render. Dedicated
+3-D Studio authoring has been retired from the apps. Durable multi-stage mesh
+workflows remain available through the CLI and API described above; their
+published outputs appear individually in the Library.
 
-Choose **Run workflow on** before authoring to bind the whole studio session to
-one connected machine. Its models, previous workflows, uploads, progress,
-resume/cancel actions, and final GLB all stay on that machine; authenticated
-hosts receive their saved API key. Switching machines opens that machine's own
-workflow state rather than carrying a draft or job identity across hosts.
+The native macOS app can view and export existing meshes, but does not yet
+support Hunyuan3D authoring in Generate.
 
 1. **Pick a Hunyuan3D model** in Create. The form reshapes itself from the
    model's own generation profile: Shape, Resolution, exact-size, Fit to

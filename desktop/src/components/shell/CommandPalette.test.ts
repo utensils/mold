@@ -930,10 +930,10 @@ describe("CommandPalette — Generate respects the route it is on", () => {
    * "Generate from these words" left the 3-D Studio and rendered a picture
    * in New image. One of the two raisers had been fixed.
    */
-  it("stays on the 3-D Studio rather than rendering a picture in New image", async () => {
+  it("routes a retired Studio URL to New image", async () => {
     routePath.value = "/create/3d";
     const wrapper = await runGenerate();
-    expect(routerPush).not.toHaveBeenCalledWith("/create");
+    expect(routerPush).toHaveBeenCalledWith("/create");
     wrapper.unmount();
   });
 

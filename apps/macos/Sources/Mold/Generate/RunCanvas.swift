@@ -71,12 +71,8 @@ struct RunCanvas: View {
     @ViewBuilder private var running: some View {
         VStack(spacing: 14) {
             if let preview {
-                Image(nsImage: preview)
-                    .resizable()
-                    .interpolation(.medium)
-                    .aspectRatio(contentMode: .fit)
+                ZoomableImage(image: preview, identity: "preview", onClick: togglePrompt)
                     .padding(40)
-                    .onTapGesture(perform: togglePrompt)
             } else {
                 VStack(spacing: 10) {
                     ProgressView()

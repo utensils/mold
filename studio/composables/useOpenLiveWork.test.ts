@@ -133,7 +133,7 @@ describe("openLiveWorkWith", () => {
    * A 3-D stage is admitted as an ordinary generation, so it reaches here
    * looking like any other print. New image cannot resume a durable workflow.
    */
-  it("routes a 3-D workflow stage to the workflow, not to New image", async () => {
+  it("opens a historical 3-D workflow stage as an ordinary generation", async () => {
     findQueueEntryById.mockResolvedValue({
       id: "job-1",
       state: "running",
@@ -148,15 +148,8 @@ describe("openLiveWorkWith", () => {
       },
     });
     await openLiveWorkWith(surface())(row({ id: "job-1", execution: null }));
-    expect(restore).not.toHaveBeenCalled();
-    expect(go).toHaveBeenCalledWith(
-      expect.objectContaining({
-        query: expect.objectContaining({
-          workflow: "wf-9",
-          host: "workstation",
-        }),
-      }),
-    );
+    expect(restore).toHaveBeenCalled();
+    expect(go).toHaveBeenCalledWith("/create");
   });
 
   it("lets the surface answer a download row without navigating", async () => {

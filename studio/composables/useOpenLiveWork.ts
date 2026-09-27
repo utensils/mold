@@ -5,7 +5,6 @@ import {
   selectedQueueGeneration,
   type SelectedQueueGeneration,
 } from "../api/generationSelection";
-import { meshWorkflowRouteFor } from "../lib/meshWorkflowProvenance";
 
 /** Somewhere a surface can navigate to: a path, or a path with a query. */
 export type LiveWorkDestination =
@@ -72,15 +71,6 @@ export function openLiveWorkWith<M extends object>(
         );
         if (!selection) {
           surface.fail(LIVE_WORK_NO_SETTINGS);
-          return;
-        }
-        // A 3-D Studio stage is admitted as an ordinary generation, so it
-        // arrives here looking like any other print. New image cannot resume
-        // a durable workflow — its stages, Cancel, Resume and history live
-        // only under /api/mesh-workflows.
-        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
-        if (workflow) {
-          await surface.go(workflow);
           return;
         }
         surface.restore(selection, row.hostId);

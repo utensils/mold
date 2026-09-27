@@ -10,7 +10,6 @@ import { router } from "./router";
 // imported destination: each view has its own suite that mounts it for real.
 vi.mock("./views/GenerateView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/QueueView.vue", () => ({ default: { template: "<div />" } }));
-vi.mock("./views/MeshWorkflowView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/LibraryView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/ModelsView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/MachinesView.vue", () => ({ default: { template: "<div />" } }));
@@ -23,7 +22,6 @@ describe("router — five-destination IA", () => {
     for (const [path, title] of [
       ["/create", "New image"],
       ["/queue", "Queue"],
-      ["/create/3d", "3-D studio"],
       ["/library", "My images"],
       ["/models", "Styles"],
       ["/machines", "Machines"],
@@ -36,6 +34,13 @@ describe("router — five-destination IA", () => {
   it("roots the app at Create", async () => {
     await router.push("/");
     expect(router.currentRoute.value.path).toBe("/create");
+  });
+
+  it("restores a retired Studio route to Create without workflow state", async () => {
+    await router.replace("/create/3d?workflow=old-job&host=old-machine");
+    expect(router.currentRoute.value.path).toBe("/create");
+    expect(router.currentRoute.value.query).toEqual({});
+    expect(router.currentRoute.value.name).toBe("create");
   });
 
   it("lands the retired scene-composer deep links on Create", async () => {

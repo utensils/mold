@@ -35,7 +35,7 @@ describe("router", () => {
     expect(router.currentRoute.value.name).toBe("create");
 
     await router.push("/create/3d");
-    expect(router.currentRoute.value.name).toBe("mesh-workflow");
+    expect(router.currentRoute.value.name).toBe("not-found");
 
     await router.push("/models");
     expect(router.currentRoute.value.name).toBe("models");

@@ -1,6 +1,6 @@
 # Mold for macOS (native)
 
-An experimental native Swift app for mold, developed on the
+The native Swift app for mold, developed on the
 `feat/macos-native-app` branch and merged through PR #1728. It ships as
 `Mold-native-<version>.dmg` beside the Tauri DMG, on the same stable and
 nightly channels, and installs as **Mold Studio.app** -- the Tauri app is
@@ -10,8 +10,14 @@ The executable inside keeps the short name `Mold`.
 
 Mold Studio declares a single-instance Launch Services policy, so notification clicks and repeated app opens reuse the running application. A notification brings the main window forward on the finished print or Queue; clicks received during startup wait until navigation is ready.
 
-It is a candidate replacement for the Tauri `desktop/` app on macOS, scoped to
-generation and the library. No 3-D studio.
+It is the **recommended Mac download** and the replacement for the Tauri
+`desktop/` app on macOS, which is now the legacy Mac build (kept for Macs that
+cannot run macOS 26) and remains the default on Windows and Linux. Releases
+attach it under the stable name `Mold-Studio-macos-arm64.dmg` as well, so
+`https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg`
+always fetches the newest stable build; the README and the website
+(`website/guide/macos.md`) link that. Scoped to generation and the library. No
+3-D studio.
 
 ## What works today
 

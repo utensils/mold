@@ -19,6 +19,7 @@ enum PreferencesReset {
     static let keys: [String] = [
         "destination",
         "sidebarVisibility",
+        "sidebarCollectionsExpanded",
         "selectedMachine",
         "defaultMachine",
         "generateMachine",

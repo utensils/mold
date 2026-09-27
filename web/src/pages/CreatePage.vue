@@ -5268,12 +5268,6 @@ onBeforeUnmount(() => {
           >Browse styles</router-link
         >
       </p>
-      <router-link
-        v-if="output.kind.value === 'mesh'"
-        to="/create/3d"
-        class="text-sm text-safelight underline"
-        >3-D workflows</router-link
-      >
     </header>
     <div
       data-test="generate-workspace"
@@ -6075,12 +6069,6 @@ onBeforeUnmount(() => {
 }
 .create-header p {
   flex-basis: 100%;
-}
-/* The 3-D workflows link sat at the header's right edge because the h1 used
-   to carry `flex: 1 1 180px`. That rule was doing two jobs and only one of
-   them left with the kind strip; this keeps the other. */
-.create-header > a {
-  margin-left: auto;
 }
 /* `min-width: 0` so the row can shrink below its content — see the template
    comment. (This is a SIBLING of the composer, not one of its four

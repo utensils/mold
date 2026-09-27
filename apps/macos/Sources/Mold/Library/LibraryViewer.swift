@@ -47,12 +47,7 @@ struct LibraryViewer: View {
             } else if entry.print.isMesh {
                 mesh
             } else if let image = full ?? placeholder {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(full == nil ? .low : .high)
-                    .aspectRatio(contentMode: .fit)
-                    // The thumbnail stands in at the right aspect while the
-                    // full picture loads, so nothing jumps when it arrives.
+                ZoomableImage(image: image, identity: entry.id)
                     .opacity(full == nil ? 0.55 : 1)
             } else {
                 ProgressView()
