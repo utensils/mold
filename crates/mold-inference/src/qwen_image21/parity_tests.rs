@@ -720,6 +720,43 @@ fn engine_paths(env: &Env) -> mold_core::ModelPaths {
     }
 }
 
+/// P8's positive margins over upstream's own bf16 render, in dB of PSNR
+/// against upstream's fp32 render
+/// (`docs/qualification/qwen-image-2.1-image-conditioning.md`).
+///
+/// mold's BF16 engine is held to BEAT upstream's bf16 pipeline, not merely
+/// to come within some distance of it, because the F32 vision tower and VAE
+/// encoder (`reference::{vision_tower_dtype, vae_encoder_dtype}`) are exactly
+/// what buys that lead: `conditioning_precision_study` re-runs the same
+/// trajectories with both components in BF16 and asserts that variant FAILS
+/// the turbo gate, so flipping either const back is a parity failure.
+///
+/// Measured on an L40S (CUDA fast path): the engine renders base4 at
+/// 38.69 dB and turbo6 at 36.23 dB against upstream bf16's 37.59 and 33.22,
+/// i.e. +1.10 and +3.01 dB. With both consts flipped to BF16 the ENGINE
+/// renders turbo6 at 33.17 dB (-0.04 dB, failing this gate by 1.54 dB), and
+/// the component-level study lands its BF16 variant at -6.43 dB, so the
+/// turbo margin sits 1.5 dB under the shipped path and above every BF16
+/// measurement. The 4-step
+/// base render is not tower-sensitive (both variants clear it), and its
+/// margin guards against the render falling behind upstream at all.
+const P8_BASE_MARGIN_DB: f64 = 0.5;
+const P8_TURBO_MARGIN_DB: f64 = 1.5;
+
+fn p8_margin_db(case: &str) -> f64 {
+    match case {
+        "base4" => P8_BASE_MARGIN_DB,
+        "turbo6" => P8_TURBO_MARGIN_DB,
+        other => panic!("no P8 gate for {other}"),
+    }
+}
+
+/// The P8 gate: mold's PSNR against upstream's fp32 render must exceed
+/// upstream's own bf16 render's by at least `margin_db`.
+fn p8_gate(ours_db: f64, upstream_bf16_db: f64, margin_db: f64) -> bool {
+    ours_db >= upstream_bf16_db + margin_db
+}
+
 /// PSNR in dB of two `[H, W, 3]` float images in `[0, 1]`.
 fn psnr(a: &Tensor, b: &Tensor) -> f64 {
     let mse = (a - b)
@@ -739,8 +776,8 @@ fn psnr(a: &Tensor, b: &Tensor) -> f64 {
 /// multimodal encode, VAE encode, joint-layout denoise with the prefix cache,
 /// decode — on upstream's own injected noise, against the upstream bf16
 /// render. The engine runs at its device's working dtype (BF16 on CUDA), so
-/// the gate is relative: mold's PSNR against upstream's fp32 render must be
-/// within 1 dB of upstream's own bf16 render's.
+/// the gate is relative: mold's PSNR against upstream's fp32 render must beat
+/// upstream's own bf16 render's by [`P8_BASE_MARGIN_DB`] ([`p8_gate`]).
 #[test]
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p8_base_end_to_end_matches_the_upstream_capture() {
@@ -802,8 +839,8 @@ fn p8_base_end_to_end_matches_the_upstream_capture() {
     )
     .unwrap();
     assert!(
-        ours_psnr >= theirs_psnr - 1.0,
-        "{ours_psnr} dB vs upstream's {theirs_psnr} dB"
+        p8_gate(ours_psnr, theirs_psnr, P8_BASE_MARGIN_DB),
+        "{ours_psnr} dB vs upstream's {theirs_psnr} dB (gate: {P8_BASE_MARGIN_DB:+} dB)"
     );
 }
 /// Calibration and UAT probe (not a parity gate): render a 1024² CFG request
@@ -1019,7 +1056,8 @@ fn p7_bf16_lora_matches_the_upstream_capture() {
 
 /// P8 (turbo, 6 steps): the turbo tier end to end — Viggle r256 installed by
 /// the engine from the tier's distilled adapter, the recipe's six sigmas with
-/// no terminal stretch — on upstream's injected noise, gated like P8 base.
+/// no terminal stretch — on upstream's injected noise, gated like P8 base by
+/// [`P8_TURBO_MARGIN_DB`].
 #[test]
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p8_turbo_end_to_end_matches_the_upstream_capture() {
@@ -1084,8 +1122,8 @@ fn p8_turbo_end_to_end_matches_the_upstream_capture() {
     )
     .unwrap();
     assert!(
-        ours_psnr >= theirs_psnr - 1.0,
-        "{ours_psnr} dB vs upstream's {theirs_psnr} dB"
+        p8_gate(ours_psnr, theirs_psnr, P8_TURBO_MARGIN_DB),
+        "{ours_psnr} dB vs upstream's {theirs_psnr} dB (gate: {P8_TURBO_MARGIN_DB:+} dB)"
     );
 }
 /// P8 diagnostics: step-by-step latents of the base (4) and turbo (6)
@@ -1274,5 +1312,223 @@ fn p8_denoise_diagnostics() {
         psnr(&ours, &rgb(&fp32)),
         psnr(&fp32_final, &rgb(&fp32)),
         psnr(&rgb(&bf16), &rgb(&fp32)),
+    );
+}
+/// The F32 vision tower / VAE encoder evidence
+/// (`reference::{vision_tower_dtype, vae_encoder_dtype}`), re-derived in one
+/// command: both components run in BF16 and in F32 against the fp32 captures
+/// (P2's merger and DeepStack maps, P4's packed condition latents), then the
+/// P8 base and turbo trajectories are driven from each variant's own
+/// conditioning and condition latents — the engine's composition, component
+/// by component — and scored against upstream's fp32 render with the P8 gate.
+/// F32 must pass it and the BF16 tower/encoder must fail it on the turbo
+/// recipe, so the dtype choice is pinned by a measurement, not by a const fn.
+///
+/// ```text
+/// QWEN_IMAGE21_MODEL_ROOT=/storage/mold/models \
+/// QWEN_IMAGE21_FIXTURES=/storage/mold/fixtures/qwen_image21/captures \
+/// CUDA_VISIBLE_DEVICES=3 cargo test -p mold-ai-inference --features cuda,cudnn,flash-attn \
+///   --lib qwen_image21::parity_tests::conditioning_precision_study -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn conditioning_precision_study() {
+    use super::lora::{build_registry, Qwen21LoraEntry};
+    use super::scheduler::{scheduler_for, ScheduleKind};
+    let env = env();
+    let device = device();
+    let progress = ProgressReporter::default();
+    let working = crate::engine::gpu_dtype(&device);
+    let variants = [DType::BF16, DType::F32];
+    let p2 = env.capture("p2_vision_fp32.safetensors");
+    let p4 = env.capture("p4_vae_encode_fp32.safetensors");
+    let both = references(&["ref_opaque.png", "ref_rgba.png"]);
+    let opaque = references(&["ref_opaque.png"]);
+
+    // Vision tower: P2 errors on both references, and the P8 reference's
+    // features for the conditioning below.
+    let mut vision = Vec::new();
+    for dtype in variants {
+        let tower = load_vision_tower(&env.text_encoder(), &device, dtype, &progress).unwrap();
+        let features = encode_vision(&tower, &both, &device, &mut || Ok(())).unwrap();
+        let (max, mean) = relative_error(&features.embeds, &p2["vision_merger"]);
+        eprintln!("STUDY tower {dtype:?}: merger relative max {max:.3e}, mean {mean:.3e}");
+        for (index, map) in features.deepstack.iter().enumerate() {
+            let (max, mean) = relative_error(map, &p2[&format!("vision_deepstack_{index}")]);
+            eprintln!(
+                "STUDY tower {dtype:?}: deepstack {index} relative max {max:.3e}, mean {mean:.3e}"
+            );
+        }
+        vision.push(encode_vision(&tower, &opaque, &device, &mut || Ok(())).unwrap());
+    }
+    let mut encoder = Qwen3Encoder::load_bf16(
+        &env.text_encoder(),
+        &env.tokenizer(),
+        &device,
+        working,
+        &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+        &progress,
+    )
+    .unwrap();
+    let truth_embeds = env.capture("p3_p8_pos_fp32.safetensors")["prompt_embeds"].clone();
+    let conditioning: Vec<QwenImage21TextConditioning> = vision
+        .iter()
+        .zip(variants)
+        .map(|(features, dtype)| {
+            let conditioning = encode_prompt_with_images(&mut encoder, features, P8_PROMPT)
+                .unwrap()
+                .to_device_dtype(&device, working)
+                .unwrap();
+            let (max, mean) = relative_error(&conditioning.embeddings, &truth_embeds);
+            eprintln!(
+                "STUDY tower {dtype:?}: P3 p8_pos prompt_embeds relative max {max:.3e}, mean {mean:.3e}"
+            );
+            conditioning
+        })
+        .collect();
+    drop(encoder);
+    drop(vision);
+
+    // VAE encoder: P4 errors on both references, and the P8 condition latents.
+    let mut condition_latents = Vec::new();
+    for dtype in variants {
+        let vae_encoder =
+            super::vae_encoder::QwenImage21VaeEncoder::load(&env.vae(), &device, dtype, &progress)
+                .unwrap();
+        for (reference, name) in both.iter().zip(["opaque", "rgba"]) {
+            let packed = vae_encoder
+                .encode_packed(&reference.vae_input(&device, dtype).unwrap())
+                .unwrap();
+            let (max, mean) = relative_error(&packed, &p4[&format!("{name}_packed")]);
+            eprintln!(
+                "STUDY vae encoder {dtype:?}: {name} packed latents relative max {max:.3e}, mean {mean:.3e}"
+            );
+            if name == "opaque" {
+                condition_latents.push(packed.to_dtype(working).unwrap());
+            }
+        }
+    }
+
+    // The P8 trajectories from each variant's own conditioning.
+    let mut transformer =
+        QwenImage21Transformer::load(&env.transformer(), &device, working, &progress).unwrap();
+    let noise = env.capture("p8_noise.safetensors")["latents"].clone();
+    let mut finals = Vec::new();
+    for (name, steps) in [("base4", 4usize), ("turbo6", 6)] {
+        let kind = if name == "turbo6" {
+            let registry = build_registry(
+                &[Qwen21LoraEntry {
+                    path: viggle(&env, 256),
+                    scale: 1.0,
+                }],
+                &device,
+                working,
+            )
+            .unwrap();
+            transformer.install_lora(Some(&registry)).unwrap();
+            ScheduleKind::for_model("qwen-image-2.1-turbo:bf16")
+        } else {
+            transformer.install_lora(None).unwrap();
+            ScheduleKind::Base
+        };
+        for ((conditioning, cond), dtype) in
+            conditioning.iter().zip(&condition_latents).zip(variants)
+        {
+            let layout = QwenImage21JointLayout::build(
+                &conditioning.image_slots[0],
+                &conditioning.valid_tokens,
+                &[(52, 78)],
+                (32, 32),
+            )
+            .unwrap();
+            let (mut scheduler, _) = scheduler_for(kind, steps, 1024);
+            let mut latents = noise.to_device(&device).unwrap().to_dtype(working).unwrap();
+            let mut branch = transformer
+                .prepare(
+                    conditioning,
+                    layout,
+                    Some(cond.clone()),
+                    PrefixCacheDecision::Retain,
+                )
+                .unwrap();
+            let exec_path = transformer.exec_path();
+            for _ in 0..steps {
+                let timestep =
+                    super::scheduler::step_timestep(&scheduler, working, !exec_path.is_legacy());
+                let prediction = branch.forward(&latents, timestep).unwrap();
+                latents = scheduler.step(&prediction, &latents).unwrap();
+            }
+            drop(branch);
+            finals.push((name, dtype, latents));
+        }
+    }
+    drop(transformer);
+
+    let vae_dtype = working;
+    let vae = super::vae::QwenImage21Vae::load(&env.vae(), &device, vae_dtype, &progress).unwrap();
+    let decode = |latents: &Tensor| -> Tensor {
+        let decoded = vae
+            .decode_packed(&latents.to_dtype(vae_dtype).unwrap(), 32, 32)
+            .unwrap();
+        ((decoded
+            .i(0)
+            .unwrap()
+            .narrow(0, 0, 3)
+            .unwrap()
+            .permute((1, 2, 0))
+            .unwrap()
+            + 1.0)
+            .unwrap()
+            / 2.0)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+    };
+    let mut verdicts = Vec::new();
+    for (name, dtype, latents) in &finals {
+        let rgb = |file: &str| {
+            env.capture(file)["decoded_rgba_float"]
+                .narrow(2, 0, 3)
+                .unwrap()
+                .clamp(0f32, 1f32)
+                .unwrap()
+        };
+        let truth = rgb(&format!("p8_{name}_fp32.safetensors"));
+        let upstream = psnr(&rgb(&format!("p8_{name}_bf16.safetensors")), &truth);
+        let ours = psnr(&decode(latents), &truth);
+        let margin = p8_margin_db(name);
+        let passes = p8_gate(ours, upstream, margin);
+        eprintln!(
+            "STUDY P8 {name} tower+encoder {dtype:?}: mold vs fp32 {ours:.2} dB, upstream bf16 vs fp32 {upstream:.2} dB, margin {:+.2} dB (gate {margin:+.2} dB: {})",
+            ours - upstream,
+            if passes { "pass" } else { "FAIL" }
+        );
+        verdicts.push((*name, *dtype, ours, passes));
+    }
+    for (name, dtype, _, passes) in &verdicts {
+        if *dtype == DType::F32 {
+            assert!(
+                passes,
+                "the shipped F32 conditioning fails the P8 {name} gate"
+            );
+        }
+    }
+    let turbo = |dtype| {
+        verdicts
+            .iter()
+            .find(|(name, d, _, _)| *name == "turbo6" && *d == dtype)
+            .unwrap()
+    };
+    assert!(
+        !turbo(DType::BF16).3,
+        "a BF16 vision tower and VAE encoder pass the P8 turbo gate: the F32 choice is no longer evidenced"
+    );
+    eprintln!(
+        "STUDY turbo P8 delta F32 - BF16: {:+.2} dB",
+        turbo(DType::F32).2 - turbo(DType::BF16).2
     );
 }
