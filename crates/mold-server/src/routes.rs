@@ -1568,6 +1568,14 @@ async fn prepare_generation_inner(
     } else {
         resolved_generation_profile(state, &request.model, &canonical_model).await
     };
+    // A negative prompt sent to a recipe that hides the control (a turbo,
+    // distilled or fixed-schedule tier) conditions nothing. Older clients and
+    // saved drafts send one regardless, so this is an advisory rather than a
+    // refusal — asked of the CALLER's request, before expansion or a family
+    // default could write the field.
+    let negative_prompt_warning = resolved_profile
+        .as_ref()
+        .and_then(|profile| mold_core::negative_prompt_ignored_warning(profile, request));
     // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
     // their authoritative family and conditioning-aware task template. The
     // resolved profile is looked up first so the expander sees the recipe's
@@ -1656,6 +1664,7 @@ async fn prepare_generation_inner(
         other: apply_lip_dub_reference_timing(state, request).await?,
         ..RequestWarnings::default()
     };
+    warnings.other.extend(negative_prompt_warning);
 
     let mut singleton_validation;
     let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
