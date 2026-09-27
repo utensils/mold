@@ -6,7 +6,8 @@ silent, follow the native Mac app's behaviour (`apps/macos/README.md`, "What
 works today").
 
 The visual reference is the "Mold Studio Companion Mockups" design canvas, 16
-frames. They cover iPhone and iPad, light and dark, and Dynamic Type from
+frames (<https://claude.ai/artifact/UaYj5f1YMaVuCYne4nLFRj>, private to the
+owner until shared). They cover iPhone and iPad, light and dark, and Dynamic Type from
 xSmall through AX5.
 
 ## 1. What this app is
