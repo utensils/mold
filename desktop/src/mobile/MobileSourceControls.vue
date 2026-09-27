@@ -7,7 +7,12 @@ import type { ApiTarget } from "../lib/api/client";
 import type { CatalogEntry, ModelEntry } from "../lib/api/types";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { buildControlNetOptions } from "../lib/controlNetOptions";
-import { attachmentRoleLabel, attachmentTitleLabel, moveAttachment } from "../lib/editAttachments";
+import ReferenceImageStrip from "@studio/components/ReferenceImageStrip.vue";
+import {
+  referenceOrdinalBase,
+  reorderReference,
+  stripSetsCanvas,
+} from "@studio/lib/referenceStrip";
 import type { GenerateForm } from "../lib/generateForm";
 import {
   inlineGenerationMediaBytes,
@@ -612,9 +617,20 @@ function removeEditImage(index: number): void {
   props.form.imageAttachments = next;
 }
 
-function moveEditImage(index: number, delta: -1 | 1): void {
-  props.form.imageAttachments = moveAttachment(props.form.imageAttachments, index, delta);
+function moveEditImage(from: number, to: number): void {
+  props.form.imageAttachments = reorderReference(props.form.imageAttachments, from, to);
 }
+
+/** The shared ordered strip: thumbnails numbered the way the prompt names
+ * them, the canvas mark on a `canvas: last-reference` recipe, and an additive
+ * reference numbered after the source it ships beside. */
+const stripImages = computed(() => props.form.imageAttachments.map((data) => ({ data })));
+const stripCanvas = computed(() =>
+  stripSetsCanvas(caps.value.sourceImageMode, caps.value.referenceImages?.canvas),
+);
+const stripOrdinalBase = computed(() =>
+  referenceOrdinalBase(caps.value.sourceImageMode, Boolean(props.form.sourceImage)),
+);
 
 function setSourceFit(event: Event): void {
   props.form.sourceFit = sourceFitPolicyForMode(
@@ -829,75 +845,24 @@ function applyMask(mask: string): void {
         tabindex="-1"
         @change="pickEditImages"
       />
-      <button
-        type="button"
-        class="secondary-button mobile-source-pick"
-        data-test="mobile-edit-add"
-        @click="editInput?.click()"
-      >
-        Add photos
-      </button>
-
-      <div
-        v-if="form.imageAttachments.length"
-        class="mobile-attachment-grid"
-        data-test="mobile-edit-grid"
-      >
-        <article
-          v-for="(image, index) in form.imageAttachments"
-          :key="`${index}-${image.slice(0, 16)}`"
-          class="mobile-attachment-card"
-          :data-test="`mobile-edit-card-${index}`"
-        >
-          <!-- The alpha bed sits under every reference, so a transparent PNG
-               or WebP shows exactly which pixels are empty. -->
-          <img
-            class="ms-alpha-bed"
-            :src="base64ToDataUrl(image)"
-            :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
-          />
-          <div class="mobile-attachment-copy">
-            <strong :data-test="`mobile-edit-role-${index}`">{{
-              referencesOnly ? `Reference ${index + 1}` : attachmentRoleLabel(index)
-            }}</strong>
-            <span :data-test="`mobile-edit-title-${index}`">{{ attachmentTitleLabel(index) }}</span>
-          </div>
-          <div
-            class="mobile-attachment-actions"
-            :aria-label="`${attachmentTitleLabel(index)} actions`"
-          >
-            <button
-              type="button"
-              class="mobile-media-tile-action"
-              :disabled="index === 0"
-              :aria-label="`Move ${attachmentTitleLabel(index)} earlier`"
-              :data-test="`mobile-edit-earlier-${index}`"
-              @click="moveEditImage(index, -1)"
-            >
-              ‹
-            </button>
-            <button
-              type="button"
-              class="mobile-media-tile-action"
-              :disabled="index === form.imageAttachments.length - 1"
-              :aria-label="`Move ${attachmentTitleLabel(index)} later`"
-              :data-test="`mobile-edit-later-${index}`"
-              @click="moveEditImage(index, 1)"
-            >
-              ›
-            </button>
-            <button
-              type="button"
-              class="mobile-media-tile-action is-danger"
-              :aria-label="`Remove ${attachmentTitleLabel(index)}`"
-              :data-test="`mobile-edit-remove-${index}`"
-              @click="removeEditImage(index)"
-            >
-              Remove
-            </button>
-          </div>
-        </article>
-      </div>
+      <!-- One numbered thumbnail per photo, in request order: the shared
+           strip in its touch form (44pt controls, no dragging). Its add tile
+           opens the multi-select photo input above. -->
+      <ReferenceImageStrip
+        :images="stripImages"
+        :first-is-target="plan.kind === 'attachments' && plan.primary === 'target'"
+        :sets-canvas="stripCanvas"
+        :ordinal-base="stripOrdinalBase"
+        :max="referenceMax"
+        touch-friendly
+        add-label="Add photos"
+        empty-label="Add photos"
+        strip-test-id="mobile-reference-strip"
+        test-id-prefix="mobile-"
+        @move="moveEditImage"
+        @remove="removeEditImage"
+        @add="editInput?.click()"
+      />
     </fieldset>
 
     <fieldset
