@@ -2831,6 +2831,11 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     // The two forwards are also sequential, so CFG is a bounded additive term
     // rather than a multiplier — see `crate::wan_admission`.
     let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
+    // Qwen Image 2.1 runs its CFG branches one after another at batch 1
+    // (batched CFG measured slower), and its family estimate already carries
+    // both branches' prefix term and the hint's batch — so neither multiplier
+    // applies to it; the reference arm below prices each branch's cache.
+    let qwen21 = hint.is_some_and(|h| h.family == ActivationFamily::QwenImage21Dit);
     let cfg_factor = if !wan && cfg_active(req.guidance) && req.negative_prompt.is_some() {
         2
     } else {
@@ -2890,7 +2895,11 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         activation_memory_for_estimate(hint, qwen_quantized)
     };
 
-    let mut activation = base.saturating_mul(batch).saturating_mul(cfg_factor);
+    let mut activation = if qwen21 {
+        base
+    } else {
+        base.saturating_mul(batch).saturating_mul(cfg_factor)
+    };
 
     if !wan && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
         let request_images = req.edit_images.as_ref().filter(|images| !images.is_empty());
@@ -2974,9 +2983,9 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             let cache =
                 qwen_image21_prefix_cache_bytes(shape, branches, dtype, qwen21_cache_budget);
             let workspace = qwen_image21_reference_workspace_bytes(base, shape, hint.batch, dtype);
+            // The workspace already carries the hint's batch, and the CFG
+            // branches share it one after another; only their caches add up.
             activation = workspace
-                .saturating_mul(batch)
-                .saturating_mul(cfg_factor)
                 .saturating_add(cache)
                 .max(qwen_image21_encode_phase_bytes(shape, dtype));
         }
@@ -5779,13 +5788,13 @@ mod qwen_image21_reference_memory_tests {
             base, shape, hint.batch, dtype,
         );
         let reference_pixels = 1024 * 1024 * 4;
-        assert_eq!(text_only, base * 2);
+        assert_eq!(text_only, base);
         // The encode phase (reference encoders and their working set) is over
         // before the denoise allocates, so the charge is the larger of the
         // two, never their sum.
         assert_eq!(
             with_one,
-            (workspace * 2 + cache).max(qwen_image21_encode_phase_bytes(shape, dtype))
+            (workspace + cache).max(qwen_image21_encode_phase_bytes(shape, dtype))
                 + reference_pixels
         );
         assert!(with_one > text_only);
