@@ -22,6 +22,9 @@ struct GeneratePane: View {
     /// notice is drawn by the body below.
     @Environment(ReuseStore.self) var reuse
     @Environment(DraftPersistence.self) var drafts
+    /// Holds a licence the press has to accept first; the sheet itself is
+    /// the root's (`RootView`). Not `private`: `+Licence` writes it.
+    @Environment(DownloadStore.self) var downloads
     /// Persisted, and deliberately not `private`: the toolbar button that
     /// flips it lives in an extension in another file. Its own key beside
     /// `libraryShowsInspector` -- ⌥⌘I is one shortcut whose STATE is per

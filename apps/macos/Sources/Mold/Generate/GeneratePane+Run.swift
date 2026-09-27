@@ -8,8 +8,17 @@ extension GeneratePane {
     /// A clip longer than the checkpoint renders in one pass goes out as an
     /// EPHEMERAL chain job instead of a batch. The routing is resolved here
     /// because it needs the recipe, which the controller does not hold.
-    func startRun() {
+    func startRun() { startRun(accepted: []) }
+
+    /// `accepted` is the licence ids accepted since the placement answer
+    /// was read, so a retry after the sheet does not ask for them again.
+    func startRun(accepted: Set<String>) {
         guard let host else { return }
+        // A render that would FETCH a gated model -- Qwen Image 2.1 and its
+        // turbo tiers, Qwen Research -- asks for the terms before anything is
+        // queued, the way the web does (`licenseRequirements`); accepting
+        // runs this press again (`GeneratePane+Licence.swift`).
+        if holdsForLicence(on: host, accepted: accepted) { return }
         let routing = recipe.flatMap {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
@@ -23,7 +32,7 @@ extension GeneratePane {
            let member = RetainedSourcePicture.member(
                of: authority, forHydrating: outgoingProbe(on: host)) {
             reuse.clear()
-            Task { await attachThenRun(member, of: authority) }
+            Task { await attachThenRun(member, of: authority, accepted: accepted) }
             return
         }
         // Whatever a chain still cannot carry -- a mask, an identity photo --
@@ -48,7 +57,8 @@ extension GeneratePane {
     /// clip without the picture it was supposed to start from is the thing
     /// this whole path exists to stop.
     func attachThenRun(
-        _ member: RetainedSourceMedia.Member, of authority: ReuseStore.Authority
+        _ member: RetainedSourceMedia.Member, of authority: ReuseStore.Authority,
+        accepted: Set<String> = []
     ) async {
         switch await RetainedSourcePicture.fetch(member, of: authority, hosts: hosts) {
         case let .refused(sentence):
@@ -56,7 +66,7 @@ extension GeneratePane {
         case let .picture(picture):
             RetainedSourcePicture.place(picture, named: authority.filename,
                                         in: &controller.draft)
-            startRun()
+            startRun(accepted: accepted)
         }
     }
 

@@ -61,9 +61,6 @@ struct ModelsPane: View {
     }
 
     var body: some View {
-        // A local binding, the way `LibraryPane+Toolbar` reads `navigation`:
-        // `downloads.pendingLicense` is `internal(set)`, not `@State` here.
-        @Bindable var downloads = downloads
         VStack(spacing: 0) {
             content
             if let removalSummary {
@@ -87,9 +84,6 @@ struct ModelsPane: View {
         .searchable(text: $query, prompt: "Search models")
         .searchFocused($isSearchFocused)
         .toolbar { toolbar }
-        .sheet(item: $downloads.pendingLicense) { pending in
-            LicenseSheet(pending: pending)
-        }
         .sheet(item: $componentsModel) { model in
             if let host { ComponentsSheet(model: model, host: host) }
         }

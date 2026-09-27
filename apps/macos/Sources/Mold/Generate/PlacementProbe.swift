@@ -15,6 +15,9 @@ import MoldClient
 @Observable
 final class PlacementProbe {
     private(set) var placement: PlacementPreview?
+    /// The model `placement` answers for. A licence gate must not act on an
+    /// answer about the model someone just switched away from.
+    private(set) var placementModel: String?
     private(set) var error: String?
 
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -46,11 +49,13 @@ final class PlacementProbe {
                 // here would revert the hint to a superseded answer.
                 guard !Task.isCancelled else { return }
                 self?.placement = answer
+                self?.placementModel = model
                 self?.error = nil
             } catch is CancellationError {
                 // Superseded by a later control change, not a failed request.
             } catch {
                 self?.placement = nil
+                self?.placementModel = nil
                 self?.error = error.sentence
             }
         }

@@ -26,6 +26,8 @@ struct RootView: View {
     @Binding var destination: Destination
 
     var body: some View {
+        // `pendingLicense` is `internal(set)` on the store, not `@State` here.
+        @Bindable var downloads = downloads
         NavigationSplitView(columnVisibility: $columnVisibility) {
             Sidebar(destination: $destination)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
@@ -33,6 +35,13 @@ struct RootView: View {
             DestinationDetail(destination: $destination)
         }
         .navigationTitle("Mold Studio")
+        // At the ROOT, not on the Models pane: a gated install can start from
+        // Models, from a held Queue row's Pull, or from Generate before a
+        // render that would fetch its model (Qwen Image 2.1's Qwen Research
+        // terms) -- and a sheet only Models drew was silent from the other two.
+        .sheet(item: $downloads.pendingLicense) { pending in
+            LicenseSheet(pending: pending)
+        }
         .task { await hosts.refreshAll() }
         // Shelves and their counts belong to the shell, regardless of which
         // destination opens first. Keep this independent of host probes so
