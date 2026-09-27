@@ -179,6 +179,29 @@ jobs:
             exit 1
           fi
 
+          # The website links to this rolling alias. Update it only after the
+          # versioned nightly DMG is public and verified.
+          studio_alias="$RUNNER_TEMP/Mold-Studio-macos-arm64.dmg"
+          cp "$dmg" "$studio_alias"
+          gh release upload latest "$studio_alias" --repo "$GITHUB_REPOSITORY" --clobber
+          alias_url="https://github.com/$GITHUB_REPOSITORY/releases/download/latest/Mold-Studio-macos-arm64.dmg"
+          alias_ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$alias_url" -o "$RUNNER_TEMP/Mold-Studio-macos-arm64.remote.dmg" \
+              && [[ "$(sha256sum "$RUNNER_TEMP/Mold-Studio-macos-arm64.remote.dmg" | awk '{print $1}')" == "$expected_sha" ]]; then
+              alias_ready=true
+              break
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Native nightly Studio alias not anonymously verified yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$alias_ready" != true ]]; then
+            echo "::error::the native nightly Studio alias failed anonymous SHA-256 verification"
+            exit 1
+          fi
+
           # 3. Ask again at the pointer boundary: main can advance while that
           #    payload propagates.
           head_guard "main advanced before the appcast flip."

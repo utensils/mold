@@ -15,9 +15,11 @@ It is the **recommended Mac download** and the replacement for the Tauri
 cannot run macOS 26) and remains the default on Windows and Linux. Releases
 attach it under the stable name `Mold-Studio-macos-arm64.dmg` as well, so
 `https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg`
-always fetches the newest stable build; the README and the website
-(`website/guide/macos.md`) link that. Scoped to generation and the library. No
-3-D studio.
+always fetches the newest stable build. The rolling `latest` prerelease also
+publishes that filename for the newest nightly, at
+`https://github.com/utensils/mold/releases/download/latest/Mold-Studio-macos-arm64.dmg`.
+The website uses these fixed URLs; versioned DMGs remain available for
+verification. Scoped to generation and the library. No 3-D studio.
 
 ## What works today
 
