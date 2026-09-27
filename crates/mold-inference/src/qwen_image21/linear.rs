@@ -255,6 +255,17 @@ impl Q21Linear {
         })
     }
 
+    /// Where the base weight lives (tests; the GGUF arm answers `None`).
+    #[cfg(test)]
+    pub(crate) fn base_location(&self) -> Option<candle_core::DeviceLocation> {
+        match &self.weight {
+            Q21Weight::Dense(linear) => Some(linear.weight().device().location()),
+            Q21Weight::Quant(_) => None,
+            Q21Weight::Int8 { linear, .. } => Some(linear.weight().device().location()),
+            Q21Weight::Fp8 { weight, .. } => Some(weight.device().location()),
+        }
+    }
+
     /// The installed bypass stack.
     #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn adapters(&self) -> &[LinearLoraAdapter] {
@@ -397,6 +408,15 @@ pub(crate) enum Q21GateUp {
 }
 
 impl Q21GateUp {
+    /// Where the projection weights live (tests).
+    #[cfg(test)]
+    pub(crate) fn base_locations(&self) -> Vec<Option<candle_core::DeviceLocation>> {
+        match self {
+            Self::Split { gate, proj } => vec![gate.base_location(), proj.base_location()],
+            Self::Fused { gate_up, .. } => vec![gate_up.base_location()],
+        }
+    }
+
     #[allow(dead_code)] // the LoRA installer sizes gate/proj adapters with it
     pub(crate) fn hidden(&self) -> usize {
         match self {

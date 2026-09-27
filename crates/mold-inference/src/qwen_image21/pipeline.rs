@@ -1297,24 +1297,11 @@ impl QwenImage21Engine {
         // to host RAM for the decode and restore it after, or release it and
         // let the next request reload — the decision's second half.
         use super::text_encoder_residency::TransformerDecode;
-        match residency.transformer_decode {
-            TransformerDecode::Resident => {}
-            TransformerDecode::ParkHost => {
-                progress.info(&format!(
-                    "Parking Qwen Image 2.1 transformer: {}",
-                    residency.reason
-                ));
-                loaded.transformer.move_to_device(&Device::Cpu)?;
-                loaded.device.synchronize()?;
-            }
-            TransformerDecode::Drop => {
-                progress.info(&format!(
-                    "Releasing Qwen Image 2.1 transformer: {}",
-                    residency.reason
-                ));
-            }
-        }
         if residency.transformer_decode == TransformerDecode::Drop {
+            progress.info(&format!(
+                "Releasing Qwen Image 2.1 transformer: {}",
+                residency.reason
+            ));
             // Nothing survives this request: the next one loads afresh.
             self.active_lora.clear();
             let loaded = self
@@ -1343,21 +1330,94 @@ impl QwenImage21Engine {
             )?;
             return Self::response(req, &image, seed, started, warnings);
         }
-        let decoded = Self::decode_rgba(
-            progress,
-            &loaded.vae,
-            &latents,
-            latent_height,
-            latent_width,
-            &loaded.vae_device,
-            loaded.vae_dtype,
-        );
-        if residency.transformer_decode == TransformerDecode::ParkHost {
-            // Restore even when the decode failed, so the engine stays usable.
-            loaded.transformer.move_to_device(&loaded.device)?;
+        let decode = || {
+            Self::decode_rgba(
+                progress,
+                &loaded.vae,
+                &latents,
+                latent_height,
+                latent_width,
+                &loaded.vae_device,
+                loaded.vae_dtype,
+            )
+        };
+        if residency.transformer_decode != TransformerDecode::ParkHost {
+            let image = decode()?;
+            return Self::response(req, &image, seed, started, warnings);
         }
-        let image = decoded?;
+        progress.info(&format!(
+            "Parking Qwen Image 2.1 transformer: {}",
+            residency.reason
+        ));
+        let device = loaded.device.clone();
+        let outcome = decode_with_parked_transformer(
+            &mut loaded.transformer,
+            |transformer| {
+                transformer.move_to_device(&Device::Cpu)?;
+                device.synchronize()?;
+                Ok(())
+            },
+            decode,
+            // Restore even when the decode failed, so the engine stays usable.
+            |transformer| transformer.move_to_device(&device),
+        );
+        if outcome.transformer_lost {
+            // The transformer is not where the engine's device says it is:
+            // keeping it would fail every later request with a device
+            // mismatch. Release it (and the LoRA it carried) so the next
+            // request reloads.
+            self.active_lora.clear();
+            self.base.loaded = None;
+        }
+        let image = outcome.result?;
         Self::response(req, &image, seed, started, warnings)
+    }
+}
+
+/// The result of a VAE decode bracketed by parking the transformer in host
+/// RAM and restoring it.
+struct ParkedDecode<T> {
+    /// The decode's answer, or the park's error when the park failed. A
+    /// restore failure never replaces it: a failed decode reports its own
+    /// error, and a successful one still ships its image.
+    result: Result<T>,
+    /// The transformer is not (known to be) back on the engine's device, so
+    /// the engine must release it and reload on the next request.
+    transformer_lost: bool,
+}
+
+/// Park `state` (the transformer) with `park`, run `decode`, then `restore`
+/// it — even when the decode failed. Any park or restore failure marks the
+/// transformer lost: after an OOM on either side the engine cannot vouch for
+/// where its weights are, and a split transformer fails every later request
+/// with a device mismatch until the model is reloaded.
+fn decode_with_parked_transformer<S: ?Sized, T>(
+    state: &mut S,
+    park: impl FnOnce(&mut S) -> Result<()>,
+    decode: impl FnOnce() -> Result<T>,
+    restore: impl FnOnce(&mut S) -> Result<()>,
+) -> ParkedDecode<T> {
+    if let Err(error) = park(state) {
+        return ParkedDecode {
+            result: Err(error.context("parking the Qwen Image 2.1 transformer for the VAE decode")),
+            transformer_lost: true,
+        };
+    }
+    let result = decode();
+    let transformer_lost = match restore(state) {
+        Ok(()) => false,
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "restoring the Qwen Image 2.1 transformer after the VAE decode failed; \
+                 releasing it so the next request reloads"
+            );
+            true
+        }
+    };
+    ParkedDecode {
+        result,
+        transformer_lost,
     }
 }
 
@@ -1462,6 +1522,66 @@ mod tests {
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
         bytes.into_inner()
+    }
+
+    /// The park/decode/restore bracket: the engine keeps its transformer only
+    /// when both moves succeeded, and a decode's own answer always wins over
+    /// a restore failure.
+    #[test]
+    fn a_failed_park_or_restore_releases_the_transformer() {
+        use std::cell::Cell;
+        let decoded = Cell::new(false);
+
+        // Park fails (host RAM): no decode is attempted, the park error is
+        // returned, and the engine must reload.
+        let outcome = decode_with_parked_transformer(
+            &mut (),
+            |_| anyhow::bail!("park: host OOM"),
+            || {
+                decoded.set(true);
+                Ok(1)
+            },
+            |_| Ok(()),
+        );
+        assert!(outcome.transformer_lost);
+        assert!(!decoded.get());
+        assert!(outcome.result.unwrap_err().to_string().contains("park"));
+
+        // Decode fails, restore fails too: the decode's error is the answer.
+        let outcome = decode_with_parked_transformer(
+            &mut (),
+            |_| Ok(()),
+            || -> Result<i32> { anyhow::bail!("decode: device OOM") },
+            |_| anyhow::bail!("restore: device OOM"),
+        );
+        assert!(outcome.transformer_lost);
+        assert!(outcome.result.unwrap_err().to_string().contains("decode"));
+
+        // Decode succeeds, restore fails: the image still ships; the engine
+        // drops the stranded transformer and reloads next time.
+        let outcome = decode_with_parked_transformer(
+            &mut (),
+            |_| Ok(()),
+            || Ok(7),
+            |_| anyhow::bail!("restore: device OOM"),
+        );
+        assert!(outcome.transformer_lost);
+        assert_eq!(outcome.result.unwrap(), 7);
+
+        // Decode fails, restore succeeds: the engine stays loaded.
+        let outcome = decode_with_parked_transformer(
+            &mut (),
+            |_| Ok(()),
+            || -> Result<i32> { anyhow::bail!("decode: device OOM") },
+            |_| Ok(()),
+        );
+        assert!(!outcome.transformer_lost);
+        assert!(outcome.result.is_err());
+
+        // The happy path.
+        let outcome = decode_with_parked_transformer(&mut (), |_| Ok(()), || Ok(3), |_| Ok(()));
+        assert!(!outcome.transformer_lost);
+        assert_eq!(outcome.result.unwrap(), 3);
     }
 
     #[test]
