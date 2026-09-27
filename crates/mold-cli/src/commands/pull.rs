@@ -654,10 +654,11 @@ mod tests {
             super::local_backend_refusal("qwen-image-2.1:fp8", Some(mold_core::GpuBackend::Metal))
                 .unwrap();
         assert_eq!(refusal, mold_core::manifest::QWEN_IMAGE21_FP8_METAL_REFUSAL);
-        assert!(
-            super::local_backend_refusal("qwen-image-2.1:fp8", Some(mold_core::GpuBackend::Cuda))
-                .is_none()
-        );
+        assert!(super::local_backend_refusal(
+            "qwen-image-2.1:fp8",
+            Some(mold_core::GpuBackend::Cuda)
+        )
+        .is_none());
         assert!(super::local_backend_refusal("qwen-image-2.1:fp8", None).is_none());
     }
 

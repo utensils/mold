@@ -163,7 +163,10 @@ mod tests {
         let foreign = s.to_device(&other).unwrap();
         for (label, result) in [
             ("foreign sin", rms_norm_rope_i(&x, &w, &c, &foreign, 1e-6)),
-            ("kernel foreign sin", cuda::forward(&x, &w, &c, &foreign, 1e-6)),
+            (
+                "kernel foreign sin",
+                cuda::forward(&x, &w, &c, &foreign, 1e-6),
+            ),
         ] {
             let err = result.expect_err(label).to_string();
             assert!(err.contains("device"), "{label}: {err}");
