@@ -149,3 +149,14 @@ describe("ImageDropWell drop-target identity", () => {
     expect(wrapper.attributes("data-drop-target")).toBeUndefined();
   });
 });
+
+describe("ImageDropWell alpha bed", () => {
+  it("draws the checkerboard on the preview image box itself", () => {
+    const wrapper = mount(ImageDropWell, {
+      props: { image: "iVBORw0KGgo=", filename: "cutout.png" },
+    });
+    const img = wrapper.find('[data-test="image-well-preview"]');
+    expect(img.exists()).toBe(true);
+    expect(img.classes()).toContain("ms-alpha-bed");
+  });
+});

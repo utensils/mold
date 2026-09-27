@@ -3,10 +3,12 @@ import {
   generationCapabilitiesForFamily,
   outputFormatsForFamily,
   pruneRequestForFamily,
+  recipeCapabilitiesSnapshot,
   schedulerOptionsForFamily,
   supportsAdvancedVideo,
 } from "./capabilities";
 import type { GenerateRequest } from "./api/types";
+import { qwenImage21Recipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 
 describe("generationCapabilitiesForFamily", () => {
   it("gates negative prompt to CFG families only", () => {
@@ -334,5 +336,68 @@ describe("supportsAdvancedVideo", () => {
       expect(supportsAdvancedVideo(f)).toBe(false);
       expect(generationCapabilitiesForFamily(f).supportsAdvancedVideo).toBe(false);
     }
+  });
+});
+
+describe("pruneRequestForFamily transparent background", () => {
+  const request: GenerateRequest = {
+    prompt: "a paper lantern",
+    model: "qwen-image-2.1:bf16",
+    width: 1024,
+    height: 1024,
+    steps: 40,
+    batch_size: 1,
+    output_format: "jpeg",
+    transparent_background: true,
+  };
+  const qwen21 = recipeCapabilitiesSnapshot(
+    qwenImage21Recipe(),
+    "qwen-image21",
+    "qwen-image-2.1:bf16",
+  );
+
+  it("snapshots the recipe's transparency block for the form-only builders", () => {
+    expect(qwen21?.transparency).toMatchObject({
+      mode: "adjustable",
+      formats: ["png", "webp"],
+    });
+  });
+
+  it("keeps it where advertised, moving JPEG to an alpha format", () => {
+    const pruned = pruneRequestForFamily(
+      request,
+      "qwen-image21",
+      "qwen-image-2.1:bf16",
+      null,
+      qwen21,
+    );
+    expect(pruned.transparent_background).toBe(true);
+    expect(pruned.output_format).toBe("png");
+  });
+
+  it("deletes it wherever the recipe carries no adjustable block", () => {
+    const sdxl = recipeCapabilitiesSnapshot(sdxlRecipe(), "sdxl", "sdxl:fp16");
+    const pruned = pruneRequestForFamily(request, "sdxl", "sdxl:fp16", null, sdxl);
+    expect("transparent_background" in pruned).toBe(false);
+    expect(pruned.output_format).toBe("jpeg");
+    // An older host with no recipe at all never gets the field either.
+    expect("transparent_background" in pruneRequestForFamily(request, "qwen-image21")).toBe(false);
+    // …and a snapshot persisted before the field existed reads as absent.
+    const { transparency: _dropped, ...stale } = qwen21!;
+    expect(
+      "transparent_background" in
+        pruneRequestForFamily(request, "qwen-image21", "qwen-image-2.1:bf16", null, stale),
+    ).toBe(false);
+  });
+
+  it("drops a stray false: off is the field's absence", () => {
+    const pruned = pruneRequestForFamily(
+      { ...request, transparent_background: false, output_format: "png" },
+      "qwen-image21",
+      "qwen-image-2.1:bf16",
+      null,
+      qwen21,
+    );
+    expect("transparent_background" in pruned).toBe(false);
   });
 });

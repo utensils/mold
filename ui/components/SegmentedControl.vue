@@ -10,6 +10,14 @@ export interface SegmentOption<V> {
   value: V;
   label: string;
   sub?: string | undefined;
+  /**
+   * One unavailable choice that stays VISIBLE (e.g. JPEG while a transparent
+   * background is on) rather than vanishing from under the user. Clicks and
+   * arrow keys skip it; `title` carries the reason.
+   */
+  disabled?: boolean | undefined;
+  /** Tooltip — the reason a disabled option is unavailable. */
+  title?: string | undefined;
 }
 
 const props = withDefaults(
@@ -56,8 +64,12 @@ const activeIndex = computed(() =>
   ),
 );
 
+function optionDisabled(option: SegmentOption<T> | undefined): boolean {
+  return props.disabled || option?.disabled === true;
+}
+
 function pick(value: T) {
-  if (props.disabled) return;
+  if (optionDisabled(props.options.find((o) => o.value === value))) return;
   emit("update:modelValue", value);
 }
 
@@ -72,9 +84,16 @@ function onKeydown(event: KeyboardEvent) {
   if (delta === 0) return;
   event.preventDefault();
   const count = props.options.length;
-  const next = (activeIndex.value + delta + count) % count;
-  const option = props.options[next];
-  if (option) emit("update:modelValue", option.value);
+  // Walk past disabled options; a row with nothing else enabled stays put.
+  let next = activeIndex.value;
+  for (let step = 0; step < count; step += 1) {
+    next = (next + delta + count) % count;
+    const option = props.options[next];
+    if (option && !option.disabled) {
+      if (next !== activeIndex.value) emit("update:modelValue", option.value);
+      return;
+    }
+  }
 }
 </script>
 
@@ -101,7 +120,8 @@ function onKeydown(event: KeyboardEvent) {
       :aria-checked="option.value === modelValue"
       :data-on="option.value === modelValue ? 'true' : undefined"
       :tabindex="option.value === modelValue ? 0 : -1"
-      :disabled="disabled"
+      :disabled="disabled || option.disabled === true"
+      :title="option.title"
       @click="pick(option.value)"
     >
       <span class="ms-seg__label" :data-label="option.label">{{

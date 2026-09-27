@@ -201,9 +201,21 @@ import {
 } from "@studio/lib/sourceFit";
 import {
   conditioningForRequest,
+  fittedAttachmentRole,
   referencesLockBatchSize,
   sourceMediaPlan,
 } from "@studio/lib/sourceMediaPlan";
+import {
+  referenceCanvasSize,
+  stagedReferenceDimensions,
+} from "@studio/lib/referenceCanvas";
+import {
+  imageInputFormatForName,
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+} from "@studio/lib/referenceImagesProfile";
+import { transparencyControl } from "@studio/lib/transparency";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import type { DropTarget } from "@studio/lib/imageDropRouting";
 import { applyCreateDrop, routeCreateDrop } from "../lib/createImageDrop";
 import {
@@ -1269,6 +1281,76 @@ const referencesReplaceSource = computed(
 const attachmentPicker = computed(
   () => sourcePlan.value.kind === "attachments",
 );
+/**
+ * The containers a REFERENCE picker accepts — the recipe's advertised
+ * `reference_images.formats` (Qwen Image 2.1 adds WebP), the legacy PNG/JPEG
+ * pair otherwise. A source well and an edit target stay PNG/JPEG: that is
+ * what `source_image` admission takes.
+ */
+const referenceFormats = computed(
+  () =>
+    capabilities.value.referenceImages?.formats ??
+    LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
+);
+/** What the one Source/Edit-images picker accepts right now. */
+const sourcePickerFormats = computed(() =>
+  attachmentPicker.value &&
+  !replaceTargetOnPick.value &&
+  fittedAttachmentRole(capabilities.value.sourceImageMode) === null
+    ? referenceFormats.value
+    : LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
+);
+
+// A model with no adapter path closes an open Add-on looks sheet rather than
+// leaving a picker whose choices the request would drop.
+watch(
+  () => capabilities.value.supportsLora,
+  (supported) => {
+    if (!supported && railSheet.value === "loras") closeRailSheet();
+  },
+);
+
+/**
+ * `reference_images.canvas: last-reference` (Qwen Image 2.1): while the
+ * canvas intent is still the model default, the canvas follows the LAST
+ * reference's aspect at the recipe's default area, rounded half-to-even on
+ * its grid exactly like the CLI and the engine. A size the user picked
+ * (`manual`) never moves.
+ */
+watch(
+  [
+    () => capabilities.value.referenceImages?.canvas ?? null,
+    () => capabilities.value.sourceImageMode,
+    () =>
+      form.state.value.imageAttachments
+        .map(
+          (image) =>
+            `${image.width ?? ""}x${image.height ?? ""}:${image.base64?.length ?? 0}:${image.base64?.slice(-24) ?? ""}`,
+        )
+        .join("|"),
+    () => canvasIntent.value,
+  ],
+  () => {
+    if (capabilities.value.sourceImageMode !== "references") return;
+    const recipe = activeRecipe.value;
+    if (!recipe) return;
+    const next = referenceCanvasSize({
+      canvas: capabilities.value.referenceImages?.canvas ?? null,
+      references: stagedReferenceDimensions(form.state.value.imageAttachments),
+      defaults: recipe.defaults,
+      alignment: recipe.resolution.alignment,
+      intent: canvasIntent.value,
+    });
+    if (
+      next &&
+      (next.width !== form.state.value.width ||
+        next.height !== form.state.value.height)
+    ) {
+      form.state.value.width = next.width;
+      form.state.value.height = next.height;
+    }
+  },
+);
 /** Which conditioning the request will carry — the shared decision. */
 const requestConditioning = computed(() =>
   conditioningForRequest(capabilities.value.sourceImageMode, {
@@ -1994,6 +2076,11 @@ const advCount = computed(() =>
           startStep: form.state.value.identityStartStep ?? null,
         })
       : 0,
+    // Counted only where the recipe offers the toggle; a parked choice on a
+    // model without it inflates nothing.
+    transparentBackground:
+      transparencyControl(capabilities.value) !== null &&
+      form.state.value.transparentBackground === true,
   }),
 );
 
@@ -2533,6 +2620,19 @@ function makeVariations(): void {
  * possibly be this render — one match, no older than the job itself — and
  * otherwise says it does not know, which the menu then discloses.
  */
+/** The finished print carries alpha: its listed row says so (`has_alpha`,
+ * which also covers an edit of a transparent reference), or — before the row
+ * lands — its own request asked for a transparent background. */
+const resultAlpha = computed(() => {
+  if (showsAlphaBed(canvasPrintRow.value)) return true;
+  // A chained long clip's request carries no still toggle at all.
+  const request = latestDone.value?.request;
+  return (
+    !!request &&
+    "transparent_background" in request &&
+    request.transparent_background === true
+  );
+});
 const canvasPrintRow = computed<GalleryImage | null>(() => {
   const job = latestDone.value;
   const r = job?.result;
@@ -2608,7 +2708,7 @@ function galleryItemMimeType(item: GalleryImage): string {
   const format = (item.format ?? item.filename.split(".").pop() ?? "")
     .toLowerCase()
     .replace("jpg", "jpeg");
-  const kind = mediaKind(item.format, item.filename);
+  const kind = mediaKind(item.format, item.filename, item.metadata);
   if (kind === "video") return format ? `video/${format}` : "video/mp4";
   if (kind === "audio") return format ? `audio/${format}` : "audio/wav";
   if (kind === "mesh") return GLB_MIME_TYPE;
@@ -2690,6 +2790,16 @@ async function prepareStillSourceToRequest(
     : (form.state.value.imageAttachments[0] ?? null);
   const mask = override ? override.mask : form.state.value.maskImage;
   if (!source) return { source, mask };
+  // A `references` layout has no source well: its first attachment is an
+  // ordered reference like the rest, and references are never fitted,
+  // flattened or re-encoded — a transparent PNG/WebP must reach the engine
+  // with its alpha and its own size.
+  if (
+    !override &&
+    fittedAttachmentRole(capabilities.value.sourceImageMode) === null
+  ) {
+    return { source: null, mask };
+  }
   // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so
   // there is nothing to fit the source onto — fitting it against the 0×0
   // canvas would resample the conditioning image out of existence. The
@@ -4528,9 +4638,17 @@ const recentSourceDisabledReason = computed<string | null>(() => {
   const menu = recentContextMenu.value;
   const item = menu?.item;
   if (!menu || !item) return null;
-  const kind = mediaKind(item.format, item.filename);
+  const kind = mediaKind(item.format, item.filename, item.metadata);
   if (kind === "mesh")
     return "A 3-D mesh cannot condition a render — source images are pixels.";
+  // A still WebP is a real print now; only a recipe advertising WebP
+  // references can take one (a source image is PNG/JPEG at admission).
+  if (kind === "image" && imageInputFormatForName(item.filename) === "webp") {
+    const accepted = sourcePickerFormats.value;
+    if (!accepted.includes("webp")) {
+      return `This style takes ${imageInputFormatsSentence(accepted)} pictures, not WebP.`;
+    }
+  }
   // Unfiled AND payload-free: a print restored from a reload before its row
   // is listed. There is nothing to read and no name to read it by.
   if (menu.unfiled && !menu.inlineBase64) return RECENT_CONTEXT_UNFILED_REASON;
@@ -4860,7 +4978,7 @@ async function attachLightboxSource(
       base64 = await blobToBase64(blob);
       mime = blob.type;
     }
-    const kind = mediaKind(item.format, item.filename);
+    const kind = mediaKind(item.format, item.filename, item.metadata);
     if (kind === "video") {
       form.state.value.sourceVideo = {
         kind: "upload",
@@ -4930,7 +5048,7 @@ async function onLightboxUseSource(item: GalleryImage) {
 }
 
 async function onLightboxUpscale(item: GalleryImage) {
-  if (mediaKind(item.format, item.filename) === "video") {
+  if (mediaKind(item.format, item.filename, item.metadata) === "video") {
     closeDrawer();
     await router.push({
       name: "library",
@@ -4997,15 +5115,22 @@ function dropContext() {
   };
 }
 
-/** Read a dropped file the same way every well does: PNG/JPEG only, and the
- * header decoded for the dimensions a gallery pick would have carried. */
+/** Read a dropped file the same way every well does: PNG/JPEG (plus WebP on
+ * a reference strip whose recipe advertises it), and the header decoded for
+ * the dimensions a gallery pick would have carried. */
 async function droppedSourceImage(
   file: File,
+  target: DropTarget,
 ): Promise<SourceImageState | null> {
+  // A strip takes its recipe's own containers; every well stays PNG/JPEG.
+  const formats =
+    target === "references"
+      ? referenceFormats.value
+      : LEGACY_REFERENCE_IMAGE_FORMATS.slice();
   const base64 = await blobToBase64(file);
-  const dimensions = imageDimensionsFromBase64(base64);
+  const dimensions = imageDimensionsFromBase64(base64, formats);
   if (!dimensions) {
-    composerError.value = "Only PNG or JPEG images can be used here.";
+    composerError.value = `Only ${imageInputFormatsSentence(formats)} images can be used here.`;
     return null;
   }
   return {
@@ -5053,7 +5178,7 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
     composerError.value = routed.refused;
     return;
   }
-  const image = await droppedSourceImage(file);
+  const image = await droppedSourceImage(file, routed);
   if (!image) return;
   composerError.value = null;
   await applyDropToForm(routed, image);
@@ -5227,6 +5352,7 @@ onBeforeUnmount(() => {
             :result-mesh-src="resultMeshSrc"
             :result-caption="resultCaption"
             :result-filename="resultFilename"
+            :result-alpha="resultAlpha"
             :can-download="canDownload"
             :can-copy-link="canCopyLink"
             :can-make-variations="canMakeVariations"
@@ -5567,7 +5693,11 @@ onBeforeUnmount(() => {
           >
             {{ sourceConditioningError }}
           </p>
+          <!-- Only a recipe that takes adapters offers them: the row used to
+               render for every model, so a LoRA picked on a model with no
+               adapter path was silently dropped from the request. -->
           <DisclosureRow
+            v-if="capabilities.supportsLora"
             label="Add-on looks"
             note="Stack extra styles on top of this one"
             :value="loraDisclosureValue"
@@ -5667,7 +5797,9 @@ onBeforeUnmount(() => {
             />
           </template>
 
-          <template v-else-if="railSheet === 'loras'">
+          <template
+            v-else-if="railSheet === 'loras' && capabilities.supportsLora"
+          >
             <LoraPicker
               :family="currentFamily"
               :model-value="form.state.value.loras"
@@ -5775,6 +5907,7 @@ onBeforeUnmount(() => {
       "
       :multiple="!replaceTargetOnPick && attachmentPicker"
       :gallery-only="replaceTargetOnPick || !attachmentPicker"
+      :formats="sourcePickerFormats"
       @pick="onPickSource"
       @close="
         showPicker = false;
@@ -5812,6 +5945,7 @@ onBeforeUnmount(() => {
       :open="showReferencePicker"
       title="Add reference images"
       :multiple="true"
+      :formats="referenceFormats"
       @pick="onPickReferences"
       @close="showReferencePicker = false"
     />

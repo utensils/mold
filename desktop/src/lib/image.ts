@@ -1,5 +1,12 @@
 import { blobToBase64 } from "@studio/lib/base64";
 import type { GalleryImage } from "./api/types";
+import {
+  imageInputFormatForName,
+  imageInputFormatOfBase64,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+  referenceImageMimeTypes,
+  type ImageInputFormat,
+} from "@studio/lib/referenceImagesProfile";
 
 export { blobToBase64 };
 
@@ -15,9 +22,12 @@ export function fileToBase64(file: File): Promise<string> {
   return blobToBase64(file);
 }
 
-/** Object URL for a base64 payload so a `<img>` can preview it. */
-export function base64ToDataUrl(b64: string, mime = "image/png"): string {
-  return `data:${mime};base64,${b64}`;
+/** Object URL for a base64 payload so a `<img>` can preview it. Without an
+ * explicit type the container is read from the payload's own first bytes
+ * (a WebP reference is labelled WebP), falling back to PNG. */
+export function base64ToDataUrl(b64: string, mime?: string): string {
+  const resolved = mime ?? referenceImageMimeTypes([imageInputFormatOfBase64(b64) ?? "png"])[0]!;
+  return `data:${resolved};base64,${b64}`;
 }
 
 /**
@@ -27,8 +37,15 @@ export function base64ToDataUrl(b64: string, mime = "image/png"): string {
  * image picker filters its grid with this to avoid forwarding a pick that
  * would only fail at generation time.
  */
-export function isStillImageFile(filename: string): boolean {
-  return /\.(png|jpe?g)$/i.test(filename.trim());
+export function isStillImageFile(
+  filename: string,
+  formats: readonly ImageInputFormat[] = LEGACY_REFERENCE_IMAGE_FORMATS,
+): boolean {
+  // `formats` is the recipe's advertised `reference_images.formats` for a
+  // reference strip (Qwen Image 2.1 adds WebP); every other caller keeps the
+  // PNG/JPEG pair source images are admitted as.
+  const format = imageInputFormatForName(filename);
+  return format !== null && formats.includes(format);
 }
 
 /**
@@ -39,9 +56,12 @@ export function isStillImageFile(filename: string): boolean {
  */
 export function isStillImageGalleryItem(
   item: Pick<GalleryImage, "filename" | "format" | "metadata">,
+  formats: readonly ImageInputFormat[] = LEGACY_REFERENCE_IMAGE_FORMATS,
 ): boolean {
-  if (!isStillImageFile(item.filename)) return false;
+  if (!isStillImageFile(item.filename, formats)) return false;
   const format = item.format?.toLowerCase();
-  if (format && format !== "png" && format !== "jpeg") return false;
+  if (format && !(formats as readonly string[]).includes(format)) return false;
+  // A still WebP and an animated one share the container; the frame counts
+  // tell them apart, exactly as for a mislabelled video row.
   return !item.metadata.frames && !item.metadata.video_frames;
 }

@@ -2346,3 +2346,30 @@ describe("MobileGalleryViewer sheet mechanics", () => {
     expect(handle.attributes("aria-controls")).toBe(bodyId);
   });
 });
+
+describe("MobileGalleryViewer alpha bed", () => {
+  it("puts a transparent print on a checkerboard sized to the picture", async () => {
+    const cutout: GalleryImage = {
+      ...image,
+      filename: "cutout.png",
+      metadata: { ...image.metadata, width: 1600, height: 900, has_alpha: true },
+    };
+    const viewer = mountViewer(cutout);
+    await flushPromises();
+    const bed = viewer.get("[data-test='gallery-viewer-alpha-bed']");
+    expect(bed.classes()).toContain("ms-alpha-bed");
+    // The print's own aspect sizes the bed, never the letterboxed stage.
+    expect(bed.attributes("style")).toContain("--alpha-w: 1600");
+    expect(bed.attributes("style")).toContain("--alpha-h: 900");
+    expect(viewer.get("[data-test='gallery-viewer-image']").classes()).toContain(
+      "gallery-viewer-media--over-bed",
+    );
+  });
+
+  it("keeps an opaque print on the plain stage", async () => {
+    const viewer = mountViewer();
+    await flushPromises();
+    expect(viewer.find("[data-test='gallery-viewer-alpha-bed']").exists()).toBe(false);
+    expect(viewer.find("[data-test='gallery-viewer-image']").exists()).toBe(true);
+  });
+});

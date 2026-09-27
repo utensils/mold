@@ -79,8 +79,18 @@ describe("advancedActiveCount", () => {
           videoSuite: true,
           wanRecipe: 2,
           identity: 2,
+          transparentBackground: true,
         }),
       ),
-    ).toBe(10);
+    ).toBe(11);
+  });
+
+  it("counts the transparent-background toggle once", () => {
+    expect(advancedActiveCount(params({ transparentBackground: true }))).toBe(
+      1,
+    );
+    expect(advancedActiveCount(params({ transparentBackground: false }))).toBe(
+      0,
+    );
   });
 });

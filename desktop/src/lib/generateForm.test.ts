@@ -27,6 +27,7 @@ import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/
 import {
   flux2DevRecipe,
   flux2KleinRecipe,
+  qwenImage21Recipe,
   qwenImageEditRecipe,
   sdxlIpAdapterRecipe,
   sdxlRecipe,
@@ -3711,5 +3712,121 @@ describe("the retired style preset", () => {
     const legacy = cloneGenerateForm(clean);
     (legacy as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
     expect(buildRequest(legacy)).toEqual(buildRequest(clean));
+  });
+});
+
+describe("Qwen Image 2.1 transparency and references", () => {
+  function qwen21Model(recipe = qwenImage21Recipe()): ModelEntry {
+    return {
+      name: "qwen-image-2.1:bf16",
+      family: "qwen-image21",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 40,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function qwen21Form(): GenerateForm {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwen21Model());
+    form.prompt = "a paper lantern";
+    return form;
+  }
+
+  it("sends transparent_background only while the toggle is on", () => {
+    const form = qwen21Form();
+    expect("transparent_background" in buildRequest(form)).toBe(false);
+    form.transparentBackground = true;
+    expect(buildRequest(form).transparent_background).toBe(true);
+  });
+
+  it("moves JPEG to PNG while the toggle is on", () => {
+    const form = qwen21Form();
+    form.outputFormat = "jpeg";
+    expect(buildRequest(form).output_format).toBe("jpeg");
+    form.transparentBackground = true;
+    expect(buildRequest(form).output_format).toBe("png");
+  });
+
+  it("parks the toggle on a model that does not advertise it", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, {
+      ...qwen21Model(),
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [sdxlRecipe()],
+      },
+    } as unknown as ModelEntry);
+    form.prompt = "a lantern";
+    form.transparentBackground = true;
+    form.outputFormat = "jpeg";
+    const req = buildRequest(form);
+    expect("transparent_background" in req).toBe(false);
+    expect(req.output_format).toBe("jpeg");
+    expect(form.transparentBackground).toBe(true);
+  });
+
+  it("ships every reference byte for byte and batches text-to-image freely", () => {
+    const form = qwen21Form();
+    form.batchSize = 3;
+    expect(buildRequest(form).batch_size).toBe(3);
+    form.imageAttachments = ["RGBA-PNG", "WEBP"];
+    const req = buildRequest(form);
+    expect(req.edit_images).toEqual(["RGBA-PNG", "WEBP"]);
+    expect(req.batch_size).toBe(1);
+    expect("source_image" in req).toBe(false);
+  });
+
+  it("restores the toggle from the print's request, never from has_alpha", () => {
+    const metadata = {
+      prompt: "a paper lantern",
+      model: "qwen-image-2.1:bf16",
+      width: 1024,
+      height: 1024,
+      steps: 40,
+      guidance: 1,
+      seed: 7,
+    } as unknown as OutputMetadata;
+    const on = qwen21Form();
+    applyMetadataToForm(on, { ...metadata, transparent_background: true });
+    expect(on.transparentBackground).toBe(true);
+    const off = qwen21Form();
+    off.transparentBackground = true;
+    applyMetadataToForm(off, { ...metadata, has_alpha: true });
+    expect(off.transparentBackground).toBe(false);
+  });
+
+  it("restores the toggle from a running job's own request", () => {
+    const form = qwen21Form();
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a paper lantern",
+        model: "qwen-image-2.1:bf16",
+        width: 1024,
+        height: 1024,
+        steps: 40,
+        guidance: 1,
+        batch_size: 1,
+        output_format: "png",
+        transparent_background: true,
+      },
+      [qwen21Model()],
+    );
+    expect(form.transparentBackground).toBe(true);
   });
 });

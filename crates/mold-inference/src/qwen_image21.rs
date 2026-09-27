@@ -16,10 +16,14 @@ pub(crate) mod banded_conv;
 pub(crate) mod conditioning;
 pub(crate) mod exec_path;
 pub(crate) mod layout;
+pub(crate) mod linear;
 pub(crate) mod lora;
 pub(crate) mod pipeline;
 pub(crate) mod reference;
 pub(crate) mod scheduler;
+pub mod text_encoder_residency;
+#[cfg(test)]
+mod tier_renders;
 pub(crate) mod transformer;
 pub(crate) mod vae;
 pub(crate) mod vae_encoder;
@@ -52,6 +56,13 @@ pub fn metal_transformer_dtype(value: Option<&str>) -> DType {
             DType::BF16
         }
     }
+}
+
+/// The `MOLD_QWEN_IMAGE21_QMATMUL` decision for a raw value — the engine's own
+/// parser, exported so mold-server's execution identity canonicalizes the
+/// spelling to the arm that will actually run.
+pub fn qmatmul_env_enabled(value: Option<&str>) -> bool {
+    linear::parse_qwen_image21_qmatmul(value)
 }
 
 /// v0.32's per-branch retention bound, and still the whole rule for

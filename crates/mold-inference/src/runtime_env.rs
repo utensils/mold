@@ -104,6 +104,10 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_QWEN3_VARIANT",
     // Qwen Image 2.1 Metal denoiser precision changes weights and latent storage.
     "MOLD_QWEN_IMAGE21_DTYPE",
+    // Qwen Image 2.1 GGUF tiers: per-forward dequant (default on CUDA) vs
+    // candle's QMatMul kernels. Numerics, transient memory and step latency
+    // all differ, so the two arms never share a fingerprint or timing bucket.
+    "MOLD_QWEN_IMAGE21_QMATMUL",
     // Qwen Image 2.1 prefix K/V retention: upstream warns that cached and
     // uncached renders differ in BF16, so the decision moves pixels.
     "MOLD_QWEN_IMAGE21_KV_CACHE",
@@ -253,6 +257,7 @@ mod tests {
             // forward; residency and step latency both differ.
             "MOLD_FLUX2_FP8_CACHE",
             "MOLD_QWEN_IMAGE21_DTYPE",
+            "MOLD_QWEN_IMAGE21_QMATMUL",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),

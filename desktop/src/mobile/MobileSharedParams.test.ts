@@ -2,7 +2,11 @@ import { mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
-import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  hunyuan3dRecipe,
+  qwenImage21Recipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import {
   applyModelDefaults,
   buildRequest,
@@ -625,3 +629,57 @@ function fieldFor(wrapper: VueWrapper, label: string): DOMWrapper<HTMLElement> {
   if (!field) throw new Error(`no field labelled ${label}`);
   return field;
 }
+
+describe("MobileSharedParams transparent background", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  function modelFor(name: string, family: string, recipe: ReturnType<typeof sdxlRecipe>) {
+    return {
+      name,
+      family,
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: recipe.defaults.steps,
+      default_guidance: recipe.defaults.guidance,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: family,
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function mountFor(model: ModelEntry) {
+    const form = reactive(newGenerateForm()) as GenerateForm;
+    form.model = model.name;
+    form.family = model.family;
+    applyModelDefaults(form, model);
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, model, lastSeed: null, section: "primary" },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+    return { form, wrapper };
+  }
+
+  it("renders the row only where the recipe advertises the toggle", () => {
+    const qwen = mountFor(modelFor("qwen-image-2.1:bf16", "qwen-image21", qwenImage21Recipe()));
+    expect(qwen.wrapper.find("[data-test='mobile-transparent-background']").exists()).toBe(true);
+    const sdxl = mountFor(modelFor("sdxl-base:fp16", "sdxl", sdxlRecipe()));
+    expect(sdxl.wrapper.find("[data-test='mobile-transparent-background']").exists()).toBe(false);
+  });
+
+  it("sends the field once on and moves JPEG to PNG", async () => {
+    const { form, wrapper } = mountFor(
+      modelFor("qwen-image-2.1:bf16", "qwen-image21", qwenImage21Recipe()),
+    );
+    form.prompt = "a paper lantern";
+    form.outputFormat = "jpeg";
+    await wrapper.get("[data-test='mobile-transparent-background-toggle']").trigger("click");
+    expect(form.transparentBackground).toBe(true);
+    expect(form.outputFormat).toBe("png");
+    expect(buildRequest(form).transparent_background).toBe(true);
+  });
+});

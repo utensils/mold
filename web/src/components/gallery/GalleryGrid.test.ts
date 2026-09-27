@@ -130,6 +130,25 @@ describe("GalleryGrid", () => {
     expect(badges[0]!.text()).toBe("New");
   });
 
+  it("draws the checkerboard only on a still that carries alpha", () => {
+    const cutout: GalleryImage = {
+      filename: "cutout.webp",
+      timestamp: 1_700_000_200,
+      format: "webp",
+      metadata: meta({ has_alpha: true }),
+    };
+    const wrapper = mount(GalleryGrid, {
+      props: { entries: [image, cutout], loading: false },
+    });
+    const tiles = wrapper.findAll(".ms-tile");
+    expect(tiles.map((tile) => tile.attributes("data-alpha"))).toEqual([
+      undefined,
+      "true",
+    ]);
+    // A still WebP is a still, not a motion print.
+    expect(wrapper.findAll(".gg__vbadge")).toHaveLength(0);
+  });
+
   it("shows a play glyph + duration overlay on motion prints", () => {
     const wrapper = mount(GalleryGrid, {
       props: { entries: [image, video], loading: false },

@@ -24,6 +24,7 @@ import {
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import BulkBar from "../components/library/BulkBar.vue";
 import CollectionsShelf, { type ShelfCard } from "../components/library/CollectionsShelf.vue";
@@ -2847,6 +2848,7 @@ onUnmounted(() => {
                 :media-version="tile.model.mediaVersion"
                 :priority="tile.priority"
                 :video="tile.model.localVideo"
+                :alpha="!tile.model.localVideo && showsAlphaBed(tile.model.item)"
                 :alt="tile.model.item.metadata.prompt"
               />
               <!-- NEW badge (top-left) — hidden while selecting, where the

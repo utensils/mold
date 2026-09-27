@@ -17,7 +17,7 @@ import {
   sourceConditioningValidationError,
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
-import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
+import { base64ToDataUrl, fileToBase64 } from "../lib/image";
 import {
   coerceSourceFitForMaskless,
   defaultSourceFitPolicy,
@@ -40,6 +40,13 @@ import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/Sourc
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import NamedViewsPanel from "@studio/components/NamedViewsPanel.vue";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  fileMatchesImageInputFormats,
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+  referenceImageMimeTypes,
+  type ImageInputFormat,
+} from "@studio/lib/referenceImagesProfile";
 import {
   activeNamedViewsProfile,
   namedViewValidationError,
@@ -418,18 +425,26 @@ watch(
   { immediate: true },
 );
 
-function isAcceptedImage(file: File): boolean {
-  return (
-    file.type === "image/png" ||
-    file.type === "image/jpeg" ||
-    (!file.type && isStillImageFile(file.name))
-  );
+function isAcceptedImage(
+  file: File,
+  formats: readonly ImageInputFormat[] = LEGACY_REFERENCE_IMAGE_FORMATS,
+): boolean {
+  return fileMatchesImageInputFormats(file, formats);
 }
+
+/** The containers the edit/reference strip takes: the recipe's advertised
+ * `reference_images.formats` (Qwen Image 2.1 adds WebP), PNG/JPEG otherwise.
+ * Picked bytes are kept exactly as chosen — never flattened. */
+const referenceFormats = computed(
+  () => caps.value.referenceImages?.formats ?? LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
+);
+const referenceAccept = computed(() => referenceImageMimeTypes(referenceFormats.value).join(","));
 
 async function readImages(
   event: Event,
   multiple: boolean,
   replacing: InlineGenerationMediaField | null = null,
+  formats: readonly ImageInputFormat[] = LEGACY_REFERENCE_IMAGE_FORMATS,
 ): Promise<Array<{ file: File; b64: string }>> {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
@@ -447,8 +462,8 @@ async function readImages(
     error.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return [];
   }
-  if (files.some((file) => !isAcceptedImage(file))) {
-    error.value = "Only PNG or JPEG photos can be used here.";
+  if (files.some((file) => !isAcceptedImage(file, formats))) {
+    error.value = `Only ${imageInputFormatsSentence(formats)} photos can be used here.`;
     return [];
   }
 
@@ -555,7 +570,7 @@ function removeEndFrame(): void {
 }
 
 async function pickEditImages(event: Event): Promise<void> {
-  const picked = await readImages(event, true);
+  const picked = await readImages(event, true, null, referenceFormats.value);
   if (picked.length === 0) return;
   const establishesTarget =
     plan.value.kind === "attachments" &&
@@ -808,7 +823,7 @@ function applyMask(mask: string): void {
         ref="editInput"
         hidden
         type="file"
-        accept="image/png,image/jpeg"
+        :accept="referenceAccept"
         multiple
         data-test="mobile-edit-input"
         tabindex="-1"
@@ -834,7 +849,10 @@ function applyMask(mask: string): void {
           class="mobile-attachment-card"
           :data-test="`mobile-edit-card-${index}`"
         >
+          <!-- The alpha bed sits under every reference, so a transparent PNG
+               or WebP shows exactly which pixels are empty. -->
           <img
+            class="ms-alpha-bed"
             :src="base64ToDataUrl(image)"
             :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
           />

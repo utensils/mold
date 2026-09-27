@@ -135,6 +135,13 @@ export interface OutputMetadata {
   /** Effective values the render actually applied, not the request's. */
   id_weight?: number | null;
   id_start_step?: number | null;
+  /** The request asked for a transparent background (only ever `true`;
+   * Reuse restores the toggle from it). Additive. */
+  transparent_background?: boolean | null;
+  /** The STORED file carries alpha (some pixel below full opacity) — also
+   * true for an edit of a transparent reference with the toggle off. The
+   * Library draws the checkerboard from it (`showsAlphaBed`). Additive. */
+  has_alpha?: boolean | null;
   /** Client-shaped source-fit provenance echoed verbatim by newer servers.
    * Parse defensively before restoring. */
   source_fit?: unknown;
@@ -228,9 +235,27 @@ export const ANIMATED_FORMATS: ReadonlyArray<OutputFormat> = [
   "webp",
 ];
 
+/** The frame counts that tell an animated WebP from a still one. */
+export interface MediaKindFrames {
+  frames?: number | null;
+  video_frames?: number | null;
+}
+
+/**
+ * WebP is BOTH a still format (every still recipe advertises it, and
+ * `webp_still` encodes a single non-animated frame) and an animation
+ * container. The file decides — `OutputFormat::is_video_artifact` reads the
+ * `ANIM`/`VP8X` flag — and a client sees that decision as frame metadata: an
+ * animation records its frame count, a still records none.
+ */
+function webpIsAnimated(metadata: MediaKindFrames | null | undefined): boolean {
+  return (metadata?.frames ?? 0) > 1 || (metadata?.video_frames ?? 0) > 1;
+}
+
 export function mediaKind(
   fmt: OutputFormat | null | undefined,
   filename: string,
+  metadata?: MediaKindFrames | null,
 ): MediaKind {
   const resolved = fmt ?? inferFormatFromName(filename);
   // Narrowest kind first, matching the probe order the server and the Rust
@@ -239,6 +264,9 @@ export function mediaKind(
   if (resolved && MESH_FORMATS.includes(resolved)) return "mesh";
   if (resolved && VIDEO_FORMATS.includes(resolved)) return "video";
   if (resolved && AUDIO_FORMATS.includes(resolved)) return "audio";
+  if (resolved === "webp") {
+    return webpIsAnimated(metadata) ? "animated" : "image";
+  }
   if (resolved && ANIMATED_FORMATS.includes(resolved)) return "animated";
   return "image";
 }
@@ -468,6 +496,12 @@ export interface GenerateRequestWire {
    * field rather than refusing it, renders exactly what it always did.
    */
   reference_weight?: number | null;
+  /**
+   * Cut the subject out onto a transparent background
+   * (`capabilities.transparency`). Only `true` ever travels — off is the
+   * field's absence, so an ordinary render is byte-identical on the wire.
+   */
+  transparent_background?: boolean | null;
   /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
   references?: GenerationReference[] | null;
   /** Face-identity (PuLID) reference, base64 PNG/JPEG with no data-URI
@@ -1086,7 +1120,8 @@ export interface LoraSelection {
 /// matmul work and disk I/O at build time, so 4 is a sane UX ceiling.
 export { MAX_LORA_STACK } from "@studio/lib/generationCapabilities";
 
-/// Families whose engines actually merge LoRA adapters today. Mirrors
+/// Families whose engines apply LoRA adapters today — merged into the
+/// weights or, as on Qwen Image 2.1, as an unmerged bypass branch. Mirrors
 /// `mold_core::validation::LORA_CAPABLE_FAMILIES` and its
 /// `require_lora_capable_family` gate. Keep both in sync — divergence shows
 /// up as a UI that lets the user pick a LoRA the server then rejects.
@@ -1192,6 +1227,13 @@ export interface GenerateFormState {
    * server's own default stays the authority — the `identityWeight` rule.
    */
   referenceWeight?: number | null;
+  /**
+   * The Transparent background toggle. Kept even while a model that does not
+   * advertise it is selected (it parks, like a staged identity photo) and
+   * sent only while the recipe's `capabilities.transparency` is adjustable.
+   * Absent on a draft saved before the field existed, which reads as off.
+   */
+  transparentBackground?: boolean;
   maskImage: SourceImageState | null;
   controlImage: SourceImageState | null;
   controlModel: string;

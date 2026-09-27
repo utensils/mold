@@ -9,11 +9,12 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::{Linear, VarBuilder};
+use candle_nn::VarBuilder;
 use std::path::PathBuf;
 
 use super::attention::SegmentDispatch;
 use super::layout::{BlockCausalPlan, QwenImage21JointLayout};
+use super::linear::{Q21GateUp, Q21Linear, Q21Vb, Q21WeightSource};
 use super::{PrefixCacheDecision, QwenImage21TextConditioning};
 
 /// Official `transformer/config.json` geometry for Qwen/Qwen-Image-2.1.
@@ -95,8 +96,12 @@ impl QwenImage21TransformerConfig {
 /// Every bias-free projection in the checkpoint is built here, and only here,
 /// so swapping the linear representation (quantized storage, a LoRA adapter
 /// slot) is one change rather than one per module.
-fn linear(in_dim: usize, out_dim: usize, vb: VarBuilder<'_>) -> Result<Linear> {
-    Ok(candle_nn::linear_no_bias(in_dim, out_dim, vb)?)
+///
+/// The arm is the checkpoint's (`qwen_image21::linear`): the BF16 shards give
+/// the Dense arm, bit-identical to `candle_nn::linear_no_bias`; GGUF, Comfy
+/// INT8 ConvRot and torchao FP8 tiers give their quantized arms.
+fn linear(in_dim: usize, out_dim: usize, vb: Q21Vb<'_>) -> Result<Q21Linear> {
+    vb.linear(in_dim, out_dim)
 }
 
 /// Zero-centered RMS norm used by `txt_in.text_norm`.
@@ -109,7 +114,7 @@ struct ZeroCenterRmsNorm {
 }
 
 impl ZeroCenterRmsNorm {
-    fn new(dim: usize, eps: f64, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(dim: usize, eps: f64, vb: Q21Vb<'_>) -> Result<Self> {
         Ok(Self {
             weight: vb.get(dim, "weight")?,
             eps,
@@ -155,12 +160,12 @@ impl LayerNormNoParams {
 
 struct TextProjection {
     text_norm: ZeroCenterRmsNorm,
-    in_layer: Linear,
-    out_layer: Linear,
+    in_layer: Q21Linear,
+    out_layer: Q21Linear,
 }
 
 impl TextProjection {
-    fn new(cfg: &QwenImage21TransformerConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(cfg: &QwenImage21TransformerConfig, vb: Q21Vb<'_>) -> Result<Self> {
         let inner = cfg.inner_dim();
         Ok(Self {
             text_norm: ZeroCenterRmsNorm::new(cfg.context_in_dim, cfg.eps, vb.pp("text_norm"))?,
@@ -170,23 +175,21 @@ impl TextProjection {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.out_layer
-            .forward(
-                &candle_nn::Activation::GeluPytorchTanh
-                    .forward(&self.in_layer.forward(&self.text_norm.forward(xs)?)?)?,
-            )
-            .map_err(Into::into)
+        self.out_layer.forward(
+            &candle_nn::Activation::GeluPytorchTanh
+                .forward(&self.in_layer.forward(&self.text_norm.forward(xs)?)?)?,
+        )
     }
 }
 
 struct TimestepEmbedder {
-    linear_1: Linear,
-    linear_2: Linear,
+    linear_1: Q21Linear,
+    linear_2: Q21Linear,
     inner_dim: usize,
 }
 
 impl TimestepEmbedder {
-    fn new(inner_dim: usize, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(inner_dim: usize, vb: Q21Vb<'_>) -> Result<Self> {
         Ok(Self {
             linear_1: linear(256, inner_dim, vb.pp("linear_1"))?,
             linear_2: linear(inner_dim, inner_dim, vb.pp("linear_2"))?,
@@ -231,25 +234,23 @@ impl TimestepEmbedder {
 }
 
 struct SwiGlu {
-    proj: Linear,
-    gate_layer: Linear,
-    out: Linear,
+    /// `gate_layer` and `proj`, split (diffusers) or fused gate-first
+    /// (ComfyUI / GGUF) as the checkpoint stores them.
+    gate_up: Q21GateUp,
+    out: Q21Linear,
 }
 
 impl SwiGlu {
-    fn new(dim: usize, mlp_dim: usize, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(dim: usize, mlp_dim: usize, vb: Q21Vb<'_>) -> Result<Self> {
         Ok(Self {
-            proj: linear(dim, mlp_dim, vb.pp("proj"))?,
-            gate_layer: linear(dim, mlp_dim, vb.pp("gate_layer"))?,
+            gate_up: vb.gate_up(dim, mlp_dim)?,
             out: linear(mlp_dim, dim, vb.pp("out"))?,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let gate = candle_nn::Activation::Silu.forward(&self.gate_layer.forward(xs)?)?;
-        self.out
-            .forward(&(gate * self.proj.forward(xs)?)?)
-            .map_err(Into::into)
+        // `silu(gate_layer(x)) * proj(x)` (`transformer_qwenimage21.py:212`).
+        self.out.forward(&self.gate_up.swiglu(xs)?)
     }
 }
 
@@ -273,10 +274,10 @@ enum LayerCache<'a> {
 struct Attention {
     dispatch: SegmentDispatch,
     fused_ops: bool,
-    to_q: Linear,
-    to_k: Linear,
-    to_v: Linear,
-    to_out: Linear,
+    to_q: Q21Linear,
+    to_k: Q21Linear,
+    to_v: Q21Linear,
+    to_out: Q21Linear,
     norm_q: Tensor,
     norm_k: Tensor,
     heads: usize,
@@ -285,7 +286,7 @@ struct Attention {
 }
 
 impl Attention {
-    fn new(cfg: &QwenImage21TransformerConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(cfg: &QwenImage21TransformerConfig, vb: Q21Vb<'_>) -> Result<Self> {
         let inner = cfg.inner_dim();
         Ok(Self {
             dispatch: SegmentDispatch {
@@ -346,7 +347,7 @@ impl Attention {
         let (q, k, v) = if self.fused_ops && hidden_states.device().is_metal() {
             // Normalize while BSHD is contiguous; flattening BHSD first copies
             // the whole projection. RoPE still accumulates in F32 as upstream.
-            let project = |linear: &Linear, weight: &Tensor| -> Result<Tensor> {
+            let project = |linear: &Q21Linear, weight: &Tensor| -> Result<Tensor> {
                 let xs = linear.forward(hidden_states)?;
                 let normalized = candle_nn::ops::rms_norm(
                     &xs.reshape((batch * sequence * self.heads, self.head_dim))?,
@@ -374,7 +375,7 @@ impl Attention {
                     .contiguous()?,
             )
         } else {
-            let project = |linear: &Linear| -> Result<Tensor> {
+            let project = |linear: &Q21Linear| -> Result<Tensor> {
                 linear
                     .forward(hidden_states)?
                     .reshape((batch, sequence, self.heads, self.head_dim))?
@@ -420,7 +421,6 @@ impl Attention {
         let context = self.dispatch.attend(&q, &k, &v, plan)?;
         self.to_out
             .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
-            .map_err(Into::into)
     }
 }
 
@@ -432,7 +432,7 @@ struct TransformerBlock {
 }
 
 impl TransformerBlock {
-    fn new(cfg: &QwenImage21TransformerConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(cfg: &QwenImage21TransformerConfig, vb: Q21Vb<'_>) -> Result<Self> {
         let inner = cfg.inner_dim();
         Ok(Self {
             norm1: LayerNormNoParams::new(cfg.eps),
@@ -500,11 +500,11 @@ impl TransformerBlock {
 
 struct AdaFinalNorm {
     norm: LayerNormNoParams,
-    linear: Linear,
+    linear: Q21Linear,
 }
 
 impl AdaFinalNorm {
-    fn new(dim: usize, eps: f64, vb: VarBuilder<'_>) -> Result<Self> {
+    fn new(dim: usize, eps: f64, vb: Q21Vb<'_>) -> Result<Self> {
         Ok(Self {
             norm: LayerNormNoParams::new(eps),
             linear: linear(dim, dim, vb.pp("linear"))?,
@@ -528,14 +528,18 @@ impl AdaFinalNorm {
 /// condition latents into the text stream where the Qwen3-VL image slots were.
 pub(crate) struct QwenImage21Transformer {
     compact_modulation: bool,
+    /// The checkpoint's tier, named by the per-step finiteness guard.
+    tier: String,
+    /// Whether a GGUF linear may be on candle's QMatMul arm.
+    qmatmul_guard: bool,
     cfg: QwenImage21TransformerConfig,
-    img_in: Linear,
+    img_in: Q21Linear,
     time_text_embed: TimestepEmbedder,
     txt_in: TextProjection,
-    modulation: Linear,
+    modulation: Q21Linear,
     blocks: Vec<TransformerBlock>,
     norm_out: AdaFinalNorm,
-    proj_out: Linear,
+    proj_out: Q21Linear,
 }
 
 /// Rotary tables of one branch, built once per request rather than on every
@@ -710,26 +714,79 @@ impl QwenImage21Transformer {
         self.prepare(conditioning, layout, None, cache_policy)
     }
 
+    /// Load any published tier. The format comes from the checkpoint header
+    /// (`artifact_format::probe_qwen_image21_transformer`): the BF16 shards,
+    /// Comfy INT8 ConvRot, torchao FP8, or a GGUF (leejet or unsloth).
     pub(crate) fn load(
         paths: &[PathBuf],
         device: &Device,
         dtype: DType,
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let vb = crate::weight_loader::load_safetensors_with_progress(
+        let source = Q21WeightSource::open(
             paths,
-            dtype,
             device,
-            "Qwen Image 2.1 transformer",
+            dtype,
+            super::linear::qmatmul_enabled(),
             progress,
         )?;
-        Self::from_var_builder(QwenImage21TransformerConfig::official(), vb)
+        let transformer = Self::from_source(QwenImage21TransformerConfig::official(), &source)?;
+        progress.info(&format!(
+            "Qwen Image 2.1 transformer tier: {} (block linears: {:?})",
+            source.tier_label(),
+            transformer.blocks[0].attn.to_q.kind()
+        ));
+        Ok(transformer)
     }
 
+    /// Move every weight to `device` in place — the transformer's park to
+    /// host RAM for a 2K VAE decode and its restore afterwards
+    /// (`text_encoder_residency::TransformerDecode::ParkHost`). No reload
+    /// from disk: quantized storage makes a byte-exact round trip.
+    pub(crate) fn move_to_device(&mut self, device: &Device) -> Result<()> {
+        self.img_in = self.img_in.to_device(device)?;
+        self.time_text_embed.linear_1 = self.time_text_embed.linear_1.to_device(device)?;
+        self.time_text_embed.linear_2 = self.time_text_embed.linear_2.to_device(device)?;
+        self.txt_in.text_norm.weight = self.txt_in.text_norm.weight.to_device(device)?;
+        self.txt_in.in_layer = self.txt_in.in_layer.to_device(device)?;
+        self.txt_in.out_layer = self.txt_in.out_layer.to_device(device)?;
+        self.modulation = self.modulation.to_device(device)?;
+        for block in &mut self.blocks {
+            let attn = &mut block.attn;
+            attn.to_q = attn.to_q.to_device(device)?;
+            attn.to_k = attn.to_k.to_device(device)?;
+            attn.to_v = attn.to_v.to_device(device)?;
+            attn.to_out = attn.to_out.to_device(device)?;
+            attn.norm_q = attn.norm_q.to_device(device)?;
+            attn.norm_k = attn.norm_k.to_device(device)?;
+            block.mlp.gate_up = block.mlp.gate_up.to_device(device)?;
+            block.mlp.out = block.mlp.out.to_device(device)?;
+        }
+        self.norm_out.linear = self.norm_out.linear.to_device(device)?;
+        self.proj_out = self.proj_out.to_device(device)?;
+        Ok(())
+    }
+
+    /// Fail a denoise step whose prediction is not finite, naming this
+    /// checkpoint's tier and whether the QMatMul switch shaped it.
+    pub(crate) fn ensure_finite(&self, prediction: &Tensor, step: usize) -> Result<()> {
+        super::linear::ensure_finite_prediction(prediction, step, &self.tier, self.qmatmul_guard)
+    }
+
+    /// Build from a dense `VarBuilder` (synthetic tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_var_builder(
         cfg: QwenImage21TransformerConfig,
-        vb: VarBuilder<'_>,
+        vb: VarBuilder<'static>,
     ) -> Result<Self> {
+        Self::from_source(cfg, &Q21WeightSource::from_var_builder(vb))
+    }
+
+    pub(crate) fn from_source(
+        cfg: QwenImage21TransformerConfig,
+        source: &Q21WeightSource,
+    ) -> Result<Self> {
+        let vb = source.root();
         cfg.validate()?;
         let inner = cfg.inner_dim();
         let img_in = linear(cfg.in_channels, inner, vb.pp("img_in"))?;
@@ -748,6 +805,8 @@ impl QwenImage21Transformer {
         let proj_out = linear(inner, cfg.out_channels, vb.pp("proj_out"))?;
         Ok(Self {
             compact_modulation: crate::attention::metal_fast_path_enabled(),
+            tier: source.tier_label(),
+            qmatmul_guard: source.qmatmul_guard(),
             cfg,
             img_in,
             time_text_embed,
@@ -913,7 +972,6 @@ impl QwenImage21Transformer {
         let target_temb = temb.narrow(0, 0, batch)?;
         self.proj_out
             .forward(&self.norm_out.forward(&target_hidden, &target_temb)?)
-            .map_err(Into::into)
     }
 }
 #[cfg(test)]
@@ -1951,7 +2009,7 @@ mod tests {
             let (normalized, gate) =
                 TransformerBlock::modulate(block.norm1.forward(&hidden).unwrap(), &mod1).unwrap();
             let attn = &block.attn;
-            let project = |linear: &Linear| {
+            let project = |linear: &Q21Linear| {
                 linear
                     .forward(&normalized)
                     .unwrap()

@@ -130,6 +130,26 @@ describe("prompt remix contract", () => {
     );
   });
 
+  it("stales reviewed work when the transparent-background toggle flips", () => {
+    // The engine wraps the prompt in Qwen's RGBA recipe while the toggle is
+    // on, so a rewrite reviewed for an opaque render describes a different
+    // picture once it flips.
+    expect(conditioningFingerprint({ transparent_background: true })).not.toBe(
+      conditioningFingerprint({}),
+    );
+    // Off is the absence of the field: a fingerprint recorded before the
+    // toggle existed stays valid.
+    expect(conditioningFingerprint({ transparent_background: false })).toBe(
+      conditioningFingerprint({}),
+    );
+    expect(conditioningFingerprint({ source_image: "a" })).toBe(
+      conditioningFingerprint({
+        source_image: "a",
+        transparent_background: null,
+      }),
+    );
+  });
+
   it("treats an edit/reference swap as stale conditioning", () => {
     // Reference images ARE the conditioning for an edit recipe (Qwen edit,
     // FLUX.2 [dev]) and one half of it for an exclusive one (Klein), so

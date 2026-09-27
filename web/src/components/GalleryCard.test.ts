@@ -68,4 +68,32 @@ describe("GalleryCard", () => {
     // The prompt stays visible beneath the title.
     expect(organized.text()).toContain("visible image");
   });
+
+  it("draws the checkerboard behind a print that carries alpha", async () => {
+    const opaque = mount(GalleryCard, { props: { item } });
+    expect(
+      opaque.get('[data-test="card-media"]').attributes("data-alpha"),
+    ).toBe(undefined);
+
+    const cutout = mount(GalleryCard, {
+      props: {
+        item: {
+          ...item,
+          filename: "cutout.png",
+          metadata: { ...item.metadata, has_alpha: true },
+        },
+      },
+      attachTo: document.body,
+    });
+    await cutout.vm.$nextTick();
+    const media = cutout.get('[data-test="card-media"]');
+    expect(media.attributes("data-alpha")).toBe("true");
+    // The board appears with the picture, never behind the loading shimmer.
+    expect(media.classes()).not.toContain("ms-alpha-bed");
+    await cutout.find("img").trigger("load");
+    expect(cutout.get('[data-test="card-media"]').classes()).toContain(
+      "ms-alpha-bed",
+    );
+    cutout.unmount();
+  });
 });

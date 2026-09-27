@@ -755,3 +755,37 @@ describe("Lightbox in the Trash", () => {
     wrapper.unmount();
   });
 });
+
+describe("Lightbox alpha bed", () => {
+  const stubs = {
+    AuthedMedia: {
+      props: ["alpha"],
+      template: `<div :data-alpha="alpha ? 'true' : 'false'" />`,
+    },
+  };
+
+  it("puts a transparent still on the checkerboard, sized to the picture", () => {
+    const cutout = mount(Lightbox, {
+      props: {
+        item: { ...item, metadata: { ...item.metadata, has_alpha: true } },
+        index: 0,
+        count: 1,
+        video: false,
+      },
+      global: { stubs },
+    });
+    const media = cutout.get("[data-test='lightbox-still']");
+    expect(media.attributes("data-alpha")).toBe("true");
+    // The img hugs the picture, so the letterbox around it stays plain.
+    expect(media.classes()).toContain("!w-auto");
+    expect(media.classes()).not.toContain("!object-contain");
+
+    const opaque = mount(Lightbox, {
+      props: { item, index: 0, count: 1, video: false },
+      global: { stubs },
+    });
+    const plain = opaque.get("[data-test='lightbox-still']");
+    expect(plain.attributes("data-alpha")).toBe("false");
+    expect(plain.classes()).toContain("!object-contain");
+  });
+});

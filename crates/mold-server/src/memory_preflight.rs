@@ -1672,11 +1672,86 @@ fn authoritative_cuda_available(
 /// keeps preflight and the actual load path consistent: a model admitted only
 /// because text encoders can be dropped should not then OOM during eager
 /// startup before it gets a chance to generate.
+/// Qwen Image 2.1's eager plan on a measured CUDA card, priced with the text
+/// encoder PARKED when it does not fit beside the denoise workspace — the
+/// engine's own `text_encoder_residency::plan`, asked with this host's memory
+/// and the process's `MOLD_QWEN3_VARIANT` / `MOLD_KEEP_TE_RAM`. `Some` only
+/// when the chosen language model lands on the card and that eager peak
+/// (allocator margin and measured decode peak included) fits it, so a 24 GB
+/// card with a quantized tier stays Eager
+/// (the TE parks at 2K) rather than falling to Sequential, which reloads the
+/// encoder and the transformer on every request.
+pub(crate) fn qwen_image21_eager_plan(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
+    let host = crate::h3_admission::current_h3_host_memory();
+    qwen_image21_eager_plan_with_host(
+        paths,
+        hint,
+        available_bytes,
+        host.total_bytes,
+        host.spendable_bytes(),
+    )
+}
+
+pub(crate) fn qwen_image21_eager_plan_with_host(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    host_total_bytes: u64,
+    host_available_bytes: u64,
+) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
+    use mold_inference::qwen_image21::text_encoder_residency as residency;
+    let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
+    let available = available_bytes.filter(|bytes| *bytes > 0)?;
+    let vae_dtype_bytes = if cfg!(feature = "metal") { 4 } else { 2 };
+    let (denoise, decode) =
+        residency::render_workspace_bytes(hint.width, hint.height, hint.batch, vae_dtype_bytes);
+    let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
+    let plan = residency::plan(&residency::Qwen21PlanInputs {
+        paths,
+        qwen3_variant: variant.as_deref(),
+        // A Metal build's pool is unified: the engine never parks there, so
+        // the plan must not price a park either.
+        device: if cfg!(feature = "metal") {
+            residency::TeDevice::Metal
+        } else {
+            residency::TeDevice::Cuda
+        },
+        usable_free_bytes: available,
+        denoise_workspace_bytes: denoise,
+        decode_peak_bytes: decode,
+        host_total_bytes,
+        host_available_bytes,
+        already_parked_bytes: 0,
+        keep_te_ram: mold_inference::device::keep_te_ram_mode(),
+    })
+    .ok()?;
+    // The decision already carries its allocator margin and the measured
+    // decode peak, so it is held to the card itself — the same comparison
+    // the engine makes — rather than the generic 90% cap.
+    // An encoder that would only fit on the host makes every eager request a
+    // CPU encode of an 8B model; Sequential (encoder alone on the card, then
+    // the transformer) is the faster plan there.
+    (plan.choice.on_gpu() && plan.decision.eager_peak_bytes <= available).then_some(plan)
+}
+
 pub(crate) fn select_server_load_strategy_for_budget(
     paths: &ModelPaths,
     available_bytes: Option<u64>,
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
+    if hint.is_some_and(|h| h.family == ActivationFamily::QwenImage21Dit)
+        && available_bytes.is_some_and(|bytes| bytes > 0)
+    {
+        return if qwen_image21_eager_plan(paths, hint, available_bytes).is_some() {
+            mold_inference::LoadStrategy::Eager
+        } else {
+            mold_inference::LoadStrategy::Sequential
+        };
+    }
     let transformer_is_gguf = transformer_path_is_gguf(paths);
 
     if large_flux2_bf16_should_auto_offload(
@@ -2073,6 +2148,12 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         )
     }) && block_offload;
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
+    // Qwen Image 2.1 eager prices the text encoder by its residency decision —
+    // parked for the denoise when it does not fit beside the workspace — and
+    // the workspace inside that decision is the whole render's, so it replaces
+    // the generic `peak + activation` rather than adding to it. `None` is a
+    // Sequential plan (or another family), which keeps the generic estimate.
+    let qwen21_plan = qwen_image21_eager_plan(paths, hint, available_memory_bytes);
     // Weight bytes the wan arm below discounted because parking can free them.
     // Kept so the plan can re-add them and ask the engine's own question — will
     // this render park? — rather than inferring it from the discounted peak.
@@ -2132,7 +2213,9 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 flux2_geometry,
                 projection,
             );
-            let peak = if wan && offload_policy.metal {
+            let peak = if let Some(plan) = &qwen21_plan {
+                plan.decision.eager_peak_bytes
+            } else if wan && offload_policy.metal {
                 // Wan's sequential Metal engine drops its text encoder before
                 // it loads the transformer and VAE. Price those phases
                 // separately: adding denoise activation to the generic
@@ -2246,13 +2329,16 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // encoder-placement decision this charge exists for. Adding it only to the
     // final peak left the one consumer that matters reading the old number.
     let fp8_widen_bytes = flux2_fp8_widen_extra_bytes(paths, hint, available_memory_bytes);
-    let eager_peak = mold_inference::device::estimate_peak_memory_with_encoder_override(
-        paths,
-        mold_inference::LoadStrategy::Eager,
-        streamed_encoder_charge,
-    )
-    .saturating_add(co_residency_activation)
-    .saturating_add(fp8_widen_bytes);
+    let eager_peak = match &qwen21_plan {
+        Some(plan) => plan.decision.eager_peak_bytes,
+        None => mold_inference::device::estimate_peak_memory_with_encoder_override(
+            paths,
+            mold_inference::LoadStrategy::Eager,
+            streamed_encoder_charge,
+        )
+        .saturating_add(co_residency_activation)
+        .saturating_add(fp8_widen_bytes),
+    };
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
     let qwen_family = hint.is_some_and(|h| h.family.is_qwen_image());
@@ -5396,5 +5482,150 @@ mod qwen_image21_reference_memory_tests {
             vec![(640, 800)]
         );
         assert!(qwen_image21_reference_dimensions(&request(0), None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod qwen_image21_residency_tests {
+    use super::*;
+    use std::path::Path;
+
+    const GIB: u64 = 1 << 30;
+
+    fn sized(dir: &Path, name: &str, bytes: u64) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(bytes)
+            .unwrap();
+        path
+    }
+
+    /// A Qwen Image 2.1 install: the transformer tier, the shared VAE, and the
+    /// four BF16 text-encoder shards (sparse files — no header, so the planner
+    /// prices the BF16 language model at its documented 16.4 GB).
+    fn qwen21_paths(dir: &Path, transformer_bytes: u64) -> ModelPaths {
+        let transformer = sized(dir, "transformer.safetensors", transformer_bytes);
+        let vae = sized(dir, "vae.safetensors", 675_509_688);
+        let text_encoder_files = (1..=4)
+            .map(|i| sized(dir, &format!("te-{i}.safetensors"), 4_400_000_000))
+            .collect();
+        ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files,
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
+    fn hint(width: u32, height: u32) -> Option<ActivationHint> {
+        Some(ActivationHint {
+            width,
+            height,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::QwenImage21Dit,
+        })
+    }
+
+    /// The mandatory 24 GB row: a quantized transformer stays Eager at 1024²
+    /// — its eager plan parks or keeps the (auto-selected, quantized) encoder
+    /// exactly as the engine will — where the file-size estimate would have
+    /// charged 17.5 GB of BF16 shards beside it and fallen to Sequential.
+    #[test]
+    fn a_24gb_card_keeps_a_quantized_tier_eager() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 7_256_783_064);
+        let plan = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(22 * GIB),
+            64 * GIB,
+            48 * GIB,
+        )
+        .expect("a 24 GB card plans the int8 tier eager");
+        assert!(matches!(
+            plan.choice,
+            mold_inference::qwen_image21::text_encoder_residency::Qwen3Choice::Gguf { .. }
+        ));
+        assert!(plan.decision.eager_peak_bytes <= 22 * GIB);
+        assert_eq!(
+            select_server_load_strategy_for_budget(&paths, Some(22 * GIB), hint(1024, 1024)),
+            mold_inference::LoadStrategy::Eager
+        );
+    }
+
+    /// BF16 everything does not fit a 24 GB card even with the encoder parked
+    /// (14.2 GB transformer + the denoise workspace + the decode), so it stays
+    /// Sequential; a 48 GB card holds it all resident.
+    #[test]
+    fn bf16_is_sequential_at_24gb_and_resident_at_48gb() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        assert_eq!(
+            select_server_load_strategy_for_budget(&paths, Some(22 * GIB), hint(1024, 1024)),
+            mold_inference::LoadStrategy::Sequential
+        );
+        let plan = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            64 * GIB,
+            48 * GIB,
+        )
+        .expect("a 48 GB card plans bf16 eager");
+        assert_eq!(
+            plan.decision.residency,
+            mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency::Resident
+        );
+    }
+
+    /// The generation estimate prices Qwen Image 2.1 eager at the residency
+    /// decision's peak — the SAME number the plan carries — rather than the
+    /// sum of every file.
+    #[test]
+    fn the_generation_estimate_reads_the_same_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 7_256_783_064);
+        let req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lighthouse",
+            "model": "qwen-image-2.1:int8-conv",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let memory = estimate_generation_memory_for_request_with_projection(
+            &req,
+            &paths,
+            hint(1024, 1024),
+            GenerationOffloadPolicy::new(
+                false,
+                mold_inference::wan::block_offload::AdmissionPolicy::Disabled,
+                false,
+            ),
+            Some(22 * GIB),
+            false,
+            false,
+            None,
+        );
+        let plan =
+            qwen_image21_eager_plan(&paths, hint(1024, 1024), Some(22 * GIB)).expect("eager plan");
+        assert_eq!(memory.peak_memory_bytes, plan.decision.eager_peak_bytes);
+        assert_eq!(memory.fits_available_memory, Some(true));
     }
 }

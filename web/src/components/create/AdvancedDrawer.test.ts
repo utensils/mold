@@ -10,6 +10,11 @@ import {
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import { createPinia, setActivePinia } from "pinia";
 import { identityActiveCount } from "@studio/lib/identityConditioning";
+import {
+  qwenImage21Recipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
+import { TRANSPARENCY_UNAVAILABLE_FORMAT_REASON } from "@studio/lib/transparency";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
 const UPSCALERS: ModelInfoExtended[] = [
@@ -1123,5 +1128,82 @@ describe("AdvancedDrawer identity group", () => {
     ];
     expect(next.identityWeight).toBeNull();
     expect(next.identityStartStep).toBeNull();
+  });
+});
+
+describe("AdvancedDrawer transparent background (Qwen Image 2.1)", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  function model(
+    name: string,
+    family: string,
+    recipe: ReturnType<typeof qwenImage21Recipe>,
+  ): ModelInfoExtended {
+    return {
+      name,
+      family,
+      downloaded: true,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: family,
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as ModelInfoExtended;
+  }
+  const qwen21 = model(
+    "qwen-image-2.1:bf16",
+    "qwen-image21",
+    qwenImage21Recipe(),
+  );
+  const sdxl = model("sdxl-base:fp16", "sdxl", sdxlRecipe());
+
+  it("renders the toggle only where the recipe advertises it", () => {
+    const on = factory(
+      "qwen-image21",
+      { model: qwen21.name, modelFamily: "qwen-image21" },
+      { models: [qwen21] },
+    );
+    expect(on.find("[data-test='transparent-background']").exists()).toBe(true);
+    const off = factory(
+      "sdxl",
+      { model: sdxl.name, modelFamily: "sdxl" },
+      { models: [sdxl] },
+    );
+    expect(off.find("[data-test='transparent-background']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("turning it on moves JPEG to PNG and disables JPEG with its reason", async () => {
+    const wrapper = factory(
+      "qwen-image21",
+      {
+        model: qwen21.name,
+        modelFamily: "qwen-image21",
+        outputFormat: "jpeg",
+      },
+      { models: [qwen21] },
+    );
+    await wrapper.get("[data-test='transparent-background']").trigger("click");
+    const next = wrapper
+      .emitted("update:modelValue")!
+      .at(-1)![0] as GenerateFormState;
+    expect(next.transparentBackground).toBe(true);
+    expect(next.outputFormat).toBe("png");
+
+    await wrapper.setProps({ modelValue: next });
+    const jpeg = wrapper
+      .findAll("[data-test='section-output'] [role=radio]")
+      .find((radio) => radio.text() === "JPEG")!;
+    expect(jpeg.attributes("disabled")).toBeDefined();
+    expect(jpeg.attributes("title")).toBe(
+      TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+    );
+    expect(wrapper.get("[data-test='format-note']").text()).toBe(
+      TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+    );
   });
 });

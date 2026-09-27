@@ -141,3 +141,42 @@ describe("SegmentedControl", () => {
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
   });
 });
+
+describe("SegmentedControl per-option disabled", () => {
+  const withDisabled = [
+    { value: "png", label: "PNG" },
+    {
+      value: "jpeg",
+      label: "JPEG",
+      disabled: true,
+      title: "JPEG has no transparency.",
+    },
+    { value: "webp", label: "WEBP" },
+  ];
+
+  function mountDisabled(modelValue = "png") {
+    return mount(SegmentedControl, {
+      props: { modelValue, options: withDisabled, label: "File format" },
+    });
+  }
+
+  it("keeps the option visible, disabled, with its reason as the tooltip", () => {
+    const radios = mountDisabled().findAll("[role=radio]");
+    expect(radios).toHaveLength(3);
+    expect(radios[1]!.attributes("disabled")).toBeDefined();
+    expect(radios[1]!.attributes("title")).toBe("JPEG has no transparency.");
+    expect(radios[0]!.attributes("disabled")).toBeUndefined();
+  });
+
+  it("never selects it by click", async () => {
+    const wrapper = mountDisabled();
+    await wrapper.findAll("button")[1]!.trigger("click");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+  });
+
+  it("skips it with the arrow keys", async () => {
+    const wrapper = mountDisabled("png");
+    await wrapper.trigger("keydown", { key: "ArrowRight" });
+    expect(wrapper.emitted("update:modelValue")).toEqual([["webp"]]);
+  });
+});

@@ -67,10 +67,7 @@ impl Qwen3Model {
     ) -> Result<Tensor> {
         match self {
             Self::BF16(m) => m.forward_final_pre_norm_with_attention(input_ids, attention),
-            Self::Quantized(_) => anyhow::bail!(
-                "Qwen Image 2.1 requires the native BF16/safetensors text encoder; \
-                 quantized Qwen3 is unsupported"
-            ),
+            Self::Quantized(m) => m.forward_final_pre_norm_with_attention(input_ids, attention),
         }
     }
 
@@ -84,9 +81,7 @@ impl Qwen3Model {
     ) -> Result<Tensor> {
         match self {
             Self::BF16(m) => m.forward_multimodal_final_pre_norm(input_ids, visual, mrope),
-            Self::Quantized(_) => anyhow::bail!(
-                "Qwen Image 2.1 reference conditioning requires the BF16 text encoder in this build"
-            ),
+            Self::Quantized(m) => m.forward_multimodal_final_pre_norm(input_ids, visual, mrope),
         }
     }
 }

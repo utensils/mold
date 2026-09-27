@@ -7,9 +7,9 @@
 //! this file: its value is that it does not move. It reads the live module's
 //! weights through the parent's private fields.
 
+use crate::qwen_image21::linear::Q21Linear;
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::Linear;
 
 use super::{Attention, PrefixKv, QwenImage21Transformer, TransformerBlock};
 use crate::qwen_image21::QwenImage21TextConditioning;
@@ -119,7 +119,7 @@ fn attention_forward_t2i(
     };
 
     let (q, k, v) = if attn.fused_ops && hidden_states.device().is_metal() {
-        let project = |linear: &Linear, weight: &Tensor| -> Result<Tensor> {
+        let project = |linear: &Q21Linear, weight: &Tensor| -> Result<Tensor> {
             let xs = linear.forward(hidden_states)?;
             let normalized = candle_nn::ops::rms_norm(
                 &xs.reshape((batch * sequence * attn.heads, attn.head_dim))?,
@@ -147,7 +147,7 @@ fn attention_forward_t2i(
                 .contiguous()?,
         )
     } else {
-        let project = |linear: &Linear| -> Result<Tensor> {
+        let project = |linear: &Q21Linear| -> Result<Tensor> {
             linear
                 .forward(hidden_states)?
                 .reshape((batch, sequence, attn.heads, attn.head_dim))?
@@ -181,8 +181,7 @@ fn attention_forward_t2i(
             let context = target_attention(attn, &q, &k, &v, bias.as_ref())?;
             return attn
                 .to_out
-                .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
-                .map_err(Into::into);
+                .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?);
         }
         LegacyLayerCache::Disabled => {}
     }
@@ -204,7 +203,6 @@ fn attention_forward_t2i(
     let context = Tensor::cat(&[&prefix, &target], 2)?;
     attn.to_out
         .forward(&context.transpose(1, 2)?.reshape((batch, sequence, inner))?)
-        .map_err(Into::into)
 }
 
 fn block_forward_t2i(
@@ -375,5 +373,4 @@ pub(super) fn forward_with_cache(
     transformer
         .proj_out
         .forward(&transformer.norm_out.forward(&target_hidden, &target_temb)?)
-        .map_err(Into::into)
 }

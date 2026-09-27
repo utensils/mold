@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { useMobileBack } from "./useMobileBack";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
@@ -672,6 +673,15 @@ function resetImageZoom(): void {
   imageZoomActive.value = false;
   syncImageZoom();
 }
+
+/** A still carrying alpha sits on the checkerboard. The bed is sized to the
+ * CONTAINED bitmap from the print's own aspect (container units against the
+ * image plane), so the letterbox bars around it stay the plain stage. */
+const alphaBed = computed(() => showsAlphaBed(props.item));
+const alphaBedStyle = computed(() => ({
+  "--alpha-w": String(Math.max(1, props.item.metadata.width || 1)),
+  "--alpha-h": String(Math.max(1, props.item.metadata.height || 1)),
+}));
 
 /** Measure the contained bitmap, not its full-width object-fit element. */
 function imageZoomMetrics(): ViewerImageZoomMetrics {
@@ -1401,11 +1411,21 @@ onBeforeUnmount(() => {
             aria-hidden="true"
             draggable="false"
           />
+          <!-- A print with alpha sits on the checkerboard, sized to the
+               contained picture itself (never the letterbox around it). -->
+          <span
+            v-if="mediaUrl && alphaBed"
+            class="gallery-viewer-alpha-bed ms-alpha-bed"
+            :style="alphaBedStyle"
+            data-test="gallery-viewer-alpha-bed"
+            aria-hidden="true"
+          />
           <img
-            v-else
+            v-if="mediaUrl"
             :key="mediaLoadKey"
             ref="viewerImage"
             class="gallery-viewer-media"
+            :class="{ 'gallery-viewer-media--over-bed': alphaBed }"
             :src="mediaUrl"
             :alt="item.metadata.prompt || item.filename"
             data-test="gallery-viewer-image"

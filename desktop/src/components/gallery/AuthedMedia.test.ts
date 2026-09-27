@@ -166,3 +166,20 @@ describe("AuthedMedia target identity", () => {
     expect(authedMediaUrl).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("AuthedMedia alpha bed", () => {
+  it("draws the checkerboard on the still only when asked", async () => {
+    const opaque = mount(AuthedMedia, {
+      props: { path: "/api/gallery/thumbnail/opaque.png" },
+    });
+    await vi.waitFor(() => expect(opaque.find("img").exists()).toBe(true));
+    expect(opaque.get("img").classes()).not.toContain("ms-alpha-bed");
+
+    const cutout = mount(AuthedMedia, {
+      props: { path: "/api/gallery/thumbnail/cutout.png", alpha: true },
+    });
+    await vi.waitFor(() => expect(cutout.find("img").exists()).toBe(true));
+    expect(cutout.get("img").classes()).toContain("ms-alpha-bed");
+    expect(cutout.get("img").attributes("data-alpha")).toBe("true");
+  });
+});

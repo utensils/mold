@@ -28,6 +28,10 @@ import {
   referenceImagesFromProfile,
   type ReferenceImagesCapabilities,
 } from "./referenceImagesProfile";
+import {
+  transparencyFromProfile,
+  type TransparencyCapabilities,
+} from "./transparency";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 export {
@@ -58,6 +62,7 @@ export type {
   ReferenceImagesCapabilities,
   ReferenceSourceRelation,
 } from "./referenceImagesProfile";
+export type { TransparencyCapabilities } from "./transparency";
 
 /**
  * How the primary form lays out image conditioning. Derived from
@@ -203,6 +208,20 @@ export interface BaseGenerationCapabilities {
    * recipe — in which case `GenerateRequest.mesh` is refused at admission.
    */
   mesh: MeshCapabilitiesProfile | undefined;
+  /**
+   * The recipe's transparent-background contract
+   * (`capabilities.transparency`), or `null` on an OLDER SERVER. There is no
+   * family fallback: a host that predates the field would drop the request
+   * field and render opaque. `transparencyControl` in `transparency.ts` is
+   * the one reading of whether the toggle renders.
+   */
+  transparency: TransparencyCapabilities | null;
+  /**
+   * The recipe renders ONE picture per request whatever it holds (H3, and a
+   * reference recipe that cannot render without its references). A recipe
+   * whose references are optional batches as text-to-image and locks only
+   * while references are held — `referencesLockBatchSize` answers that.
+   */
   forcesBatchSizeOne: boolean;
 }
 
@@ -372,6 +391,7 @@ export const LORA_CAPABLE_FAMILIES = [
   "sdxl",
   "qwen-image",
   "qwen-image-edit",
+  "qwen-image21",
   "wan",
   "z-image",
 ] as const;
@@ -580,7 +600,16 @@ export function baseGenerationCapabilities(
     // control under a validation error no user could clear.
     canvasless: advertisedRecipe ? recipeIsCanvasless(advertisedRecipe) : mesh,
     mesh: profileCaps?.mesh ?? undefined,
-    forcesBatchSizeOne: h3 || qwenEdit,
+    transparency: transparencyFromProfile(profileCaps?.transparency),
+    // A reference recipe that cannot render WITHOUT references (Qwen edit)
+    // edits one picture every time; an optional strip (FLUX.2 [dev], Qwen
+    // Image 2.1) batches freely until references are attached, which is the
+    // shared `referencesLockBatchSize` question every surface also asks.
+    forcesBatchSizeOne:
+      h3 ||
+      qwenEdit ||
+      (referenceImages?.required === true &&
+        referenceImages.sourceRelation !== "combines"),
   };
 }
 
