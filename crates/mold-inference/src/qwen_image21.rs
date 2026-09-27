@@ -18,6 +18,7 @@ pub(crate) mod pipeline;
 pub(crate) mod scheduler;
 pub(crate) mod transformer;
 pub(crate) mod vae;
+pub(crate) mod vae_encoder;
 
 pub use pipeline::QwenImage21Engine;
 
