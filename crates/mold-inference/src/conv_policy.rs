@@ -95,7 +95,8 @@ pub fn cudnn_compiled() -> bool {
 /// bytes is about clips versus stills, not about which operator is doing the
 /// arithmetic.
 pub fn policy_for_family(family: &str) -> ConvPolicy {
-    match family {
+    // A registered alias is answered as its family, as the attention table.
+    match crate::batch::canonical_production_family(family) {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => ConvPolicy::Video,
         // Mirrors `attention::policy_for_family`. Qwen Image 2.1's
         // convolutions are all in its VAE, whose full-resolution 3x3 convs

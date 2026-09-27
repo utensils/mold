@@ -205,7 +205,8 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 /// built from. Freezing the image answer for a video render would describe
 /// different arithmetic from the one the renderer runs.
 pub fn policy_for_family(family: &str) -> AttentionPolicy {
-    match family {
+    // A registered alias is answered as its family (`flux.2` -> `flux2`).
+    match crate::batch::canonical_production_family(family) {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
         // FLUX.1, FLUX.2 and Qwen Image 2.1. See `AttentionPolicy::FastStill`;
         // the convolution side mirrors this list in
@@ -1241,6 +1242,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(max_abs_diff(&keys, &fast), 0.0);
+    }
+
+    /// A registered family alias IS its family: the factory builds the same
+    /// engine for `flux.2` as for `flux2` and for `ltx2.3` as for `ltx2`, so
+    /// the policy the plan freezes (and the conv scope a VAE runs under) must
+    /// be the same too. `ltx2.3` and `flux.2` used to fall through to `Image`
+    /// and freeze math for a render the engine ran on flash.
+    #[test]
+    fn every_registered_alias_takes_its_familys_policy() {
+        for entry in crate::production_batch_capabilities() {
+            for alias in entry.aliases {
+                assert_eq!(
+                    policy_for_family(alias),
+                    policy_for_family(entry.family),
+                    "alias {alias:?} of {:?}",
+                    entry.family
+                );
+                assert_eq!(
+                    crate::conv_policy::policy_for_family(alias),
+                    crate::conv_policy::policy_for_family(entry.family),
+                    "conv alias {alias:?} of {:?}",
+                    entry.family
+                );
+            }
+        }
+        assert_eq!(policy_for_family("flux.2"), AttentionPolicy::FastStill);
+        assert_eq!(policy_for_family("ltx2.3"), AttentionPolicy::Video);
     }
 
     #[test]

@@ -922,11 +922,25 @@ mod tests {
         let x = to_bf16(&make_input(1, 4, in_dim));
         let a = lora.forward(&x).unwrap().to_dtype(DType::F32).unwrap();
         let b = merged.forward(&x).unwrap().to_dtype(DType::F32).unwrap();
-        let max = max_abs_diff(
-            &a.to_device(&candle_core::Device::Cpu).unwrap(),
-            &b.to_device(&candle_core::Device::Cpu).unwrap(),
+        let b = b.to_device(&candle_core::Device::Cpu).unwrap();
+        let max = max_abs_diff(&a.to_device(&candle_core::Device::Cpu).unwrap(), &b);
+        // RELATIVE to the output's magnitude: these outputs reach ~5, where
+        // one BF16 ulp is already 0.03125, so an absolute 1e-2 bound fails on
+        // a single rounding difference (as it did on CUDA). A few roundings
+        // are well inside 1% of the peak.
+        let peak = b
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            max / peak < 1e-2,
+            "bf16 bypass vs merged: {max} against a peak of {peak}"
         );
-        assert!(max < 1e-2, "bf16 bypass vs merged: {max}");
     }
 
     /// The registry reports the device bytes it is holding, summed over

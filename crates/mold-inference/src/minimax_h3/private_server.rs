@@ -9321,6 +9321,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn presentation_authenticates_exact_records_and_live_route() {
         let fixture = PresentationFixture::new();
@@ -10125,6 +10126,53 @@ mod tests {
         assert!(error.to_string().contains("reviewed evidence allowlist"));
     }
 
+    // The reviewed-record tests below exercise the EXTERNAL record reader —
+    // the file named by the caller, admitted by its digest — which exists only
+    // in a build without public `h3`. A public build (#1010) reads the
+    // compiled-in placeholder instead and ignores the caller's path, exactly
+    // like `fl2va_admission_still_requires_the_reviewed_record_file`; its
+    // arm is pinned by `public_build_never_reads_a_caller_supplied_runtime_record`.
+
+    /// A public `h3` build authorizes FL2VA through its compiled public
+    /// profile, never through a runtime-qualification record. The embedded
+    /// placeholder must therefore authorize nothing, and the caller's record
+    /// path and digest must be ignored rather than read: a caller who can
+    /// write a record and name its digest must not be able to mint the
+    /// authority on a shipping build.
+    #[cfg(feature = "h3")]
+    #[test]
+    fn public_build_never_reads_a_caller_supplied_runtime_record() {
+        let record = record();
+        let (_root, path) = write_record(&record);
+        let digest = sha256_open_file(&open_regular_file_no_follow(&path).unwrap()).unwrap();
+        let missing = Path::new("/private-h3-path-must-not-be-opened");
+        for (path, reviewed) in [
+            (path.as_path(), [digest.as_str()]),
+            (missing, [digest.as_str()]),
+            (
+                path.as_path(),
+                [REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256[0]],
+            ),
+        ] {
+            let error = open_reviewed_h3_private_runtime_qualification_for_source(
+                path,
+                &reviewed,
+                &record.campaign_source_sha,
+                &record.campaign_runtime_code_identity_sha256,
+            )
+            .err()
+            .expect("the embedded placeholder must authorize nothing");
+            assert!(
+                error.to_string().contains(
+                    "embedded H3 runtime qualification is not in the reviewed evidence allowlist"
+                ),
+                "{}: {error:#}",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn reviewed_record_binds_all_thirteen_bounds_and_identity_axes() {
         let record = record();
@@ -10153,6 +10201,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn reviewed_record_requires_exact_runtime_code_identity() {
         let record = record();
@@ -10179,6 +10228,7 @@ mod tests {
         assert!(error.to_string().contains("different runtime code"));
     }
 
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn reviewed_record_rejects_crossed_device_or_artifact_authority() {
         let record = record();
@@ -10205,6 +10255,7 @@ mod tests {
             .contains("differs from artifact, device, or kernel authority"));
     }
 
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn reviewed_record_rejects_each_crossed_route_before_artifact_qualification() {
         let record = record();
@@ -10233,6 +10284,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "h3"))]
     #[test]
     fn reviewed_record_rejects_unbound_source_executable_and_gpu_claims() {
         for unsupported in [
@@ -11382,11 +11434,19 @@ mod tests {
     #[cfg(feature = "h3")]
     #[test]
     fn public_progress_labels_describe_artifact_verification_without_private_claims() {
+        // Each label names the work that stage actually does (#1601): the
+        // installed-artifact pass RESOLVES trusted installed weights and
+        // hashes no model body, so it must never claim to verify them, while
+        // the VAE preparation stage still verifies what it opens.
+        assert!(H3_ARTIFACT_VERIFICATION_PROGRESS.starts_with("Resolving installed MiniMax H3"));
+        assert!(!H3_ARTIFACT_VERIFICATION_PROGRESS
+            .to_ascii_lowercase()
+            .contains("verif"));
+        assert!(H3_VAE_ARTIFACT_VERIFICATION_PROGRESS.starts_with("Verifying MiniMax H3"));
         for label in [
             H3_ARTIFACT_VERIFICATION_PROGRESS,
             H3_VAE_ARTIFACT_VERIFICATION_PROGRESS,
         ] {
-            assert!(label.starts_with("Verifying MiniMax H3"));
             assert!(!label.to_ascii_lowercase().contains("private"));
             assert!(!label.to_ascii_lowercase().contains("authenticat"));
         }

@@ -817,10 +817,25 @@ mod tests {
             ExactUpscalePlacement::Cpu,
         )
         .unwrap_err();
+        assert_h3_artifact_path_policy(&error);
+    }
+
+    /// Without the public engine an H3-named weight path is refused on
+    /// compliance grounds before its metadata is read. A build that links
+    /// `h3` (#1010) classifies the same path as available
+    /// (`mold_core::model_artifact_activation`), so the plan proceeds to the
+    /// metadata read, which these missing paths fail.
+    fn assert_h3_artifact_path_policy(error: &anyhow::Error) {
+        let message = error.to_string();
+        #[cfg(not(feature = "h3"))]
         assert!(
-            error
-                .to_string()
-                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            message.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            "unexpected error: {error:#}"
+        );
+        #[cfg(feature = "h3")]
+        assert!(
+            message.contains("could not resolve")
+                && !message.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
             "unexpected error: {error:#}"
         );
     }
@@ -849,9 +864,7 @@ mod tests {
             ExactUpscalePlacement::Cpu,
         )
         .expect_err("a nested H3 artifact must remain gated");
-        assert!(error
-            .to_string()
-            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert_h3_artifact_path_policy(&error);
     }
 
     struct CancellationContractEngine {

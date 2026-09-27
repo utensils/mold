@@ -1134,12 +1134,14 @@ impl QwenImage21SequenceShape {
 
 /// Bytes the prefix K/V cache of `branches` CFG branches holds for `shape`,
 /// under the engine's own retention rule (`qwen_image21::PrefixCachePolicy`)
-/// and the process's `MOLD_QWEN_IMAGE21_KV_CACHE`, so admission prices
-/// exactly what the engine retains. A branch that recomputes holds nothing.
+/// with `budget` and the process's `MOLD_QWEN_IMAGE21_KV_CACHE`, so admission
+/// prices exactly what the engine retains. A branch that recomputes holds
+/// nothing.
 pub fn qwen_image21_prefix_cache_bytes(
     shape: QwenImage21SequenceShape,
     branches: usize,
     dtype_bytes: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
 ) -> u64 {
     let prefixes = vec![shape.prefix_tokens(); branches.max(1)];
     crate::qwen_image21::PrefixCachePolicy::resolve(
@@ -1148,12 +1150,35 @@ pub fn qwen_image21_prefix_cache_bytes(
         1,
         dtype_bytes,
         crate::qwen_image21::prefix_cache_mode_from_env(),
+        budget,
     )
     .into_iter()
     .zip(&prefixes)
     .filter(|(decision, _)| *decision == crate::qwen_image21::PrefixCacheDecision::Retain)
     .map(|(_, &tokens)| crate::qwen_image21::prefix_cache_bytes(tokens, 1, dtype_bytes))
     .sum()
+}
+
+/// The prefix-cache budget a reference-conditioned render gets on a card with
+/// `usable_bytes` usable device memory (as if nothing of this render were
+/// resident), holding `resident_bytes` of transformer and VAE and running a
+/// `workspace_bytes` denoise workspace — [`crate::qwen_image21::prefix_cache_headroom`]
+/// on the CUDA fast path, the request-only rule everywhere else. The text
+/// encoder is deliberately not charged: the residency plan parks or drops it
+/// when the cache needs its room, which is how admission prefers retaining.
+/// `usable_bytes = None` (no card known) prefers retaining outright.
+pub fn qwen_image21_prefix_cache_budget(
+    usable_bytes: Option<u64>,
+    resident_bytes: u64,
+    workspace_bytes: u64,
+) -> crate::qwen_image21::PrefixCacheBudget {
+    use crate::qwen_image21::PrefixCacheBudget;
+    if !crate::qwen_image21::prefix_cache_follows_memory() {
+        return PrefixCacheBudget::RequestOnly;
+    }
+    PrefixCacheBudget::Headroom(usable_bytes.map_or(u64::MAX, |usable| {
+        crate::qwen_image21::prefix_cache_headroom(usable, resident_bytes, workspace_bytes)
+    }))
 }
 
 /// Denoise workspace per joint token at BF16, fitted on an L40S (1024²
@@ -1166,7 +1191,7 @@ pub fn qwen_image21_prefix_cache_bytes(
 pub const QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES: u64 = 192 * 1024;
 
 /// The denoise workspace of a reference-conditioned Qwen Image 2.1 render,
-/// plus the prefix cache it retains.
+/// WITHOUT its prefix cache.
 ///
 /// The workspace is the larger of the text-to-image estimate scaled by the
 /// joint sequence over the text-to-image one (attention scales with KEY
@@ -1176,10 +1201,9 @@ pub const QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES: u64 = 192 * 1024;
 /// Q/K/V, SwiGLU and per-token modulation rows are all joint-length.
 /// `base_activation` is `activation_bytes(.., QwenImage21Dit)`, whose legacy
 /// text-only prefix term the reference request's own cache replaces.
-pub fn qwen_image21_reference_activation_bytes(
+pub fn qwen_image21_reference_workspace_bytes(
     base_activation: u64,
     shape: QwenImage21SequenceShape,
-    branches: usize,
     batch: u32,
     dtype_bytes: usize,
 ) -> u64 {
@@ -1193,12 +1217,25 @@ pub fn qwen_image21_reference_activation_bytes(
     let per_token = (shape.joint_tokens() as u64)
         .saturating_mul(QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES * dtype_bytes as u64 / 2)
         .saturating_mul(u64::from(batch.max(1)));
-    scaled
-        .max(per_token)
+    scaled.max(per_token)
+}
+
+/// [`qwen_image21_reference_workspace_bytes`] plus the prefix cache the render
+/// retains under `budget` ([`qwen_image21_prefix_cache_bytes`]).
+pub fn qwen_image21_reference_activation_bytes(
+    base_activation: u64,
+    shape: QwenImage21SequenceShape,
+    branches: usize,
+    batch: u32,
+    dtype_bytes: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
+) -> u64 {
+    qwen_image21_reference_workspace_bytes(base_activation, shape, batch, dtype_bytes)
         .saturating_add(qwen_image21_prefix_cache_bytes(
             shape,
             branches,
             dtype_bytes,
+            budget,
         ))
 }
 
@@ -1256,6 +1293,7 @@ pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_by
 /// and the text-to-image denoise term already charges it for the text and
 /// target rows, so this adds exactly the CONDITION rows — one estimate over
 /// the whole joint sequence, never the text rows twice.
+#[allow(clippy::too_many_arguments)]
 pub fn qwen_image21_reference_extra_bytes(
     format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
     width: u32,
@@ -1264,6 +1302,7 @@ pub fn qwen_image21_reference_extra_bytes(
     dtype_bytes: usize,
     references: &[(u32, u32)],
     branches: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
 ) -> u64 {
     if references.is_empty() {
         return 0;
@@ -1276,7 +1315,7 @@ pub fn qwen_image21_reference_extra_bytes(
         dtype_bytes as u32,
         ActivationFamily::QwenImage21Dit,
     );
-    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes)
+    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes, budget)
         .saturating_sub(base)
         .saturating_add(qwen_image21_linear_workspace_bytes(
             format,
@@ -1284,6 +1323,63 @@ pub fn qwen_image21_reference_extra_bytes(
             batch,
         ))
         .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
+}
+
+/// The denoise workspace (no prefix cache) of a `width x height` render
+/// conditioned on `references`: the text-to-image activation for a plain
+/// render, [`qwen_image21_reference_workspace_bytes`] for a conditioned one,
+/// plus the tier's linear workspace over the whole joint sequence. This is the
+/// `workspace_bytes` every [`qwen_image21_prefix_cache_budget`] caller passes.
+pub fn qwen_image21_denoise_workspace_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    width: u32,
+    height: u32,
+    references: &[(u32, u32)],
+    batch: u32,
+    dtype_bytes: usize,
+) -> u64 {
+    let shape = QwenImage21SequenceShape::for_request(width, height, references);
+    let base = activation_bytes(
+        width,
+        height,
+        batch,
+        dtype_bytes as u32,
+        ActivationFamily::QwenImage21Dit,
+    );
+    let workspace = if references.is_empty() {
+        base
+    } else {
+        qwen_image21_reference_workspace_bytes(base, shape, batch, dtype_bytes)
+    };
+    workspace.saturating_add(qwen_image21_linear_workspace_bytes(
+        format,
+        shape.joint_tokens() as u64,
+        batch,
+    ))
+}
+
+/// What a PLAN must keep beside the transformer and the VAE for a render's
+/// denoise, before any prefix cache: [`qwen_image21_denoise_workspace_bytes`]
+/// plus the reference encoders an eager engine keeps resident through the
+/// denoise ([`qwen_image21_encode_phase_bytes`], zero without references).
+/// Admission and the text-encoder residency plan hand this to
+/// [`qwen_image21_prefix_cache_budget`], so the cache they plan fits beside
+/// exactly what the residency decision then charges; the engine's own
+/// denoise-time sample already sees those encoders resident and passes the
+/// bare workspace.
+pub fn qwen_image21_planned_denoise_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    width: u32,
+    height: u32,
+    references: &[(u32, u32)],
+    batch: u32,
+    dtype_bytes: usize,
+) -> u64 {
+    qwen_image21_denoise_workspace_bytes(format, width, height, references, batch, dtype_bytes)
+        .saturating_add(qwen_image21_encode_phase_bytes(
+            QwenImage21SequenceShape::for_request(width, height, references),
+            dtype_bytes,
+        ))
 }
 
 /// Header dimensions of encoded reference images; an unreadable header is
@@ -3616,6 +3712,59 @@ pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemory
 
 fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
     free.saturating_sub(reserve)
+}
+
+/// Bytes this process can allocate on `ordinal` right now: the driver's free
+/// memory plus what this process's own stream-ordered pool holds RESERVED but
+/// not in use, less the operator reserve.
+///
+/// `usable_free_vram_bytes` is the driver's view, and after a large drop (a
+/// text encoder parked to the host, say) the pool keeps the freed pages
+/// reserved rather than returning them, so the driver reports them as used —
+/// by us. Deciding whether an optional allocation fits (the Qwen Image 2.1
+/// prefix cache) from that view refused 12 GiB with ~20 GiB idle in the pool.
+/// Off CUDA, and without pool-backed allocation, this is
+/// `usable_free_vram_bytes`.
+#[cfg(feature = "cuda")]
+pub fn usable_allocatable_vram_bytes(ordinal: usize) -> Option<u64> {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys, CudaContext};
+    let context = CudaContext::new(ordinal).ok()?;
+    let (free, _) = context.mem_get_info().ok()?;
+    let mut pool_idle = 0u64;
+    if context.has_async_alloc() && context.preflight_raw_call().is_ok() {
+        // SAFETY: `context.cu_device()` is the live device this retained
+        // context owns, and this is the pool `cuMemAllocAsync` draws from.
+        if let Ok(pool) = unsafe { result::device::get_mem_pool(context.cu_device()) } {
+            let reserved = pool_attribute(
+                &context,
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+            );
+            let used = pool_attribute(
+                &context,
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+            );
+            if let (Some(reserved), Some(used)) = (reserved, used) {
+                pool_idle = reserved.saturating_sub(used);
+            }
+        }
+    }
+    Some(usable_allocatable_from_raw(
+        free as u64,
+        pool_idle,
+        reserved_vram_bytes(),
+    ))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn usable_allocatable_vram_bytes(ordinal: usize) -> Option<u64> {
+    usable_free_vram_bytes(ordinal)
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn usable_allocatable_from_raw(free: u64, pool_idle: u64, reserve: u64) -> u64 {
+    free.saturating_add(pool_idle).saturating_sub(reserve)
 }
 
 /// Total VRAM currently in use (`total - free`) for the specified GPU
@@ -7259,13 +7408,17 @@ mod tests {
     #[cfg(not(feature = "metal"))]
     #[test]
     fn vram_load_delta_is_saturating_sub() {
-        // A baseline above any possible reading saturates to zero on every
-        // build: a flaky reading (post < pre) must never panic or wrap.
+        // No live reading can exceed `u64::MAX`, so a baseline there must
+        // saturate to zero in every build — a flaky reading (post < pre)
+        // must never panic or wrap.
         assert_eq!(vram_load_delta(0, u64::MAX), 0);
-        // Without CUDA, vram_in_use_bytes(0) == 0, so every baseline gives 0.
-        // A CUDA build run on a machine with a visible GPU reads real usage,
-        // so only the saturating half is portable there.
-        if !cfg!(feature = "cuda") {
+        // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0
+        // for any N. A CUDA build reads the DEVICE-global used bytes
+        // (`total - free` from `cuMemGetInfo`), which include every other
+        // process and every concurrently running test on the card, so a zero
+        // baseline there is legitimately nonzero.
+        #[cfg(not(feature = "cuda"))]
+        {
             assert_eq!(vram_load_delta(0, 0), 0);
             assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
         }
@@ -7767,8 +7920,34 @@ mod tests {
         assert_eq!(report.global_free_drop(), Some(0));
     }
 
+    /// The pool high-water marks a probe reads are ONE counter per device for
+    /// the whole process, and `enter` rearms them. The lib suite runs tests on
+    /// parallel threads, so a second live probe rearming mid-phase erased the
+    /// first one's peak (the flaky `each_cuda_phase_measures_only_its_own_peak`
+    /// "big peak" failure). Every test that opens a live probe holds this.
+    static LIVE_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn live_probe_lock() -> std::sync::MutexGuard<'static, ()> {
+        LIVE_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Memory the pool holds reserved but unused is this process's to
+    /// allocate: it counts beside the driver's free bytes, the operator
+    /// reserve still comes off the top, and nothing underflows.
+    #[test]
+    fn allocatable_vram_counts_the_pools_idle_reservation() {
+        const GB: u64 = 1_000_000_000;
+        assert_eq!(usable_allocatable_from_raw(4 * GB, 20 * GB, GB), 23 * GB);
+        assert_eq!(usable_allocatable_from_raw(4 * GB, 0, GB), 3 * GB);
+        assert_eq!(usable_allocatable_from_raw(0, 0, GB), 0);
+    }
+
     #[test]
     fn a_probe_on_a_gpuless_build_finishes_as_unavailable() {
+        // Under the `cuda` feature this probe is live and rearms the marks.
+        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("vae_decode");
         let report = probe.finish();
 
@@ -7780,15 +7959,27 @@ mod tests {
         }
     }
 
+    /// The pool high-water mark these probes read and rearm is ONE counter
+    /// per device per process, so two live-CUDA probe tests running on
+    /// parallel test threads rearm each other's peak (`cargo test`; nextest
+    /// runs each test in its own process and never sees this). Production
+    /// has one job per device, so only the harness needs the serialization.
+    #[cfg(feature = "cuda")]
+    static CUDA_POOL_PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Live check that the pool attributes really describe Mold's own
     /// allocations. Skipped (not failed) when no CUDA device is present, the
     /// same pattern the LTX-2 CUDA handoff test uses.
     #[cfg(feature = "cuda")]
     #[test]
     fn a_cuda_probe_measures_the_allocation_made_inside_the_phase() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("test_alloc");
         let tensor =
             candle_core::Tensor::zeros((256, 1024, 1024), candle_core::DType::F32, &device)
@@ -7820,9 +8011,13 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn each_cuda_phase_measures_only_its_own_peak() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let big = PhaseVramProbe::enter("big");
         {
             let _tensor =
@@ -7844,10 +8039,16 @@ mod tests {
             big_report.peak_pool_used.expect("big peak") >= 2_147_483_648,
             "the first phase owns its own 2 GB: {big_report}"
         );
+        // Relative, not absolute: another test's allocation on the shared
+        // pool (which no lock here serializes) may raise either phase's mark,
+        // but only an un-rearmed counter hands the second phase the first
+        // one's 2 GB on top of its own 256 MB.
+        let big_peak = big_report.peak_pool_used.expect("big peak");
+        let small_peak = small_report.peak_pool_used.expect("small peak");
         assert!(
-            small_report.peak_pool_used.expect("small peak") < 2_147_483_648,
+            small_peak < big_peak || small_peak < 2_147_483_648,
             "the high-water mark must be rearmed per phase, so the second phase \
-             never inherits the first's peak: {small_report}"
+             never inherits the first's peak: {small_report} after {big_report}"
         );
     }
 
@@ -7875,9 +8076,13 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn a_nested_cuda_probe_never_erases_its_parents_peak() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let outer = PhaseVramProbe::enter("outer");
         {
             let _tensor =
@@ -8106,11 +8311,28 @@ mod qwen_image21_activation_tests {
         };
         use crate::artifact_format::QwenImage21TransformerFormat as Format;
         let refs = [(1536, 1024), (1024, 1024)];
-        let bf16 =
-            qwen_image21_reference_extra_bytes(Some(Format::Bf16), 1024, 1024, 1, 2, &refs, 2);
+        let bf16 = qwen_image21_reference_extra_bytes(
+            Some(Format::Bf16),
+            1024,
+            1024,
+            1,
+            2,
+            &refs,
+            2,
+            crate::qwen_image21::PrefixCacheBudget::RequestOnly,
+        );
         assert_eq!(
             bf16,
-            qwen_image21_reference_extra_bytes(None, 1024, 1024, 1, 2, &refs, 2)
+            qwen_image21_reference_extra_bytes(
+                None,
+                1024,
+                1024,
+                1,
+                2,
+                &refs,
+                2,
+                crate::qwen_image21::PrefixCacheBudget::RequestOnly
+            )
         );
         let int8 = qwen_image21_reference_extra_bytes(
             Some(Format::ComfyInt8ConvRot),
@@ -8120,6 +8342,7 @@ mod qwen_image21_activation_tests {
             2,
             &refs,
             2,
+            crate::qwen_image21::PrefixCacheBudget::RequestOnly,
         );
         let shape = QwenImage21SequenceShape::for_request(1024, 1024, &refs);
         let text_to_image = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
@@ -8151,7 +8374,8 @@ mod qwen_image21_activation_tests {
                 1,
                 2,
                 &[],
-                2
+                2,
+                crate::qwen_image21::PrefixCacheBudget::RequestOnly
             ),
             0
         );
@@ -8441,6 +8665,9 @@ mod flux2_denoise_budget_tests {
 mod qwen_image21_sequence_sizing_tests {
     use super::*;
 
+    const RO: crate::qwen_image21::PrefixCacheBudget =
+        crate::qwen_image21::PrefixCacheBudget::RequestOnly;
+
     const GIB: u64 = 1 << 30;
 
     #[test]
@@ -8463,7 +8690,7 @@ mod qwen_image21_sequence_sizing_tests {
     fn prefix_cache_charge_mirrors_the_engine_decision() {
         let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
         // One reference, both CFG branches, BF16: retained (~4.3 GiB).
-        let retained = qwen_image21_prefix_cache_bytes(one, 2, 2);
+        let retained = qwen_image21_prefix_cache_bytes(one, 2, 2, RO);
         assert_eq!(
             retained,
             2 * crate::qwen_image21::prefix_cache_bytes(one.prefix_tokens(), 1, 2)
@@ -8476,12 +8703,81 @@ mod qwen_image21_sequence_sizing_tests {
             1024,
             &[(1024, 1024), (1024, 1024), (1024, 1024)],
         );
-        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2), 0);
+        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2, RO), 0);
         // Text-to-image: the legacy term exactly.
         let t2i = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
         assert_eq!(
-            qwen_image21_prefix_cache_bytes(t2i, 2, 4),
+            qwen_image21_prefix_cache_bytes(t2i, 2, 4, RO),
             crate::qwen_image21::prefix_cache_budget_bytes(1)
+        );
+    }
+
+    /// On the CUDA fast path the cache is charged exactly when it fits the
+    /// card's headroom: three references with CFG (~16.8k prefix tokens)
+    /// retain on a card with room for them and recompute — charging nothing —
+    /// on one without.
+    #[test]
+    fn fast_path_cache_charge_follows_the_headroom() {
+        use crate::qwen_image21::PrefixCacheBudget::Headroom;
+        let three = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 3]);
+        let full = 2 * crate::qwen_image21::prefix_cache_bytes(three.prefix_tokens(), 1, 2);
+        assert_eq!(
+            qwen_image21_prefix_cache_bytes(three, 2, 2, Headroom(full)),
+            full
+        );
+        assert_eq!(
+            qwen_image21_prefix_cache_bytes(three, 2, 2, Headroom(full - 1)),
+            0
+        );
+        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2, RO), 0);
+        // The budget is the card less weights, workspace and the margin, and
+        // only the fast path reads the card at all.
+        let workspace =
+            qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[(1024, 1024); 3], 1, 2);
+        let budget = qwen_image21_prefix_cache_budget(Some(46 * GIB), 16 * GIB, workspace);
+        if crate::qwen_image21::prefix_cache_follows_memory() {
+            assert_eq!(
+                budget,
+                Headroom(
+                    46 * GIB
+                        - 16 * GIB
+                        - workspace
+                        - crate::qwen_image21::PREFIX_CACHE_MARGIN_BYTES
+                )
+            );
+            assert_eq!(
+                qwen_image21_prefix_cache_budget(None, 0, 0),
+                Headroom(u64::MAX)
+            );
+        } else {
+            assert_eq!(budget, RO);
+        }
+        // The workspace never includes a cache, and grows with the prefix.
+        let one = qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[(1024, 1024)], 1, 2);
+        let base = activation_bytes(1024, 1024, 1, 2, ActivationFamily::QwenImage21Dit);
+        assert_eq!(
+            one,
+            qwen_image21_reference_workspace_bytes(
+                base,
+                QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]),
+                1,
+                2
+            )
+        );
+        assert!(workspace > one);
+        assert_eq!(
+            qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[], 1, 2),
+            base
+        );
+        // A plan also keeps the reference encoders beside the denoise.
+        let three = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 3]);
+        assert_eq!(
+            qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[(1024, 1024); 3], 1, 2),
+            workspace + qwen_image21_encode_phase_bytes(three, 2)
+        );
+        assert_eq!(
+            qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[], 1, 2),
+            base
         );
     }
 
@@ -8489,7 +8785,7 @@ mod qwen_image21_sequence_sizing_tests {
     fn reference_activation_scales_with_keys_and_swaps_the_prefix_term() {
         let base = activation_bytes(1024, 1024, 1, 2, ActivationFamily::QwenImage21Dit);
         let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
-        let with_reference = qwen_image21_reference_activation_bytes(base, one, 2, 1, 2);
+        let with_reference = qwen_image21_reference_activation_bytes(base, one, 2, 1, 2, RO);
         assert!(with_reference > base);
         let legacy = crate::qwen_image21::prefix_cache_budget_bytes(1);
         let scaled = flux2_reference_scaled_activation_bytes(
@@ -8500,14 +8796,14 @@ mod qwen_image21_sequence_sizing_tests {
         let per_token = one.joint_tokens() as u64 * QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES;
         assert_eq!(
             with_reference,
-            scaled.max(per_token) + qwen_image21_prefix_cache_bytes(one, 2, 2)
+            scaled.max(per_token) + qwen_image21_prefix_cache_bytes(one, 2, 2, RO)
         );
         // More references never cost less workspace.
         let ten = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 10]);
         assert!(
-            qwen_image21_reference_activation_bytes(base, ten, 2, 1, 2)
-                >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2)
-                    - qwen_image21_prefix_cache_bytes(one, 2, 2)
+            qwen_image21_reference_activation_bytes(base, ten, 2, 1, 2, RO)
+                >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2, RO)
+                    - qwen_image21_prefix_cache_bytes(one, 2, 2, RO)
         );
         // The L40S evidence, two samplers. The reference renders' phase
         // samples (3 and 10 references, recomputed prefix, BF16 math) held
@@ -8530,7 +8826,7 @@ mod qwen_image21_sequence_sizing_tests {
             let shape =
                 QwenImage21SequenceShape::for_request(1024, 1024, &vec![(1536, 1024); count]);
             let estimate = mib(qwen_image21_reference_activation_bytes(
-                base, shape, 2, 1, 2,
+                base, shape, 2, 1, 2, RO,
             ));
             let harness = mib((harness_rate * shape.joint_tokens() as f64) as u64);
             assert!(
