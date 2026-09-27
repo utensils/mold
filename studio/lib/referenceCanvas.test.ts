@@ -4,6 +4,7 @@ import {
   fitToTargetAreaTiesEven,
   referenceCanvasSize,
   roundHalfToEven,
+  stagedReferenceDimensions,
 } from "./referenceCanvas";
 
 describe("roundHalfToEven", () => {
@@ -105,11 +106,9 @@ describe("referenceCanvasSize", () => {
     ).toEqual({ width: 1184, height: 896 });
   });
 
-  it("returns to the recipe default when the strip empties", () => {
-    expect(referenceCanvasSize({ ...base, references: [] })).toEqual({
-      width: 1024,
-      height: 1024,
-    });
+  it("leaves the canvas alone with no references at all", () => {
+    // A restored draft hydrating with an empty strip must keep its canvas.
+    expect(referenceCanvasSize({ ...base, references: [] })).toBeNull();
   });
 
   it("never moves a canvas the user chose", () => {
@@ -139,5 +138,50 @@ describe("referenceCanvasSize", () => {
         references: [{ width: 1600, height: 900 }, null],
       }),
     ).toBeNull();
+  });
+});
+
+describe("stagedReferenceDimensions", () => {
+  it("prefers recorded sizes and falls back to the header", () => {
+    // 1170x2532 PNG IHDR.
+    const png = btoa(
+      String.fromCharCode(
+        0x89,
+        0x50,
+        0x4e,
+        0x47,
+        0x0d,
+        0x0a,
+        0x1a,
+        0x0a,
+        0x00,
+        0x00,
+        0x00,
+        0x0d,
+        0x49,
+        0x48,
+        0x44,
+        0x52,
+        0x00,
+        0x00,
+        0x04,
+        0x92,
+        0x00,
+        0x00,
+        0x09,
+        0xe4,
+      ),
+    );
+    expect(
+      stagedReferenceDimensions([
+        { base64: "ignored", width: 640, height: 480 },
+        { data: png },
+        { base64: "" },
+      ]),
+    ).toEqual([
+      { width: 640, height: 480 },
+      { width: 1170, height: 2532 },
+      null,
+    ]);
   });
 });

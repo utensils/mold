@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   fileMatchesImageInputFormats,
   imageInputFormatForName,
+  imageInputFormatOfBase64,
   imageInputFormatsSentence,
   LEGACY_REFERENCE_IMAGE_FORMATS,
   referenceImageMimeTypes,
@@ -104,5 +105,20 @@ describe("picker wording and file matching", () => {
       ),
     ).toBe(false);
     expect(imageInputFormatForName("clip.mp4")).toBeNull();
+  });
+});
+
+describe("imageInputFormatOfBase64", () => {
+  it("reads the container from the payload's first bytes", () => {
+    expect(imageInputFormatOfBase64("iVBORw0KGgoAAAANSUhEUg==")).toBe("png");
+    expect(imageInputFormatOfBase64("/9j/4AAQSkZJRgABAQ==")).toBe("jpeg");
+    expect(imageInputFormatOfBase64("UklGRjAHAABXRUJQVlA4IA==")).toBe("webp");
+    expect(
+      imageInputFormatOfBase64(
+        "data:image/webp;base64,UklGRjAHAABXRUJQVlA4IA==",
+      ),
+    ).toBe("webp");
+    expect(imageInputFormatOfBase64("R0lGODlhAQABAA==")).toBeNull();
+    expect(imageInputFormatOfBase64("not base64!")).toBeNull();
   });
 });

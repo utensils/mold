@@ -1,3 +1,5 @@
+import type { ImageInputFormat } from "./generated/generationProfileV1";
+
 /** Pixel dimensions decoded directly from a PNG/JPEG/WebP base64 header. */
 export interface ImageDimensions {
   width: number;
@@ -163,16 +165,31 @@ function webpDimensions(bytes: Uint8Array): ImageDimensions | null {
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
+/** The containers a caller that names none accepts: `source_image`, masks,
+ * keyframes and identity photos are PNG/JPEG at admission. */
+const DEFAULT_FORMATS: readonly ImageInputFormat[] = ["png", "jpeg"];
+
 /**
- * Decode PNG/JPEG/WebP dimensions from raw base64 or a data URL.
+ * Decode PNG/JPEG (and, where `formats` names it, WebP) dimensions from raw
+ * base64 or a data URL.
+ *
+ * The answer doubles as a FORMAT GATE for every well that calls it — a
+ * `null` is how a source well refuses a GIF — so WebP is opt-in: only a
+ * reference strip whose recipe advertises WebP (`reference_images.formats`)
+ * passes it, and every PNG/JPEG-only door stays exactly as strict as before.
  *
  * Returns `null` for malformed/unsupported media or a JPEG whose SOF marker
  * falls beyond the bounded metadata prefix.
  */
 export function imageDimensionsFromBase64(
   base64: string,
+  formats: readonly ImageInputFormat[] = DEFAULT_FORMATS,
 ): ImageDimensions | null {
   const bytes = decodedPrefix(base64);
   if (!bytes) return null;
-  return pngDimensions(bytes) ?? jpegDimensions(bytes) ?? webpDimensions(bytes);
+  return (
+    (formats.includes("png") ? pngDimensions(bytes) : null) ??
+    (formats.includes("jpeg") ? jpegDimensions(bytes) : null) ??
+    (formats.includes("webp") ? webpDimensions(bytes) : null)
+  );
 }

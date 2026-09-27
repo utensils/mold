@@ -210,3 +210,24 @@ export function fileMatchesImageInputFormats(
   const format = imageInputFormatForName(file.name);
   return format !== null && formats.includes(format);
 }
+
+/**
+ * The container of a base64 payload (raw or a data URL), from its first
+ * bytes — `null` when it is none of PNG/JPEG/WebP or not base64 at all.
+ */
+export function imageInputFormatOfBase64(
+  base64: string,
+): ImageInputFormat | null {
+  const comma = base64.indexOf(",");
+  const payload = (comma >= 0 ? base64.slice(comma + 1) : base64)
+    .replace(/\s+/g, "")
+    .slice(0, 16);
+  try {
+    const binary = globalThis.atob(payload);
+    return sniffImageInputFormat(
+      Uint8Array.from(binary, (character) => character.charCodeAt(0)),
+    );
+  } catch {
+    return null;
+  }
+}

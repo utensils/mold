@@ -19,7 +19,10 @@
  */
 
 import type { ReferenceCanvasRule } from "./generated/generationProfileV1";
-import type { ImageDimensions } from "./imageDimensions";
+import {
+  imageDimensionsFromBase64,
+  type ImageDimensions,
+} from "./imageDimensions";
 import type { CanvasIntent } from "./outputShape";
 
 /** Python's `round()` for a finite float: halves go to the even neighbour. */
@@ -65,19 +68,19 @@ export interface ReferenceCanvasInput {
 
 /**
  * The canvas the rule asks for, or `null` when the canvas should be left
- * alone: no rule, a canvas the user chose, or a last reference whose size is
- * not known yet (never guess — the next read settles it). With no references
- * the answer is the recipe default, so emptying the strip gives the default
- * canvas back.
+ * alone: no rule, a canvas the user chose, an empty strip, or a last
+ * reference whose size is not known yet (never guess — the next read settles
+ * it). An empty strip answers `null` rather than the recipe default because
+ * surfaces also run this when a restored draft hydrates, and a restored
+ * canvas must not be silently reset; emptying the strip keeps the last
+ * reference's shape, which Reset returns to the default.
  */
 export function referenceCanvasSize(
   input: ReferenceCanvasInput,
 ): ImageDimensions | null {
   if (input.canvas !== "last-reference") return null;
   if (input.intent !== "model-default") return null;
-  if (input.references.length === 0) {
-    return { width: input.defaults.width, height: input.defaults.height };
-  }
+  if (input.references.length === 0) return null;
   const last = input.references[input.references.length - 1];
   if (!last) return null;
   return fitToTargetAreaTiesEven(
@@ -86,4 +89,34 @@ export function referenceCanvasSize(
     input.defaults.width * input.defaults.height,
     input.alignment,
   );
+}
+
+/** The strip's staged images, in any surface's own shape. */
+export interface StagedReferenceImage {
+  /** Raw base64 or a data URL; empty/null is a bytes-less reattach entry. */
+  base64?: string | null;
+  data?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * Each staged reference's size: the dimensions the picker already recorded,
+ * else read from the header (PNG, JPEG or WebP). `null` where neither is
+ * known — a bytes-less reattach entry, or an unreadable header.
+ */
+export function stagedReferenceDimensions(
+  images: readonly StagedReferenceImage[],
+): (ImageDimensions | null)[] {
+  return images.map((image) => {
+    if (image.width && image.height) {
+      return { width: image.width, height: image.height };
+    }
+    const bytes = image.base64 || image.data;
+    // Every container a reference strip may hold; admission, not this read,
+    // decides which the recipe accepts.
+    return bytes
+      ? imageDimensionsFromBase64(bytes, ["png", "jpeg", "webp"])
+      : null;
+  });
 }

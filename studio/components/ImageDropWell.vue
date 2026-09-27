@@ -327,7 +327,6 @@ function onDrop(event: DragEvent): void {
 .image-well--touch .image-well__preview {
   place-items: center;
   background: var(--color-print-surface, #111);
-  border-radius: 10px;
 }
 .image-well--touch .image-well__preview img {
   width: auto;

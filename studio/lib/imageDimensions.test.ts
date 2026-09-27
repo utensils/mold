@@ -56,6 +56,19 @@ describe("imageDimensionsFromBase64", () => {
 });
 
 describe("imageDimensionsFromBase64 WebP", () => {
+  const ALL = ["png", "jpeg", "webp"] as const;
+
+  it("refuses WebP unless the caller names it (source wells stay PNG/JPEG)", () => {
+    const webp = base64([
+      0x52, 0x49, 0x46, 0x46, 0x30, 0x07, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+      0x56, 0x50, 0x38, 0x20, 0x24, 0x07, 0x00, 0x00, 0x50, 0xd6, 0x00, 0x9d,
+      0x01, 0x2a, 0x92, 0x04, 0x41, 0x03,
+    ]);
+    expect(imageDimensionsFromBase64(webp)).toBeNull();
+    expect(imageDimensionsFromBase64(webp, ["png", "jpeg"])).toBeNull();
+    expect(imageDimensionsFromBase64(webp, ALL)).not.toBeNull();
+  });
+
   // Header bytes from Pillow 12.3 (`Image.new(mode, (1170, 833)).save(…,
   // "WEBP")`): one per container a reference picker can hand over.
   it("reads a lossy VP8 frame", () => {
@@ -64,7 +77,7 @@ describe("imageDimensionsFromBase64 WebP", () => {
       0x56, 0x50, 0x38, 0x20, 0x24, 0x07, 0x00, 0x00, 0x50, 0xd6, 0x00, 0x9d,
       0x01, 0x2a, 0x92, 0x04, 0x41, 0x03,
     ]);
-    expect(imageDimensionsFromBase64(webp)).toEqual({
+    expect(imageDimensionsFromBase64(webp, ALL)).toEqual({
       width: 1170,
       height: 833,
     });
@@ -76,7 +89,7 @@ describe("imageDimensionsFromBase64 WebP", () => {
       0x56, 0x50, 0x38, 0x4c, 0x3b, 0x00, 0x00, 0x00, 0x2f, 0x91, 0x04, 0xd0,
       0x10, 0x07, 0x10, 0x11, 0x11, 0x00,
     ]);
-    expect(imageDimensionsFromBase64(webp)).toEqual({
+    expect(imageDimensionsFromBase64(webp, ALL)).toEqual({
       width: 1170,
       height: 833,
     });
@@ -88,7 +101,7 @@ describe("imageDimensionsFromBase64 WebP", () => {
       0x56, 0x50, 0x38, 0x58, 0x0a, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
       0x91, 0x04, 0x00, 0x40, 0x03, 0x00,
     ]);
-    expect(imageDimensionsFromBase64(webp)).toEqual({
+    expect(imageDimensionsFromBase64(webp, ALL)).toEqual({
       width: 1170,
       height: 833,
     });
@@ -100,6 +113,6 @@ describe("imageDimensionsFromBase64 WebP", () => {
       0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
       0x44, 0xac, 0x00, 0x00, 0x88, 0x58,
     ]);
-    expect(imageDimensionsFromBase64(wav)).toBeNull();
+    expect(imageDimensionsFromBase64(wav, ALL)).toBeNull();
   });
 });
