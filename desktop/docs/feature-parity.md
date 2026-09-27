@@ -193,6 +193,7 @@ Post-generation image upscale persists distinct `-original` and `-upscaled` entr
 - Z-Image: `z-image-turbo:bf16/q8/q6/q4`.
 - Qwen-Image: `qwen-image`, `qwen-image-2512` (`bf16`,`q2`–`q8`), `qwen-image-lightning:fp8`/`fp8-8step`, `qwen-image-flash:q8/q4` (4-step DMD2), `qwen-image-distill:q8/q4` (15-step).
 - Qwen-Image-Edit: `qwen-image-edit-2511:bf16/q2..q8`, `qwen-image-edit-lightning:fp8` (official 4-step).
+- Qwen Image 2.1: `qwen-image-2.1` (`bf16`, `int8-conv`, `fp8`, `q8`/`q6`/`q5`/`q4`/`q3`/`q2`) and `qwen-image-2.1-turbo` (`bf16`, `int8-conv`, `q8`; Viggle 6-step LoRA, fixed recipe). Every tier is gated by the non-commercial Qwen Research License (`qwen-research`).
 - Wuerstchen: `wuerstchen-v2:fp16`.
 - LTX-Video: `ltx-video-0.9.6`, `-0.9.6-distilled`, `-0.9.8-2b-distilled`, `-0.9.8-13b-dev`, `-0.9.8-13b-distilled` (`bf16`).
 - LTX-2: `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`; LTX-2.3 `ltx-2.3-22b-dev`/`-distilled` (`bf16`/`fp8`); LTX-2.5 `ltx-2.5-22b-dev`/`-distilled` (`bf16`, `bf16-conv`, `int8-conv`) plus the distilled GGUF tiers `q3`, `q3-k-s`, `q4`, `q4-k-s`, `q5`, `q6`, `q8`.

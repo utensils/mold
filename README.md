@@ -68,6 +68,12 @@ mold run qwen-image-edit-2511:q4 "make the chair red" --image chair.png
 mold run flux2-klein:bf16 "the woman from image 1 wearing the glasses from image 2" \
   --reference person.jpg --reference glasses.jpg
 
+# Qwen Image 2.1: up to 10 ordered references, a transparent cut-out, or 6-step turbo
+mold run qwen-image-2.1 "put the jacket from image 1 on the person in image 2" \
+  --image jacket.png --image person.jpg
+mold run qwen-image-2.1 "a red paper lantern with a gold tassel" --transparent -o lantern.png
+mold run qwen-image-2.1-turbo "a lighthouse on a basalt cliff at dusk, oil painting"
+
 # Generate video
 mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 
@@ -91,7 +97,7 @@ and `ffprobe` on `PATH` before the server advertises that feature.
 ## What it supports
 
 - **Models:** FLUX.1, Flux.2, Stable Diffusion, Z-Image, Qwen-Image,
-  Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
+  Qwen Image 2.1, Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
   [model catalog](https://utensils.io/mold/models/) for variants and hardware
   requirements.
   Wan's 1.3B BF16 and 5B Q8/FP16 paths are performance-qualified on Apple
@@ -100,8 +106,13 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Metal admission checks each request against live unified-memory headroom.
   Forced-local H3 execution accepts one FL2VA request; batches, sequences, and
   Ref2VA reference uploads require the server route.
+  Qwen Image 2.1 (non-commercial Qwen Research License) edits from up to ten
+  ordered references, renders transparent PNG/WebP cut-outs, runs native 2K
+  presets, and ships BF16, INT8, FP8, GGUF and 6-step turbo tiers; its CUDA
+  fast path is 2.5x faster at 1024² and 6x at 2K than v0.32.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
-  identity photos, reference-image prompting, prompt expansion, and upscaling.
+  identity photos, reference-image prompting, transparent backgrounds, prompt
+  expansion, and upscaling, as PNG, JPEG or still WebP.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
 - **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1,
