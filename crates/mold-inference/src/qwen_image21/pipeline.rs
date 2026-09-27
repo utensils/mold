@@ -409,6 +409,10 @@ impl QwenImage21Engine {
             req.caller_lora_stack().is_empty(),
             "Qwen Image 2.1 LoRA adapters are not implemented"
         );
+        anyhow::ensure!(
+            mold_core::manifest::qwen_image21_turbo_schedule(&req.model).is_none(),
+            "Qwen Image 2.1 turbo tiers need their distilled adapter, which this build cannot apply yet"
+        );
         let format = req.resolved_output_format();
         anyhow::ensure!(
             matches!(
@@ -557,8 +561,11 @@ impl QwenImage21Engine {
         let latent_tokens = latent_height * latent_width;
         // `mu` reads the TARGET tokens only (`P:724`): references never move
         // the schedule.
-        let (mut scheduler, schedule_warning) =
-            scheduler_for(ScheduleKind::Base, req.steps as usize, latent_tokens);
+        let (mut scheduler, schedule_warning) = scheduler_for(
+            ScheduleKind::for_model(&req.model),
+            req.steps as usize,
+            latent_tokens,
+        );
         if let Some(warning) = schedule_warning {
             progress.info(&warning);
         }

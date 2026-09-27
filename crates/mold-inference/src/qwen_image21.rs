@@ -16,6 +16,7 @@ pub(crate) mod banded_conv;
 pub(crate) mod conditioning;
 pub(crate) mod exec_path;
 pub(crate) mod layout;
+pub(crate) mod lora;
 pub(crate) mod pipeline;
 pub(crate) mod reference;
 pub(crate) mod scheduler;

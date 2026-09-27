@@ -140,7 +140,10 @@ fn map_key_with(stem: &str, layers: usize) -> Result<Vec<Qwen21LoraTarget>> {
     // Kohya: `lora_unet_<flattened>`.
     if let Some(flat) = key.strip_prefix("lora_unet_") {
         if let Some(fused) = flat.strip_suffix("_img_mlp_gate_up") {
-            let block = fused.replace('_', ".");
+            let block = match fused.strip_prefix("transformer_blocks_") {
+                Some(index) => format!("transformer_blocks.{index}"),
+                None => fused.to_string(),
+            };
             return fused_gate_up(&block, layers);
         }
         if let Some(module) = flattened_table(layers).get(flat) {
@@ -174,7 +177,7 @@ fn fused_gate_up(block: &str, layers: usize) -> Result<Vec<Qwen21LoraTarget>> {
         .and_then(|index| index.parse().ok())
         .filter(|index| *index < layers)
         .with_context(|| format!("fused gate_up LoRA on unknown block `{block}`"))?;
-    let mlp = QwenImage21TransformerConfig::official().mlp_hidden_dim();
+    let mlp = mlp_hidden_dim();
     Ok(vec![
         Qwen21LoraTarget {
             candle_key: format!("transformer_blocks.{index}.img_mlp.gate_layer.weight"),
@@ -185,6 +188,12 @@ fn fused_gate_up(block: &str, layers: usize) -> Result<Vec<Qwen21LoraTarget>> {
             up_rows: Some((mlp, mlp)),
         },
     ])
+}
+
+/// Width of the SwiGLU hidden layer (`inner · mlp_ratio`).
+fn mlp_hidden_dim() -> usize {
+    let cfg = QwenImage21TransformerConfig::official();
+    cfg.num_attention_heads * cfg.attention_head_dim * cfg.mlp_ratio
 }
 
 /// Map every stem of an adapter, refusing one that adapts nothing.
@@ -249,19 +258,29 @@ impl LoraMetadataScale {
         })
     }
 
-    /// Read it from a safetensors file's `__metadata__`, if present.
+    /// Read it from a safetensors file's `__metadata__`, if present. Only the
+    /// header is read, never the tensors.
     pub(crate) fn read(path: &Path) -> Result<Option<Self>> {
-        let file = std::fs::File::open(path)
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)
             .with_context(|| format!("failed to open LoRA {}", path.display()))?;
-        // SAFETY: read-only mapping of a file this process does not write.
-        let mapped = unsafe { memmap2::Mmap::map(&file)? };
-        let (_, header) = safetensors::SafeTensors::read_metadata(&mapped)
+        let mut length = [0u8; 8];
+        file.read_exact(&mut length)
             .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
+        let length = u64::from_le_bytes(length);
+        if length > 100 << 20 {
+            bail!("LoRA header of {} claims {length} bytes", path.display());
+        }
+        let mut header = vec![0u8; length as usize];
+        file.read_exact(&mut header)
+            .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
+        let header: serde_json::Value = serde_json::from_slice(&header)
+            .with_context(|| format!("LoRA header of {} is not JSON", path.display()))?;
         header
-            .metadata()
-            .as_ref()
+            .get("__metadata__")
             .and_then(|metadata| metadata.get("lora_adapter_metadata"))
-            .map(|json| Self::parse(json))
+            .and_then(serde_json::Value::as_str)
+            .map(Self::parse)
             .transpose()
     }
 
@@ -368,7 +387,7 @@ mod tests {
 
     #[test]
     fn comfy_fused_gate_up_splits_gate_first() {
-        let mlp = QwenImage21TransformerConfig::official().mlp_hidden_dim();
+        let mlp = mlp_hidden_dim();
         let expected = vec![
             (
                 "transformer_blocks.7.img_mlp.gate_layer.weight".to_string(),
@@ -438,11 +457,7 @@ mod tests {
         assert!(!layout.files.is_empty());
         for (name, file) in &layout.files {
             for module in file.modules.keys() {
-                let stem = if TOP_LEVEL.contains(&module.as_str()) {
-                    format!("transformer.{module}")
-                } else {
-                    format!("transformer.transformer_blocks.5.{module}")
-                };
+                let stem = format!("transformer.{}", module.replace("{i}", "5"));
                 assert_eq!(map_key(&stem).unwrap().len(), 1, "{name}: {module}");
             }
             let scale = LoraMetadataScale::parse(&file.metadata["lora_adapter_metadata"]).unwrap();
@@ -473,5 +488,40 @@ mod tests {
             Some(16.0)
         );
         assert!(LoraMetadataScale::parse("not json").is_err());
+    }
+}
+#[cfg(test)]
+mod viggle_file_tests {
+    use super::*;
+
+    /// Both published Viggle adapters: every layer stem maps, and the scale
+    /// read from their `__metadata__` (no `.alpha` tensors) is exactly 1.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_FIXTURES (the Viggle files under ../viggle)"]
+    fn published_viggle_adapters_map_and_scale_to_one() {
+        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
+            return;
+        };
+        let dir = std::path::Path::new(&fixtures).join("../viggle");
+        for rank in [128usize, 256] {
+            let path = dir.join(format!(
+                "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r{rank}.safetensors"
+            ));
+            let scale = LoraMetadataScale::read(&path).unwrap().unwrap();
+            assert_eq!(scale.alpha, Some(rank as f64));
+            assert_eq!(scale.rank, Some(rank as f64));
+            let adapter = crate::flux::lora::LoraAdapter::load(&path).unwrap();
+            assert_eq!(adapter.layers.len(), 227);
+            let mapped = map_adapter(adapter.layers.keys().map(String::as_str)).unwrap();
+            assert!(mapped.iter().all(|(_, targets)| targets.len() == 1));
+            for (stem, layer) in &adapter.layers {
+                assert!(layer.alpha.is_none());
+                let rank = layer.a.dim(0).unwrap();
+                assert_eq!(
+                    effective_scale(1.0, rank, layer.alpha, scale.alpha_for(stem)),
+                    1.0
+                );
+            }
+        }
     }
 }
