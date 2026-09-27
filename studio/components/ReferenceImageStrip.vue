@@ -328,24 +328,25 @@ function onStripDrop(event: DragEvent): void {
 
 <style scoped>
 .ris {
-  --ris-tile: 96px;
+  --ris-tile: 112px;
   --ris-control: 24px;
   display: grid;
   gap: 6px;
   min-width: 0;
 }
 .ris--touch {
-  --ris-tile: 132px;
+  --ris-tile: 136px;
   --ris-control: 44px;
 }
+/* The strip WRAPS rather than scrolling: order is the point, so every
+ * picture (up to ten on Qwen Image 2.1) stays in view at once. */
 .ris__list {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 0;
-  padding: 0 0 4px;
+  padding: 0;
   list-style: none;
-  overflow-x: auto;
-  scroll-snap-type: x proximity;
 }
 .ris__tile {
   position: relative;
@@ -358,7 +359,6 @@ function onStripDrop(event: DragEvent): void {
   border: 1px solid var(--mold-border, #ddd);
   border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep, transparent);
-  scroll-snap-align: start;
 }
 .ris__tile--over {
   border-color: var(--mold-blue, #b45309);
@@ -407,22 +407,28 @@ function onStripDrop(event: DragEvent): void {
   position: absolute;
   right: 4px;
   bottom: 4px;
-  padding: 1px 5px;
+  left: 4px;
+  overflow: hidden;
+  padding: 1px 4px;
+  text-align: center;
+  text-overflow: ellipsis;
   border-radius: var(--mold-radius-1);
   background: var(--mold-blue, #b45309);
   color: var(--mold-on-accent, #fff);
   font-family: var(--mold-font-mono, ui-monospace, monospace);
-  font-size: var(--mold-fs-micro, 0.6875rem);
+  font-size: calc(var(--mold-fs-micro, 0.6875rem) * 0.85);
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   white-space: nowrap;
 }
+/* The role wraps under the ordinal rather than truncating: "Reference" is
+ * the word a user reads to tell it from the Target. */
 .ris__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 4px;
+  column-gap: 6px;
   min-width: 0;
 }
 .ris__label {
@@ -432,12 +438,10 @@ function onStripDrop(event: DragEvent): void {
   white-space: nowrap;
 }
 .ris__role {
-  overflow: hidden;
   color: var(--mold-text-dim, #737373);
   font-family: var(--mold-font-mono, ui-monospace, monospace);
   font-size: var(--mold-fs-micro, 0.6875rem);
   letter-spacing: 0.06em;
-  text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -495,7 +499,7 @@ function onStripDrop(event: DragEvent): void {
   gap: 2px;
   width: 100%;
   height: 100%;
-  min-height: calc(var(--ris-tile) * 0.75 + var(--ris-control) + 40px);
+  min-height: calc(var(--ris-tile) * 0.75);
   border: 1px dashed var(--mold-border, #bbb);
   border-radius: var(--mold-radius-3);
   background: transparent;
