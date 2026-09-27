@@ -947,40 +947,98 @@ impl<'a> Q21Vb<'a> {
     }
 }
 
-/// Fail a denoise step whose prediction is not finite, naming the tier.
+/// Denoise steps between two reads of [`FiniteGuard`]'s on-device flag.
+///
+/// Each read is a device→host copy that drains the stream, so the next step's
+/// first kernels are launched onto an idle GPU; reading every step paid that
+/// bubble on every tier. Eight bounds the wasted work on a failing render to
+/// seven steps, and the last step is always read.
+pub(crate) const FINITE_GUARD_INTERVAL: usize = 8;
+
+/// Fails a render whose denoise predictions went non-finite, naming the tier.
 ///
 /// Qwen-Image's GGUF tiers have returned 100% NaN through candle's MMQ kernels
 /// (`docs/architecture/qwen-mmq-nan.md`), which renders as a solid-black image
-/// rather than an error. `x - x` is `0` for every finite element and `NaN` for
-/// an infinite or NaN one, so its sum is exactly zero iff the tensor is finite
-/// — one elementwise pass and a reduction, with no overflow on large but finite
-/// predictions (a sum of squares could overflow and false-positive).
-pub(crate) fn ensure_finite_prediction(
-    prediction: &Tensor,
-    step: usize,
-    tier: &str,
+/// rather than an error. Neither upstream checks at all (diffusers'
+/// `pipeline_qwenimage21.py:757-804` loop, ComfyUI's samplers); mold keeps the
+/// guard so such a render is an error, not a black picture.
+///
+/// `x - x` is `0` for every finite element and `NaN` for an infinite or NaN
+/// one, so its sum is exactly zero iff the tensor is finite — one elementwise
+/// pass and a reduction, with no overflow on large but finite predictions (a
+/// sum of squares could overflow and false-positive). The per-step sums are
+/// ACCUMULATED on the device (a NaN stays NaN through the running sum) and the
+/// scalar is read only every `interval` steps and on the last step, so the
+/// guarantee — no non-finite latent reaches the VAE — holds without draining
+/// the stream every step.
+pub(crate) struct FiniteGuard<'a> {
+    interval: usize,
+    tier: &'a str,
     qmatmul: bool,
-) -> Result<()> {
-    let probe = prediction
-        .broadcast_sub(prediction)?
-        .to_dtype(DType::F32)?
-        .sum_all()?
-        .to_scalar::<f32>()?;
-    if probe == 0.0 {
-        return Ok(());
+    /// The running on-device sum since the last read, and its first step.
+    pending: Option<(Tensor, usize)>,
+    #[cfg(test)]
+    reads: usize,
+}
+
+impl<'a> FiniteGuard<'a> {
+    pub(crate) fn new(interval: usize, tier: &'a str, qmatmul: bool) -> Self {
+        Self {
+            interval: interval.max(1),
+            tier,
+            qmatmul,
+            pending: None,
+            #[cfg(test)]
+            reads: 0,
+        }
     }
-    let hint = if qmatmul {
-        format!(
-            "{QMATMUL_ENV}=1 routed its linears through candle's quantized CUDA kernels; unset it \
-             to take the per-forward dequant arm"
+
+    /// Fold step `step`'s prediction (0-based, of `total`) into the flag,
+    /// reading it at a window's end or on the last step.
+    pub(crate) fn observe(&mut self, prediction: &Tensor, step: usize, total: usize) -> Result<()> {
+        let probe = prediction
+            .broadcast_sub(prediction)?
+            .to_dtype(DType::F32)?
+            .sum_all()?;
+        let (sum, first) = match self.pending.take() {
+            Some((sum, first)) => ((sum + probe)?, first),
+            None => (probe, step),
+        };
+        if step + 1 - first < self.interval && step + 1 < total {
+            self.pending = Some((sum, first));
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        if sum.to_scalar::<f32>()? == 0.0 {
+            return Ok(());
+        }
+        let hint = if self.qmatmul {
+            format!(
+                "{QMATMUL_ENV}=1 routed its linears through candle's quantized CUDA kernels; \
+                 unset it to take the per-forward dequant arm"
+            )
+        } else {
+            "the quantized kernels are not implicated; report the tier and the canvas".to_string()
+        };
+        let window = if first == step {
+            format!("denoise step {}", step + 1)
+        } else {
+            format!("denoise steps {}-{}", first + 1, step + 1)
+        };
+        bail!(
+            "Qwen Image 2.1 {} produced a non-finite prediction within {window}; {hint}",
+            self.tier
         )
-    } else {
-        "the quantized kernels are not implicated; report the tier and the canvas".to_string()
-    };
-    bail!(
-        "Qwen Image 2.1 {tier} produced a non-finite prediction at denoise step {}; {hint}",
-        step + 1
-    )
+    }
+
+    /// Flag reads so far (tests).
+    #[cfg(test)]
+    pub(crate) fn reads(&self) -> usize {
+        self.reads
+    }
 }
 
 #[cfg(test)]
