@@ -52,7 +52,10 @@ pub(crate) fn decode_image_from_binding(
             .checked_mul(4)
             .context("reference image decode limit overflowed")?,
     );
-    let image = crate::img_utils::decode_oriented_srgb_with_limits(&bytes, limits)
+    // MiniMax-H3 Ref2VA is this decoder's only caller, and its upstream opens
+    // a reference with PIL's `convert("RGB")`
+    // (`img_utils::decode_oriented_srgb_pillow_with_limits`).
+    let image = crate::img_utils::decode_oriented_srgb_pillow_with_limits(&bytes, limits)
         .context("reference image decode failed")?;
     checkpoint()?;
     Ok(image)
@@ -529,6 +532,37 @@ mod tests {
             .sum::<f64>()
             / expected.len() as f64;
         assert!(mean <= 2.0, "upright pixels drifted: mean-abs {mean}");
+    }
+
+    /// MiniMax-H3's upstream opens a reference image with PIL and converts it
+    /// to RGB (`inference_minimax_h3.py:601-603`; diffusers `load_image`,
+    /// `loading_utils.py:47-52`), which takes the HIGH byte of a 16-bit
+    /// sample: `0x00ff` is 0 and `0xff00` 255 there, 1 and 254 under the
+    /// `image` crate's rounded `x / 257`.
+    #[test]
+    fn image_binding_reduces_sixteen_bit_samples_as_pillow_does() {
+        let source = image::ImageBuffer::from_pixel(2, 2, image::Rgb([0x00ffu16, 0xff00, 0x8000]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let (_staged, binding) = binding(bytes.get_ref());
+        let decoded = decode_image_from_binding(&binding, &mut || Ok(())).unwrap();
+        for pixel in decoded.pixels() {
+            assert_eq!(pixel.0, [0, 255, 128], "pixel = {:?}", pixel.0);
+        }
+    }
+
+    /// Hunyuan3D 2mv's server-bound views must read a 16-bit alpha as Pillow's
+    /// `convert("RGBA")` does, exactly like its inline views.
+    #[test]
+    fn rgba_binding_reduces_sixteen_bit_samples_as_pillow_does() {
+        let bytes = include_bytes!("../testdata/hunyuan3d/pillow_16bit_rgba.png");
+        let (_staged, binding) = binding(bytes);
+        let decoded = decode_rgba_image_from_binding(&binding, &mut || Ok(())).unwrap();
+        for pixel in decoded.pixels() {
+            assert_eq!(pixel.0, [0x80, 0x80, 0x80, 255], "pixel = {:?}", pixel.0);
+        }
     }
 
     #[test]

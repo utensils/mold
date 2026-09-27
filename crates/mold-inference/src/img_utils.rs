@@ -173,10 +173,66 @@ pub fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
 
 /// [`decode_oriented_srgb`] with caller-supplied decoder limits.
 ///
-/// H3 accepts user media through several durable and local entry points. They
-/// all need the same EXIF/ICC semantics without giving up the family's strict
-/// dimension and allocation bounds merely to share this decoder.
+/// 16-bit samples reduce with the `image` crate's rounded `x / 257`; a family
+/// whose upstream opens its images with PIL uses
+/// [`decode_oriented_srgb_pillow_with_limits`] instead.
 pub fn decode_oriented_srgb_with_limits(bytes: &[u8], limits: image::Limits) -> Result<RgbImage> {
+    decode_oriented_srgb_inner(bytes, limits, |decoded| decoded.to_rgb8())
+}
+
+/// [`decode_oriented_srgb_with_limits`] reduced to 8 bits exactly as PIL's
+/// `Image.open(...).convert("RGB")` does (see [`pillow_rgb8`]).
+///
+/// MiniMax-H3 accepts user media through several durable and local entry
+/// points (FL2VA endpoints, Ref2VA image references). They all need the same
+/// EXIF/ICC semantics without giving up the family's strict dimension and
+/// allocation bounds, and the same 8-bit pixels the released model was
+/// conditioned on: the official repo opens every image with
+/// `Image.open(path).convert("RGB")` (`inference_minimax_h3.py:601-603`), and
+/// its diffusers modular pipeline — whose endpoint resize and cover-crop
+/// arithmetic mold's H3 preprocessing mirrors
+/// (`modular_pipelines/minimax_h3/before_encoder.py:134-158`) — loads a file
+/// through `load_image` (`references.py:99-106`), i.e. `PIL.Image.open`,
+/// `ImageOps.exif_transpose` and `convert("RGB")`
+/// (`utils/loading_utils.py:35-52`). ComfyUI's `LoadImage` is a third answer
+/// and deliberately not followed here: at `a73d24ba` it decodes through PyAV
+/// (`nodes.py:1769-1771`), which hands a 16-bit PNG over as `gbrpf32le`
+/// floats, `x / 65535` (`comfy_api/latest/_input_impl/video_types.py:519-530`),
+/// and `comfy.utils.lanczos` then truncates `255 * x` to `uint8`
+/// (`comfy/utils.py:1101`), i.e. `floor(x / 257)`.
+///
+/// Deliberate divergences from that PIL path, shared with every other caller
+/// of this decoder: an embedded ICC profile is converted to sRGB (PIL
+/// ignores it), and the EXIF orientation is applied even where the official
+/// script's own loader (`inference_minimax_h3.py:601-603`) does not — the
+/// diffusers loader does.
+pub fn decode_oriented_srgb_pillow_with_limits(
+    bytes: &[u8],
+    limits: image::Limits,
+) -> Result<RgbImage> {
+    decode_oriented_srgb_inner(bytes, limits, pillow_rgb8)
+}
+
+/// PIL's `Image.open(...).convert("RGB")` from a decoded image: the 16-bit
+/// PNG cases take [`pillow_rgba8`]'s reduction (high byte for RGB/RGBA/LA,
+/// a clamp for `I;16`) and then drop alpha, which is what PIL's
+/// `RGBA -> RGB` conversion does — it never composites. 8-bit sources are
+/// the `image` crate's own conversion, which agrees.
+pub fn pillow_rgb8(decoded: DynamicImage) -> RgbImage {
+    match decoded {
+        DynamicImage::ImageRgb16(_)
+        | DynamicImage::ImageRgba16(_)
+        | DynamicImage::ImageLumaA16(_)
+        | DynamicImage::ImageLuma16(_) => DynamicImage::ImageRgba8(pillow_rgba8(decoded)).to_rgb8(),
+        other => other.to_rgb8(),
+    }
+}
+
+fn decode_oriented_srgb_inner(
+    bytes: &[u8],
+    limits: image::Limits,
+    to_rgb8: impl FnOnce(DynamicImage) -> RgbImage,
+) -> Result<RgbImage> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .context("failed to sniff source image format")?;
@@ -204,7 +260,7 @@ pub fn decode_oriented_srgb_with_limits(bytes: &[u8], limits: image::Limits) -> 
             | image::ColorType::L16
             | image::ColorType::La16
     );
-    let rgb = decoded.to_rgb8();
+    let rgb = to_rgb8(decoded);
     Ok(match icc {
         Some(profile) if !profile.is_empty() => {
             let layout = if is_grayscale {
@@ -284,11 +340,16 @@ pub fn decode_oriented_srgb_rgba(bytes: &[u8]) -> Result<image::RgbaImage> {
     )
 }
 
+/// [`decode_oriented_srgb_rgba`] under caller-supplied decoder limits: the
+/// Hunyuan3D 2mv views that reach the engine as server-bound references
+/// (`reference_media::decode_rgba_image_from_binding`). Same Pillow
+/// reduction as the inline path, so a view reads the same pixels whichever
+/// way it arrived.
 pub fn decode_oriented_srgb_rgba_with_limits(
     bytes: &[u8],
     limits: image::Limits,
 ) -> Result<image::RgbaImage> {
-    decode_oriented_srgb_rgba_inner(bytes, limits, |_, _| Ok(()), |decoded| decoded.to_rgba8())
+    decode_oriented_srgb_rgba_inner(bytes, limits, |_, _| Ok(()), pillow_rgba8)
 }
 
 /// Decode one ordered reference image (`GenerateRequest.edit_images`) the one
@@ -916,6 +977,95 @@ mod hunyuan3d_decode_tests {
         assert_eq!(
             decode_oriented_srgb_rgba(&bytes.into_inner()).unwrap(),
             image
+        );
+    }
+
+    /// Hunyuan3D 2mv's server-bound views decode through
+    /// `decode_oriented_srgb_rgba_with_limits`
+    /// (`reference_media::decode_rgba_image_from_binding`), its inline views
+    /// through `decode_oriented_srgb_rgba`. Both must be Pillow's
+    /// `convert("RGBA")`, or one 16-bit view reads differently depending on
+    /// how it reached the engine: under `x / 257` this fixture's alpha
+    /// `0xFF00` is 254, not upstream's 255.
+    #[test]
+    fn hunyuan3d_bound_view_decode_takes_the_pillow_high_byte() {
+        let limited = decode_oriented_srgb_rgba_with_limits(
+            SIXTEEN_BIT_RGBA_FIXTURE,
+            image::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            limited,
+            decode_oriented_srgb_rgba(SIXTEEN_BIT_RGBA_FIXTURE).unwrap()
+        );
+        for pixel in limited.pixels() {
+            assert_eq!(pixel.0, [0x80, 0x80, 0x80, 255], "pixel = {:?}", pixel.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod pillow_rgb_decode_tests {
+    use super::*;
+
+    const SAMPLES: [u16; 10] = [
+        0x0000, 0x00ff, 0x0100, 0x7fff, 0x8000, 0xff00, 0xff7f, 0xff80, 0xfeff, 0xffff,
+    ];
+
+    fn png<P: image::PixelWithColorType>(image: &image::ImageBuffer<P, Vec<P::Subpixel>>) -> Vec<u8>
+    where
+        [P::Subpixel]: image::EncodableLayout,
+    {
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    /// Measured with Pillow 12.3.0 (`tmp/qwen21-b-pillow-venv`) on these ten
+    /// samples written as 16-bit PNGs of each colour type:
+    /// `Image.open(path).convert("RGB")` — what MiniMax-H3's upstream does to
+    /// every endpoint and reference image — reads the HIGH byte for 16-bit
+    /// RGB, RGBA and LA (Pillow opens `LA;16B` as `RGBA`) and clamps 16-bit
+    /// grayscale (`I;16`) to 255. The `image` crate's rounded `x / 257`
+    /// reads `0x00ff` as 1 and `0xff00` as 254 instead, and scales `I;16`.
+    #[test]
+    fn pillow_rgb_decode_matches_pillow_convert_rgb_across_every_sixteen_bit_mode() {
+        use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
+        const PIL_HIGH_BYTE: [u8; 10] = [0, 0, 1, 127, 128, 255, 255, 255, 254, 255];
+        const PIL_I16_CLAMP: [u8; 10] = [0, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+
+        let decode = |bytes: Vec<u8>| -> Vec<[u8; 3]> {
+            decode_oriented_srgb_pillow_with_limits(&bytes, image::Limits::default())
+                .unwrap()
+                .pixels()
+                .map(|pixel| pixel.0)
+                .collect()
+        };
+        let grey = |values: [u8; 10]| values.map(|value| [value; 3]).to_vec();
+        let rgba = ImageBuffer::from_fn(10, 1, |x, _| Rgba([SAMPLES[x as usize]; 4]));
+        let rgb = ImageBuffer::from_fn(10, 1, |x, _| Rgb([SAMPLES[x as usize]; 3]));
+        let la = ImageBuffer::from_fn(10, 1, |x, _| LumaA([SAMPLES[x as usize]; 2]));
+        let l = ImageBuffer::from_fn(10, 1, |x, _| Luma([SAMPLES[x as usize]]));
+        assert_eq!(decode(png(&rgba)), grey(PIL_HIGH_BYTE));
+        assert_eq!(decode(png(&rgb)), grey(PIL_HIGH_BYTE));
+        assert_eq!(decode(png(&la)), grey(PIL_HIGH_BYTE));
+        assert_eq!(decode(png(&l)), grey(PIL_I16_CLAMP));
+    }
+
+    /// 8-bit sources are the `image` crate's own conversion, which agrees
+    /// with Pillow's `convert("RGB")`: alpha is DROPPED, not composited.
+    #[test]
+    fn pillow_rgb_decode_leaves_eight_bit_sources_unchanged() {
+        let image = image::RgbaImage::from_fn(6, 4, |x, y| {
+            image::Rgba([x as u8 * 40, y as u8 * 60, 7, (x * 40) as u8])
+        });
+        let bytes = png(&image);
+        let decoded =
+            decode_oriented_srgb_pillow_with_limits(&bytes, image::Limits::default()).unwrap();
+        assert_eq!(decoded, image::DynamicImage::ImageRgba8(image).to_rgb8());
+        assert_eq!(
+            decoded,
+            decode_oriented_srgb_with_limits(&bytes, image::Limits::default()).unwrap()
         );
     }
 }
