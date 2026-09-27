@@ -2436,7 +2436,20 @@ mod tests {
                         for (name, actual) in [("uncached", uncached), ("cached", cached)] {
                             let expected = &golden[&format!("{key}.{name}")];
                             assert_eq!(actual.dtype(), expected.dtype(), "{key}.{name}");
-                            assert_eq!(flat(&actual), flat(expected), "{key}.{name}");
+                            // The golden was produced on another host, and CPU
+                            // matmuls pick their SIMD path per machine, so the
+                            // cross-host check is ulp-scale rather than bitwise
+                            // (bitwise identity to the old forward is pinned
+                            // in-process by `t2i_forward_is_bitwise_the_frozen_legacy_forward`).
+                            let tolerance = if dtype == DType::F32 { 1e-5 } else { 4e-3 };
+                            for (index, (a, e)) in
+                                flat(&actual).iter().zip(flat(expected).iter()).enumerate()
+                            {
+                                assert!(
+                                    (a - e).abs() <= tolerance * (1.0 + e.abs()),
+                                    "{key}.{name}[{index}]: {a} vs golden {e}"
+                                );
+                            }
                             compared += 1;
                         }
                     }
