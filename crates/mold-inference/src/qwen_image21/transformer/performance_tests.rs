@@ -156,11 +156,11 @@ fn official_metal_mode_benchmark() -> Result<()> {
     let mut latents = (noise * scheduler.initial_sigma())?;
     let total_steps = scheduler.num_steps();
     let executed_steps = limit.min(total_steps);
-    let decision = super::super::PrefixCachePolicy::resolve_for_device(
+    let decision = super::super::PrefixCachePolicy::resolve_from_env(
         &[conditioning.sequence_length()],
+        false,
         1,
         dtype,
-        &device,
     )[0];
     let mut prepared = transformer.prepare_t2i(&conditioning, 64, 64, decision)?;
     let mut predictions = Vec::new();

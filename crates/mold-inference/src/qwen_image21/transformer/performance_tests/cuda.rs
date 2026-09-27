@@ -434,11 +434,11 @@ fn official_cuda_mode_benchmark() -> Result<()> {
     let executed_steps = limit.min(total_steps);
     let mut prefixes = vec![conditioning.sequence_length()];
     prefixes.extend(negative_conditioning.as_ref().map(|c| c.sequence_length()));
-    let decisions = crate::qwen_image21::PrefixCachePolicy::resolve_for_device(
+    let decisions = crate::qwen_image21::PrefixCachePolicy::resolve_from_env(
         &prefixes,
+        false,
         conditioning.batch_size(),
         dtype,
-        &device,
     );
     let mut conditional =
         transformer.prepare_t2i(&conditioning, latent_height, latent_width, decisions[0])?;

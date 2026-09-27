@@ -629,3 +629,88 @@ fn p8_base_end_to_end_matches_the_upstream_capture() {
         "{ours_psnr} dB vs upstream's {theirs_psnr} dB"
     );
 }
+/// Calibration and UAT probe (not a parity gate): render a 1024² CFG request
+/// conditioned on `QWEN_IMAGE21_CALIBRATION_REFS` (default 1) copies of
+/// `QWEN_IMAGE21_CALIBRATION_REF` (default `ref_opaque.png`), sequentially,
+/// for `QWEN_IMAGE21_CALIBRATION_STEPS` (default 4) steps, optionally with
+/// `QWEN_IMAGE21_CALIBRATION_TRANSPARENT=1` and a
+/// `QWEN_IMAGE21_CALIBRATION_PROMPT`; print the sizing functions' estimate so
+/// an external VRAM sampler can be read against it, and write the PNG to the
+/// temp dir for inspection.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn calibration_reference_render() {
+    use crate::engine::{InferenceEngine, LoadStrategy};
+    let Some(env) = env() else { return };
+    let count: usize = std::env::var("QWEN_IMAGE21_CALIBRATION_REFS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let steps: u32 = var("QWEN_IMAGE21_CALIBRATION_STEPS")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+    let reference =
+        var("QWEN_IMAGE21_CALIBRATION_REF").unwrap_or_else(|| "ref_opaque.png".to_string());
+    let prompt = var("QWEN_IMAGE21_CALIBRATION_PROMPT").unwrap_or_else(|| P8_PROMPT.to_string());
+    let transparent = var("QWEN_IMAGE21_CALIBRATION_TRANSPARENT").is_some();
+    let mut engine = super::QwenImage21Engine::new(
+        "qwen-image-2.1:bf16".to_string(),
+        engine_paths(&env),
+        LoadStrategy::Sequential,
+        0,
+    );
+    let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+        "prompt": prompt,
+        "negative_prompt": P6_NEGATIVE,
+        "model": "qwen-image-2.1:bf16",
+        "width": 1024,
+        "height": 1024,
+        "steps": steps,
+        "guidance": 4.0,
+        "seed": 7,
+        "output_format": "png"
+    }))
+    .unwrap();
+    if transparent {
+        request.transparent_background = Some(true);
+    }
+    request.edit_images =
+        (count > 0).then(|| vec![std::fs::read(testdata(&reference)).unwrap(); count]);
+    let shape = crate::device::QwenImage21SequenceShape::for_request(
+        1024,
+        1024,
+        &vec![(1536, 1024); count],
+    );
+    let base = crate::device::activation_bytes(
+        1024,
+        1024,
+        1,
+        2,
+        crate::device::ActivationFamily::QwenImage21Dit,
+    );
+    let cache = crate::device::qwen_image21_prefix_cache_bytes(shape, 2, 2);
+    let workspace =
+        crate::device::qwen_image21_reference_activation_bytes(base, shape, 2, 1, 2) - cache;
+    eprintln!(
+        "CALIBRATION refs={count} prefix_tokens={} cache={:.2} GiB workspace={:.2} GiB encode={:.2} GiB",
+        shape.prefix_tokens(),
+        cache as f64 / (1u64 << 30) as f64,
+        workspace as f64 / (1u64 << 30) as f64,
+        crate::device::qwen_image21_encode_phase_bytes(shape, 2) as f64 / (1u64 << 30) as f64,
+    );
+    let started = std::time::Instant::now();
+    let response = engine.generate(&request).unwrap();
+    eprintln!(
+        "CALIBRATION done in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::write(
+        std::env::temp_dir().join(format!(
+            "qwen21_calibration_{count}_{steps}{}.png",
+            if transparent { "_rgba" } else { "" }
+        )),
+        &response.images[0].data,
+    )
+    .unwrap();
+}

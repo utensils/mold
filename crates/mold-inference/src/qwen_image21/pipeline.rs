@@ -607,11 +607,11 @@ impl QwenImage21Engine {
             })
             .collect::<Result<Vec<_>>>()?;
         let prefixes: Vec<usize> = layouts.iter().map(|layout| layout.prefix_len()).collect();
-        let decisions = super::PrefixCachePolicy::resolve_for_device(
+        let decisions = super::PrefixCachePolicy::resolve_from_env(
             &prefixes,
+            condition.is_some(),
             conditioning.batch_size(),
             dtype,
-            device,
         );
         if decisions.contains(&super::PrefixCacheDecision::Recompute) {
             progress.info(
