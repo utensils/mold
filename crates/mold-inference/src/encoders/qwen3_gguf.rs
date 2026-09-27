@@ -1,9 +1,15 @@
-//! Quantized Qwen3-4B encoder loader for GGUF files (llama.cpp standard naming).
+//! Quantized Qwen3 language-model loader for GGUF files (llama.cpp standard naming).
 //!
-//! Implements the Qwen3-4B architecture used as the Z-Image text encoder.
-//! Architecture: 36 layers, 32 Q heads, 8 KV heads (GQA 4:1), 2560 hidden, 128 head_dim,
-//! SwiGLU MLP (9728 intermediate), RoPE theta=1e6, RMSNorm eps=1e-6.
-//! Returns second-to-last layer output (layer 34 of 36), no final norm.
+//! Serves three checkpoints: the Qwen3-4B Z-Image / Klein-4B encoder, the
+//! Qwen3-8B Klein-9B encoder, and the language half of Qwen3-VL-8B-Instruct
+//! (Qwen Image 2.1). All three share one block: 32 Q heads, 8 KV heads (GQA
+//! 4:1), 128 head_dim, SwiGLU MLP, per-head Q/K RMS norms before RoPE. What
+//! differs is read from the GGUF's own metadata under its
+//! `general.architecture` key (`qwen3.*` or `qwen3vl.*`): the block count, the
+//! RoPE base (1e6 for Qwen3, 5e6 for Qwen3-VL — `qwen3vl.rope.freq_base`), the
+//! RMS epsilon and the head counts. A file carrying none of them keeps the
+//! historical Qwen3-4B constants, so every existing checkpoint builds exactly
+//! as before.
 //!
 //! GGUF tensor names (llama.cpp standard):
 //! - `token_embd.weight`
@@ -12,6 +18,11 @@
 //! - `blk.{i}.attn_q_norm.weight`, `blk.{i}.attn_k_norm.weight`
 //! - `blk.{i}.ffn_norm.weight`, `blk.{i}.ffn_gate.weight`, `blk.{i}.ffn_up.weight`,
 //!   `blk.{i}.ffn_down.weight`
+//!
+//! llama.cpp's Qwen2/3/3-VL converters keep HuggingFace's Q/K row order (NEOX
+//! rope, `rotate_half`), so the half-split rotation below is the checkpoint's
+//! own; the weight-gated parity test pins each dequantized tensor to the BF16
+//! shards, which is what proves no permutation happened.
 
 use anyhow::Result;
 use candle_core::quantized::gguf_file;
@@ -22,19 +33,106 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-// ── Qwen3-4B architecture constants ──────────────────────────────────────────
+use super::qwen3_vl_inject::{self, VisualInjection};
+
+// ── Architecture ─────────────────────────────────────────────────────────────
 
 /// Default layer count for Qwen3-4B (read from GGUF metadata if available).
 const DEFAULT_N_LAYERS: usize = 36;
-const N_HEADS: usize = 32; // Q heads
-const N_KV_HEADS: usize = 8; // K/V heads (GQA 4:1)
-const HEAD_DIM: usize = 128;
-const ROPE_THETA: f64 = 1_000_000.0;
-const RMS_NORM_EPS: f64 = 1e-6;
+const DEFAULT_N_HEADS: usize = 32; // Q heads
+const DEFAULT_N_KV_HEADS: usize = 8; // K/V heads (GQA 4:1)
+const DEFAULT_HEAD_DIM: usize = 128;
+const DEFAULT_ROPE_THETA: f64 = 1_000_000.0;
+const DEFAULT_RMS_NORM_EPS: f64 = 1e-6;
 /// Return output after this many layers (second-to-last = 35 layers of 36).
 const N_RETURN_LAYERS: usize = 35;
-/// GQA repeat factor: each KV head serves this many Q heads.
-const KV_REPEAT: usize = N_HEADS / N_KV_HEADS; // 4
+/// Query rows per attention chunk: bounds the score tile to
+/// `heads x chunk x keys` however long the (multimodal) sequence is.
+const ATTENTION_QUERY_CHUNK: usize = 1024;
+
+/// The per-checkpoint half of the architecture, from GGUF metadata.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GgufQwen3Arch {
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+    pub rope_theta: f64,
+    pub rms_norm_eps: f64,
+}
+
+impl Default for GgufQwen3Arch {
+    fn default() -> Self {
+        Self {
+            n_layers: DEFAULT_N_LAYERS,
+            n_heads: DEFAULT_N_HEADS,
+            n_kv_heads: DEFAULT_N_KV_HEADS,
+            head_dim: DEFAULT_HEAD_DIM,
+            rope_theta: DEFAULT_ROPE_THETA,
+            rms_norm_eps: DEFAULT_RMS_NORM_EPS,
+        }
+    }
+}
+
+impl GgufQwen3Arch {
+    /// Read the architecture from `metadata`, under `general.architecture`
+    /// (llama.cpp writes `qwen3` or `qwen3vl`), falling back to `qwen3.*` and
+    /// `llama.*` and then to the Qwen3-4B defaults field by field.
+    pub(crate) fn from_metadata(metadata: &HashMap<String, gguf_file::Value>) -> Result<Self> {
+        let arch = match metadata.get("general.architecture") {
+            Some(gguf_file::Value::String(arch)) => Some(arch.clone()),
+            _ => None,
+        };
+        let prefixes = arch
+            .iter()
+            .map(String::as_str)
+            .chain(["qwen3", "llama"])
+            .collect::<Vec<_>>();
+        let find = |suffix: &str| {
+            prefixes
+                .iter()
+                .find_map(|prefix| metadata.get(&format!("{prefix}.{suffix}")))
+        };
+        let integer = |suffix: &str, default: usize| -> Result<usize> {
+            Ok(match find(suffix) {
+                None => default,
+                Some(value) => value
+                    .to_u64()
+                    .map(|v| v as usize)
+                    .or_else(|_| value.to_u32().map(|v| v as usize))?,
+            })
+        };
+        let float = |suffix: &str, default: f64| -> Result<f64> {
+            Ok(match find(suffix) {
+                None => default,
+                Some(gguf_file::Value::F32(v)) => f64::from(*v),
+                Some(gguf_file::Value::F64(v)) => *v,
+                Some(other) => anyhow::bail!("GGUF {suffix} is not a float: {other:?}"),
+            })
+        };
+        let n_heads = integer("attention.head_count", DEFAULT_N_HEADS)?;
+        let arch = Self {
+            n_layers: integer("block_count", DEFAULT_N_LAYERS)?,
+            n_heads,
+            n_kv_heads: integer("attention.head_count_kv", DEFAULT_N_KV_HEADS)?,
+            head_dim: integer("attention.key_length", DEFAULT_HEAD_DIM)?,
+            rope_theta: float("rope.freq_base", DEFAULT_ROPE_THETA)?,
+            rms_norm_eps: float("attention.layer_norm_rms_epsilon", DEFAULT_RMS_NORM_EPS)?,
+        };
+        anyhow::ensure!(
+            arch.n_layers > 0
+                && arch.n_kv_heads > 0
+                && arch.n_heads.is_multiple_of(arch.n_kv_heads)
+                && arch.head_dim.is_multiple_of(2),
+            "GGUF Qwen3 architecture is inconsistent: {arch:?}"
+        );
+        Ok(arch)
+    }
+
+    fn kv_repeat(&self) -> usize {
+        self.n_heads / self.n_kv_heads
+    }
+}
 
 // ── RMS Layer Norm ───────────────────────────────────────────────────────────
 
@@ -56,27 +154,64 @@ impl RmsNorm {
 
 // ── RoPE (Rotary Position Embeddings) ────────────────────────────────────────
 
-fn compute_rope(seq_len: usize, device: &Device) -> Result<(Tensor, Tensor)> {
-    let half_dim = HEAD_DIM / 2;
-    let inv_freq: Vec<f32> = (0..half_dim)
-        .map(|i| 1.0f32 / (ROPE_THETA as f32).powf(2.0 * i as f32 / HEAD_DIM as f32))
-        .collect();
-    let inv_freq = Tensor::from_vec(inv_freq, (1, half_dim), device)?;
+fn inv_freq(arch: &GgufQwen3Arch) -> Vec<f32> {
+    let half_dim = arch.head_dim / 2;
+    (0..half_dim)
+        .map(|i| 1.0f32 / (arch.rope_theta as f32).powf(2.0 * i as f32 / arch.head_dim as f32))
+        .collect()
+}
+
+/// `(cos, sin)` for the shared positions `0..seq_len`, each `(seq_len, half)`.
+fn compute_rope(arch: &GgufQwen3Arch, seq_len: usize, device: &Device) -> Result<(Tensor, Tensor)> {
+    let half_dim = arch.head_dim / 2;
+    let inv_freq = Tensor::from_vec(inv_freq(arch), (1, half_dim), device)?;
     let positions: Vec<f32> = (0..seq_len).map(|p| p as f32).collect();
     let positions = Tensor::from_vec(positions, (seq_len, 1), device)?;
     let freqs = positions.matmul(&inv_freq)?; // (seq_len, half_dim)
     Ok((freqs.cos()?, freqs.sin()?))
 }
 
-/// Apply rotary embeddings to a tensor of shape (batch, heads, seq_len, head_dim).
+/// `(cos, sin)` for per-row positions, each `(batch, seq_len, half)` — the
+/// left-padded Qwen3-VL prompt batches restart every row's positions at zero
+/// (`Bf16Qwen3Encoder::rope_positions_for_attention`).
+fn compute_rope_rows(
+    arch: &GgufQwen3Arch,
+    rows: &[Vec<usize>],
+    device: &Device,
+) -> Result<(Tensor, Tensor)> {
+    let half_dim = arch.head_dim / 2;
+    let seq_len = rows.first().map_or(0, Vec::len);
+    let freqs = inv_freq(arch);
+    let mut angles = Vec::with_capacity(rows.len() * seq_len * half_dim);
+    for row in rows {
+        anyhow::ensure!(row.len() == seq_len, "ragged Qwen3 position rows");
+        for &position in row {
+            angles.extend(freqs.iter().map(|freq| position as f32 * freq));
+        }
+    }
+    let angles = Tensor::from_vec(angles, (rows.len(), seq_len, half_dim), device)?;
+    Ok((angles.cos()?, angles.sin()?))
+}
+
+/// Apply rotary embeddings to `(batch, heads, seq_len, head_dim)`. `cos`/`sin`
+/// are `(seq, half)` shared by every row, or `(batch, seq, half)` per row.
 fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let (_b, _h, seq_len, _d) = x.dims4()?;
-    let half = HEAD_DIM / 2;
+    let (_b, _h, seq_len, head_dim) = x.dims4()?;
+    let half = head_dim / 2;
     let x1 = x.narrow(D::Minus1, 0, half)?;
     let x2 = x.narrow(D::Minus1, half, half)?;
-    // cos/sin: (seq_len, half_dim) → (1, 1, seq_len, half_dim)
-    let cos = cos.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
-    let sin = sin.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
+    let (cos, sin) = if cos.rank() == 2 {
+        // (seq_len, half_dim) → (1, 1, seq_len, half_dim)
+        (
+            cos.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?,
+            sin.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?,
+        )
+    } else {
+        // (batch, seq_len, half_dim) → (batch, 1, seq_len, half_dim)
+        (cos.unsqueeze(1)?, sin.unsqueeze(1)?)
+    };
+    let cos = cos.to_dtype(x.dtype())?;
+    let sin = sin.to_dtype(x.dtype())?;
     let out1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
     let out2 = (x2.broadcast_mul(&cos)? + x1.broadcast_mul(&sin)?)?;
     Tensor::cat(&[&out1, &out2], D::Minus1).map_err(Into::into)
@@ -132,6 +267,7 @@ struct Qwen3Attention {
     o_proj: QMatMul,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
+    arch: GgufQwen3Arch,
 }
 
 impl Qwen3Attention {
@@ -143,20 +279,21 @@ impl Qwen3Attention {
         mask: &Tensor,
     ) -> Result<Tensor> {
         let (b, seq_len, _) = xs.dims3()?;
+        let arch = self.arch;
 
         // Project Q/K/V
         let q = self
             .q_proj
             .forward(xs)?
-            .reshape((b, seq_len, N_HEADS, HEAD_DIM))?;
+            .reshape((b, seq_len, arch.n_heads, arch.head_dim))?;
         let k = self
             .k_proj
             .forward(xs)?
-            .reshape((b, seq_len, N_KV_HEADS, HEAD_DIM))?;
+            .reshape((b, seq_len, arch.n_kv_heads, arch.head_dim))?;
         let v = self
             .v_proj
             .forward(xs)?
-            .reshape((b, seq_len, N_KV_HEADS, HEAD_DIM))?;
+            .reshape((b, seq_len, arch.n_kv_heads, arch.head_dim))?;
 
         // Per-head Q/K norms (applied before RoPE)
         let q = self.q_norm.forward(&q)?;
@@ -172,20 +309,39 @@ impl Qwen3Attention {
         let k = apply_rotary_emb(&k, cos, sin)?;
 
         // GQA: repeat KV heads to match Q head count
-        let k = repeat_kv(&k, KV_REPEAT)?;
-        let v = repeat_kv(&v, KV_REPEAT)?;
+        let k = repeat_kv(&k, arch.kv_repeat())?;
+        let v = repeat_kv(&v, arch.kv_repeat())?.contiguous()?;
 
-        // Scaled dot-product attention with causal mask
-        let scale = 1.0 / (HEAD_DIM as f64).sqrt();
-        let scores = (q.matmul(&k.t()?)? * scale)?;
-        let scores = scores.broadcast_add(mask)?;
-        let attn_weights = candle_nn::ops::softmax_last_dim(&scores)?;
-        let attn_output = attn_weights.matmul(&v.contiguous()?)?;
+        // Scaled dot-product attention with the additive mask, one bounded
+        // block of query rows at a time. A single chunk is exactly the
+        // unchunked computation, so every prompt under the chunk size runs
+        // the historical arithmetic.
+        let scale = 1.0 / (arch.head_dim as f64).sqrt();
+        let k_t = k.t()?;
+        let mut chunks = Vec::with_capacity(seq_len.div_ceil(ATTENTION_QUERY_CHUNK));
+        for start in (0..seq_len).step_by(ATTENTION_QUERY_CHUNK) {
+            let rows = ATTENTION_QUERY_CHUNK.min(seq_len - start);
+            let (q, mask) = if rows == seq_len {
+                (q.clone(), mask.clone())
+            } else {
+                (q.narrow(2, start, rows)?, mask.narrow(2, start, rows)?)
+            };
+            let scores = (q.matmul(&k_t)? * scale)?;
+            let scores = scores.broadcast_add(&mask)?;
+            let attn_weights = candle_nn::ops::softmax_last_dim(&scores)?;
+            chunks.push(attn_weights.matmul(&v)?);
+        }
+        let attn_output = if chunks.len() == 1 {
+            chunks.pop().expect("one chunk")
+        } else {
+            Tensor::cat(&chunks, 2)?
+        };
 
         // Reshape back: (B, heads, seq, head_dim) → (B, seq, hidden_dim)
-        let attn_output = attn_output
-            .transpose(1, 2)?
-            .reshape((b, seq_len, N_HEADS * HEAD_DIM))?;
+        let attn_output =
+            attn_output
+                .transpose(1, 2)?
+                .reshape((b, seq_len, arch.n_heads * arch.head_dim))?;
 
         self.o_proj.forward(&attn_output).map_err(Into::into)
     }
@@ -219,7 +375,6 @@ impl Qwen3Block {
         (xs + ffn_output).map_err(Into::into)
     }
 }
-
 // ── GgufQwen3Encoder ─────────────────────────────────────────────────────────
 
 /// Quantized Qwen3-4B encoder loaded from a GGUF file with llama.cpp standard names.
@@ -237,6 +392,7 @@ pub(crate) struct GgufQwen3Encoder {
     /// that single entry to the host, so the retained map adds no device bytes
     /// at all.
     retained: GgufCheckpoint,
+    arch: GgufQwen3Arch,
 }
 
 /// A parked GGUF checkpoint: every tensor on the host, plus the header
@@ -322,18 +478,12 @@ impl GgufQwen3Encoder {
         let d_model = emb_weights.dim(1)?;
         let embedding = candle_nn::Embedding::new(emb_weights, d_model);
 
-        // Read layer count from metadata, default to 36 (Qwen3-4B)
-        let n_layers = metadata
-            .get("qwen3.block_count")
-            .or_else(|| metadata.get("llama.block_count"))
-            .and_then(|v| match v {
-                gguf_file::Value::U32(n) => Some(*n as usize),
-                _ => None,
-            })
-            .unwrap_or(DEFAULT_N_LAYERS);
+        // Block count, head geometry, RoPE base and epsilon from the file's own
+        // metadata (`qwen3.*`, `qwen3vl.*`), Qwen3-4B defaults otherwise.
+        let arch = GgufQwen3Arch::from_metadata(&metadata)?;
 
-        let mut blocks = Vec::with_capacity(n_layers);
-        for i in 0..n_layers {
+        let mut blocks = Vec::with_capacity(arch.n_layers);
+        for i in 0..arch.n_layers {
             let prefix = format!("blk.{i}");
 
             // Q/K/V/O projections
@@ -346,24 +496,24 @@ impl GgufQwen3Encoder {
             let q_norm_w = get(&format!("{prefix}.attn_q_norm.weight"))?.dequantize(device)?;
             let q_norm = RmsNorm {
                 weight: q_norm_w,
-                eps: RMS_NORM_EPS,
+                eps: arch.rms_norm_eps,
             };
             let k_norm_w = get(&format!("{prefix}.attn_k_norm.weight"))?.dequantize(device)?;
             let k_norm = RmsNorm {
                 weight: k_norm_w,
-                eps: RMS_NORM_EPS,
+                eps: arch.rms_norm_eps,
             };
 
             // Attention + FFN norms
             let attn_norm_w = get(&format!("{prefix}.attn_norm.weight"))?.dequantize(device)?;
             let attn_norm = RmsNorm {
                 weight: attn_norm_w,
-                eps: RMS_NORM_EPS,
+                eps: arch.rms_norm_eps,
             };
             let ffn_norm_w = get(&format!("{prefix}.ffn_norm.weight"))?.dequantize(device)?;
             let ffn_norm = RmsNorm {
                 weight: ffn_norm_w,
-                eps: RMS_NORM_EPS,
+                eps: arch.rms_norm_eps,
             };
 
             // SwiGLU FFN
@@ -378,6 +528,7 @@ impl GgufQwen3Encoder {
                 o_proj,
                 q_norm,
                 k_norm,
+                arch,
             };
 
             let ffn = SwiGluFFN { gate, up, down };
@@ -402,8 +553,109 @@ impl GgufQwen3Encoder {
         Ok(Self {
             embedding,
             blocks,
+            arch,
             retained: (retained, metadata),
         })
+    }
+
+    /// The architecture this checkpoint declared.
+    #[allow(dead_code)] // read by the multimodal conditioning encoder and tests
+    pub(crate) fn arch(&self) -> GgufQwen3Arch {
+        self.arch
+    }
+
+    /// Run every decoder layer and return the final hidden states BEFORE the
+    /// model's final RMSNorm — the state Qwen Image 2.1 consumes (diffusers
+    /// `pipeline_qwenimage21.py` takes `hidden_states[-1]` pre-norm), and the
+    /// GGUF twin of `Bf16Qwen3Encoder::forward_final_pre_norm_with_attention`.
+    ///
+    /// `attention[b][key]` marks the real positions of batch row `b` in a
+    /// left-padded prompt batch. With it, the mask is the BF16 encoder's
+    /// causal + key-padding mask (including its unmask-unattended rule) and
+    /// each row's RoPE positions restart at zero after its pads, exactly as
+    /// transformers' `get_rope_index` derives them. `None` is plain causal
+    /// over positions `0..L`.
+    pub(crate) fn forward_final_pre_norm_with_attention(
+        &mut self,
+        input_ids: &Tensor,
+        attention: Option<&[Vec<bool>]>,
+    ) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        let mut xs = self.embedding.forward(input_ids)?;
+        let (cos, sin, mask) = match attention {
+            Some(rows) => {
+                anyhow::ensure!(
+                    rows.len() == batch,
+                    "Qwen3 attention mask mismatch: {batch} batch row(s) expected, got {}",
+                    rows.len()
+                );
+                let positions = super::qwen3_bf16::Bf16Qwen3Encoder::rope_positions_for_attention(
+                    rows, seq_len,
+                )?;
+                let (cos, sin) = compute_rope_rows(&self.arch, &positions, xs.device())?;
+                let mask = super::qwen3_bf16::Bf16Qwen3Encoder::batch_attention_mask(
+                    rows,
+                    seq_len,
+                    xs.dtype(),
+                    xs.device(),
+                )?;
+                (cos, sin, mask)
+            }
+            None => {
+                let (cos, sin) = compute_rope(&self.arch, seq_len, xs.device())?;
+                (cos, sin, causal_mask(seq_len, xs.dtype(), xs.device())?)
+            }
+        };
+        for block in self.blocks.iter_mut() {
+            xs = block.forward(&xs, &cos, &sin, &mask)?;
+        }
+        Ok(xs)
+    }
+
+    /// The multimodal forward: `<|image_pad|>` rows replaced by the vision
+    /// merger's output, interleaved MRoPE from three position axes, and
+    /// DeepStack features added after the first layers — transformers
+    /// `modeling_qwen3_vl.py` (`Qwen3VLModel.forward`, `:299-314`, `:861-883`).
+    ///
+    /// Batch-1, like the BF16 twin: upstream encodes the positive and negative
+    /// prompts in separate calls. `mrope` holds the T/H/W position of every
+    /// token (text tokens carry the same value on all three axes). Returns
+    /// the final hidden states before the final RMSNorm.
+    #[allow(dead_code)] // driven by the reference-image conditioning encoder
+    pub(crate) fn forward_multimodal_final_pre_norm(
+        &mut self,
+        input_ids: &Tensor,
+        visual: Option<VisualInjection>,
+        mrope: &[Vec<u32>; 3],
+    ) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        anyhow::ensure!(batch == 1, "Qwen3-VL multimodal forward is batch-1");
+        anyhow::ensure!(
+            mrope.iter().all(|axis| axis.len() == seq_len),
+            "Qwen3-VL MRoPE positions cover {} tokens, the input has {seq_len}",
+            mrope[0].len()
+        );
+        let mut xs = self.embedding.forward(input_ids)?;
+        let hidden = xs.dim(2)?;
+        if let Some(visual) = &visual {
+            visual.validate(seq_len, hidden, self.blocks.len())?;
+            xs = qwen3_vl_inject::inject_visual_rows(&xs, visual)?;
+        }
+        let (cos, sin) = qwen3_vl_inject::mrope_cos_sin(
+            mrope,
+            self.arch.head_dim,
+            self.arch.rope_theta,
+            qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS,
+            xs.device(),
+        )?;
+        let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
+        for (layer, block) in self.blocks.iter_mut().enumerate() {
+            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            if let Some(visual) = &visual {
+                xs = qwen3_vl_inject::apply_deepstack(&xs, visual, layer)?;
+            }
+        }
+        Ok(xs)
     }
 
     /// Run the Qwen3 encoder forward pass.
@@ -414,7 +666,7 @@ impl GgufQwen3Encoder {
         let mut xs = self.embedding.forward(input_ids)?;
 
         // Compute RoPE sin/cos for this sequence length
-        let (cos, sin) = compute_rope(seq_len, xs.device())?;
+        let (cos, sin) = compute_rope(&self.arch, seq_len, xs.device())?;
 
         // Compute causal attention mask
         let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
@@ -455,7 +707,7 @@ impl GgufQwen3Encoder {
 
         let (_batch, seq_len) = input_ids.dims2()?;
         let mut xs = self.embedding.forward(input_ids)?;
-        let (cos, sin) = compute_rope(seq_len, xs.device())?;
+        let (cos, sin) = compute_rope(&self.arch, seq_len, xs.device())?;
         let mask = match attention {
             Some(attention) => {
                 if attention.len() != seq_len {
@@ -518,9 +770,9 @@ mod tests {
     const TEST_VOCAB: usize = 32;
     const TEST_FFN: usize = 256;
     /// The block width is fixed by the architecture constants above
-    /// (`N_HEADS * HEAD_DIM`), so a "tiny" fixture can shrink the vocabulary
+    /// (`DEFAULT_N_HEADS * DEFAULT_HEAD_DIM`), so a "tiny" fixture can shrink the vocabulary
     /// and the FFN but not this.
-    const TEST_DIM: usize = N_HEADS * HEAD_DIM;
+    const TEST_DIM: usize = DEFAULT_N_HEADS * DEFAULT_HEAD_DIM;
 
     /// A deterministic quantized tensor of the given shape.
     fn q(shape: (usize, usize), seed: f32) -> Arc<QTensor> {
@@ -544,7 +796,7 @@ mod tests {
     fn synthetic_checkpoint() -> GgufCheckpoint {
         let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
         tensors.insert("token_embd.weight".into(), q((TEST_VOCAB, TEST_DIM), 0.1));
-        let kv_width = N_KV_HEADS * HEAD_DIM;
+        let kv_width = DEFAULT_N_KV_HEADS * DEFAULT_HEAD_DIM;
         tensors.insert("blk.0.attn_q.weight".into(), q((TEST_DIM, TEST_DIM), 0.2));
         tensors.insert("blk.0.attn_k.weight".into(), q((kv_width, TEST_DIM), 0.3));
         tensors.insert("blk.0.attn_v.weight".into(), q((kv_width, TEST_DIM), 0.4));
@@ -552,8 +804,14 @@ mod tests {
             "blk.0.attn_output.weight".into(),
             q((TEST_DIM, TEST_DIM), 0.5),
         );
-        tensors.insert("blk.0.attn_q_norm.weight".into(), norm(HEAD_DIM, 0.6));
-        tensors.insert("blk.0.attn_k_norm.weight".into(), norm(HEAD_DIM, 0.7));
+        tensors.insert(
+            "blk.0.attn_q_norm.weight".into(),
+            norm(DEFAULT_HEAD_DIM, 0.6),
+        );
+        tensors.insert(
+            "blk.0.attn_k_norm.weight".into(),
+            norm(DEFAULT_HEAD_DIM, 0.7),
+        );
         tensors.insert("blk.0.attn_norm.weight".into(), norm(TEST_DIM, 0.8));
         tensors.insert("blk.0.ffn_norm.weight".into(), norm(TEST_DIM, 0.9));
         tensors.insert("blk.0.ffn_gate.weight".into(), q((TEST_FFN, TEST_DIM), 1.0));
@@ -650,5 +908,271 @@ mod tests {
             unshared_device_bytes < NEGLIGIBLE,
             "the retained map holds {unshared_device_bytes} device bytes nothing else is using"
         );
+    }
+
+    fn to_rows(t: &Tensor) -> Vec<Vec<f32>> {
+        t.squeeze(0).unwrap().to_vec2::<f32>().unwrap()
+    }
+
+    fn max_diff(a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+        a.iter()
+            .zip(b)
+            .flat_map(|(x, y)| x.iter().zip(y).map(|(p, q)| (p - q).abs()))
+            .fold(0.0, f32::max)
+    }
+
+    fn tiny_encoder() -> GgufQwen3Encoder {
+        let (tensors, metadata) = synthetic_checkpoint();
+        GgufQwen3Encoder::from_tensors(tensors, metadata, &Device::Cpu).unwrap()
+    }
+
+    /// Qwen3-VL-8B's own GGUF header (`Qwen/Qwen3-VL-8B-Instruct-GGUF`):
+    /// `general.architecture = qwen3vl` and every hyperparameter under that
+    /// prefix, including the 5e6 RoPE base the stock Qwen3 files do not use.
+    #[test]
+    fn qwen3vl_metadata_sets_the_architecture() {
+        let mut metadata = HashMap::new();
+        let s = |v: &str| gguf_file::Value::String(v.to_string());
+        metadata.insert("general.architecture".to_string(), s("qwen3vl"));
+        metadata.insert("qwen3vl.block_count".into(), gguf_file::Value::U32(36));
+        metadata.insert(
+            "qwen3vl.attention.head_count".into(),
+            gguf_file::Value::U32(32),
+        );
+        metadata.insert(
+            "qwen3vl.attention.head_count_kv".into(),
+            gguf_file::Value::U32(8),
+        );
+        metadata.insert(
+            "qwen3vl.attention.key_length".into(),
+            gguf_file::Value::U32(128),
+        );
+        metadata.insert(
+            "qwen3vl.rope.freq_base".into(),
+            gguf_file::Value::F32(5_000_000.0),
+        );
+        metadata.insert(
+            "qwen3vl.attention.layer_norm_rms_epsilon".into(),
+            gguf_file::Value::F32(1e-6),
+        );
+        let arch = GgufQwen3Arch::from_metadata(&metadata).unwrap();
+        assert_eq!(arch.n_layers, 36);
+        assert_eq!(arch.rope_theta, 5_000_000.0);
+        assert_eq!(arch.rms_norm_eps as f32, 1e-6);
+
+        // A stock Qwen3 file (only `qwen3.block_count`) keeps every default,
+        // and an empty header is exactly the historical Qwen3-4B constants.
+        let mut stock = HashMap::new();
+        stock.insert("qwen3.block_count".into(), gguf_file::Value::U32(1));
+        let stock = GgufQwen3Arch::from_metadata(&stock).unwrap();
+        assert_eq!(
+            stock,
+            GgufQwen3Arch {
+                n_layers: 1,
+                ..GgufQwen3Arch::default()
+            }
+        );
+        assert_eq!(stock.rope_theta, 1_000_000.0);
+
+        // An inconsistent header is refused rather than built.
+        let mut bad = HashMap::new();
+        bad.insert(
+            "qwen3.attention.head_count_kv".into(),
+            gguf_file::Value::U32(7),
+        );
+        assert!(GgufQwen3Arch::from_metadata(&bad).is_err());
+    }
+
+    /// The RoPE base is live: the same weights under a different
+    /// `rope.freq_base` produce different hidden states.
+    #[test]
+    fn the_rope_base_reaches_the_forward() {
+        let (tensors, mut metadata) = synthetic_checkpoint();
+        let mut base =
+            GgufQwen3Encoder::from_tensors(tensors.clone(), metadata.clone(), &Device::Cpu)
+                .unwrap();
+        metadata.insert(
+            "qwen3.rope.freq_base".into(),
+            gguf_file::Value::F32(5_000_000.0),
+        );
+        let mut vl = GgufQwen3Encoder::from_tensors(tensors, metadata, &Device::Cpu).unwrap();
+        assert_eq!(vl.arch().rope_theta, 5_000_000.0);
+        let ids = Tensor::from_vec(vec![1u32, 5, 9, 2, 7], (1, 5), &Device::Cpu).unwrap();
+        let a = to_rows(
+            &base
+                .forward_final_pre_norm_with_attention(&ids, None)
+                .unwrap(),
+        );
+        let b = to_rows(
+            &vl.forward_final_pre_norm_with_attention(&ids, None)
+                .unwrap(),
+        );
+        assert_eq!(max_diff(&a[..1], &b[..1]), 0.0, "position 0 is theta-free");
+        assert!(
+            max_diff(&a, &b) > 1e-6,
+            "later positions must move with theta"
+        );
+    }
+
+    /// The pre-norm forward runs EVERY layer: on the synthetic one-block
+    /// checkpoint it is the output of layer 0, which `forward_with_layers`
+    /// exposes independently.
+    #[test]
+    fn the_pre_norm_forward_is_the_last_layers_output() {
+        let mut encoder = tiny_encoder();
+        let ids = Tensor::from_vec(vec![3u32, 1, 4, 1, 5], (1, 5), &Device::Cpu).unwrap();
+        let pre_norm = encoder
+            .forward_final_pre_norm_with_attention(&ids, None)
+            .unwrap();
+        let layer0 = encoder.forward_with_layers(&ids, &[0], None).unwrap();
+        assert_eq!(max_diff(&to_rows(&pre_norm), &to_rows(&layer0)), 0.0);
+        // An all-real mask is the plain causal forward.
+        let all = vec![vec![true; 5]];
+        let masked = encoder
+            .forward_final_pre_norm_with_attention(&ids, Some(&all))
+            .unwrap();
+        assert!(max_diff(&to_rows(&pre_norm), &to_rows(&masked)) < 1e-6);
+    }
+
+    /// Qwen Image 2.1 left-pads its prompt batches. The real tokens of a
+    /// padded row must see exactly what an unpadded run of the same tokens
+    /// sees: pad keys masked, and RoPE positions restarting at zero.
+    #[test]
+    fn a_left_padded_row_matches_the_unpadded_prompt() {
+        let mut encoder = tiny_encoder();
+        let prompt = [7u32, 2, 9];
+        let plain = Tensor::from_vec(prompt.to_vec(), (1, 3), &Device::Cpu).unwrap();
+        let expected = to_rows(
+            &encoder
+                .forward_final_pre_norm_with_attention(&plain, None)
+                .unwrap(),
+        );
+        let padded = Tensor::from_vec(vec![0u32, 0, 7, 2, 9], (1, 5), &Device::Cpu).unwrap();
+        let rows = vec![vec![false, false, true, true, true]];
+        let actual = to_rows(
+            &encoder
+                .forward_final_pre_norm_with_attention(&padded, Some(&rows))
+                .unwrap(),
+        );
+        assert!(
+            max_diff(&actual[2..], &expected) < 1e-4,
+            "padded row diverged by {}",
+            max_diff(&actual[2..], &expected)
+        );
+        // Batched: a second row with no padding is its own unpadded forward.
+        let batch =
+            Tensor::from_vec(vec![0u32, 0, 7, 2, 9, 4, 4, 7, 2, 9], (2, 5), &Device::Cpu).unwrap();
+        let rows = vec![
+            vec![false, false, true, true, true],
+            vec![true, true, true, true, true],
+        ];
+        let out = encoder
+            .forward_final_pre_norm_with_attention(&batch, Some(&rows))
+            .unwrap();
+        let first = out.narrow(0, 0, 1).unwrap();
+        assert!(max_diff(&to_rows(&first)[2..], &expected) < 1e-4);
+        assert!(encoder
+            .forward_final_pre_norm_with_attention(&batch, Some(&rows[..1]))
+            .is_err());
+    }
+
+    /// With no visual rows and equal T/H/W positions, the multimodal forward
+    /// is the text forward.
+    #[test]
+    fn a_text_only_multimodal_forward_is_the_text_forward() {
+        let mut encoder = tiny_encoder();
+        let ids = Tensor::from_vec(vec![1u32, 2, 3, 4, 5, 6], (1, 6), &Device::Cpu).unwrap();
+        let text = to_rows(
+            &encoder
+                .forward_final_pre_norm_with_attention(&ids, None)
+                .unwrap(),
+        );
+        let positions: Vec<u32> = (0..6).collect();
+        let mrope = [positions.clone(), positions.clone(), positions];
+        let multimodal = to_rows(
+            &encoder
+                .forward_multimodal_final_pre_norm(&ids, None, &mrope)
+                .unwrap(),
+        );
+        assert!(max_diff(&text, &multimodal) < 1e-5);
+    }
+
+    /// Visual rows and DeepStack are causal: nothing before the first image
+    /// pad moves, and the pad rows themselves do.
+    #[test]
+    fn visual_injection_moves_only_the_image_rows_and_what_follows() {
+        let mut encoder = tiny_encoder();
+        let ids = Tensor::from_vec(vec![1u32, 2, 3, 3, 3, 4], (1, 6), &Device::Cpu).unwrap();
+        let t: Vec<u32> = vec![0, 1, 2, 2, 2, 3];
+        let h: Vec<u32> = vec![0, 1, 2, 2, 3, 3];
+        let w: Vec<u32> = vec![0, 1, 2, 3, 2, 3];
+        let mrope = [t, h, w];
+        let plain = to_rows(
+            &encoder
+                .forward_multimodal_final_pre_norm(&ids, None, &mrope)
+                .unwrap(),
+        );
+        let rows = |salt: f32| {
+            Tensor::from_vec(
+                (0..3 * TEST_DIM)
+                    .map(|i| ((i as f32) * 0.01 + salt).sin() * 0.1)
+                    .collect::<Vec<_>>(),
+                (3, TEST_DIM),
+                &Device::Cpu,
+            )
+            .unwrap()
+        };
+        let visual = VisualInjection {
+            positions: vec![2, 3, 4],
+            embeds: rows(0.3),
+            deepstack: vec![rows(0.7)],
+        };
+        let injected = to_rows(
+            &encoder
+                .forward_multimodal_final_pre_norm(&ids, Some(visual.clone()), &mrope)
+                .unwrap(),
+        );
+        assert_eq!(max_diff(&plain[..2], &injected[..2]), 0.0);
+        assert!(max_diff(&plain[2..], &injected[2..]) > 1e-4);
+        // More DeepStack features than layers is refused.
+        let too_many = VisualInjection {
+            deepstack: vec![rows(0.1), rows(0.2)],
+            ..visual
+        };
+        assert!(encoder
+            .forward_multimodal_final_pre_norm(&ids, Some(too_many), &mrope)
+            .is_err());
+    }
+
+    /// Chunking the attention's query rows is the same arithmetic.
+    #[test]
+    fn chunked_attention_matches_one_chunk() {
+        let mut encoder = tiny_encoder();
+        let seq = ATTENTION_QUERY_CHUNK + 5;
+        let ids = Tensor::from_vec(
+            (0..seq as u32)
+                .map(|i| i % TEST_VOCAB as u32)
+                .collect::<Vec<_>>(),
+            (1, seq),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let chunked = encoder
+            .forward_final_pre_norm_with_attention(&ids, None)
+            .unwrap();
+        // The last row sees every key; recompute it on a prompt short enough
+        // to be one chunk by checking the first chunk's rows against a run
+        // truncated to them (causality makes row i depend on 0..=i only).
+        let head = ids.narrow(1, 0, 40).unwrap();
+        let short = encoder
+            .forward_final_pre_norm_with_attention(&head, None)
+            .unwrap();
+        assert!(
+            max_diff(
+                &to_rows(&chunked.narrow(1, 0, 40).unwrap()),
+                &to_rows(&short)
+            ) < 1e-5
+        );
+        assert_eq!(chunked.dims(), [1, seq, TEST_DIM]);
     }
 }

@@ -4895,12 +4895,15 @@ pub fn find_umt5_variant(tag: &str) -> Option<&'static Umt5Variant> {
 // ── Quantized Qwen3 variant registry ──────────────────────────────────────────
 
 /// A quantized Qwen3 text encoder variant available from HuggingFace.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen3Variant {
     pub tag: &'static str,
     pub hf_repo: &'static str,
     pub hf_filename: &'static str,
     pub size_bytes: u64,
+    /// Pinned LFS digest, verified after download when present. The
+    /// historical Qwen3 lists predate pinning and resolve unpinned.
+    pub sha256: Option<&'static str>,
 }
 
 /// A quantized Qwen2.5-VL text encoder variant available from HuggingFace.
@@ -4920,24 +4923,28 @@ pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-Q8_0.gguf",
             size_bytes: 4_280_404_704,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "q6",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-Q6_K.gguf",
             size_bytes: 3_306_260_704,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "iq4",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-imatrix-IQ4_XS.gguf",
             size_bytes: 2_270_751_136,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "q3",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-imatrix-Q3_K_M.gguf",
             size_bytes: 2_075_617_696,
+            sha256: None,
         },
     ];
     VARIANTS
@@ -5006,24 +5013,28 @@ pub fn known_qwen3_8b_variants() -> &'static [Qwen3Variant] {
             hf_repo: "unsloth/Qwen3-8B-GGUF",
             hf_filename: "Qwen3-8B-Q8_0.gguf",
             size_bytes: 8_709_519_168,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "q6",
             hf_repo: "unsloth/Qwen3-8B-GGUF",
             hf_filename: "Qwen3-8B-Q6_K.gguf",
             size_bytes: 6_725_900_096,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "iq4",
             hf_repo: "unsloth/Qwen3-8B-GGUF",
             hf_filename: "Qwen3-8B-IQ4_XS.gguf",
             size_bytes: 4_581_287_744,
+            sha256: None,
         },
         Qwen3Variant {
             tag: "q3",
             hf_repo: "unsloth/Qwen3-8B-GGUF",
             hf_filename: "Qwen3-8B-Q3_K_M.gguf",
             size_bytes: 4_124_161_856,
+            sha256: None,
         },
     ];
     VARIANTS
@@ -5032,6 +5043,59 @@ pub fn known_qwen3_8b_variants() -> &'static [Qwen3Variant] {
 /// Find a Qwen3-8B variant by tag (e.g. "q8", "q6", "iq4", "q3").
 pub fn find_qwen3_8b_variant(tag: &str) -> Option<&'static Qwen3Variant> {
     known_qwen3_8b_variants().iter().find(|v| v.tag == tag)
+}
+
+// ── Quantized Qwen3-VL-8B variant registry ──────────────────────────────────
+
+/// Pinned revision of `Qwen/Qwen3-VL-8B-Instruct-GGUF` the digests below
+/// were read from (Hub API LFS oids).
+pub const QWEN3_VL_8B_GGUF_REVISION: &str = "f982a07559d4a2f6c8744d840bf6fccab30eea96";
+
+/// Quantized language models for Qwen Image 2.1's Qwen3-VL-8B-Instruct text
+/// encoder, sorted largest → smallest.
+///
+/// The Image 2.1 text-encoder shards are stock Qwen3-VL-8B-Instruct (identical
+/// 750-tensor key set; sampled tensors hash identically), so the official
+/// GGUF conversions serve as its language half. The vision tower always comes
+/// from the BF16 shards. Deliberately NOT [`known_qwen3_8b_variants`]:
+/// `unsloth/Qwen3-8B` is a different model with a 1e6 RoPE base.
+pub fn known_qwen3_vl_8b_variants() -> &'static [Qwen3Variant] {
+    static VARIANTS: &[Qwen3Variant] = &[
+        Qwen3Variant {
+            tag: "q8",
+            hf_repo: "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+            hf_filename: "Qwen3VL-8B-Instruct-Q8_0.gguf",
+            size_bytes: 8_709_519_456,
+            sha256: Some("0d264b3941185d00a74f75c4245521dae088ff1efc90ab8d1754e83f5844adb0"),
+        },
+        Qwen3Variant {
+            tag: "q4",
+            hf_repo: "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+            hf_filename: "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+            size_bytes: 5_027_784_800,
+            sha256: Some("67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2"),
+        },
+    ];
+    VARIANTS
+}
+
+/// Whether auto-fallback may choose `variant` without an explicit
+/// `MOLD_QWEN3_VARIANT`.
+///
+/// Measured on the Qwen Image 2.1 t2i template against the BF16 checkpoint run
+/// in F32 (per-token cosine of the conditioning rows): Q8_0 mean 0.9992, worst
+/// 0.9929 — closer than the shipped BF16 tier's own worst token (0.9642).
+/// Q4_K_M mean 0.9607, worst 0.3948 — the attention-sink token collapses, and
+/// forcing an exact dequantized matmul does not recover it (0.9629), so it is
+/// the weights, not a kernel. Q4 stays selectable by name for a card that
+/// cannot hold Q8 at all, and is never chosen silently.
+pub fn qwen3_vl_8b_variant_auto_eligible(variant: &Qwen3Variant) -> bool {
+    variant.tag == "q8"
+}
+
+/// Find a Qwen3-VL-8B variant by tag (`q8`, `q4`).
+pub fn find_qwen3_vl_8b_variant(tag: &str) -> Option<&'static Qwen3Variant> {
+    known_qwen3_vl_8b_variants().iter().find(|v| v.tag == tag)
 }
 
 /// Total size of all files in the manifest in bytes.
@@ -11453,6 +11517,34 @@ mod tests {
         assert_eq!(find_qwen3_8b_variant("iq4").unwrap().tag, "iq4");
         assert_eq!(find_qwen3_8b_variant("q3").unwrap().tag, "q3");
         assert!(find_qwen3_8b_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn qwen3_vl_8b_variants_are_pinned_official_ggufs() {
+        let variants = known_qwen3_vl_8b_variants();
+        assert_eq!(
+            variants.iter().map(|v| v.tag).collect::<Vec<_>>(),
+            ["q8", "q4"]
+        );
+        for pair in variants.windows(2) {
+            assert!(pair[0].size_bytes > pair[1].size_bytes, "largest first");
+        }
+        for v in variants {
+            assert_eq!(v.hf_repo, "Qwen/Qwen3-VL-8B-Instruct-GGUF");
+            assert!(v.hf_filename.ends_with(".gguf"));
+            let sha = v.sha256.expect("the VL list is pinned");
+            assert_eq!(sha.len(), 64);
+            assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(v.size_bytes < QWEN3_8B_FP16_SIZE);
+        }
+        assert_eq!(find_qwen3_vl_8b_variant("q4").unwrap().tag, "q4");
+        assert!(find_qwen3_vl_8b_variant("iq4").is_none());
+        // The historical lists stay unpinned; the VL list shares no file with
+        // Klein-9B's (a different model).
+        assert!(known_qwen3_8b_variants().iter().all(|v| v.sha256.is_none()));
+        assert!(known_qwen3_8b_variants()
+            .iter()
+            .all(|k| variants.iter().all(|v| v.hf_repo != k.hf_repo)));
     }
 
     #[test]

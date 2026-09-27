@@ -67,10 +67,7 @@ impl Qwen3Model {
     ) -> Result<Tensor> {
         match self {
             Self::BF16(m) => m.forward_final_pre_norm_with_attention(input_ids, attention),
-            Self::Quantized(_) => anyhow::bail!(
-                "Qwen Image 2.1 requires the native BF16/safetensors text encoder; \
-                 quantized Qwen3 is unsupported"
-            ),
+            Self::Quantized(m) => m.forward_final_pre_norm_with_attention(input_ids, attention),
         }
     }
 }
