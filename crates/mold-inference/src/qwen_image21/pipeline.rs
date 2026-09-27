@@ -25,6 +25,7 @@ use std::time::Instant;
 use super::layout::QwenImage21JointLayout;
 use super::lora::{
     build_registry as build_lora_registry, fingerprint as lora_fingerprint, Qwen21LoraEntry,
+    Qwen21LoraFingerprint,
 };
 use super::reference::{
     encode_prompt_with_images, encode_vision, load_vision_tower, prepare_reference,
@@ -75,7 +76,7 @@ pub struct QwenImage21Engine {
     /// `lora::fingerprint` — empty means none. It describes the transformer
     /// that is resident, not the request: written where adapters are
     /// installed, cleared wherever the transformer goes away.
-    active_lora: Vec<(u64, u64)>,
+    active_lora: Vec<Qwen21LoraFingerprint>,
     /// Parity tests inject upstream's exact initial latents: torch's RNG is
     /// not mold's ChaCha stream, so a seed cannot reproduce them.
     #[cfg(test)]

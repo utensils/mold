@@ -244,13 +244,62 @@ impl Qwen21LoraEntry {
     }
 }
 
-/// Identity of an installed stack: path hash and scale BITS per adapter, in
-/// order (the `LoraFingerprint` rule every family's residency reads).
-pub(crate) fn fingerprint(entries: &[Qwen21LoraEntry]) -> Vec<(u64, u64)> {
+/// One adapter's identity in an installed stack: path hash, scale BITS and
+/// [`file_identity`].
+pub(crate) type Qwen21LoraFingerprint = (u64, u64, u64);
+
+/// Identity of an installed stack: path hash, scale BITS and file identity
+/// per adapter, in order (the `LoraFingerprint` rule every family's residency
+/// reads, plus the file). The path alone is not an identity: a retrained
+/// adapter written over the same path at the same scale would otherwise
+/// match the stack already in the bypass slots and keep rendering the stale
+/// weights.
+pub(crate) fn fingerprint(entries: &[Qwen21LoraEntry]) -> Vec<Qwen21LoraFingerprint> {
     entries
         .iter()
-        .map(|entry| (entry.path_hash(), entry.scale.to_bits()))
+        .map(|entry| {
+            (
+                entry.path_hash(),
+                entry.scale.to_bits(),
+                file_identity(&entry.path),
+            )
+        })
         .collect()
+}
+
+/// A cheap identity for the bytes at `path`, from metadata alone: length,
+/// modification time and — on Unix — device, inode and status-change time.
+/// `ctime` is the part a writer cannot forge (it is stamped by the kernel on
+/// every write, and no syscall sets it), and the inode catches a file
+/// replaced by rename. Hashing the content instead would read a multi-GB
+/// adapter on every request just to learn that nothing changed. An unreadable
+/// file answers 0; loading it fails right after, so that value is never
+/// installed.
+fn file_identity(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metadata.len().hash(&mut hasher);
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .hash(&mut hasher);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Load an adapter, giving every layer that carries no `.alpha` tensor the
@@ -619,6 +668,38 @@ mod tests {
             let rank = scale.rank.unwrap() as usize;
             assert_eq!(effective_scale(1.0, rank, None, scale.alpha), 1.0);
         }
+    }
+
+    /// A retrained adapter written over the same path at the same scale must
+    /// not match the stack already installed: the fingerprint carries the
+    /// file's identity, not only its name.
+    #[test]
+    fn a_file_rewritten_in_place_changes_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.safetensors");
+        std::fs::write(&path, b"first training run").unwrap();
+        let entries = [Qwen21LoraEntry {
+            path: path.clone(),
+            scale: 0.8,
+        }];
+        let before = fingerprint(&entries);
+        assert_eq!(before, fingerprint(&entries), "stable while untouched");
+        // Same length, same path, same scale: only the content changed.
+        std::fs::write(&path, b"secnd training run").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7))
+            .unwrap();
+        drop(file);
+        assert_ne!(before, fingerprint(&entries));
+        // Replacing the file (a new inode) is a new identity too.
+        let replacement = dir.path().join("next.safetensors");
+        std::fs::write(&replacement, b"first training run").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let replaced = fingerprint(&entries);
+        assert_ne!(before, replaced);
+        // The scale is still part of it.
+        let rescaled = fingerprint(&[Qwen21LoraEntry { path, scale: 0.5 }]);
+        assert_ne!(replaced, rescaled);
     }
 
     #[test]
