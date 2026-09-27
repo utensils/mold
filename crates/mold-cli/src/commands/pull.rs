@@ -40,6 +40,16 @@ pub async fn pull_and_configure(
         }
     };
 
+    // A tier this build's GPU backend cannot execute at all (an FP8 tier on
+    // Metal) is refused before its download, not after the engine refuses
+    // the landed weights at load.
+    if let Some(reason) =
+        local_backend_refusal(&manifest.name, mold_inference::compiled_gpu_backend())
+    {
+        eprintln!("{} {reason}", theme::icon_fail());
+        return Err(AlreadyReported.into());
+    }
+
     let (total_bytes, remaining_bytes) = mold_core::manifest::compute_download_size(manifest);
     let total_gb = total_bytes as f64 / 1_073_741_824.0;
     let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
@@ -421,6 +431,13 @@ pub async fn run(
     Ok(())
 }
 
+/// Why this build's GPU backend (`None` on a CPU-only build) cannot run the
+/// manifest tier `name` — [`mold_core::manifest::backend_refusal`], the same
+/// authority the server's download and admission doors ask.
+fn local_backend_refusal(name: &str, backend: Option<mold_core::GpuBackend>) -> Option<String> {
+    backend.and_then(|backend| mold_core::manifest::backend_refusal(name, backend))
+}
+
 /// The line printed after a successful manifest pull.
 ///
 /// A model this build cannot execute must not be handed a `mold run` hint it
@@ -629,6 +646,21 @@ async fn pull_via_server(
 
 #[cfg(test)]
 mod tests {
+    /// A local pull on a Metal build refuses an FP8 tier before downloading;
+    /// CUDA and CPU-only builds pull it.
+    #[test]
+    fn a_local_pull_refuses_a_tier_this_backend_cannot_run() {
+        let refusal =
+            super::local_backend_refusal("qwen-image-2.1:fp8", Some(mold_core::GpuBackend::Metal))
+                .unwrap();
+        assert_eq!(refusal, mold_core::manifest::QWEN_IMAGE21_FP8_METAL_REFUSAL);
+        assert!(
+            super::local_backend_refusal("qwen-image-2.1:fp8", Some(mold_core::GpuBackend::Cuda))
+                .is_none()
+        );
+        assert!(super::local_backend_refusal("qwen-image-2.1:fp8", None).is_none());
+    }
+
     /// #1276: the post-pull line is the last chance to be honest about a
     /// 21-42 GB download. A runnable model gets the `mold run` hint; every
     /// unrunnable one gets the server's own sentence for why, and never a

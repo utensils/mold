@@ -550,10 +550,7 @@ impl Q21WeightSource {
                 )
             })?;
         if format == QwenImage21TransformerFormat::TorchaoFp8 && device.is_metal() {
-            bail!(
-                "qwen-image-2.1:fp8 needs CUDA: candle's Metal backend has no F8E4M3 cast \
-                 kernel to widen its weights. Use qwen-image-2.1:int8-conv or a GGUF tier on Metal."
-            );
+            bail!("{}", mold_core::manifest::QWEN_IMAGE21_FP8_METAL_REFUSAL);
         }
         let backend = match format {
             QwenImage21TransformerFormat::Gguf {
