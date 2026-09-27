@@ -187,18 +187,35 @@ pub(super) fn install_mode(
 }
 
 pub(super) fn transformer_paths(root: &Path, tier: &str) -> Result<Vec<PathBuf>> {
-    match tier {
-        "bf16" => Ok((1..=2)
+    if tier == "bf16" {
+        return Ok((1..=2)
             .map(|i| {
                 root.join(format!(
                     "qwen-image-2.1-bf16/transformer/diffusion_pytorch_model-{i:05}-of-00002.safetensors"
                 ))
             })
-            .collect()),
-        other => anyhow::bail!(
-            "QWEN_IMAGE21_BENCH_TIER={other}: this build loads only the bf16 transformer"
-        ),
+            .collect());
     }
+    // Quantized tiers load from `QWEN_IMAGE21_BENCH_TIER_DIR` (a directory
+    // holding the pinned upstream files under their published names), so
+    // the harness can time a tier on a host that has not installed it.
+    let dir = PathBuf::from(std::env::var("QWEN_IMAGE21_BENCH_TIER_DIR").map_err(|_| {
+        anyhow::anyhow!("QWEN_IMAGE21_BENCH_TIER={tier} needs QWEN_IMAGE21_BENCH_TIER_DIR")
+    })?);
+    let file = match tier {
+        "int8-conv" => "qwen_image_2.1_int8_convrot.safetensors",
+        "fp8" => "Qwen-Image-2.1-FP8.safetensors",
+        "q8" => "qwen_image_2.1-Q8_0.gguf",
+        "q6" => "qwen_image_2.1-Q6_K.gguf",
+        "q5" => "qwen_image_2.1-Q5_0.gguf",
+        "q4" => "qwen_image_2.1-Q4_K.gguf",
+        "q3" => "qwen_image_2.1-Q3_K.gguf",
+        "q2" => "qwen_image_2.1-Q2_K.gguf",
+        other => anyhow::bail!(
+            "QWEN_IMAGE21_BENCH_TIER={other}: expected bf16, int8-conv, fp8 or q2..q8"
+        ),
+    };
+    Ok(vec![dir.join(file)])
 }
 
 pub(super) fn parse_conv(raw: &str) -> Result<ConvBackend> {
