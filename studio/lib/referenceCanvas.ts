@@ -20,7 +20,7 @@
 
 import type { ReferenceCanvasRule } from "./generated/generationProfileV1";
 import {
-  imageDimensionsFromBase64,
+  orientedImageDimensionsFromBase64,
   type ImageDimensions,
 } from "./imageDimensions";
 import type { CanvasIntent } from "./outputShape";
@@ -101,22 +101,29 @@ export interface StagedReferenceImage {
 }
 
 /**
- * Each staged reference's size: the dimensions the picker already recorded,
- * else read from the header (PNG, JPEG or WebP). `null` where neither is
- * known — a bytes-less reattach entry, or an unreadable header.
+ * Each staged reference's UPRIGHT size: read from the header with its EXIF
+ * orientation applied (PNG, JPEG or WebP), which is how the engine decodes a
+ * reference and how the CLI and the server size the same canvas; else the
+ * dimensions the picker recorded. `null` where neither is known — a
+ * bytes-less reattach entry, or an unreadable header.
+ *
+ * The bytes win over a recorded size because a picker records the stored
+ * header (a portrait phone photo is landscape pixels plus `Orientation = 6`),
+ * and a canvas sized from that would come out sideways.
  */
 export function stagedReferenceDimensions(
   images: readonly StagedReferenceImage[],
 ): (ImageDimensions | null)[] {
   return images.map((image) => {
-    if (image.width && image.height) {
-      return { width: image.width, height: image.height };
-    }
     const bytes = image.base64 || image.data;
     // Every container a reference strip may hold; admission, not this read,
     // decides which the recipe accepts.
-    return bytes
-      ? imageDimensionsFromBase64(bytes, ["png", "jpeg", "webp"])
+    const read = bytes
+      ? orientedImageDimensionsFromBase64(bytes, ["png", "jpeg", "webp"])
+      : null;
+    if (read) return read;
+    return image.width && image.height
+      ? { width: image.width, height: image.height }
       : null;
   });
 }

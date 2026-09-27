@@ -58,6 +58,8 @@ web/*.tsbuildinfo
 !apps/mobile/src-tauri/gen/android/app/src/main/res/mipmap-*/**/*.png
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.jpg
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.png
+!crates/mold-core/testdata/reference_orientation/*.jpg
+!crates/mold-core/testdata/reference_orientation/*.png
 # PuLID face-extraction parity fixtures (#1222): public-domain portraits and
 # the warp goldens captured from them. Un-ignored rather than force-added,
 # because release-plz refuses to run while a tracked file is also gitignored.
@@ -88,6 +90,7 @@ uat-*
 # without this negation those posters are both tracked and ignored, which
 # makes release-plz refuse to compute versions at all.
 !website/public/gallery/**
+!crates/mold-core/testdata/reference_orientation/*.webp
 # HDR renders write one EXR per frame, so a single short clip is tens of
 # megabytes across dozens of files.
 *.exr

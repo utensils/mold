@@ -6963,6 +6963,86 @@ mod tests {
         assert!(!rows[0].request_json.contains("transparent_background"));
     }
 
+    /// A reference whose header declares 60000x60000 is a few dozen bytes on
+    /// the wire and ~14 GB once decoded. Both doors refuse it by name, before
+    /// a queue row exists (`reference_image::validate_reference_image_dimensions`
+    /// through the one reference validator).
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_oversized_reference_is_refused_at_both_doors() {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let chunk = |kind: &[u8; 4], data: &[u8]| {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+            out
+        };
+        let mut ihdr = 60_000u32.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&60_000u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(chunk(b"IHDR", &ihdr));
+        png.extend(chunk(
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
+        png.extend(chunk(b"IEND", &[]));
+
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "the same lantern at dusk",
+            "qwen-image-2.1:bf16",
+            1024,
+            1024,
+        ))
+        .unwrap();
+        request_json["edit_images"] =
+            serde_json::json!([base64::engine::general_purpose::STANDARD.encode(&png)]);
+        let durable = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json.clone()],
+        });
+        for (path, body) in [
+            ("/api/generation-batches", durable),
+            ("/api/generate", request_json),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(json_request("POST", path, body))
+                .await
+                .unwrap();
+            let status = response.status();
+            let response_body = json_body(response).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{path}: {response_body}"
+            );
+            let error = response_body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("Reference 1 is 60000x60000"),
+                "{path}: {response_body}"
+            );
+        }
+        assert!(journal.list_all().is_empty());
+    }
+
     /// A mesh model stores binary glTF and nothing else, so an explicit
     /// raster format is COERCED rather than refused: an older client that
     /// always sends `png` must still get its mesh, exactly as the CLI already

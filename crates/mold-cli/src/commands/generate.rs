@@ -427,11 +427,10 @@ fn last_reference_canvas(
     let Some(last) = edit_images.and_then(|images| images.last()) else {
         return Ok(None);
     };
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(last))
-        .with_guessed_format()
-        .map_err(|error| anyhow::anyhow!("failed to read the last reference image: {error}"))?
-        .into_dimensions()
-        .map_err(|error| {
+    // The engine decodes the reference upright (EXIF orientation applied), so
+    // the canvas is read from the same oriented size.
+    let (width, height) =
+        mold_core::reference_image::oriented_dimensions(last).map_err(|error| {
             anyhow::anyhow!("failed to read the last reference image's size: {error}")
         })?;
     let align = mold_core::dimension_alignment_for_model(model, Some(family));
@@ -6583,6 +6582,17 @@ mod tests {
         assert_eq!(dims(Some(512), None, &refs), (512, 1024));
         // No reference: the model default.
         assert_eq!(dims(None, None, &[]), (1024, 1024));
+        // A landscape-stored photo with EXIF Orientation 6 is portrait: the
+        // engine decodes it upright, so the canvas is portrait too.
+        let rotated =
+            std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "../mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg",
+            ))
+            .unwrap();
+        assert_eq!(
+            dims(None, None, &[rotated]),
+            mold_core::validation::fit_to_target_area_ties_even(48, 96, 1024 * 1024, 32)
+        );
 
         // FLUX.2 [dev] takes references but advertises no canvas rule.
         assert_eq!(

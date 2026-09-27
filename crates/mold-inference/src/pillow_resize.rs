@@ -316,6 +316,14 @@ pub(crate) fn resize_rgba_premultiplied(
 /// `BLEND(a, 255, c) = DIV255(255 * (255 - a) + c * a)`
 /// (`ImagingUtils.h:22-24`). This is the copy Qwen Image 2.1 hands its
 /// vision tower (`pipeline_qwenimage21.py:266-271`).
+///
+/// It is also the ONE flatten for an output container with no alpha (a JPEG
+/// render that kept alpha, `image::encode_rgba_image`). mold had a second
+/// copy there, written as straight-alpha round-to-nearest,
+/// `(c * a + 255 * (255 - a) + 127) / 255`; Pillow's `DIV255(x + 128)` is
+/// that same function on every `(c, a)` — pinned exhaustively by
+/// `pillow_div255_blend_is_round_to_nearest` — so the two were unified rather
+/// than kept as look-alikes that could drift apart.
 pub(crate) fn composite_over_white(source: &RgbaImage) -> RgbImage {
     let (width, height) = source.dimensions();
     let bytes = source
@@ -438,6 +446,22 @@ mod tests {
             )
             .unwrap();
             assert_eq!(actual.as_raw(), &expected, "rgb_as_rgba_{case}");
+        }
+    }
+
+    #[test]
+    fn pillow_div255_blend_is_round_to_nearest() {
+        for alpha in 0..=255u8 {
+            for colour in 0..=255u8 {
+                let composited = composite_over_white(&RgbaImage::from_pixel(
+                    1,
+                    1,
+                    image::Rgba([colour, colour, colour, alpha]),
+                ));
+                let (a, c) = (u32::from(alpha), u32::from(colour));
+                let nearest = ((c * a + 255 * (255 - a) + 127) / 255) as u8;
+                assert_eq!(composited.get_pixel(0, 0).0[0], nearest, "c={c} a={a}");
+            }
         }
     }
 
