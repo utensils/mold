@@ -421,6 +421,25 @@ fn image_args_are_ordered_references(
                 == mold_core::generation_profile::ReferenceSourceRelation::Replaces)
 }
 
+/// Split the loaded `--image` values into `(source_image, edit_images)`.
+///
+/// On a recipe whose ordered references ARE `--image`
+/// ([`image_args_are_ordered_references`]: Qwen-Image-Edit, FLUX.2 [dev],
+/// Qwen Image 2.1) every value becomes an `edit_images` entry in the order
+/// typed — the order the prompt's "image 1", "image 2" name, and the order
+/// whose LAST entry sizes a `last-reference` canvas. Everywhere else the first
+/// value is the one source image.
+fn route_image_args(
+    profile: &mold_core::generation_profile::ReferenceImagesProfile,
+    loaded_images: Vec<Vec<u8>>,
+) -> (Option<Vec<u8>>, Option<Vec<Vec<u8>>>) {
+    if image_args_are_ordered_references(profile) {
+        (None, (!loaded_images.is_empty()).then_some(loaded_images))
+    } else {
+        (loaded_images.into_iter().next(), None)
+    }
+}
+
 fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) -> Result<()> {
     let profile = mold_core::generation_profile::reference_images_for_recipe(family, model);
     let subject = mold_core::generation_profile::reference_subject_label(family, model);
@@ -1159,6 +1178,7 @@ pub async fn run(
     camera_control: Option<String>,
     host: Option<String>,
     format: Option<OutputFormat>,
+    transparent: bool,
     no_metadata: bool,
     title: Option<String>,
     filing: crate::commands::generate::FilingOptions,
@@ -1407,19 +1427,10 @@ pub async fn run(
             })
             .collect::<Result<Vec<_>>>()?
     };
-    let reference_profile =
-        mold_core::generation_profile::reference_images_for_recipe(&family, &model);
-    let ordered_images = image_args_are_ordered_references(&reference_profile);
-    let source_image = if ordered_images {
-        None
-    } else {
-        loaded_images.first().cloned()
-    };
-    let mut edit_images = if ordered_images && !loaded_images.is_empty() {
-        Some(loaded_images)
-    } else {
-        None
-    };
+    let (source_image, mut edit_images) = route_image_args(
+        &mold_core::generation_profile::reference_images_for_recipe(&family, &model),
+        loaded_images,
+    );
     // `--reference` on a reference-capable recipe. Never mixed with `--image`
     // on today's recipes — `reference_edit_image_paths` refuses that pairing
     // for both `Replaces` and `Exclusive` — so the append is the whole
@@ -1685,7 +1696,9 @@ pub async fn run(
                 Some(&family),
                 has_visual_conditioning,
             )),
-            transparent_background: None,
+            // The expander describes a cut-out subject with no backdrop; the
+            // RGBA wrapper text itself is the engine's and never reaches it.
+            transparent_background: transparent.then_some(true),
         })
     };
 
@@ -1966,6 +1979,7 @@ pub async fn run(
                 Some(named_view_references)
             },
             reference_uploads: h3_authoring.uploads,
+            transparent_background: transparent.then_some(true),
         },
         host,
         format,
@@ -2664,6 +2678,28 @@ mod tests {
         assert_eq!(prompt.unwrap(), "a cat");
     }
 
+    /// The Viggle turbo tier is a model name like any other: bare it pins to
+    /// `:bf16`, and every published tag is reachable as the first positional.
+    #[test]
+    fn qwen_image21_turbo_tiers_resolve_as_the_model_positional() {
+        let mut config = test_config();
+        for (typed, resolved) in [
+            ("qwen-image-2.1-turbo", "qwen-image-2.1-turbo:bf16"),
+            ("qwen-image-2.1-turbo:bf16", "qwen-image-2.1-turbo:bf16"),
+            ("qwen-image-2.1-turbo:q8", "qwen-image-2.1-turbo:q8"),
+            (
+                "qwen-image-2.1-turbo:int8-conv",
+                "qwen-image-2.1-turbo:int8-conv",
+            ),
+            ("qwen-image-2.1", "qwen-image-2.1:bf16"),
+        ] {
+            let (model, prompt) =
+                resolve_run_args(Some(typed), &["a red lantern".to_string()], &mut config).unwrap();
+            assert_eq!(model, resolved, "{typed}");
+            assert_eq!(prompt.as_deref(), Some("a red lantern"), "{typed}");
+        }
+    }
+
     #[test]
     fn model_only_no_prompt() {
         let mut config = test_config();
@@ -3052,6 +3088,46 @@ mod tests {
         assert!(
             error.to_string().contains("multiple --image values"),
             "{error}"
+        );
+    }
+
+    /// Qwen Image 2.1's references are `Replaces`: repeated `--image` values
+    /// become `edit_images` in the order typed, up to the family's ten, and
+    /// never a source image.
+    #[test]
+    fn qwen_image21_image_args_are_the_ordered_reference_group() {
+        let profile = mold_core::generation_profile::reference_images_for_recipe(
+            "qwen-image21",
+            "qwen-image-2.1:bf16",
+        );
+        let (source, edits) =
+            route_image_args(&profile, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(source, None);
+        assert_eq!(edits, Some(vec![b"first".to_vec(), b"second".to_vec()]));
+        assert_eq!(route_image_args(&profile, Vec::new()), (None, None));
+
+        for model in ["qwen-image-2.1:bf16", "qwen-image-2.1-turbo:bf16"] {
+            validate_image_args_for_model(
+                "qwen-image21",
+                model,
+                &vec![String::from("ref.png"); 10],
+            )
+            .unwrap();
+            let error = validate_image_args_for_model(
+                "qwen-image21",
+                model,
+                &vec![String::from("ref.png"); 11],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("at most 10"), "{error}");
+        }
+
+        // A source-image recipe still reads the first value as its source.
+        let klein =
+            mold_core::generation_profile::reference_images_for_recipe("flux2", "flux2-klein:bf16");
+        assert_eq!(
+            route_image_args(&klein, vec![b"src".to_vec()]),
+            (Some(b"src".to_vec()), None)
         );
     }
 

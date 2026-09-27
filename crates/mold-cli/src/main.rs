@@ -1675,6 +1675,13 @@ Examples:
               value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb"]))]
         format: Option<OutputFormat>,
 
+        /// Transparent background (models advertising
+        /// capabilities.transparency; png/webp). The subject is rendered as
+        /// a cut-out with an alpha channel; JPEG cannot carry one and is
+        /// refused.
+        #[arg(long, help_heading = "Output")]
+        transparent: bool,
+
         /// Disable embedded generation metadata in PNG output for this run
         #[arg(long, help_heading = "Output")]
         no_metadata: bool,
@@ -3286,6 +3293,7 @@ async fn run() -> anyhow::Result<()> {
             camera_control,
             host,
             format,
+            transparent,
             no_metadata,
             title,
             tags,
@@ -3344,6 +3352,13 @@ async fn run() -> anyhow::Result<()> {
             if title.is_some() && (script.is_some() || prompt.len() > 1) {
                 anyhow::bail!(
                     "--title applies to single-clip runs; chain scripts and multi-prompt sequences do not carry a title yet"
+                );
+            }
+
+            // A transparent cut-out is one still; a chain renders video.
+            if transparent && (script.is_some() || prompt.len() > 1) {
+                anyhow::bail!(
+                    "--transparent renders one still; chain scripts and multi-prompt sequences cannot carry it"
                 );
             }
 
@@ -3485,6 +3500,7 @@ async fn run() -> anyhow::Result<()> {
                 camera_control,
                 host,
                 format,
+                transparent,
                 no_metadata,
                 title,
                 commands::generate::FilingOptions {
@@ -4620,6 +4636,25 @@ mod tests {
         match cli.command {
             Commands::Serve { gpus, .. } => assert_eq!(gpus.as_deref(), Some("none")),
             _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn run_transparent_is_an_output_switch_that_defaults_off() {
+        match parse(&[
+            "run",
+            "qwen-image-2.1:bf16",
+            "a red lantern",
+            "--transparent",
+        ])
+        .command
+        {
+            Commands::Run { transparent, .. } => assert!(transparent),
+            _ => panic!("expected Run"),
+        }
+        match parse(&["run", "qwen-image-2.1:bf16", "a red lantern"]).command {
+            Commands::Run { transparent, .. } => assert!(!transparent),
+            _ => panic!("expected Run"),
         }
     }
 
