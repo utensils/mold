@@ -4068,16 +4068,7 @@ fn build_plan(
         })
         .saturating_add(mesh_host)
         .saturating_add(texture_host);
-    let fingerprint = execution_fingerprint(
-        context.model,
-        device,
-        context.effective,
-        &components,
-        context.engine_config,
-        context.effective_loras,
-        memory.block_offload,
-    );
-    let warm_reuse_fingerprint = warm_reuse_fingerprint(
+    let (fingerprint, warm_reuse_fingerprint) = engine_fingerprints(
         context.model,
         device,
         context.effective,
@@ -5859,17 +5850,27 @@ fn load_plan_independent_components(
 /// Qwen Image 2.1 carries every LoRA in bypass slots (`plan.md`: "LoRA is
 /// always bypass, never merged ... every tier takes adapters without
 /// rebuilds"); `qwen_image21::pipeline` compares the wanted stack with its
-/// `active_lora` and swaps the slots in place. Its warm engine therefore
-/// serves any stack, and rebuilding it for one would reload the whole
-/// transformer to arrive at the state an in-place install reaches in a second.
+/// `active_lora` and swaps the slots in place. The resident engine is the
+/// same whatever adapters a request carries, and rebuilding it for one would
+/// reload the whole transformer to arrive at the state an in-place install
+/// reaches in a second.
 fn adapters_install_per_request(family: &str) -> bool {
     family == "qwen-image21"
 }
 
-/// [`ResolvedExecutionPlan::warm_reuse_fingerprint`]: the exact identity with
-/// the load plan normalised away and, for a family that installs adapters per
-/// request ([`adapters_install_per_request`]), the adapter stack too.
-fn warm_reuse_fingerprint(
+/// The exact and warm-reuse engine identities of one plan
+/// ([`ResolvedExecutionPlan::execution_fingerprint`] and
+/// [`ResolvedExecutionPlan::warm_reuse_fingerprint`]).
+///
+/// For a family that installs adapters per request
+/// ([`adapters_install_per_request`]) BOTH are blind to the adapter stack —
+/// its `Lora` components and `effective_loras` — because neither describes the
+/// engine that is resident: an eager engine (no retained residency) is
+/// compared by the exact identity, so leaving the stack in it would still
+/// rebuild on every adapter change. The stack itself stays frozen on the plan
+/// (`effective_loras`), is re-validated at dispatch, and is still charged by
+/// the memory estimate. Every other family keeps the stack in both.
+fn engine_fingerprints(
     model: &str,
     device: &DeviceFact,
     effective: &EffectivePlacement,
@@ -5877,15 +5878,15 @@ fn warm_reuse_fingerprint(
     engine_config: &mold_inference::FrozenEngineConfig,
     effective_loras: &[PlannedLora],
     offload: bool,
-) -> String {
-    let mut components = load_plan_independent_components(components);
+) -> (String, String) {
+    let mut components = components.clone();
     let effective_loras = if adapters_install_per_request(&engine_config.family) {
         components.retain(|role, _| !matches!(role, ComponentRole::Lora(_)));
         &[]
     } else {
         effective_loras
     };
-    execution_fingerprint(
+    let exact = execution_fingerprint(
         model,
         device,
         effective,
@@ -5893,7 +5894,17 @@ fn warm_reuse_fingerprint(
         engine_config,
         effective_loras,
         offload,
-    )
+    );
+    let warm = execution_fingerprint(
+        model,
+        device,
+        effective,
+        &load_plan_independent_components(&components),
+        engine_config,
+        effective_loras,
+        offload,
+    );
+    (exact, warm)
 }
 
 fn execution_fingerprint(
@@ -10121,24 +10132,34 @@ mod tests {
             ("qwen-image:q8", "qwen-image", false),
         ] {
             let config = frozen_config_for_family(family);
-            let warm = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+            let both = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
                         loras: &[PlannedLora]| {
-                warm_reuse_fingerprint(
+                engine_fingerprints(
                     model, &device, &effective, components, &config, loras, false,
                 )
             };
-            let exact = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
-                         loras: &[PlannedLora]| {
-                execution_fingerprint(
-                    model, &device, &effective, components, &config, loras, false,
-                )
+            let warm = |c: &BTreeMap<ComponentRole, ComponentExecutionPlan>, l: &[PlannedLora]| {
+                both(c, l).1
             };
-            assert_ne!(
-                exact(&bare, &[]),
-                exact(&with_style, &style_half),
-                "{family}: the exact identity always records the adapter stack"
-            );
+            let exact = |c: &BTreeMap<ComponentRole, ComponentExecutionPlan>, l: &[PlannedLora]| {
+                both(c, l).0
+            };
             let same = |a: String, b: String| a == b;
+            // An EAGER engine (no retained residency) is compared by the exact
+            // identity, so it has to be exactly as blind to the stack.
+            assert_eq!(
+                same(exact(&bare, &[]), exact(&with_style, &style_half)),
+                request_scoped,
+                "{family}: an eager engine asked for an adapter"
+            );
+            assert_eq!(
+                same(
+                    exact(&with_style, &style_half),
+                    exact(&with_style, &style_full)
+                ),
+                request_scoped,
+                "{family}: an eager engine asked to rescale an adapter"
+            );
             assert_eq!(
                 same(warm(&bare, &[]), warm(&with_style, &style_half)),
                 request_scoped,
@@ -10170,6 +10191,11 @@ mod tests {
                 warm(&bare, &[]),
                 warm(&replaced, &[]),
                 "{family}: a replaced checkpoint still rebuilds"
+            );
+            assert_ne!(
+                exact(&bare, &[]),
+                exact(&replaced, &[]),
+                "{family}: a replaced checkpoint still rebuilds an eager engine"
             );
         }
     }
