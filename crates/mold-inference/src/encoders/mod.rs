@@ -13,6 +13,9 @@ pub(crate) mod qwen2_vision;
 pub(crate) mod qwen3;
 pub(crate) mod qwen3_bf16;
 pub(crate) mod qwen3_gguf;
+#[cfg(test)]
+mod qwen3_vl_gguf_parity;
+pub(crate) mod qwen3_vl_inject;
 pub(crate) mod sd3_clip;
 pub(crate) mod secure_dir;
 pub(crate) mod t5;

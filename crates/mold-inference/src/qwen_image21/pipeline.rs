@@ -161,21 +161,140 @@ impl QwenImage21Engine {
         Ok((device, text_device, vae_device))
     }
 
+    /// Resolve which Qwen3-VL-8B language model to load (the BF16 shards or an
+    /// official GGUF, per `MOLD_QWEN3_VARIANT` and what the card has left),
+    /// and load it. `free_vram` is measured AFTER the transformer and VAE are
+    /// resident on an eager engine, before anything on a sequential one —
+    /// the same inputs `text_encoder_residency::plan` gives the planner.
     fn load_text_encoder(
-        paths: &[PathBuf],
+        bf16_paths: &[PathBuf],
         tokenizer: &PathBuf,
         device: &Device,
         dtype: DType,
+        free_vram: u64,
         progress: &ProgressReporter,
     ) -> Result<Qwen3Encoder> {
-        Qwen3Encoder::load_bf16(
-            paths,
-            tokenizer,
+        let preference = crate::runtime_env::value("MOLD_QWEN3_VARIANT");
+        let (paths, is_gguf, on_gpu, _label) =
+            crate::encoders::variant_resolution::resolve_qwen3_variant(
+                progress,
+                preference.as_deref(),
+                device,
+                free_vram,
+                bf16_paths,
+                !bf16_paths.is_empty(),
+                false,
+                crate::encoders::variant_resolution::Qwen3Size::Vl8b,
+            )?;
+        let device = if on_gpu { device.clone() } else { Device::Cpu };
+        if is_gguf {
+            Qwen3Encoder::load_gguf(
+                &paths[0],
+                tokenizer,
+                &device,
+                &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+            )
+        } else {
+            Qwen3Encoder::load_bf16(
+                &paths,
+                tokenizer,
+                &device,
+                if device.is_cpu() {
+                    crate::engine::gpu_dtype(&device)
+                } else {
+                    dtype
+                },
+                &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+                progress,
+            )
+        }
+    }
+
+    /// Free device bytes on the text encoder's device, or zero when it cannot
+    /// be measured (CPU, or an unmeasurable card — both resolve as today).
+    fn free_vram_for(device: &Device, ordinal: usize) -> u64 {
+        if device.is_cuda() {
+            crate::device::usable_free_vram_bytes(ordinal).unwrap_or(0)
+        } else if device.is_metal() {
+            crate::device::available_system_memory_bytes().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// After an eager encode, apply the ONE residency decision
+    /// (`text_encoder_residency::decide`) the planner priced: keep the encoder,
+    /// park it in host RAM, or drop it for the denoise. The decision is
+    /// returned so the caller applies its transformer-for-decode half too.
+    fn settle_text_encoder_residency(
+        progress: &ProgressReporter,
+        paths: &ModelPaths,
+        text_encoder: &mut Qwen3Encoder,
+        req: &GenerateRequest,
+        ordinal: usize,
+        vae_dtype: DType,
+    ) -> Result<super::text_encoder_residency::Qwen21TeDecision> {
+        use super::text_encoder_residency as residency;
+        let device = if !text_encoder.on_gpu || text_encoder.device.is_cpu() {
+            residency::TeDevice::Cpu
+        } else if text_encoder.device.is_metal() {
+            residency::TeDevice::Metal
+        } else {
+            residency::TeDevice::Cuda
+        };
+        let transformer_bytes = residency::transformer_device_bytes(paths);
+        let vae_bytes = std::fs::metadata(&paths.vae).map_or(0, |metadata| metadata.len());
+        let text_encoder_bytes =
+            residency::text_encoder_device_bytes(text_encoder.encoder_paths()).unwrap_or(0);
+        let resident_now = transformer_bytes.saturating_add(vae_bytes).saturating_add(
+            if text_encoder.model.is_some() {
+                text_encoder_bytes
+            } else {
+                0
+            },
+        );
+        let usable_free_bytes = match device {
+            residency::TeDevice::Cuda => crate::device::usable_free_vram_bytes(ordinal)
+                .map_or(0, |free| free.saturating_add(resident_now)),
+            _ => 0,
+        };
+        let (denoise_workspace_bytes, decode_peak_bytes) = residency::render_workspace_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(vae_dtype),
+        );
+        let decision = residency::decide(&residency::Qwen21TeBudget {
             device,
-            dtype,
-            &Qwen3BF16Config::qwen3_image_21_text_encoder(),
-            progress,
-        )
+            usable_free_bytes,
+            transformer_bytes,
+            vae_bytes,
+            text_encoder_bytes,
+            denoise_workspace_bytes,
+            decode_peak_bytes,
+            host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+            host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
+            already_parked_bytes: text_encoder.parked_bytes(),
+            keep_te_ram: crate::device::keep_te_ram_mode(),
+        });
+        match decision.residency {
+            residency::Qwen21TeResidency::Resident => {}
+            residency::Qwen21TeResidency::ParkHost => {
+                progress.info(&format!(
+                    "Parking Qwen3-VL text encoder: {}",
+                    decision.reason
+                ));
+                text_encoder.park_to_cpu()?;
+            }
+            residency::Qwen21TeResidency::Drop => {
+                progress.info(&format!(
+                    "Dropping Qwen3-VL text encoder: {}",
+                    decision.reason
+                ));
+                text_encoder.drop_weights();
+            }
+        }
+        Ok(decision)
     }
 
     /// Load all components for the eager path.
@@ -225,6 +344,7 @@ impl QwenImage21Engine {
             &tokenizer,
             &text_device,
             text_dtype,
+            Self::free_vram_for(&text_device, self.base.gpu_ordinal),
             &self.base.progress,
         )?;
         self.base
@@ -401,6 +521,7 @@ impl QwenImage21Engine {
             } else {
                 conditional_prediction
             };
+            transformer.ensure_finite(&prediction, step)?;
             latents = scheduler.step(&prediction, &latents)?;
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
@@ -544,6 +665,7 @@ impl QwenImage21Engine {
             &tokenizer,
             &text_device,
             text_dtype,
+            Self::free_vram_for(&text_device, self.base.gpu_ordinal),
             &self.base.progress,
         )?;
         self.base
@@ -613,12 +735,24 @@ impl QwenImage21Engine {
             .loaded
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Qwen Image 2.1 was not loaded"))?;
+        // A previous request may have parked or dropped the encoder; this
+        // restores it (a host→device copy, or a reload) and is a no-op when
+        // it stayed resident.
+        loaded.text_encoder.unpark_to_gpu(progress)?;
         let (conditioning, negative_conditioning) = Self::encode_conditioning(
             progress,
             &mut loaded.text_encoder,
             req,
             &loaded.device,
             loaded.dtype,
+        )?;
+        let residency = Self::settle_text_encoder_residency(
+            progress,
+            &self.base.paths,
+            &mut loaded.text_encoder,
+            req,
+            self.base.gpu_ordinal,
+            loaded.vae_dtype,
         )?;
         let (latents, latent_height, latent_width) = Self::denoise(
             progress,
@@ -630,7 +764,56 @@ impl QwenImage21Engine {
             seed,
             initial_latents,
         )?;
-        let image = Self::decode_rgba(
+        // The decode's peak may not fit beside the transformer (2K): park it
+        // to host RAM for the decode and restore it after, or release it and
+        // let the next request reload — the decision's second half.
+        use super::text_encoder_residency::TransformerDecode;
+        match residency.transformer_decode {
+            TransformerDecode::Resident => {}
+            TransformerDecode::ParkHost => {
+                progress.info(&format!(
+                    "Parking Qwen Image 2.1 transformer: {}",
+                    residency.reason
+                ));
+                loaded.transformer.move_to_device(&Device::Cpu)?;
+                loaded.device.synchronize()?;
+            }
+            TransformerDecode::Drop => {
+                progress.info(&format!(
+                    "Releasing Qwen Image 2.1 transformer: {}",
+                    residency.reason
+                ));
+            }
+        }
+        if residency.transformer_decode == TransformerDecode::Drop {
+            // Nothing survives this request: the next one loads afresh.
+            let loaded = self
+                .base
+                .loaded
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Qwen Image 2.1 was not loaded"))?;
+            let LoadedQwenImage21 {
+                transformer,
+                vae,
+                vae_device,
+                vae_dtype,
+                device,
+                ..
+            } = loaded;
+            drop(transformer);
+            device.synchronize()?;
+            let image = Self::decode_rgba(
+                &self.base.progress,
+                &vae,
+                &latents,
+                latent_height,
+                latent_width,
+                &vae_device,
+                vae_dtype,
+            )?;
+            return Self::response(req, &image, seed, started);
+        }
+        let decoded = Self::decode_rgba(
             progress,
             &loaded.vae,
             &latents,
@@ -638,7 +821,12 @@ impl QwenImage21Engine {
             latent_width,
             &loaded.vae_device,
             loaded.vae_dtype,
-        )?;
+        );
+        if residency.transformer_decode == TransformerDecode::ParkHost {
+            // Restore even when the decode failed, so the engine stays usable.
+            loaded.transformer.move_to_device(&loaded.device)?;
+        }
+        let image = decoded?;
         Self::response(req, &image, seed, started)
     }
 }

@@ -396,6 +396,7 @@ pub enum RuntimeSemanticVariable {
     Qwen2Variant,
     Qwen3Variant,
     QwenImage21Dtype,
+    QwenImage21QMatMul,
     QwenImage21KvCache,
     QwenFp8Cache,
     QwenQMatMul,
@@ -1093,6 +1094,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
         "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
         "MOLD_QWEN_IMAGE21_DTYPE" => RuntimeSemanticVariable::QwenImage21Dtype,
+        // Swaps the Qwen Image 2.1 GGUF linear arm (per-forward dequant vs
+        // candle's QMatMul), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_QWEN_IMAGE21_QMATMUL" => RuntimeSemanticVariable::QwenImage21QMatMul,
         // Retaining the prefix K/V moves pixels (upstream: cached and uncached
         // are not bit-identical in BF16), so each resolved mode is its own class.
         "MOLD_QWEN_IMAGE21_KV_CACHE" => RuntimeSemanticVariable::QwenImage21KvCache,
@@ -1227,6 +1232,12 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             ))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
+        // Not a hand-mirror: the engine's own parser decides the arm.
+        Some(value) if variable == RuntimeSemanticVariable::QwenImage21QMatMul => {
+            CanonicalRuntimeValue::Boolean(mold_inference::qwen_image21::qmatmul_env_enabled(Some(
+                value,
+            )))
+        }
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {
             CanonicalRuntimeValue::Boolean(matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -3770,6 +3781,53 @@ fn build_plan(
                 0
             }
         });
+    // Qwen Image 2.1 eager: the engine's own text-encoder plan
+    // (`qwen_image21::text_encoder_residency::plan`, asked through the same
+    // `memory_preflight` helper that chose Eager) decides what the encoder
+    // components are — Resident, or DropReload with a cold host park — and
+    // what they cost: the chosen language model's device bytes on ONE anchor
+    // (the lowest-ordered shard), never the 17.5 GB of shard files, which also
+    // carry the vision tower and `lm_head` the encoder does not load.
+    let qwen21_te_plan = (context.family == "qwen-image21"
+        && memory.load_strategy == mold_inference::LoadStrategy::Eager)
+        .then(|| {
+            crate::memory_preflight::qwen_image21_eager_plan(
+                context.paths,
+                hint,
+                Some(device_budget),
+            )
+        })
+        .flatten();
+    // A transformer parked to host RAM for a 2K VAE decode is a host
+    // allocation made and released on EVERY such request, charged on the
+    // first transformer component.
+    let qwen21_transformer_park = qwen21_te_plan.as_ref().and_then(|plan| {
+        use mold_inference::qwen_image21::text_encoder_residency::TransformerDecode;
+        (plan.decision.transformer_decode == TransformerDecode::ParkHost).then(|| {
+            (
+                context
+                    .artifacts
+                    .keys()
+                    .find(|role| {
+                        matches!(
+                            role,
+                            ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                        )
+                    })
+                    .cloned(),
+                mold_inference::qwen_image21::text_encoder_residency::transformer_device_bytes(
+                    context.paths,
+                ),
+            )
+        })
+    });
+    let qwen21_te_anchor = qwen21_te_plan.as_ref().and_then(|_| {
+        context
+            .artifacts
+            .keys()
+            .find(|role| role.is_text_encoder())
+            .cloned()
+    });
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -3845,7 +3903,13 @@ fn build_plan(
                 }
                 ComponentLoadStrategy::StreamedBlocks
             } else if role.is_text_encoder() {
-                ComponentLoadStrategy::DropReload
+                use mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency;
+                match qwen21_te_plan.as_ref() {
+                    Some(plan) if plan.decision.residency == Qwen21TeResidency::Resident => {
+                        ComponentLoadStrategy::Resident
+                    }
+                    _ => ComponentLoadStrategy::DropReload,
+                }
             } else {
                 ComponentLoadStrategy::Resident
             };
@@ -3865,12 +3929,34 @@ fn build_plan(
                 {
                     0
                 }
-                _ => bytes,
+                _ => match qwen21_te_plan.as_ref().filter(|_| role.is_text_encoder()) {
+                    Some(plan)
+                        if qwen21_te_anchor.as_ref() == Some(role) && plan.choice.on_gpu() =>
+                    {
+                        plan.text_encoder_bytes
+                    }
+                    Some(_) => 0,
+                    None => bytes,
+                },
             };
             // The host park rides on the SAME anchor the device peak does, so
-            // a multi-shard encoder is charged once.
+            // a multi-shard encoder is charged once. A Qwen Image 2.1 park is a
+            // COLD charge like Mistral3's: a warm hit finds it already parked.
             let host = if mistral_peak_anchor.as_ref() == Some(role) {
                 mistral_host_park_bytes
+            } else if qwen21_te_anchor.as_ref() == Some(role) {
+                use mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency;
+                qwen21_te_plan
+                    .as_ref()
+                    .filter(|plan| plan.decision.residency == Qwen21TeResidency::ParkHost)
+                    .map_or(0, |plan| plan.text_encoder_bytes)
+            } else if let Some((Some(anchor), bytes)) = qwen21_transformer_park.as_ref() {
+                if anchor == role {
+                    recurring_host_bytes_by_path.insert(path.clone(), *bytes);
+                    *bytes
+                } else {
+                    0
+                }
             } else {
                 0
             };
@@ -9108,6 +9194,20 @@ mod tests {
         let f32 = runtime_semantic_setting(name, Some("f32"));
         assert_ne!(f32, default);
         assert_eq!(f32, runtime_semantic_setting(name, Some(" FP32 ")));
+    }
+
+    #[test]
+    fn qwen_image21_qmatmul_identity_is_the_arm_not_the_spelling() {
+        let name = "MOLD_QWEN_IMAGE21_QMATMUL";
+        let on = runtime_semantic_setting(name, Some("1"));
+        for value in ["true", " ON ", "yes"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), on);
+        }
+        let off = runtime_semantic_setting(name, Some("0"));
+        assert_ne!(on, off);
+        for value in ["off", "no", "banana"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), off);
+        }
     }
 
     #[test]
