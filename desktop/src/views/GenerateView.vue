@@ -68,7 +68,7 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import type { CanvasIntent } from "@studio/lib/outputShape";
+import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
 import { promptInputForForm, promptRecipeFromForm } from "../lib/promptRecipe";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
@@ -1200,7 +1200,19 @@ const contractEntry = computed(() =>
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
-const canvasIntent = ref<CanvasIntent>("model-default");
+// `canvasIntent` is this component's own state, not the store-backed form's —
+// a remount (navigating away and back) restarts a plain `ref("model-default")`
+// even though `form.width`/`form.height` kept whatever the user picked, which
+// is exactly what lets the `canvas: last-reference` watcher below re-snap a
+// chosen size the moment a reference changes. `restoredCanvasIntent` reads
+// the size already in hand against the recipe's own default: matching means
+// untouched, anything else means it was chosen.
+const canvasIntent = ref<CanvasIntent>(
+  restoredCanvasIntent(
+    { width: form.width, height: form.height },
+    effectiveGenerationRecipe(contractEntry.value, form.pipeline)?.defaults ?? null,
+  ),
+);
 let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
   canvasIntent.value = intent;

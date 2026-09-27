@@ -4765,6 +4765,11 @@ function openJob(job: Job) {
   form.state.value.upscaleModel = request.upscale_model ?? "";
   form.state.value.gifPreview = request.gif_preview ?? false;
   form.state.value.placement = request.placement ?? null;
+  // Absence means the toggle was never on, mirroring `transparent_background`
+  // never traveling on the wire for an opaque render — a stale "on" from a
+  // previously selected transparent print must not survive to this one.
+  form.state.value.transparentBackground =
+    request.transparent_background === true;
   const source = request.source_image
     ? image(request.source_image, request.source_image_name || "Source image")
     : null;
@@ -4776,10 +4781,18 @@ function openJob(job: Job) {
   const twoWellLayout =
     capabilities.value.sourceImageMode === "single-or-references" ||
     capabilities.value.sourceImageMode === "single-and-references";
+  // Only a `primary_is_target` recipe (Qwen Image Edit) has a target image at
+  // index 0 — Qwen Image 2.1's `replaces` relation has no target, so labeling
+  // its first reference "Target image" would name a well the recipe does not
+  // have.
+  const restoredReferenceTarget =
+    !twoWellLayout && capabilities.value.referenceImages?.primaryIsTarget;
   const restoredReferences = (request.edit_images ?? []).map((base64, index) =>
     image(
       base64,
-      !twoWellLayout && index === 0 ? "Target image" : `Reference ${index + 1}`,
+      restoredReferenceTarget && index === 0
+        ? "Target image"
+        : `Reference ${index + 1}`,
     ),
   );
   if (restoredReferences.length || source) {

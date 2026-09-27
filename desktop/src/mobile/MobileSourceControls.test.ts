@@ -851,6 +851,18 @@ describe("MobileSourceControls - the References strip names its ceiling", () => 
     });
     expect(wrapper.text()).not.toContain("Add up to");
   });
+
+  // Web passes `:required="plan.required"` to the shared strip; the phone's
+  // add tile must advertise the same aria-required on a required-reference
+  // recipe (Qwen Image Edit) rather than rendering a silently optional one.
+  it("marks the strip required for a required-reference recipe", () => {
+    const wrapper = mount(MobileSourceControls, {
+      props: { form: formFor("qwen-image-edit") },
+    });
+    expect(wrapper.get("[data-test='mobile-reference-add']").attributes("aria-required")).toBe(
+      "true",
+    );
+  });
 });
 
 describe("MobileSourceControls - Qwen Image 2.1 references", () => {

@@ -115,11 +115,14 @@ function tid(name: string): string {
   return `${props.testIdPrefix}${name}`;
 }
 
-// ── Keyboard focus follows the moved picture ──────────────────────────────
+// ── Keyboard focus follows the moved picture, or the gap Remove left ──────
 const root = ref<HTMLElement | null>(null);
 const pendingFocus = ref<{ index: number; dir: "earlier" | "later" } | null>(
   null,
 );
+/** Set by Remove: the removed picture's index, which after the surface
+ * applies the removal is where the NEXT picture now sits. */
+const pendingRemoveFocus = ref<number | null>(null);
 
 function move(index: number, dir: "earlier" | "later"): void {
   const to = dir === "earlier" ? index - 1 : index + 1;
@@ -128,22 +131,51 @@ function move(index: number, dir: "earlier" | "later"): void {
   emit("move", index, to);
 }
 
+function remove(index: number): void {
+  pendingRemoveFocus.value = index;
+  emit("remove", index);
+}
+
+function findRemoveButton(index: number): HTMLButtonElement | null {
+  return (
+    root.value?.querySelector<HTMLButtonElement>(
+      `[data-ris-remove="${index}"]`,
+    ) ?? null
+  );
+}
+
 watch(
   () => props.images,
   async () => {
     const pending = pendingFocus.value;
     pendingFocus.value = null;
-    if (!pending) return;
+    if (pending) {
+      await nextTick();
+      const other = pending.dir === "earlier" ? "later" : "earlier";
+      const find = (dir: string) =>
+        root.value?.querySelector<HTMLButtonElement>(
+          `[data-ris-move="${dir}-${pending.index}"]`,
+        );
+      const button = find(pending.dir);
+      // At an end the same-direction button is disabled; the other one is
+      // the natural next press.
+      (button && !button.disabled ? button : find(other))?.focus();
+      return;
+    }
+    const removed = pendingRemoveFocus.value;
+    pendingRemoveFocus.value = null;
+    if (removed === null) return;
     await nextTick();
-    const other = pending.dir === "earlier" ? "later" : "earlier";
-    const find = (dir: string) =>
+    // The picture that used to follow the removed one now sits at the same
+    // index; failing that, the one before it; failing that (the strip is
+    // empty), the add tile — focus never lands on <body>.
+    (
+      findRemoveButton(removed) ??
+      findRemoveButton(removed - 1) ??
       root.value?.querySelector<HTMLButtonElement>(
-        `[data-ris-move="${dir}-${pending.index}"]`,
-      );
-    const button = find(pending.dir);
-    // At an end the same-direction button is disabled; the other one is the
-    // natural next press.
-    (button && !button.disabled ? button : find(other))?.focus();
+        `[data-test="${tid("reference-add")}"]`,
+      )
+    )?.focus();
   },
 );
 
@@ -286,8 +318,9 @@ function onStripDrop(event: DragEvent): void {
             class="ris__action ris__action--danger"
             :disabled="disabled"
             :aria-label="`Remove ${item.label.toLowerCase()}`"
+            :data-ris-remove="item.index"
             :data-test="tid(`reference-remove-${item.index}`)"
-            @click="emit('remove', item.index)"
+            @click="remove(item.index)"
           >
             ✕
           </button>

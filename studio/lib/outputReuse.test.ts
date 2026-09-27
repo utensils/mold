@@ -47,10 +47,17 @@ describe("transparentBackgroundForSettingsReuse", () => {
 
   it("leaves it off for every other print, including an alpha reference edit", () => {
     // `has_alpha` is a fact about the FILE (a transparent reference keeps its
-    // alpha with the toggle off), not a setting the user chose.
-    expect(transparentBackgroundForSettingsReuse({ has_alpha: true })).toBe(
-      false,
-    );
+    // alpha with the toggle off), not a setting the user chose — real callers
+    // pass the full `OutputMetadata`, which carries `has_alpha` alongside
+    // `transparent_background`, but this reader never looks at it.
+    expect(
+      transparentBackgroundForSettingsReuse({
+        transparent_background: false,
+        has_alpha: true,
+      } as unknown as Parameters<
+        typeof transparentBackgroundForSettingsReuse
+      >[0]),
+    ).toBe(false);
     expect(transparentBackgroundForSettingsReuse({})).toBe(false);
     expect(
       transparentBackgroundForSettingsReuse({ transparent_background: null }),
