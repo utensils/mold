@@ -680,6 +680,32 @@ impl Bf16Qwen3Encoder {
         )
     }
 
+    /// The multimodal forward's hidden state after the embedding scatter
+    /// (index 0) and after each decoder layer `k` (index `k + 1`), for parity
+    /// diagnostics against transformers' `hidden_states` tuple.
+    #[cfg(test)]
+    pub(crate) fn multimodal_hidden_states(
+        &self,
+        input_ids: &Tensor,
+        visual: &super::qwen3_vl_inject::VisualInjection,
+        mrope: &[Vec<u32>; 3],
+    ) -> Result<Vec<Tensor>> {
+        let mut hidden = super::qwen3_vl_inject::inject_visual_rows(
+            &self.embed_tokens.forward(input_ids)?,
+            visual,
+        )?;
+        let (cos, sin) = self
+            .rotary_emb
+            .mrope_tables(mrope, super::qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS)?;
+        let mut states = vec![hidden.clone()];
+        for (index, layer) in self.layers.iter().enumerate() {
+            hidden = layer.forward_multimodal(&hidden, &cos, &sin, None)?;
+            hidden = super::qwen3_vl_inject::apply_deepstack(&hidden, visual, index)?;
+            states.push(hidden.clone());
+        }
+        Ok(states)
+    }
+
     /// [`Self::forward_multimodal_final_pre_norm`] with explicit MRoPE
     /// sections and an optional query-chunk override (tests).
     fn forward_multimodal_with(

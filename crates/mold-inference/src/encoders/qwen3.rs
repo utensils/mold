@@ -458,6 +458,20 @@ impl Qwen3Encoder {
         model.forward_final_pre_norm_with_attention(input_ids, attention)
     }
 
+    /// Qwen3-VL's batch-1 multimodal forward through the final pre-norm state.
+    pub(crate) fn forward_multimodal_final_pre_norm(
+        &mut self,
+        input_ids: &Tensor,
+        visual: Option<super::qwen3_vl_inject::VisualInjection>,
+        mrope: &[Vec<u32>; 3],
+    ) -> Result<Tensor> {
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Qwen3 model not loaded (weights dropped)"))?;
+        model.forward_multimodal_final_pre_norm(input_ids, visual, mrope)
+    }
+
     /// Drop model weights to free memory (e.g. GPU VRAM after encoding).
     pub fn drop_weights(&mut self) {
         self.model = None;

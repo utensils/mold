@@ -1,0 +1,523 @@
+//! Real-checkpoint parity against the M1 upstream captures
+//! (`testdata/qwen_image21/README.md`). Every test is `#[ignore]` and needs:
+//!
+//! - `QWEN_IMAGE21_MODEL_ROOT` — a mold models dir holding `shared/qwen-image21`
+//!   and `qwen-image-2.1-bf16/transformer`;
+//! - `QWEN_IMAGE21_FIXTURES` — the large-capture directory.
+//!
+//! GPU tests run on CUDA device 0 when built with `cuda` (select the card
+//! with `CUDA_VISIBLE_DEVICES`), otherwise on the CPU.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use candle_core::{DType, Device, Tensor};
+
+use super::layout::QwenImage21JointLayout;
+use super::reference::{
+    encode_prompt_with_images, encode_vision, load_vision_tower, pack_vision_inputs,
+    prepare_reference, tokenize_image_conditioned, PreparedReference,
+};
+use super::transformer::QwenImage21Transformer;
+use super::{encode_t2i_prompts, PrefixCacheDecision, QwenImage21TextConditioning};
+use crate::encoders::qwen3::Qwen3Encoder;
+use crate::encoders::qwen3_bf16::Qwen3BF16Config;
+use crate::progress::ProgressReporter;
+
+const P6_PROMPT: &str =
+    "Put the red apple from image 2 on the white sign in image 1, keep everything else unchanged.";
+const P6_NEGATIVE: &str = "blurry, lowres, watermark";
+const P8_PROMPT: &str =
+    "Change the sky to a warm sunset with orange clouds, keep the house and the sign unchanged.";
+
+pub(super) struct Env {
+    pub models: PathBuf,
+    pub fixtures: PathBuf,
+}
+
+pub(super) fn env() -> Option<Env> {
+    Some(Env {
+        models: PathBuf::from(std::env::var_os("QWEN_IMAGE21_MODEL_ROOT")?),
+        fixtures: PathBuf::from(std::env::var_os("QWEN_IMAGE21_FIXTURES")?),
+    })
+}
+
+impl Env {
+    pub fn tokenizer(&self) -> PathBuf {
+        self.models
+            .join("shared/qwen-image21/processor/tokenizer.json")
+    }
+
+    pub fn text_encoder(&self) -> Vec<PathBuf> {
+        (1..=4)
+            .map(|index| {
+                self.models.join(format!(
+                    "shared/qwen-image21/text_encoder/model-0000{index}-of-00004.safetensors"
+                ))
+            })
+            .collect()
+    }
+
+    pub fn transformer(&self) -> Vec<PathBuf> {
+        (1..=2)
+            .map(|index| {
+                self.models.join(format!(
+                    "qwen-image-2.1-bf16/transformer/diffusion_pytorch_model-0000{index}-of-00002.safetensors"
+                ))
+            })
+            .collect()
+    }
+
+    pub fn vae(&self) -> PathBuf {
+        self.models
+            .join("shared/qwen-image21/vae/diffusion_pytorch_model.safetensors")
+    }
+
+    pub fn capture(&self, name: &str) -> HashMap<String, Tensor> {
+        load_capture(&self.fixtures.join(name))
+    }
+}
+
+pub(super) fn device() -> Device {
+    #[cfg(feature = "cuda")]
+    if let Ok(device) = Device::new_cuda(0) {
+        return device;
+    }
+    Device::Cpu
+}
+
+/// Load a capture on the CPU. torch writes masks as safetensors `BOOL`,
+/// which candle does not read, so those become `U8`.
+pub(super) fn load_capture(path: &Path) -> HashMap<String, Tensor> {
+    use safetensors::tensor::Dtype;
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let file = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    file.tensors()
+        .into_iter()
+        .map(|(name, view)| {
+            let dtype = match view.dtype() {
+                Dtype::BOOL | Dtype::U8 => DType::U8,
+                Dtype::F32 => DType::F32,
+                Dtype::BF16 => DType::BF16,
+                Dtype::F16 => DType::F16,
+                Dtype::I64 => DType::I64,
+                Dtype::U32 => DType::U32,
+                other => panic!("{name}: unsupported capture dtype {other:?}"),
+            };
+            let tensor =
+                Tensor::from_raw_buffer(view.data(), dtype, view.shape(), &Device::Cpu).unwrap();
+            (name, tensor)
+        })
+        .collect()
+}
+
+fn testdata(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/qwen_image21")
+        .join(name)
+}
+
+pub(super) fn references(names: &[&str]) -> Vec<PreparedReference> {
+    names
+        .iter()
+        .map(|name| prepare_reference(&std::fs::read(testdata(name)).unwrap()).unwrap())
+        .collect()
+}
+
+/// `max|a - b| / max|b|` and `mean|a - b| / mean|b|`, in F32.
+pub(super) fn relative_error(actual: &Tensor, expected: &Tensor) -> (f32, f32) {
+    let actual = actual
+        .to_device(&Device::Cpu)
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap();
+    let expected = expected
+        .to_device(&Device::Cpu)
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap();
+    assert_eq!(actual.dims(), expected.dims());
+    let diff = (&actual - &expected).unwrap().abs().unwrap();
+    let scalar = |t: Tensor| t.to_scalar::<f32>().unwrap();
+    let max_error = scalar(diff.max(0).unwrap()) / scalar(expected.abs().unwrap().max(0).unwrap());
+    let mean_error =
+        scalar(diff.mean_all().unwrap()) / scalar(expected.abs().unwrap().mean_all().unwrap());
+    (max_error, mean_error)
+}
+
+/// bf16 parity: mold's mean error against the fp32 capture may be at most
+/// `ratio` times upstream's own bf16 capture's.
+fn check_against_truth(
+    label: &str,
+    actual: &Tensor,
+    upstream: &Tensor,
+    truth: &Tensor,
+    ratio: f32,
+) {
+    let (_, ours) = relative_error(actual, truth);
+    let (_, theirs) = relative_error(upstream, truth);
+    eprintln!("{label} vs fp32 truth: mold mean {ours:.3e}, upstream mean {theirs:.3e}");
+    assert!(ours <= theirs * ratio, "{label}: {ours} vs {theirs}");
+}
+
+fn check(label: &str, actual: &Tensor, expected: &Tensor, max_tolerance: f32) {
+    let (max_error, mean_error) = relative_error(actual, expected);
+    eprintln!("{label}: relative max {max_error:.3e}, mean {mean_error:.3e}");
+    assert!(max_error <= max_tolerance, "{label}: {max_error}");
+}
+
+fn bools(tensor: &Tensor) -> Vec<bool> {
+    tensor
+        .flatten_all()
+        .unwrap()
+        .to_dtype(DType::U8)
+        .unwrap()
+        .to_vec1::<u8>()
+        .unwrap()
+        .into_iter()
+        .map(|value| value != 0)
+        .collect()
+}
+
+/// P1: token ids, grid and `pixel_values` for the two captured references,
+/// exactly. CPU.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p1_processor_matches_the_upstream_capture() {
+    let Some(env) = env() else { return };
+    let refs = references(&["ref_opaque.png", "ref_rgba.png"]);
+    let tokenizer = tokenizers::Tokenizer::from_file(env.tokenizer()).unwrap();
+    let counts: Vec<usize> = refs.iter().map(|r| r.pad_count().unwrap()).collect();
+    let ids = tokenize_image_conditioned(&tokenizer, P6_PROMPT, &counts).unwrap();
+    let captured =
+        candle_core::safetensors::load(testdata("p1_processor_ids.safetensors"), &Device::Cpu)
+            .unwrap();
+    let expected: Vec<u32> = captured["input_ids"]
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<i64>()
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    assert_eq!(ids, expected);
+    let (pixels, grid, _) = pack_vision_inputs(&refs, &Device::Cpu).unwrap();
+    let pixel_capture = env.capture("p1_processor_pixels.safetensors");
+    assert_eq!(
+        grid.to_dtype(DType::I64).unwrap().to_vec2::<i64>().unwrap(),
+        pixel_capture["image_grid_thw"].to_vec2::<i64>().unwrap()
+    );
+    let actual = pixels.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let expected = pixel_capture["pixel_values"]
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let mismatched = actual
+        .iter()
+        .zip(&expected)
+        .filter(|(a, b)| a.to_bits() != b.to_bits())
+        .count();
+    assert_eq!(mismatched, 0, "{mismatched} pixel values differ");
+}
+
+/// P2: the vision merger and three DeepStack maps, fp32.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p2_vision_tower_matches_the_upstream_capture() {
+    let Some(env) = env() else { return };
+    let device = device();
+    let refs = references(&["ref_opaque.png", "ref_rgba.png"]);
+    let tower = load_vision_tower(
+        &env.text_encoder(),
+        &device,
+        DType::F32,
+        &ProgressReporter::default(),
+    )
+    .unwrap();
+    let features = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
+    let captured = env.capture("p2_vision_fp32.safetensors");
+    check("merger", &features.embeds, &captured["vision_merger"], 3e-4);
+    for (index, map) in features.deepstack.iter().enumerate() {
+        check(
+            &format!("deepstack {index}"),
+            map,
+            &captured[&format!("vision_deepstack_{index}")],
+            1e-3,
+        );
+    }
+}
+
+fn p3_cases() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+    vec![
+        ("p6_pos", P6_PROMPT, vec!["ref_opaque.png", "ref_rgba.png"]),
+        (
+            "p6_neg",
+            P6_NEGATIVE,
+            vec!["ref_opaque.png", "ref_rgba.png"],
+        ),
+        ("p8_pos", P8_PROMPT, vec!["ref_opaque.png"]),
+        ("t2i_p8", P8_PROMPT, vec![]),
+    ]
+}
+
+fn p3(dtype: DType, suffix: &str, tolerance: f32) {
+    let Some(env) = env() else { return };
+    let device = device();
+    let progress = ProgressReporter::default();
+    let mut encoder = Qwen3Encoder::load_bf16(
+        &env.text_encoder(),
+        &env.tokenizer(),
+        &device,
+        dtype,
+        &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+        &progress,
+    )
+    .unwrap();
+    let tower = load_vision_tower(&env.text_encoder(), &device, dtype, &progress).unwrap();
+    for (case, prompt, files) in p3_cases() {
+        let conditioning: QwenImage21TextConditioning = if files.is_empty() {
+            encode_t2i_prompts(&mut encoder, &[prompt.to_string()]).unwrap()
+        } else {
+            let refs = references(&files);
+            let vision = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
+            encode_prompt_with_images(&mut encoder, &vision, prompt).unwrap()
+        };
+        let captured = env.capture(&format!("p3_{case}_{suffix}.safetensors"));
+        assert_eq!(
+            conditioning.image_slots[0],
+            bools(&captured["image_pad_mask"]),
+            "{case} image pad mask"
+        );
+        if dtype == DType::F32 {
+            check(
+                &format!("{case} prompt_embeds {suffix}"),
+                &conditioning.embeddings,
+                &captured["prompt_embeds"],
+                tolerance,
+            );
+        } else {
+            // The bf16 vision tower alone moves upstream's own merger output
+            // ~11% from its fp32 run, so a bf16-to-bf16 comparison measures
+            // rounding chaos. Hold mold's bf16 to the fp32 truth no worse
+            // than upstream's bf16 is.
+            let truth =
+                env.capture(&format!("p3_{case}_fp32.safetensors"))["prompt_embeds"].clone();
+            let (_, ours) = relative_error(&conditioning.embeddings, &truth);
+            let (_, theirs) = relative_error(&captured["prompt_embeds"], &truth);
+            eprintln!(
+                "{case} bf16 vs fp32 truth: mold mean {ours:.3e}, upstream mean {theirs:.3e}"
+            );
+            assert!(ours <= theirs * tolerance, "{case}: {ours} vs {theirs}");
+        }
+    }
+}
+
+/// P3 fp32: trimmed pre-norm hidden states and `image_pad_mask` for the
+/// positive and negative P6 prompts, the P8 edit prompt, and text-to-image.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_fp32_conditioning_matches_the_upstream_capture() {
+    p3(DType::F32, "fp32", 5e-3);
+}
+
+/// P3 bf16: the same through the bf16 checkpoint.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_bf16_conditioning_matches_the_upstream_capture() {
+    // `tolerance` is the allowed ratio to upstream's own bf16 error.
+    p3(DType::BF16, "bf16", 1.5);
+}
+
+fn p6(dtype: DType, suffix: &str, tolerance: f32) {
+    let Some(env) = env() else { return };
+    let device = device();
+    let inputs = env.capture("p6_inputs.safetensors");
+    let outputs = env.capture(&format!("p6_outputs_{suffix}.safetensors"));
+    let slots =
+        bools(&load_capture(&testdata("p3_p6_pos_image_pad_mask.safetensors"))["image_pad_mask"]);
+    let embeddings = inputs["prompt_embeds"]
+        .to_device(&device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let text_len = slots.len();
+    let conditioning = QwenImage21TextConditioning {
+        embeddings,
+        valid_tokens: vec![vec![true; text_len]],
+        image_slots: vec![slots.clone()],
+    };
+    let layout = QwenImage21JointLayout::build(
+        &slots,
+        &conditioning.valid_tokens,
+        &[(52, 78), (72, 58)],
+        (32, 32),
+    )
+    .unwrap();
+    assert_eq!(layout.total_len(), 9298);
+    let cond = inputs["cond_latents"]
+        .to_device(&device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let transformer = QwenImage21Transformer::load(
+        &env.transformer(),
+        &device,
+        dtype,
+        &ProgressReporter::default(),
+    )
+    .unwrap();
+    let timestep = |name: &str| -> f64 {
+        f64::from(
+            outputs[name]
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()[0],
+        )
+    };
+    let (t_a, t_b) = (timestep("timestep_a"), timestep("timestep_b"));
+    eprintln!("timesteps {t_a} {t_b}");
+    let latent = |name: &str| {
+        inputs[name]
+            .to_device(&device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap()
+    };
+    let truth = env.capture("p6_outputs_fp32.safetensors");
+    let target_of = |set: &HashMap<String, Tensor>, name: &str| {
+        if name == "cached_b" {
+            set[name].clone()
+        } else {
+            set[name].narrow(1, 9298 - 1024, 1024).unwrap()
+        }
+    };
+    let check = |name: &str, actual: &Tensor| {
+        let label = format!("{name} {suffix}");
+        if dtype == DType::F32 {
+            check(&label, actual, &target_of(&outputs, name), tolerance);
+        } else {
+            check_against_truth(
+                &label,
+                actual,
+                &target_of(&outputs, name),
+                &target_of(&truth, name),
+                tolerance,
+            );
+        }
+    };
+
+    let mut full = transformer
+        .prepare(
+            &conditioning,
+            layout.clone(),
+            Some(cond.clone()),
+            PrefixCacheDecision::Recompute,
+        )
+        .unwrap();
+    check("full_a", &full.forward(&latent("x_a"), t_a).unwrap());
+    check("full_b", &full.forward(&latent("x_b"), t_b).unwrap());
+    drop(full);
+    let mut cached = transformer
+        .prepare(
+            &conditioning,
+            layout,
+            Some(cond),
+            PrefixCacheDecision::Retain,
+        )
+        .unwrap();
+    check("extract_a", &cached.forward(&latent("x_a"), t_a).unwrap());
+    check("cached_b", &cached.forward(&latent("x_b"), t_b).unwrap());
+}
+
+/// P6 fp32: one two-reference transformer forward — full, prefix extract,
+/// then cached — against upstream.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p6_fp32_transformer_matches_the_upstream_capture() {
+    p6(DType::F32, "fp32", 1e-4);
+}
+
+/// P6 bf16.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p6_bf16_transformer_matches_the_upstream_capture() {
+    // `tolerance` is the allowed ratio to upstream's own bf16 error.
+    p6(DType::BF16, "bf16", 1.5);
+}
+/// P3 diagnostics (fp32, one reference): MRoPE position ids exactly, then
+/// the language model's hidden states after the scatter and after layers
+/// 0-4, 18, 35 against transformers' `hidden_states`. Localizes a P3 drift.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_p8_language_model_internals_match_the_upstream_capture() {
+    let (dtype, suffix) = match std::env::var("QWEN_IMAGE21_DIAG_DTYPE").as_deref() {
+        Ok("bf16") => (DType::BF16, "bf16"),
+        _ => (DType::F32, "fp32"),
+    };
+    use crate::encoders::qwen3::Qwen3Model;
+    use crate::encoders::qwen3_vl_inject::VisualInjection;
+    use mold_candle::qwen3_vl::{create_mm_token_type_ids, qwen_mrope_positions};
+    let Some(env) = env() else { return };
+    let device = device();
+    let progress = ProgressReporter::default();
+    let refs = references(&["ref_opaque.png"]);
+    let tower = load_vision_tower(&env.text_encoder(), &device, dtype, &progress).unwrap();
+    let vision = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
+    drop(tower);
+    let p2 = env.capture("p2_vision_fp32.safetensors");
+    let (max_error, mean_error) = relative_error(
+        &vision.embeds,
+        &p2["vision_merger"]
+            .narrow(0, 0, vision.embeds.dim(0).unwrap())
+            .unwrap(),
+    );
+    eprintln!("merger vs fp32: relative max {max_error:.3e}, mean {mean_error:.3e}");
+    let encoder = Qwen3Encoder::load_bf16(
+        &env.text_encoder(),
+        &env.tokenizer(),
+        &device,
+        dtype,
+        &Qwen3BF16Config::qwen3_image_21_text_encoder(),
+        &progress,
+    )
+    .unwrap();
+    let counts: Vec<usize> = refs.iter().map(|r| r.pad_count().unwrap()).collect();
+    let ids = tokenize_image_conditioned(&encoder.tokenizer, P8_PROMPT, &counts).unwrap();
+    let mrope =
+        qwen_mrope_positions(&create_mm_token_type_ids(&ids), &vision.grids, &[], 2).unwrap();
+    let captured = env.capture(&format!("p3_p8_pos_lm_internals_{suffix}.safetensors"));
+    let positions = captured["lm_position_ids"].to_vec3::<i64>().unwrap();
+    for axis in 0..3 {
+        let expected: Vec<u32> = positions[axis][0].iter().map(|p| *p as u32).collect();
+        assert_eq!(mrope[axis], expected, "MRoPE axis {axis}");
+    }
+    let visual = VisualInjection {
+        positions: ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, id)| (*id == super::reference::QWEN3_VL_IMAGE_PAD_ID).then_some(i))
+            .collect(),
+        embeds: vision.embeds.clone(),
+        deepstack: vision.deepstack.clone(),
+    };
+    let input_ids = Tensor::from_vec(ids.clone(), (1, ids.len()), &device).unwrap();
+    let Some(Qwen3Model::BF16(model)) = encoder.model.as_ref() else {
+        panic!("BF16 encoder expected")
+    };
+    let states = model
+        .multimodal_hidden_states(&input_ids, &visual, &mrope)
+        .unwrap();
+    for index in [0usize, 1, 2, 3, 4, 18, 35, 36] {
+        let (max_error, mean_error) =
+            relative_error(&states[index], &captured[&format!("lm_hidden_{index}")]);
+        eprintln!("lm_hidden_{index}: relative max {max_error:.3e}, mean {mean_error:.3e}");
+    }
+}

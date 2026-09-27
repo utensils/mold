@@ -15,10 +15,14 @@ pub(crate) mod attention;
 pub(crate) mod conditioning;
 pub(crate) mod layout;
 pub(crate) mod pipeline;
+pub(crate) mod reference;
 pub(crate) mod scheduler;
 pub(crate) mod transformer;
 pub(crate) mod vae;
 pub(crate) mod vae_encoder;
+
+#[cfg(test)]
+mod parity_tests;
 
 pub use pipeline::QwenImage21Engine;
 
@@ -221,7 +225,7 @@ pub(crate) fn t2i_prompt_template(prompt: &str) -> String {
 /// It is intentionally derived through the loaded tokenizer at runtime rather
 /// than kept as a magic token count.  This is the same invariant as the
 /// reference's `processor.apply_chat_template(system_message, tokenize=True)`.
-fn system_message_prefix() -> String {
+pub(crate) fn system_message_prefix() -> String {
     format!("<|im_start|>system\n{QWEN_IMAGE_21_SYSTEM_PROMPT}<|im_end|>\n")
 }
 

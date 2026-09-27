@@ -27,6 +27,10 @@ pub struct Qwen3VlVisionDimensions {
     num_position_embeddings: usize,
     deepstack_visual_indexes: Vec<usize>,
     activation: Activation,
+    /// The mergers' `act_fn`. transformers' `Qwen3VLVisionPatchMerger` uses
+    /// `nn.GELU()` (exact erf); H3's port has always used the tanh
+    /// approximation and keeps it so no H3 byte moves.
+    merger_activation: Activation,
 }
 
 impl Qwen3VlVisionDimensions {
@@ -45,6 +49,7 @@ impl Qwen3VlVisionDimensions {
             num_position_embeddings: vision.num_position_embeddings,
             deepstack_visual_indexes: vision.deepstack_visual_indexes.clone(),
             activation: Activation::GeluPytorchTanh,
+            merger_activation: Activation::GeluPytorchTanh,
         }
     }
 
@@ -66,6 +71,8 @@ impl Qwen3VlVisionDimensions {
             num_position_embeddings: 2304,
             deepstack_visual_indexes: vec![8, 16, 24],
             activation: Activation::GeluPytorchTanh,
+            // `modeling_qwen3_vl.py` `Qwen3VLVisionPatchMerger.act_fn = nn.GELU()`.
+            merger_activation: Activation::Gelu,
         }
     }
 
@@ -129,6 +136,7 @@ impl Qwen3VlVisionDimensions {
             num_position_embeddings: 4,
             deepstack_visual_indexes: vec![0, 1, 2],
             activation: Activation::GeluPytorchTanh,
+            merger_activation: Activation::GeluPytorchTanh,
         }
     }
 }
@@ -484,6 +492,7 @@ struct PatchMerger {
     merged_hidden_size: usize,
     first: Linear,
     second: Linear,
+    activation: Activation,
 }
 
 impl PatchMerger {
@@ -517,6 +526,7 @@ impl PatchMerger {
                 config.output_hidden_size,
                 vb.pp("linear_fc2"),
             )?,
+            activation: config.merger_activation,
         })
     }
 
@@ -542,7 +552,9 @@ impl PatchMerger {
         };
         linear_with_cpu_bf16_fallback(
             &self.second,
-            &linear_with_cpu_bf16_fallback(&self.first, &merged)?.gelu()?,
+            &self
+                .activation
+                .forward(&linear_with_cpu_bf16_fallback(&self.first, &merged)?)?,
         )
     }
 }
