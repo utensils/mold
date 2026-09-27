@@ -89,6 +89,7 @@ impl InferenceEngine for MattingEngine {
             generation_time_ms: started.elapsed().as_millis() as u64,
             model: req.model.clone(),
             seed_used: req.seed.unwrap_or_default(),
+            prefix_cache: None,
         })
     }
 

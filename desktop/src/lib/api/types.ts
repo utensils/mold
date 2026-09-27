@@ -845,6 +845,9 @@ export interface OutputMetadata {
   /** The STORED file carries alpha — also true for an edit of a transparent
    * reference with the toggle off. Draws the checkerboard. Additive. */
   has_alpha?: boolean | null;
+  /** Qwen Image 2.1: whether the render retained its prompt prefix's K/V or
+   * recomputed it every step (the two are not bit-identical). Additive. */
+  prefix_cache?: "retained" | "recomputed" | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */

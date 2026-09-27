@@ -1026,6 +1026,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         };
 
@@ -1228,6 +1229,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         });
 
@@ -1320,6 +1322,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         }
     }
@@ -1505,6 +1508,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();

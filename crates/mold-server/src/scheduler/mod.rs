@@ -16462,6 +16462,7 @@ mod tests {
                     model: "flux-dev:q4".to_string(),
                     seed_used: 1,
                     gpu: Some(0),
+                    prefix_cache: None,
                 },
                 image: mold_core::ImageData {
                     data: vec![1],
@@ -16650,6 +16651,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 seed_used: 7,
                 gpu: Some(0),
+                prefix_cache: None,
             },
             image: original.clone(),
             output_metadata: None,
@@ -16825,6 +16827,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 seed_used: 9,
                 gpu: Some(0),
+                prefix_cache: None,
             },
             image: original.clone(),
             output_metadata: None,

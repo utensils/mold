@@ -1747,6 +1747,7 @@ impl LtxVideoEngine {
             model: self.base.model_name.clone(),
             seed_used: seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }

@@ -353,6 +353,7 @@ impl H3Fl2VaEngine {
             model: self.model_name.clone(),
             seed_used: output.seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }

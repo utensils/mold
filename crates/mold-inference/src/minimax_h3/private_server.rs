@@ -4743,6 +4743,7 @@ fn private_run_output(
         model: owner.media.canonical_model,
         seed_used: owner.media.seed,
         gpu: Some(owner.device_ordinal),
+        prefix_cache: None,
     };
     Ok(H3PrivateFl2VaRunOutput {
         response,

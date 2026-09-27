@@ -2457,6 +2457,7 @@ impl WanEngine {
             model: self.base.model_name.clone(),
             seed_used: seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }
@@ -2495,6 +2496,7 @@ fn still_response(
         model: model_name.to_string(),
         seed_used: seed,
         gpu: None,
+        prefix_cache: None,
     })
 }
 

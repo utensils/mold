@@ -109,6 +109,20 @@ pub(crate) struct Denoised {
     pub(crate) latent_height: usize,
     pub(crate) latent_width: usize,
     pub(crate) warnings: Vec<String>,
+    /// What the denoise did with its prompt prefix's K/V — the print's
+    /// provenance (`OutputMetadata::prefix_cache`).
+    pub(crate) prefix_cache: mold_core::PrefixCacheOutcome,
+}
+
+/// The print's prefix-cache provenance from the per-branch decisions.
+pub(crate) fn prefix_cache_outcome(
+    decisions: &[super::PrefixCacheDecision],
+) -> mold_core::PrefixCacheOutcome {
+    if decisions.contains(&super::PrefixCacheDecision::Recompute) {
+        mold_core::PrefixCacheOutcome::Recomputed
+    } else {
+        mold_core::PrefixCacheOutcome::Retained
+    }
 }
 
 /// The prefix-cache budget of the denoise about to run on `device` with
@@ -978,6 +992,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings: cache_warning.into_iter().collect(),
+            prefix_cache: prefix_cache_outcome(&decisions),
         })
     }
 
@@ -1024,10 +1039,14 @@ impl QwenImage21Engine {
         seed: u64,
         started: Instant,
         warnings: Vec<String>,
+        prefix_cache: mold_core::PrefixCacheOutcome,
     ) -> Result<GenerateResponse> {
         let format = req.resolved_output_format();
         let alpha = alpha_output_for_request(req);
-        let output_metadata = build_output_metadata(req, seed, None);
+        let output_metadata = build_output_metadata(req, seed, None).map(|mut metadata| {
+            metadata.prefix_cache = Some(prefix_cache);
+            metadata
+        });
         let data = encode_image_with_alpha(
             rgba,
             format,
@@ -1055,6 +1074,7 @@ impl QwenImage21Engine {
             seed_used: seed,
             video: None,
             gpu: None,
+            prefix_cache: Some(prefix_cache),
         })
     }
 
@@ -1156,6 +1176,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings,
+            prefix_cache,
         } = Self::denoise(
             progress,
             req,
@@ -1190,7 +1211,7 @@ impl QwenImage21Engine {
             &vae_device,
             vae_dtype,
         )?;
-        Self::response(req, &image, seed, started, warnings)
+        Self::response(req, &image, seed, started, warnings, prefix_cache)
     }
 
     fn generate_eager(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
@@ -1303,6 +1324,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings,
+            prefix_cache,
         } = Self::denoise(
             progress,
             req,
@@ -1365,7 +1387,7 @@ impl QwenImage21Engine {
                 &vae_device,
                 vae_dtype,
             )?;
-            return Self::response(req, &image, seed, started, warnings);
+            return Self::response(req, &image, seed, started, warnings, prefix_cache);
         }
         let decoded = Self::decode_rgba(
             progress,
@@ -1381,7 +1403,7 @@ impl QwenImage21Engine {
             loaded.transformer.move_to_device(&loaded.device)?;
         }
         let image = decoded?;
-        Self::response(req, &image, seed, started, warnings)
+        Self::response(req, &image, seed, started, warnings, prefix_cache)
     }
 }
 
@@ -1470,6 +1492,21 @@ fn device_label(device: &Device) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A print records whether its prefix was retained or recomputed; one
+    /// recomputing branch makes the whole render a recompute.
+    #[test]
+    fn the_prefix_cache_outcome_is_recorded_per_render() {
+        use super::super::PrefixCacheDecision::{Recompute, Retain};
+        assert_eq!(
+            prefix_cache_outcome(&[Retain, Retain]),
+            mold_core::PrefixCacheOutcome::Retained
+        );
+        assert_eq!(
+            prefix_cache_outcome(&[Retain, Recompute]),
+            mold_core::PrefixCacheOutcome::Recomputed
+        );
+    }
 
     fn request() -> GenerateRequest {
         serde_json::from_value(serde_json::json!({

@@ -793,6 +793,7 @@ mod tests {
             seed_used: 7,
             gpu: None,
             request_warnings: Vec::new(),
+            prefix_cache: None,
         };
         settle_publication_blocking(
             &mut harness.channels,
@@ -832,6 +833,7 @@ mod tests {
             seed_used: 7,
             gpu: None,
             request_warnings: Vec::new(),
+            prefix_cache: None,
         };
         let outcome = settle_publication_blocking(
             &mut harness.channels,

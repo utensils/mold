@@ -1044,6 +1044,7 @@ mod tests {
             video: None,
             gpu: None,
             request_warnings: Vec::new(),
+            prefix_cache: None,
         };
         let plain = format_generation_result(&resp, "a portrait", None);
         assert!(
@@ -1087,6 +1088,7 @@ mod tests {
             seed_used: 42,
             video: None,
             gpu: None,
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, "a cat on mars", None);
         assert_eq!(embed.title, "Image Generated");
@@ -1130,6 +1132,7 @@ mod tests {
             seed_used: 1,
             video: None,
             gpu: None,
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, &long_prompt, None);
         assert!(embed.description.chars().count() <= 260);
@@ -1167,6 +1170,7 @@ mod tests {
             model: "ltx-2-19b-distilled:fp8".to_string(),
             seed_used: 7,
             gpu: None,
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, "a drone shot", None);
         assert_eq!(embed.title, "Video Generated");
@@ -1214,6 +1218,7 @@ mod tests {
             model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
             seed_used: 9,
             gpu: Some(1),
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, "", None);
         assert_eq!(embed.title, "Mesh Generated");
@@ -1269,6 +1274,7 @@ mod tests {
             model: "ltx-video-0.9.6-distilled:bf16".to_string(),
             seed_used: 3,
             gpu: None,
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, "loop", None);
         assert_eq!(embed.title, "Video Generated");
@@ -1299,6 +1305,7 @@ mod tests {
             seed_used: 1,
             video: None,
             gpu: None,
+            prefix_cache: None,
         };
         let embed = format_generation_result(&resp, &long_prompt, None);
         assert!(embed.description.chars().count() <= 260);
