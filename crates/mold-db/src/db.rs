@@ -977,6 +977,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         true_cfg: None,
         cfg_start_step: None,
         has_alpha: None,
+        transparent_background: None,
     };
     let source_s: String = row.get(26)?;
     let synthetic_i: i64 = row.get(27)?;
@@ -1174,6 +1175,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         }
     }
 

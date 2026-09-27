@@ -465,6 +465,12 @@ pub struct ExpandContext {
     /// clients, and then the family alone decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_mode: Option<crate::generation_profile::PromptRequirement>,
+    /// Whether the render asks for a transparent background
+    /// (`GenerateRequest.transparent_background`). The expander is told to
+    /// describe the subject only; it never sees the engine's RGBA prompt
+    /// wrapper, which is applied after expansion. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_background: Option<bool>,
 }
 
 impl ExpandContext {
@@ -620,6 +626,7 @@ impl ExpandContext {
             references,
             loras,
             prompt_mode,
+            transparent_background: (req.transparent_background == Some(true)).then_some(true),
         }
     }
 
@@ -1940,6 +1947,15 @@ pub struct GenerateRequest {
     /// same falsification case `id_weight` has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_weight: Option<f64>,
+    /// Ask a transparency-capable recipe for a cut-out subject on a
+    /// transparent background (`capabilities.transparency`). Only
+    /// `Some(true)` is meaningful: admission normalizes `Some(false)` to
+    /// `None` ([`Self::normalize_transparent_background`]) and clients send
+    /// nothing otherwise, so an ordinary render is byte-identical. The prompt
+    /// the user wrote is never rewritten; the engine applies the model's
+    /// RGBA prompt recipe (`crate::transparency`) at encode time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_background: Option<bool>,
     /// Ordered heterogeneous MiniMax H3 Ref2VA inputs. Other families retain
     /// their existing source/edit fields and must reject this additive field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2340,6 +2356,16 @@ impl GenerateRequest {
     ///
     /// Every other family is untouched: an unavailable format there is a real
     /// client mistake and stays a 422 from the recipe's own delivery list.
+    /// `transparent_background: false` is the same request as an absent
+    /// field; admission normalizes it away so provenance, fingerprints and
+    /// the queue row carry one spelling of "no".
+    pub fn normalize_transparent_background(&mut self) -> &mut Self {
+        if self.transparent_background != Some(true) {
+            self.transparent_background = None;
+        }
+        self
+    }
+
     pub fn pin_output_format_for_family(&mut self, family: Option<&str>) -> &mut Self {
         if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
             self.output_format = Some(OutputFormat::Glb);
@@ -3404,13 +3430,19 @@ pub struct OutputMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_workflow: Option<crate::mesh_workflow::MeshWorkflowProvenance>,
     /// A fact about the stored artifact, not the request: `Some(true)` when
-    /// the saved still carries an alpha channel (at least one pixel below
-    /// full opacity). Set by the still encoder before the bytes are written,
-    /// so an embedded PNG chunk carries it, and re-derived from the
+    /// the saved still's container carries an alpha channel (an RGBA PNG, a
+    /// WebP with alpha). Set by the still encoder before the bytes are
+    /// written, so an embedded PNG chunk carries it, and re-derived from the
     /// container header at publication (`apply_still_output`). Absent means
-    /// opaque, or a print from before the field existed.
+    /// no alpha channel, or a print from before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_alpha: Option<bool>,
+    /// The request asked for a transparent background
+    /// (`GenerateRequest.transparent_background`). Recorded only when
+    /// `Some(true)`, so an ordinary print's metadata is unchanged; Reuse
+    /// restores the toggle from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_background: Option<bool>,
     pub version: String,
 }
 
@@ -3637,6 +3669,7 @@ impl OutputMetadata {
             // A fact about the stored file; the encoder or the publication
             // path (`apply_still_output`) records it.
             has_alpha: None,
+            transparent_background: (req.transparent_background == Some(true)).then_some(true),
             version: version.into(),
         }
     }
@@ -6718,6 +6751,43 @@ mod tests {
     }
 
     #[test]
+    fn the_transparency_toggle_is_additive_and_recorded_only_when_on() {
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lantern", "model": "qwen-image-2.1:bf16", "width": 1024,
+            "height": 1024, "steps": 40, "guidance": 4.0, "batch_size": 1
+        }))
+        .unwrap();
+        assert_eq!(req.transparent_background, None);
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("transparent_background")
+            .is_none());
+        let off = OutputMetadata::from_generate_request(&req, 1, None, "t");
+        assert_eq!(off.transparent_background, None);
+        assert!(serde_json::to_value(&off)
+            .unwrap()
+            .get("transparent_background")
+            .is_none());
+        let context = ExpandContext::for_generation("qwen-image21", &req, None);
+        assert_eq!(context.transparent_background, None);
+
+        req.transparent_background = Some(false);
+        let recorded = OutputMetadata::from_generate_request(&req, 1, None, "t");
+        assert_eq!(recorded.transparent_background, None);
+
+        req.transparent_background = Some(true);
+        let on = OutputMetadata::from_generate_request(&req, 1, None, "t");
+        assert_eq!(on.transparent_background, Some(true));
+        // The user's prompt is stored as written; only the engine wraps it.
+        assert_eq!(on.prompt, "a lantern");
+        let round: OutputMetadata =
+            serde_json::from_value(serde_json::to_value(&on).unwrap()).unwrap();
+        assert_eq!(round.transparent_background, Some(true));
+        let context = ExpandContext::for_generation("qwen-image21", &req, None);
+        assert_eq!(context.transparent_background, Some(true));
+    }
+
+    #[test]
     fn apply_still_output_records_the_container_alpha() {
         let mut metadata = OutputMetadata::from_generate_request(
             &serde_json::from_value::<GenerateRequest>(serde_json::json!({
@@ -7391,6 +7461,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -7647,6 +7718,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -7731,6 +7803,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -8018,6 +8091,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 
@@ -8353,6 +8427,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -8604,6 +8679,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -8685,6 +8761,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         let metadata =
@@ -8776,6 +8853,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 9, None, "0.1.0");
@@ -9571,6 +9649,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -9658,6 +9737,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -9758,6 +9838,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -9843,6 +9924,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -9949,6 +10031,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

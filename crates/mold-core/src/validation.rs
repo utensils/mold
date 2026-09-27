@@ -116,9 +116,31 @@ pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
     "sdxl",
     "qwen-image",
     "qwen-image-edit",
+    // Qwen Image 2.1 applies adapters at forward time (bypass, never
+    // merged), so every tier — BF16, GGUF, INT8, FP8 — takes them. Its LoRAs
+    // are its own architecture: a Qwen-Image / 2512 adapter does not apply.
+    "qwen-image21",
     "wan",
     "z-image",
 ];
+
+/// The ordered-reference ceiling for Qwen Image 2.1: the model card's "Support
+/// up to **10 reference images**". Admission may still refuse a smaller set
+/// whose memory estimate does not fit; this is the family bound.
+pub const QWEN_IMAGE21_MAX_REFERENCE_IMAGES: u32 = 10;
+
+/// Per-reference pixel area Qwen Image 2.1 conditions at: each reference is
+/// resized to about a 1024x1024 area, aspect preserved, before the vision
+/// tower and VAE encoder see it.
+pub const QWEN_IMAGE21_REFERENCE_MAX_PIXELS: u64 = 1024 * 1024;
+
+/// Qwen Image 2.1's canvas ceiling: the largest of the model card's native 2K
+/// presets, 2400x1792 (4:3). Every preset is on the family's 32 px grid.
+pub const QWEN_IMAGE21_MAX_PIXELS: u64 = 2_400 * 1_792;
+
+/// Qwen Image 2.1's per-axis ceiling: the long side of the 16:9 / 9:16 2K
+/// presets (2752x1536).
+pub const QWEN_IMAGE21_MAX_AXIS: u32 = 2_752;
 
 pub fn family_supports_lora(family: &str) -> bool {
     LORA_CAPABLE_FAMILIES.contains(&family)
@@ -737,6 +759,7 @@ pub fn max_pixels_for_family_composed(
         (Some("ltx2"), Ltx2SpatialComposition::TiledTwoStage) => LTX2_COMPOSED_MAX_PIXELS,
         (Some("ltx2"), Ltx2SpatialComposition::SinglePass) => LTX2_MAX_PIXELS,
         (Some(family), _) if crate::minimax_h3::is_family(family) => crate::minimax_h3::MAX_PIXELS,
+        (Some("qwen-image21"), _) => QWEN_IMAGE21_MAX_PIXELS,
         _ => MAX_PIXELS,
     }
 }
@@ -756,6 +779,7 @@ pub fn max_axis_pixels_for_family_composed(
             Some(LTX2_COMPOSED_MAX_AXIS_PIXELS)
         }
         (Some("ltx2"), Ltx2SpatialComposition::SinglePass) => Some(LTX2_MAX_AXIS_PIXELS),
+        (Some("qwen-image21"), _) => Some(QWEN_IMAGE21_MAX_AXIS),
         _ => None,
     }
 }
@@ -1405,6 +1429,27 @@ pub fn fit_to_target_area(src_w: u32, src_h: u32, target_area: u32, align: u32) 
 }
 
 /// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
+/// Identify a still reference image's container from its magic bytes.
+///
+/// PNG (`\x89PNG`), JPEG (`FF D8`) and WebP (`RIFF....WEBP`). Used for
+/// `edit_images`, whose accepted set is per recipe
+/// (`ReferenceImagesProfile::formats`); `source_image`, `mask_image`,
+/// `control_image` and keyframes keep [`is_valid_image_format`]'s PNG/JPEG.
+pub fn sniff_image_input_format(
+    data: &[u8],
+) -> Option<crate::generation_profile::ImageInputFormat> {
+    use crate::generation_profile::ImageInputFormat;
+    if data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47] {
+        Some(ImageInputFormat::Png)
+    } else if data.len() >= 2 && data[..2] == [0xFF, 0xD8] {
+        Some(ImageInputFormat::Jpeg)
+    } else if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(ImageInputFormat::Webp)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
     let is_jpeg = data.len() >= 2 && data[..2] == [0xFF, 0xD8];
@@ -1934,10 +1979,10 @@ fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
         Some(family) if family_supports_lora(family) => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image (incl. Edit and 2.1), Wan, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image (incl. Edit and 2.1), Wan, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -2053,8 +2098,10 @@ pub fn request_satisfies_source_requirement(req: &GenerateRequest, family: Optio
 /// rejection reads identically wherever it lands.
 ///
 /// `family` selects the family-aware phrasing — Wan keeps its checkpoint-swap
-/// suggestions and Qwen Image 2.1 names its text-to-image-only boundary;
-/// legacy LTX-Video keeps its text-to-video explanation. `has_source`
+/// suggestions; legacy LTX-Video keeps its text-to-video explanation. (Qwen
+/// Image 2.1 no longer lands here: its manifest `source_image` is the `None`
+/// passthrough, and its reference contract refuses `source_image` with "uses
+/// edit_images instead of source_image".) `has_source`
 /// counts first/last-frame keyframes as well as a source image (#779): both
 /// carry source frames, so either satisfies a required contract and either is
 /// refused by a text-to-video-only checkpoint. A `None` capability remains
@@ -2075,13 +2122,6 @@ pub fn source_image_contract_violation(
              or keyframes — remove them, or pick an I2V-capable checkpoint such as \
              wan22-ti2v-5b or wan22-i2v-a14b"
                 .to_string()
-        } else if family == Some("qwen-image21") {
-            format!(
-                "{model} is text-to-image only and does not accept a source image or \
-                 keyframes — Qwen Image 2.1's native Mold path currently supports \
-                 text conditioning only; remove the image or choose a checkpoint with \
-                 image conditioning"
-            )
         } else {
             format!(
                 "{model} is text-to-video only and does not accept a source image — its \
@@ -2941,6 +2981,13 @@ fn validate_generate_request_after_activation_with(
     // Face-identity conditioning is its own contract; `crate::identity` owns
     // every rule so this validator does not grow a second authority.
     crate::identity::validate_identity_conditioning_with_family(req, family)?;
+    // The transparency contract, resolved from the generation profile and
+    // checked by the ONE validator the recipe door also calls. Ahead of the
+    // H3 early return so no family can slip past it on this door.
+    crate::generation_profile::validate_transparency_against(
+        &crate::generation_profile::transparency_for_recipe(family.unwrap_or_default(), &req.model),
+        req,
+    )?;
     if req.batch_size == 0 {
         return Err("batch_size must be >= 1".to_string());
     }
@@ -4980,6 +5027,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 
@@ -6711,17 +6759,27 @@ mod tests {
     }
 
     #[test]
-    fn qwen_image21_source_refusal_names_its_text_to_image_contract() {
-        let message = source_image_contract_violation(
+    fn qwen_image21_refuses_a_source_image_in_favour_of_edit_images() {
+        // The manifest passthrough (`source_image: None`) means the video
+        // contract gate says nothing; the REFERENCE contract answers, from
+        // both doors, with the same sentence.
+        assert!(source_image_contract_violation(
             Some("qwen-image21"),
             "qwen-image-2.1:bf16",
-            Some(crate::SourceImageCapability::Unsupported),
-            true,
+            None,
+            true
         )
-        .expect("Qwen Image 2.1 must refuse source images");
-        assert!(message.contains("text-to-image only"), "{message}");
-        assert!(message.contains("Qwen Image 2.1"), "{message}");
-        assert!(!message.contains("text-to-video"), "{message}");
+        .is_none());
+        let mut req = valid_req();
+        req.model = "qwen-image-2.1:bf16".into();
+        req.width = 1024;
+        req.height = 1024;
+        req.source_image = Some(vec![0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0]);
+        let error = validate_generate_request(&req).unwrap_err();
+        assert_eq!(
+            error,
+            "qwen-image-2.1 uses edit_images instead of source_image"
+        );
     }
 
     #[test]

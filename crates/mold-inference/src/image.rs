@@ -32,17 +32,80 @@ pub(crate) fn update_output_metadata_size(
     }
 }
 
+/// What happens to the alpha channel of an RGBA render.
+///
+/// The ENGINE decides, because the answer is a property of the request, not
+/// of the pixels: Qwen Image 2.1's decoder emits edge alpha of 204-252 on
+/// ordinary opaque renders (measured in the M1 capture), so "any alpha below
+/// 255" would turn every text-to-image render into an RGBA file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaOutput {
+    /// No decision: an all-255 alpha channel encodes as RGB, anything else
+    /// keeps it. The fallback for callers that do not decide.
+    Infer,
+    /// Keep the alpha channel: PNG is written RGBA and WebP with lossless
+    /// alpha; JPEG, which cannot carry it, is composited over white.
+    Keep,
+    /// Discard the alpha channel: the RGB planes are encoded unchanged, so the
+    /// file is byte-identical to the same pixels rendered as RGB.
+    Drop,
+}
+
+/// The Qwen Image 2.1 output rule: keep alpha iff the request asks for a
+/// transparent background, or at least one reference image carries a pixel
+/// below full opacity (`capabilities.transparency.native_alpha` — an
+/// alpha-carrying reference keeps alpha in the output). Otherwise drop it.
+pub fn alpha_output_for_request(req: &mold_core::GenerateRequest) -> AlphaOutput {
+    let references_carry_alpha = req
+        .edit_images
+        .as_deref()
+        .is_some_and(|images| images.iter().any(|bytes| encoded_image_has_alpha(bytes)));
+    if req.transparent_background == Some(true) || references_carry_alpha {
+        AlphaOutput::Keep
+    } else {
+        AlphaOutput::Drop
+    }
+}
+
+/// Whether an encoded still (PNG, JPEG, WebP) has any pixel below full
+/// opacity. The container header is asked first, so an RGB file is never
+/// decoded; an alpha-capable one is decoded and scanned, because an RGBA
+/// container whose alpha is all 255 carries no transparency.
+pub fn encoded_image_has_alpha(bytes: &[u8]) -> bool {
+    if !mold_core::still_image::encoded_still_has_alpha(bytes) {
+        return false;
+    }
+    match image::load_from_memory(bytes) {
+        Ok(decoded) if decoded.color().has_alpha() => rgba_has_alpha(&decoded.to_rgba8()),
+        _ => false,
+    }
+}
+
 /// Encode a candle tensor of u8 values into still image bytes.
 ///
 /// `[3, H, W]` is an RGB render. `[4, H, W]` is an RGBA render (a decoder
-/// that emits alpha, e.g. Qwen Image 2.1's four-channel VAE): see
-/// [`encode_rgba_image`] for how its alpha reaches each container.
+/// that emits alpha, e.g. Qwen Image 2.1's four-channel VAE), encoded under
+/// [`AlphaOutput::Infer`]; an engine that has decided calls
+/// [`encode_image_with_alpha`].
 pub(crate) fn encode_image(
     img: &Tensor,
     format: OutputFormat,
     width: u32,
     height: u32,
     metadata: Option<&OutputMetadata>,
+) -> Result<Vec<u8>> {
+    encode_image_with_alpha(img, format, width, height, metadata, AlphaOutput::Infer)
+}
+
+/// [`encode_image`] with the engine's alpha decision. The decision applies to
+/// a four-channel tensor only; a three-channel render has no alpha to keep.
+pub(crate) fn encode_image_with_alpha(
+    img: &Tensor,
+    format: OutputFormat,
+    width: u32,
+    height: u32,
+    metadata: Option<&OutputMetadata>,
+    alpha: AlphaOutput,
 ) -> Result<Vec<u8>> {
     let (c, h, w) = img.dims3()?;
     if c != 3 && c != 4 {
@@ -54,7 +117,7 @@ pub(crate) fn encode_image(
     if c == 4 {
         let rgba_image = image::RgbaImage::from_raw(width, height, img_data)
             .ok_or_else(|| anyhow::anyhow!("failed to create image from tensor data"))?;
-        return encode_rgba_image(&rgba_image, format, metadata);
+        return encode_rgba_image(&rgba_image, format, metadata, alpha);
     }
     let rgb_image = image::RgbImage::from_raw(width, height, img_data)
         .ok_or_else(|| anyhow::anyhow!("failed to create image from tensor data"))?;
@@ -67,7 +130,7 @@ pub(crate) fn rgba_has_alpha(rgba_image: &image::RgbaImage) -> bool {
     rgba_image.pixels().any(|pixel| pixel[3] != u8::MAX)
 }
 
-/// Drop the alpha channel of an image whose every alpha byte is 255.
+/// Drop the alpha channel, keeping the RGB planes byte for byte.
 fn opaque_rgba_to_rgb(rgba_image: &image::RgbaImage) -> image::RgbImage {
     image::RgbImage::from_fn(rgba_image.width(), rgba_image.height(), |x, y| {
         let [r, g, b, _] = rgba_image.get_pixel(x, y).0;
@@ -88,22 +151,29 @@ pub(crate) fn composite_over_white(rgba_image: &image::RgbaImage) -> image::RgbI
     })
 }
 
-/// Encode an RGBA still.
+/// Encode an RGBA still under an [`AlphaOutput`] decision.
 ///
-/// Alpha is inspected BEFORE any container is written, because the embedded
-/// provenance records it (`OutputMetadata::has_alpha`):
+/// The decision is resolved BEFORE any container is written, because the
+/// embedded provenance records it (`OutputMetadata::has_alpha`):
 ///
-/// - every alpha byte 255: the alpha channel carries no information, so the
-///   image is encoded exactly as the RGB image it is — a PNG stays
-///   `ColorType::Rgb` and is byte-identical to an RGB render's.
-/// - otherwise PNG is written RGBA and WebP as a still with lossless alpha;
-///   JPEG, which has no alpha, is composited over white.
+/// - `Drop`, or `Infer` with every alpha byte 255: the image is encoded
+///   exactly as the RGB image it is — a PNG stays `ColorType::Rgb` and is
+///   byte-identical to an RGB render's.
+/// - `Keep`, or `Infer` with any alpha below 255: PNG is written RGBA and WebP
+///   as a still with lossless alpha; JPEG, which has no alpha, is composited
+///   over white.
 pub(crate) fn encode_rgba_image(
     rgba_image: &image::RgbaImage,
     format: OutputFormat,
     metadata: Option<&OutputMetadata>,
+    alpha: AlphaOutput,
 ) -> Result<Vec<u8>> {
-    if !rgba_has_alpha(rgba_image) {
+    let keep = match alpha {
+        AlphaOutput::Keep => true,
+        AlphaOutput::Drop => false,
+        AlphaOutput::Infer => rgba_has_alpha(rgba_image),
+    };
+    if !keep {
         return encode_rgb_image(&opaque_rgba_to_rgb(rgba_image), format, metadata);
     }
     match format {
@@ -705,6 +775,90 @@ mod tests {
         );
     }
 
+    /// Qwen Image 2.1's decoder leaves edge alpha of 204-252 on an ordinary
+    /// opaque render, so the engine decides: `Drop` must encode exactly the
+    /// RGB planes, byte-identical to the RGB render, whatever alpha says.
+    #[test]
+    fn a_dropped_alpha_channel_encodes_the_rgb_planes_unchanged() {
+        let rgb = synthetic_render(29, 17);
+        let rgba = image::RgbaImage::from_fn(29, 17, |x, y| {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            image::Rgba([r, g, b, if x == 0 { 204 } else { 252 }])
+        });
+        let metadata = test_metadata();
+        for format in [OutputFormat::Png, OutputFormat::Jpeg] {
+            let from_rgb =
+                encode_image(&rgb_tensor(&rgb), format, 29, 17, Some(&metadata)).unwrap();
+            let dropped = encode_image_with_alpha(
+                &rgba_tensor(&rgba),
+                format,
+                29,
+                17,
+                Some(&metadata),
+                AlphaOutput::Drop,
+            )
+            .unwrap();
+            assert_eq!(from_rgb, dropped, "{format}");
+        }
+    }
+
+    #[test]
+    fn a_kept_alpha_channel_is_written_even_when_fully_opaque() {
+        let rgba = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]));
+        let bytes = encode_image_with_alpha(
+            &rgba_tensor(&rgba),
+            OutputFormat::Png,
+            8,
+            8,
+            Some(&test_metadata()),
+            AlphaOutput::Keep,
+        )
+        .unwrap();
+        assert_eq!(decode_png_info(&bytes).color_type, png::ColorType::Rgba);
+        assert!(String::from_utf8_lossy(&bytes).contains("\"has_alpha\":true"));
+        // JPEG cannot carry it: composited over white, provenance says so.
+        let jpeg = encode_image_with_alpha(
+            &rgba_tensor(&cutout(8, 8)),
+            OutputFormat::Jpeg,
+            8,
+            8,
+            Some(&test_metadata()),
+            AlphaOutput::Keep,
+        )
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&jpeg).contains("\"has_alpha\":true"));
+    }
+
+    fn png_bytes(image: &image::RgbaImage) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        image.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn the_request_decides_whether_alpha_survives() {
+        let mut req: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lantern", "model": "qwen-image-2.1:bf16", "width": 64,
+            "height": 64, "steps": 4, "guidance": 1.0, "batch_size": 1
+        }))
+        .unwrap();
+        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+        req.transparent_background = Some(true);
+        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+        req.transparent_background = None;
+
+        // An RGBA container whose alpha is all 255 carries no transparency.
+        let opaque = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+        req.edit_images = Some(vec![png_bytes(&opaque), vec![0xFF, 0xD8, 0xFF]]);
+        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+        // One reference with real transparency keeps alpha in the output.
+        req.edit_images
+            .as_mut()
+            .unwrap()
+            .push(png_bytes(&cutout(8, 8)));
+        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+    }
+
     #[test]
     fn transparent_rgba_jpeg_is_composited_over_white() {
         let source = image::RgbaImage::from_fn(8, 8, |_, _| image::Rgba([0, 0, 0, 0]));
@@ -872,6 +1026,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         };
 
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, Some(&metadata)).unwrap();
@@ -986,6 +1141,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -1072,6 +1228,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         });
 
         update_output_metadata_size(&mut metadata, 1008, 1008);
@@ -1163,6 +1320,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         }
     }
 
@@ -1347,6 +1505,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
 

@@ -473,6 +473,9 @@ impl DurableMediaAdmission {
                 .transpose()?;
             crate::routes::apply_default_metadata_setting(state, &mut request).await;
             crate::routes::normalize_generation_placement(state, &mut request).await;
+            // `transparent_background: false` and an absent field are one
+            // request; the durable row carries one spelling of "no".
+            request.normalize_transparent_background();
             let preferred_gpu =
                 crate::routes::validate_multi_gpu_placement(state, request.placement.as_ref())?;
             let private_ingress =
@@ -553,28 +556,30 @@ impl DurableMediaAdmission {
             // LAST, after ordinary field validation: a request that is wrong
             // in two ways must report the same error it always did, so this
             // adds a refusal rather than reordering the existing ones.
-            if !private_ingress {
-                if let Some(output_format) = request.output_format {
-                    if !profiles_by_model.contains_key(&request.model) {
-                        let canonical = mold_core::manifest::resolve_model_name(&request.model);
-                        let profile = crate::routes::resolved_generation_profile(
-                            state,
-                            &request.model,
-                            &canonical,
-                        )
-                        .await;
-                        profiles_by_model.insert(request.model.clone(), profile);
-                    }
-                    // The door checks the recipe the request's own `pipeline`
-                    // names (the default one when it names none); preparation
-                    // may later pick IcLora or LipDub through
-                    // `plan_builtin_ltx2_control`, whose format lists match the
-                    // default's today.
-                    if let Some(profile) = profiles_by_model
-                        .get(&request.model)
-                        .and_then(Option::as_ref)
-                    {
-                        if let Some(recipe) = profile.recipe_for_pipeline(request.pipeline) {
+            if !private_ingress
+                && (request.output_format.is_some() || request.transparent_background.is_some())
+            {
+                if !profiles_by_model.contains_key(&request.model) {
+                    let canonical = mold_core::manifest::resolve_model_name(&request.model);
+                    let profile = crate::routes::resolved_generation_profile(
+                        state,
+                        &request.model,
+                        &canonical,
+                    )
+                    .await;
+                    profiles_by_model.insert(request.model.clone(), profile);
+                }
+                // The door checks the recipe the request's own `pipeline`
+                // names (the default one when it names none); preparation
+                // may later pick IcLora or LipDub through
+                // `plan_builtin_ltx2_control`, whose format lists match the
+                // default's today.
+                if let Some(profile) = profiles_by_model
+                    .get(&request.model)
+                    .and_then(Option::as_ref)
+                {
+                    if let Some(recipe) = profile.recipe_for_pipeline(request.pipeline) {
+                        if let Some(output_format) = request.output_format {
                             mold_core::validate_output_format_against_generation_profile(
                                 recipe,
                                 output_format,
@@ -582,6 +587,19 @@ impl DurableMediaAdmission {
                             .map_err(|error| {
                                 ApiError::validation(format!("requests[{}]: {error}", offset + 1))
                             })?;
+                        }
+                        // The transparency contract against the SAME
+                        // delivery-qualified recipe: a build without WebP
+                        // must refuse a transparent WebP here, at the
+                        // door, not after the render.
+                        if let Some(transparency) = recipe.capabilities.transparency.as_ref() {
+                            mold_core::validate_transparency_against(transparency, &request)
+                                .map_err(|error| {
+                                    ApiError::validation(format!(
+                                        "requests[{}]: {error}",
+                                        offset + 1
+                                    ))
+                                })?;
                         }
                     }
                 }

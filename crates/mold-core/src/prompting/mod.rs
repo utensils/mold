@@ -767,9 +767,17 @@ fn role_phrase(role: Option<ExpandReferenceRole>) -> &'static str {
     }
 }
 
+/// The `GENERATION CONTEXT` line for a transparent-background render. The
+/// expander describes the subject; the engine adds the model's RGBA prompt
+/// recipe (`crate::transparency`) after expansion, so the recipe text itself
+/// never reaches the LLM.
+pub const TRANSPARENT_BACKGROUND_CONTEXT_LINE: &str =
+    "Transparent background: describe the subject only; no scenery or backdrop.";
+
 /// Render the generation facts as plain lines for the LLM. Labels follow the
-/// family's own addressing grammar: H3 uses `<Picture n>` labels, FLUX.2 and
-/// Qwen-Image-Edit use ordinals ("image 1"), everything else names the role.
+/// family's own addressing grammar: H3 uses `<Picture n>` labels, FLUX.2,
+/// Qwen-Image-Edit and Qwen Image 2.1 use ordinals ("image 1"), everything
+/// else names the role.
 pub fn render_generation_context(
     family: &str,
     task: ExpandTask,
@@ -856,7 +864,7 @@ pub fn render_generation_context(
                 own.push(labels[label_index].clone());
                 label_index += 1;
                 described.push(format!("{} = {kind}, {role}", own.join(" and ")));
-            } else if matches!(family, "flux2" | "qwen-image-edit") {
+            } else if matches!(family, "flux2" | "qwen-image-edit" | "qwen-image21") {
                 described.push(format!("image {} = {role}", index + 1));
             } else {
                 described.push(format!("{kind} {} = {role}", index + 1));
@@ -877,6 +885,9 @@ pub fn render_generation_context(
                 .to_string(),
         ),
         Some(crate::generation_profile::PromptRequirement::Required) | None => {}
+    }
+    if context.transparent_background == Some(true) {
+        lines.push(TRANSPARENT_BACKGROUND_CONTEXT_LINE.to_string());
     }
     match context.negative_prompt_supported {
         Some(true) => lines.push(
@@ -923,6 +934,37 @@ mod tests {
                     )
             })
             .collect()
+    }
+
+    /// The corpus quotes the RGBA recipe the engine applies; this keeps the
+    /// guide from drifting away from `crate::transparency`.
+    #[test]
+    fn the_qwen_image21_guide_quotes_the_rgba_recipe_verbatim() {
+        let guide = family_guide("qwen-image21").unwrap().contents;
+        assert!(guide.contains(crate::transparency::RGBA_PROMPT_PREFIX));
+        assert!(guide.contains(crate::transparency::RGBA_PROMPT_SUFFIX));
+    }
+
+    #[test]
+    fn a_transparent_render_is_stated_in_the_generation_context() {
+        let context = crate::ExpandContext {
+            transparent_background: Some(true),
+            ..crate::ExpandContext::default()
+        };
+        let rendered =
+            render_generation_context("qwen-image21", crate::ExpandTask::TextToImage, &context);
+        assert!(
+            rendered.contains(TRANSPARENT_BACKGROUND_CONTEXT_LINE),
+            "{rendered}"
+        );
+        // The wrapper itself never reaches the LLM.
+        assert!(!rendered.contains(crate::transparency::RGBA_PROMPT_PREFIX));
+        let plain = render_generation_context(
+            "qwen-image21",
+            crate::ExpandTask::TextToImage,
+            &crate::ExpandContext::default(),
+        );
+        assert!(!plain.contains("Transparent background"));
     }
 
     #[test]
@@ -1284,6 +1326,7 @@ mod tests {
                 references: vec![ExpandReference::image(ExpandReferenceRole::FirstFrame)],
                 loras: vec!["paper-boat".into()],
                 prompt_mode: None,
+                transparent_background: None,
             },
         );
         assert!(

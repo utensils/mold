@@ -3583,7 +3583,10 @@ fn qwen_image21_manifests() -> Vec<ModelManifest> {
             negative_prompt: None,
             frames: None,
             fps: None,
-            source_image: Some(crate::types::SourceImageCapability::Unsupported),
+            // The `None` passthrough every edit family uses: references ride
+            // `edit_images` (`capabilities.reference_images`), which refuses
+            // `source_image` by name.
+            source_image: None,
         },
         hidden: false,
     }]

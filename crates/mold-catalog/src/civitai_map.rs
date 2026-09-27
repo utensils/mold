@@ -73,6 +73,9 @@ pub fn map_base_model(
 
         // Qwen
         "Qwen" | "Qwen 2" => (QwenImage, Finetune, None),
+        // Civitai's own tag for Qwen Image 2.1. A different architecture from
+        // Qwen-Image / 2512, so its adapters must never land in that family.
+        "Qwen 2.1" => (QwenImage21, Finetune, None),
 
         _ => return None,
     })
@@ -83,11 +86,24 @@ pub fn map_base_model(
 /// Qwen-Image-Edit under `baseModel=Qwen`; keeping [`map_base_model`] generic
 /// preserves that upstream query while this post-normalization step selects
 /// the runtime family that will be written to the sidecar.
+///
+/// Uploaders also file Qwen Image 2.1 adapters under the older `Qwen 2`
+/// bucket (e.g. "Qwen Image 2.1 Fix"), so a name that says "Qwen Image 2.1"
+/// selects that family: loading a 2.1 adapter onto Qwen-Image is a key
+/// mismatch, never a render.
 pub fn refine_family_from_names(
     family: Family,
     item_name: &str,
     version_name: Option<&str>,
 ) -> Family {
+    if family == Family::QwenImage
+        && [Some(item_name), version_name]
+            .into_iter()
+            .flatten()
+            .any(looks_like_qwen_image_21)
+    {
+        return Family::QwenImage21;
+    }
     if family == Family::QwenImage
         && [Some(item_name), version_name]
             .into_iter()
@@ -98,6 +114,25 @@ pub fn refine_family_from_names(
     } else {
         family
     }
+}
+
+/// "Qwen Image 2.1", "Qwen-Image-2.1", "QwenImage2.1", "qwen_image_2_1".
+fn looks_like_qwen_image_21(value: &str) -> bool {
+    let compact: String = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    compact
+        .match_indices("qwenimage21")
+        .any(|(index, matched)| {
+            // "qwenimage210" is not 2.1; a following digit continues the
+            // version number.
+            !compact[index + matched.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit())
+        })
 }
 
 fn looks_like_qwen_image_edit(value: &str) -> bool {
@@ -226,6 +261,7 @@ pub const CIVITAI_BASE_MODELS: &[&str] = &[
     "LTXV 2.3",
     "Qwen",
     "Qwen 2",
+    "Qwen 2.1",
     "SD 2.0",
     "SD 2.1",
     "AuraFlow",
@@ -272,7 +308,16 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
         // don't inherit checkpoint runnability rules.
         Lora => matches!(
             family,
-            Flux | Flux2 | Sd15 | Sdxl | Sd3 | ZImage | Ltx2 | Wan | QwenImage | QwenImageEdit
+            Flux | Flux2
+                | Sd15
+                | Sdxl
+                | Sd3
+                | ZImage
+                | Ltx2
+                | Wan
+                | QwenImage
+                | QwenImageEdit
+                | QwenImage21
         ),
         Vae | TextEncoder | Tokenizer | Clip => true,
         ControlNet => matches!(family, Sd15 | Sdxl),
@@ -305,6 +350,42 @@ mod tests {
             Kind::Checkpoint
         ));
         assert!(supported_for(Family::Sd3, Bundling::SingleFile, Kind::Lora));
+    }
+
+    #[test]
+    fn qwen_image_21_has_its_own_civitai_bucket_and_name_refinement() {
+        assert_eq!(
+            map_base_model("Qwen 2.1").map(|(family, _, _)| family),
+            Some(Family::QwenImage21)
+        );
+        assert!(supported_for(
+            Family::QwenImage21,
+            Bundling::Separated,
+            Kind::Lora
+        ));
+        for name in [
+            "Qwen Image 2.1 Fix",
+            "VNCCS PoseStudio Qwen Image 2.1",
+            "Nick_2anime_QwenImage2.1",
+            "qwen-image-2.1 style",
+        ] {
+            assert_eq!(
+                refine_family_from_names(Family::QwenImage, name, None),
+                Family::QwenImage21,
+                "{name}"
+            );
+        }
+        for name in [
+            "Qwen Image 2512 style",
+            "Qwen Image 2.10 lookalike",
+            "Qwen Image",
+        ] {
+            assert_ne!(
+                refine_family_from_names(Family::QwenImage, name, None),
+                Family::QwenImage21,
+                "{name}"
+            );
+        }
     }
 
     #[test]

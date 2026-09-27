@@ -623,6 +623,44 @@ mod tests {
         assert_eq!(retina.content_type, "image/jpeg");
     }
 
+    /// A transparent WebP still (what Qwen Image 2.1's toggle publishes) gets
+    /// a PNG tile with its alpha intact, even when the caller asked for JPEG:
+    /// flattening onto black would show a cut-out as a black square.
+    #[test]
+    fn an_alpha_webp_still_renders_a_png_thumbnail_with_alpha() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cutout.webp");
+        let rgba = image::RgbaImage::from_fn(640, 480, |x, y| {
+            if (160..480).contains(&x) && (120..360).contains(&y) {
+                image::Rgba([220, 80, 30, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        image::codecs::webp::WebPEncoder::new_lossless(std::fs::File::create(&source).unwrap())
+            .encode(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        for requested in [ThumbFormat::Png, ThumbFormat::Jpeg] {
+            let rendered = render_thumbnail(&source, "cutout.webp", 256, requested).unwrap();
+            assert_eq!(rendered.content_type, "image/png");
+            let decoded = image::load_from_memory(&rendered.bytes).unwrap();
+            assert!(decoded.color().has_alpha());
+            let decoded = decoded.to_rgba8();
+            assert_eq!((decoded.width(), decoded.height()), (256, 192));
+            assert_eq!(decoded.get_pixel(0, 0)[3], 0, "the field stays transparent");
+            assert_eq!(
+                decoded.get_pixel(128, 96)[3],
+                255,
+                "the subject stays opaque"
+            );
+        }
+    }
+
     #[test]
     fn audio_is_refused_rather_than_decoded() {
         let dir = tempfile::tempdir().unwrap();

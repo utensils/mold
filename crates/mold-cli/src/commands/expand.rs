@@ -268,6 +268,7 @@ pub(crate) fn context_from_flags(
         references: parsed,
         loras: Vec::new(),
         prompt_mode: None,
+        transparent_background: None,
     }))
 }
 

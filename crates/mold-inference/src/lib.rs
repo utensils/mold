@@ -188,6 +188,9 @@ pub use h3_factory::{
     H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy,
     H3FactoryTargetLoadDropPolicy,
 };
+/// The engine's decision about an RGBA render's alpha channel (Qwen Image 2.1),
+/// and the request rule that makes it.
+pub use image::{alpha_output_for_request, encoded_image_has_alpha, AlphaOutput};
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;

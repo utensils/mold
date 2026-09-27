@@ -55,6 +55,7 @@ pub mod safetensors_probe;
 pub mod secure_file;
 pub mod still_image;
 pub mod time;
+pub mod transparency;
 pub mod types;
 pub mod validation;
 pub mod video_upscale;
@@ -96,6 +97,10 @@ pub use generation_profile::{
     ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
     GENERATION_PROFILE_SCHEMA_VERSION, REFERENCE_IMAGES_UNSUPPORTED_REASON,
 };
+pub use generation_profile::{
+    transparency_for_recipe, validate_transparency_against, ImageInputFormat, ReferenceCanvasRule,
+    TransparencyCapabilitiesProfile, TRANSPARENCY_UNSUPPORTED_REASON,
+};
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};
 pub use mesh_workflow::*;
@@ -131,7 +136,7 @@ pub use validation::{
     frame_offset_for_family, largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition,
     materialize_request_organization, min_frames_for_family, prompt_required_for,
     prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
-    require_generate_request_model_activation, validate_generate_request,
+    require_generate_request_model_activation, sniff_image_input_format, validate_generate_request,
     validate_generate_request_fields, validate_generate_request_with_family,
     validate_generation_dimensions, validate_generation_dimensions_composed,
     validate_generation_dimensions_for_model, validate_request_organization,

@@ -2271,6 +2271,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 
@@ -2606,6 +2607,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 
@@ -2691,6 +2693,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         assert_eq!(
             engine.select_pipeline(&req).unwrap(),
@@ -2926,6 +2929,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let bridge = engine.materialize_request(&req, temp_dir.path()).unwrap();

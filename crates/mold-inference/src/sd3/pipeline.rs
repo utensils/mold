@@ -1914,6 +1914,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         let err = engine.generate_sequential(&req).unwrap_err().to_string();

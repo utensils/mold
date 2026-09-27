@@ -198,6 +198,7 @@ fn generate_request_placement_round_trips() {
         true_cfg: None,
         cfg_start_step: None,
         save_to_gallery: None,
+        transparent_background: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     let back: GenerateRequest = serde_json::from_str(&json).unwrap();

@@ -170,6 +170,7 @@ impl VideoMetadata {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            transparent_background: None,
         }
     }
 }

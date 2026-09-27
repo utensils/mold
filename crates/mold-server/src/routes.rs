@@ -1541,6 +1541,7 @@ async fn prepare_generation_inner(
     // other family's explicit format passes through to be validated against
     // its recipe.
     request.pin_output_format_for_family(resolved_family.as_deref());
+    request.normalize_transparent_background();
     // The effective, delivery-qualified recipe owns the output default. A
     // family heuristic here can select MP4 even when this binary did not link
     // the encoder, causing an omitted field to fail its own advertised profile.

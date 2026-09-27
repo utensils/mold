@@ -552,7 +552,12 @@ is_schnell = false
     #[test]
     fn manifest_model_is_downloaded_respects_component_env_overrides() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("MOLD_MODELS_DIR");
+        // An EMPTY models dir, never the developer's own: with none set the
+        // default resolves to `~/.mold/models`, where an interrupted pull's
+        // `.pulling` marker made this test fail on a machine that had one.
+        let models_dir = test_models_dir("manifest-env-overrides-models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
         let dir = test_models_dir("manifest-env-overrides");
         for rel in [
             "transformer.gguf",
@@ -588,7 +593,9 @@ is_schnell = false
         ] {
             std::env::remove_var(var);
         }
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[test]
