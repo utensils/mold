@@ -113,8 +113,8 @@ requirements.
 
 Qwen Image 2.1 edits and composes from up to ten ordered references (PNG, JPEG
 or WebP) with no special target image; name each by position in the prompt.
-With no `--width`/`--height`, the output takes the last reference's aspect
-ratio.
+With no `--width`/`--height`, the output takes the last reference's upright
+aspect ratio (EXIF orientation applied) at a 1024×1024 area.
 
 ```bash
 mold run qwen-image-2.1 --image jacket.png --image person.jpg \

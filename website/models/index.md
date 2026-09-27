@@ -60,7 +60,12 @@ simultaneously for faster inference but needs more VRAM.
 | `qwen-image:q4`            | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1024      |
 | `qwen-image-2512:q4`       | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1328      |
 | `qwen-image:q8`            | Q8      | ~22 GB       | ~24+ GB    | Slow, 50 steps     | Best GGUF, validated at 768  |
-| `qwen-image-2.1:int8-conv` | INT8    | ~15 GB       | ~19 GB     | Medium, 40 steps   | Excellent, 2K presets        |
+| `qwen-image-2.1:int8-conv` | INT8    | ~15 GB       | 18.7 GB¹   | Medium, 40 steps   | Excellent, 2K presets        |
+
+¹ Measured: whole-process peak at 1024² on an L40S limited to 24 GB, with the
+Q8 text encoder parked in host RAM for the denoise. The other figures in this
+table, including this row's sequential one, are estimates. See
+[Qwen Image 2.1](/models/qwen-image-21#which-tier-for-which-card).
 
 ::: tip Sequential vs Eager
 In **sequential mode** (the default), mold loads each component (encoder →

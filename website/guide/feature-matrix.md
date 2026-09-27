@@ -135,10 +135,10 @@ the full multiscale refinement path.
 
 ## Transparent output
 
-| Family         | Transparent background toggle | Alpha kept from an RGBA reference | Formats with alpha |
-| -------------- | ----------------------------- | --------------------------------- | ------------------ |
-| Qwen Image 2.1 | Yes                           | Yes                               | PNG, WebP          |
-| All others     | No                            | No                                | —                  |
+| Family         | Transparent background toggle | Alpha kept from a transparent reference | Formats with alpha |
+| -------------- | ----------------------------- | --------------------------------------- | ------------------ |
+| Qwen Image 2.1 | Yes                           | Yes                                     | PNG, WebP          |
+| All others     | No                            | No                                      | —                  |
 
 The toggle (`--transparent`, `transparent_background: true`) is advertised per
 recipe as `capabilities.transparency`, and every surface reads that block
