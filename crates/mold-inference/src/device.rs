@@ -7138,7 +7138,7 @@ mod tests {
     /// "An unmeasurable card is not evidence of pressure" is right for a CPU
     /// render and wrong for an accelerator whose reading failed: that is the
     /// #276 OOM the budget exists to prevent, it inverts the Metal memory
-    /// policy CLAUDE.md documents ("failed supported probes block admission"),
+    /// policy metal-memory.md documents ("failed supported probes block admission"),
     /// and it breaks the campaign's own rule that every residency decision
     /// falls back to TODAY'S behaviour — which was to drop.
     ///

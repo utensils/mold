@@ -355,7 +355,7 @@ describe("useQueueCommands — dragging a waiting row", () => {
 /**
  * A clip longer than the checkpoint can denoise in one pass runs as a chain
  * job. Graceful shutdown parks it as `paused` with its manifest, source media,
- * completed clips, and tail cache preserved — CLAUDE.md's contract is that it
+ * completed clips, and tail cache preserved — chain-sequences.md's contract is that it
  * "allows explicit resume after restart". The server answers `can_cancel:
  * false` while parked, so Stop is correctly absent, and the chain lives in its
  * own id space so the generation queue's per-job pause has no row for it.
