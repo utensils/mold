@@ -64,6 +64,7 @@ web/*.tsbuildinfo
 !crates/mold-inference/testdata/pulid/input_pattern.png
 !crates/mold-inference/testdata/pulid/faces/*.jpg
 !crates/mold-inference/testdata/pulid/faces/*.png
+!crates/mold-inference/testdata/qwen_image21/*.png
 apps/mobile/src-tauri/gen/schemas/
 result
 result-*

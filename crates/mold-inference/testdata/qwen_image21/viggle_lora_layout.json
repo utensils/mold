@@ -1,0 +1,359 @@
+{
+ "repo": "Viggle/Qwen-Image-2.1-viggle-turbo",
+ "revision": "bb26a0f38e5fe6c124aaccc9187a87eed5d9ed13",
+ "license": {
+  "name": "qwen-research",
+  "text_file": "LICENSE (byte-identical to Qwen/Qwen-Image-2.1 LICENSE, sha256 8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d)",
+  "summary": "Qwen RESEARCH LICENSE AGREEMENT (2026-09-20): non-commercial research/evaluation use only; derivative of Qwen-Image-2.1; NOTICE says 'Built with Qwen.'"
+ },
+ "recipe": {
+  "steps": 6,
+  "sigmas_raw": [
+   1.0,
+   0.9375,
+   0.875,
+   0.75,
+   0.5,
+   0.25
+  ],
+  "true_cfg_scale": 1.0,
+  "negative_prompt": null,
+  "shift_terminal": null,
+  "lora_scale": 1.0,
+  "apply": "unmerged: W x + B (A x) * alpha/rank"
+ },
+ "files": {
+  "r128": {
+   "file": "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors",
+   "sha256": "bafb91d0047df3f9b8a5a850b0c967f051164314d8aad778dfa34d9c24ec345b",
+   "size_bytes": 679604800,
+   "tensor_count": 454,
+   "dtypes": {
+    "BF16": 454
+   },
+   "__metadata__": {
+    "format": "pt",
+    "lora_adapter_metadata": "{\n  \"transformer.alpha_pattern\": {},\n  \"transformer.bias\": \"none\",\n  \"transformer.init_lora_weights\": true,\n  \"transformer.lora_alpha\": 128,\n  \"transformer.lora_dropout\": 0.0,\n  \"transformer.peft_type\": \"LORA\",\n  \"transformer.r\": 128,\n  \"transformer.rank_pattern\": {},\n  \"transformer.target_modules\": [\n    \"img_mlp.gate_layer\",\n    \"img_mlp.out\",\n    \"to_q\",\n    \"to_v\",\n    \"timestep_embedder.linear_2\",\n    \"img_mlp.proj\",\n    \"to_out.0\",\n    \"modulation.1\",\n    \"to_k\",\n    \"timestep_embedder.linear_1\"\n  ],\n  \"transformer.use_rslora\": false\n}"
+   },
+   "alpha_tensors": 0,
+   "top_level_prefixes": {
+    "transformer": 454
+   },
+   "key_pattern": "transformer.<module>.lora_A.weight [r, in] / transformer.<module>.lora_B.weight [out, r]",
+   "sample_keys": [
+    "transformer.modulation.1.lora_A.weight",
+    "transformer.modulation.1.lora_B.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_1.lora_A.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_1.lora_B.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_2.lora_A.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_2.lora_B.weight"
+   ],
+   "ranks": [
+    128
+   ],
+   "block_indices": [
+    0,
+    31,
+    32
+   ],
+   "modules": {
+    "modulation.1": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       16384,
+       128
+      ]
+     }
+    },
+    "time_text_embed.timestep_embedder.linear_1": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       128,
+       256
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "time_text_embed.timestep_embedder.linear_2": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_k": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_out.0": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_q": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_v": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.gate_layer": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       12288,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.out": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       12288
+      ],
+      "lora_B": [
+       4096,
+       128
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.proj": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       128,
+       4096
+      ],
+      "lora_B": [
+       12288,
+       128
+      ]
+     }
+    }
+   }
+  },
+  "r256": {
+   "file": "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors",
+   "sha256": "2a0148f5c73abbed5f97da5ea356e439318aadb281d01fce4af39cdf43728803",
+   "size_bytes": 1359147904,
+   "tensor_count": 454,
+   "dtypes": {
+    "BF16": 454
+   },
+   "__metadata__": {
+    "format": "pt",
+    "lora_adapter_metadata": "{\n  \"transformer.alpha_pattern\": {},\n  \"transformer.bias\": \"none\",\n  \"transformer.init_lora_weights\": true,\n  \"transformer.lora_alpha\": 256,\n  \"transformer.lora_dropout\": 0.0,\n  \"transformer.peft_type\": \"LORA\",\n  \"transformer.r\": 256,\n  \"transformer.rank_pattern\": {},\n  \"transformer.target_modules\": [\n    \"img_mlp.gate_layer\",\n    \"img_mlp.out\",\n    \"to_q\",\n    \"to_v\",\n    \"timestep_embedder.linear_2\",\n    \"img_mlp.proj\",\n    \"to_out.0\",\n    \"modulation.1\",\n    \"to_k\",\n    \"timestep_embedder.linear_1\"\n  ],\n  \"transformer.use_rslora\": false\n}"
+   },
+   "alpha_tensors": 0,
+   "top_level_prefixes": {
+    "transformer": 454
+   },
+   "key_pattern": "transformer.<module>.lora_A.weight [r, in] / transformer.<module>.lora_B.weight [out, r]",
+   "sample_keys": [
+    "transformer.modulation.1.lora_A.weight",
+    "transformer.modulation.1.lora_B.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_1.lora_A.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_1.lora_B.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_2.lora_A.weight",
+    "transformer.time_text_embed.timestep_embedder.linear_2.lora_B.weight"
+   ],
+   "ranks": [
+    256
+   ],
+   "block_indices": [
+    0,
+    31,
+    32
+   ],
+   "modules": {
+    "modulation.1": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       16384,
+       256
+      ]
+     }
+    },
+    "time_text_embed.timestep_embedder.linear_1": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       256,
+       256
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "time_text_embed.timestep_embedder.linear_2": {
+     "count": 1,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_k": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_out.0": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_q": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.attn.to_v": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.gate_layer": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       12288,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.out": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       12288
+      ],
+      "lora_B": [
+       4096,
+       256
+      ]
+     }
+    },
+    "transformer_blocks.{i}.img_mlp.proj": {
+     "count": 32,
+     "shapes": {
+      "lora_A": [
+       256,
+       4096
+      ],
+      "lora_B": [
+       12288,
+       256
+      ]
+     }
+    }
+   }
+  }
+ }
+}

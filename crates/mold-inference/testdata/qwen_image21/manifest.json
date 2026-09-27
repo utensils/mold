@@ -1,0 +1,936 @@
+{
+ "schema": "mold.qwen_image21.fixtures.v1",
+ "captured": "2026-09-26",
+ "large_dir": "/storage/mold/fixtures/qwen_image21/captures",
+ "upstream": {
+  "hf_repo": "Qwen/Qwen-Image-2.1",
+  "hf_revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+  "diffusers": "https://github.com/huggingface/diffusers",
+  "diffusers_commit": "e0abab83b5df05de9e7abd788643c1a7c1e42e28",
+  "viggle_repo": "Viggle/Qwen-Image-2.1-viggle-turbo",
+  "viggle_revision": "bb26a0f38e5fe6c124aaccc9187a87eed5d9ed13"
+ },
+ "environment": {
+  "python": "3.13.15",
+  "torch": "2.11.0+cu128",
+  "cuda_runtime": "12.8",
+  "cudnn": 91900,
+  "transformers": "5.17.0",
+  "diffusers": "0.41.0.dev0",
+  "diffusers_commit": "e0abab83b5df05de9e7abd788643c1a7c1e42e28",
+  "peft": "0.21.0",
+  "safetensors": "0.8.0",
+  "pillow": "12.3.0",
+  "numpy": "2.5.3",
+  "nvidia_driver": "595.71.05",
+  "gpus": [
+   "NVIDIA L40S"
+  ],
+  "te_device": "cuda:0",
+  "dit_device": "cuda:0",
+  "cuda_visible_devices": "0",
+  "allow_tf32": {
+   "matmul": false,
+   "cudnn": false
+  },
+  "sdpa": "torch native (diffusers QwenImage21AttnProcessor per-segment; transformers Qwen3-VL attn 'sdpa')"
+ },
+ "inputs": {
+  "p6_prompt": "Put the red apple from image 2 on the white sign in image 1, keep everything else unchanged.",
+  "negative_prompt": "blurry, lowres, watermark",
+  "p8_prompt": "Change the sky to a warm sunset with orange clouds, keep the house and the sign unchanged.",
+  "p6_target_wh": [
+   512,
+   512
+  ],
+  "p8_target_wh": [
+   512,
+   512
+  ],
+  "p6_timesteps": [
+   900.0,
+   600.0
+  ],
+  "noise_seeds": {
+   "p6_x_a": 21,
+   "p6_x_b": 22,
+   "p8_noise": 1234
+  },
+  "turbo_sigmas": [
+   1.0,
+   0.9375,
+   0.875,
+   0.75,
+   0.5,
+   0.25
+  ],
+  "rgba_recipe": {
+   "prefix": "This is an RGBA image with transparency. ",
+   "suffix": ". The image has alpha channel and the background is transparent.",
+   "example": "This is an RGBA image with transparency. A cute cartoon dragon sticker. The image has alpha channel and the background is transparent."
+  }
+ },
+ "results": {
+  "encode_fp32": {
+   "reference_sizes_wh": [
+    [
+     1248,
+     832
+    ],
+    [
+     928,
+     1152
+    ]
+   ],
+   "drop_idx": 14,
+   "img_token_id": 151655,
+   "p3_p6_pos": {
+    "prompt_embeds": {
+     "shape": [
+      1,
+      2100,
+      4096
+     ],
+     "dtype": "float32",
+     "mean": 0.08192504197359085,
+     "std": 10.425504684448242,
+     "min": -374.75030517578125,
+     "max": 860.3433837890625,
+     "abs_mean": 7.637094020843506
+    },
+    "image_pad_true": 2058,
+    "len": 2100
+   },
+   "p3_p6_neg": {
+    "prompt_embeds": {
+     "shape": [
+      1,
+      2085,
+      4096
+     ],
+     "dtype": "float32",
+     "mean": 0.08170611411333084,
+     "std": 10.43273639678955,
+     "min": -374.75030517578125,
+     "max": 860.3433837890625,
+     "abs_mean": 7.636549472808838
+    },
+    "image_pad_true": 2058,
+    "len": 2085
+   },
+   "p3_p8_pos": {
+    "prompt_embeds": {
+     "shape": [
+      1,
+      1047,
+      4096
+     ],
+     "dtype": "float32",
+     "mean": 0.04999899864196777,
+     "std": 10.151093482971191,
+     "min": -374.74725341796875,
+     "max": 791.4989624023438,
+     "abs_mean": 7.511622905731201
+    },
+    "image_pad_true": 1014,
+    "len": 1047
+   },
+   "p3_t2i_p8": {
+    "prompt_embeds": {
+     "shape": [
+      1,
+      27,
+      4096
+     ],
+     "dtype": "float32",
+     "mean": 0.09647005051374435,
+     "std": 11.997880935668945,
+     "min": -285.2729187011719,
+     "max": 389.3272705078125,
+     "abs_mean": 8.428394317626953
+    },
+    "image_pad_true": 0,
+    "len": 27
+   },
+   "p4_opaque": {
+    "size_wh": [
+     1248,
+     832
+    ],
+    "packed": {
+     "shape": [
+      1,
+      4056,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.12100747972726822,
+     "std": 1.3075376749038696,
+     "min": -5.689517974853516,
+     "max": 5.68906831741333,
+     "abs_mean": 1.0465080738067627
+    },
+    "roundtrip_mode": "RGBA"
+   },
+   "p4_rgba": {
+    "size_wh": [
+     928,
+     1152
+    ],
+    "packed": {
+     "shape": [
+      1,
+      4176,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.08620800822973251,
+     "std": 1.2956494092941284,
+     "min": -5.650488376617432,
+     "max": 4.373207092285156,
+     "abs_mean": 1.0301496982574463
+    },
+    "roundtrip_mode": "RGBA"
+   }
+  },
+  "p6_fp32": {
+   "full_a_target": {
+    "shape": [
+     1,
+     1024,
+     64
+    ],
+    "dtype": "float32",
+    "mean": 0.03220745176076889,
+    "std": 1.2854115962982178,
+    "min": -5.302294731140137,
+    "max": 4.983457565307617,
+    "abs_mean": 1.026949405670166
+   },
+   "extract_vs_full_a_target_rel": 0.0,
+   "extract_vs_full_a_all_rel": 0.0,
+   "cached_b_vs_full_b_target_rel": 7.703870958400741e-07,
+   "timestep_a": 0.8999999761581421,
+   "timestep_b": 0.6000000238418579
+  },
+  "p7_fp32": {
+   "peft_lora_layers": 227,
+   "merged": false,
+   "scaling": [
+    1.0
+   ],
+   "lora_param_dtypes": [
+    "torch.float32"
+   ],
+   "lora_effect_rel_target": 0.10637971736283668,
+   "no_lora_matches_p6": 0.0
+  },
+  "p8_fp32": {
+   "base4": {
+    "sigmas": [
+     1.0,
+     0.7492682337760925,
+     0.4325879216194153,
+     0.019999921321868896,
+     0.0
+    ],
+    "timesteps": [
+     1000.0,
+     749.2682495117188,
+     432.5879211425781,
+     19.999921798706055
+    ],
+    "final": {
+     "shape": [
+      1,
+      1024,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.18359026312828064,
+     "std": 1.3999873399734497,
+     "min": -5.22902250289917,
+     "max": 5.487573623657227,
+     "abs_mean": 1.1251239776611328
+    },
+    "png": "p8_base4_fp32.png",
+    "png_mode": "RGBA",
+    "alpha_min": 253,
+    "alpha_ne_255": 150164
+   },
+   "turbo6": {
+    "sigmas": [
+     1.0,
+     0.9625564813613892,
+     0.9230565428733826,
+     0.8371701836585999,
+     0.6315121650695801,
+     0.363569974899292,
+     0.0
+    ],
+    "timesteps": [
+     1000.0,
+     962.5564575195312,
+     923.0565185546875,
+     837.170166015625,
+     631.5121459960938,
+     363.5699768066406
+    ],
+    "final": {
+     "shape": [
+      1,
+      1024,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.13064584136009216,
+     "std": 1.1238502264022827,
+     "min": -4.5767717361450195,
+     "max": 5.3299055099487305,
+     "abs_mean": 0.8944965600967407
+    },
+    "png": "p8_turbo6_fp32.png",
+    "png_mode": "RGBA",
+    "alpha_min": 249,
+    "alpha_ne_255": 174911
+   }
+  },
+  "p6_bf16": {
+   "full_a_target": {
+    "shape": [
+     1,
+     1024,
+     64
+    ],
+    "dtype": "bfloat16",
+    "mean": 0.033010177314281464,
+    "std": 1.2869919538497925,
+    "min": -5.34375,
+    "max": 4.96875,
+    "abs_mean": 1.0281813144683838
+   },
+   "extract_vs_full_a_target_rel": 0.0,
+   "extract_vs_full_a_all_rel": 0.0,
+   "cached_b_vs_full_b_target_rel": 0.004767580019622242,
+   "timestep_a": 0.8984375,
+   "timestep_b": 0.6015625
+  },
+  "p7_bf16": {
+   "peft_lora_layers": 227,
+   "merged": false,
+   "scaling": [
+    1.0
+   ],
+   "lora_param_dtypes": [
+    "torch.bfloat16"
+   ],
+   "lora_effect_rel_target": 0.10940553273673397,
+   "no_lora_matches_p6": 0.0
+  },
+  "p8_bf16": {
+   "base4": {
+    "sigmas": [
+     1.0,
+     0.7492682337760925,
+     0.4325879216194153,
+     0.019999921321868896,
+     0.0
+    ],
+    "timesteps": [
+     1000.0,
+     749.2682495117188,
+     432.5879211425781,
+     19.999921798706055
+    ],
+    "final": {
+     "shape": [
+      1,
+      1024,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.18345612287521362,
+     "std": 1.3972195386886597,
+     "min": -5.15625,
+     "max": 5.53125,
+     "abs_mean": 1.1228364706039429
+    },
+    "png": "p8_base4_bf16.png",
+    "png_mode": "RGBA",
+    "alpha_min": 253,
+    "alpha_ne_255": 43918
+   },
+   "turbo6": {
+    "sigmas": [
+     1.0,
+     0.9625564813613892,
+     0.9230565428733826,
+     0.8371701836585999,
+     0.6315121650695801,
+     0.363569974899292,
+     0.0
+    ],
+    "timesteps": [
+     1000.0,
+     962.5564575195312,
+     923.0565185546875,
+     837.170166015625,
+     631.5121459960938,
+     363.5699768066406
+    ],
+    "final": {
+     "shape": [
+      1,
+      1024,
+      64
+     ],
+     "dtype": "float32",
+     "mean": -0.13047142326831818,
+     "std": 1.126231074333191,
+     "min": -4.59375,
+     "max": 5.34375,
+     "abs_mean": 0.8961241841316223
+    },
+    "png": "p8_turbo6_bf16.png",
+    "png_mode": "RGBA",
+    "alpha_min": 249,
+    "alpha_ne_255": 1985
+   }
+  },
+  "alpha": [
+   {
+    "name": "bakery",
+    "transparency_recipe": false,
+    "alpha_u8_min": 250,
+    "alpha_u8_ne_255": 33072,
+    "alpha_u8_eq_0": 0,
+    "alpha_float_min": 0.98046875
+   },
+   {
+    "name": "fox",
+    "transparency_recipe": false,
+    "alpha_u8_min": 252,
+    "alpha_u8_ne_255": 55795,
+    "alpha_u8_eq_0": 0,
+    "alpha_float_min": 0.98828125
+   },
+   {
+    "name": "lake",
+    "transparency_recipe": false,
+    "alpha_u8_min": 204,
+    "alpha_u8_ne_255": 23359,
+    "alpha_u8_eq_0": 0,
+    "alpha_float_min": 0.80078125
+   },
+   {
+    "name": "teapot",
+    "transparency_recipe": false,
+    "alpha_u8_min": 252,
+    "alpha_u8_ne_255": 16172,
+    "alpha_u8_eq_0": 0,
+    "alpha_float_min": 0.98828125
+   },
+   {
+    "name": "dragon",
+    "transparency_recipe": true,
+    "alpha_u8_min": 0,
+    "alpha_u8_ne_255": 617449,
+    "alpha_u8_eq_0": 108729,
+    "alpha_float_min": 0.0
+   },
+   {
+    "name": "juice",
+    "transparency_recipe": true,
+    "alpha_u8_min": 0,
+    "alpha_u8_ne_255": 631391,
+    "alpha_u8_eq_0": 71371,
+    "alpha_float_min": 0.0
+   }
+  ]
+ },
+ "files": [
+  {
+   "file": "alpha_histograms.json",
+   "location": "committed",
+   "sha256": "674abcdadd5dc9f43c7cbe2184813143807bed59f381d3c030fa1ac9baed1ebf",
+   "bytes": 11210,
+   "description": "t2i alpha statistics (bf16, 1024^2, 40 steps) incl. transparency recipe renders"
+  },
+  {
+   "file": "calculate_dimensions.json",
+   "location": "committed",
+   "sha256": "38b1eb895bda582fc37020a007afc7d331da8912a10d1a1a7cbb2bd1834ad72f",
+   "bytes": 3562,
+   "description": "U1: calculate_dimensions rows incl. half-to-even ties"
+  },
+  {
+   "file": "hf_configs.json",
+   "location": "committed",
+   "sha256": "6271e6ef2836213f187b76f63b556ffa72de3f0ba80c557adc9cf3c9e57944e9",
+   "bytes": 6989,
+   "description": ""
+  },
+  {
+   "file": "p1_processor_ids.safetensors",
+   "location": "committed",
+   "sha256": "3f27422158de83d97a893c820f538473b2c0629086fabd3dd68786650a57de0f",
+   "bytes": 51616,
+   "description": "P1: processor input_ids/attention_mask/mm_token_type_ids/image_grid_thw for 2 references"
+  },
+  {
+   "file": "p3_p6_neg_image_pad_mask.safetensors",
+   "location": "committed",
+   "sha256": "81ce1b14862b9404abbe4a47af85acf8a1775bf0ad3b5c6534367ed4ab055d76",
+   "bytes": 2205,
+   "description": "P3: image_pad_mask after drop_idx, 2 refs, negative prompt"
+  },
+  {
+   "file": "p3_p6_pos_image_pad_mask.safetensors",
+   "location": "committed",
+   "sha256": "189e475fa3bee8e1a2bbc2343f2ac08275a9a0f28eb09b0cae82219a8474f2c4",
+   "bytes": 2220,
+   "description": "P3: image_pad_mask after drop_idx, 2 refs, positive prompt"
+  },
+  {
+   "file": "p3_p8_pos_image_pad_mask.safetensors",
+   "location": "committed",
+   "sha256": "1d61a18758b9442629902dd4b9b35284fb3503e1f6ac44b387d5e8bae53f1080",
+   "bytes": 1167,
+   "description": "P3: image_pad_mask after drop_idx, 1 ref (P8 prompt)"
+  },
+  {
+   "file": "p3_t2i_p8_image_pad_mask.safetensors",
+   "location": "committed",
+   "sha256": "7dc896c843be0e873cb0b6d17c813e7368725ec989801019a336c3751bf936bd",
+   "bytes": 139,
+   "description": "P3: image_pad_mask (all false), t2i P8 prompt"
+  },
+  {
+   "file": "p5_layout.json",
+   "location": "committed",
+   "sha256": "fc1033a68554a67897b002ca5ec575f8d40b66e158ff4520ef800592029bc4eb",
+   "bytes": 2722,
+   "description": "P5: segments, prefix_len, image blocks per case"
+  },
+  {
+   "file": "p5_layout.safetensors",
+   "location": "committed",
+   "sha256": "6e9350848db898bce2c93e3deeba059ae9d3a27fe47f7018ea40e59ff06cda5b",
+   "bytes": 850117,
+   "description": "P5: joint image mask, image_ids, target mask, RoPE indices per case"
+  },
+  {
+   "file": "pillow_resize.safetensors",
+   "location": "committed",
+   "sha256": "1646e9eec58e189a54ee3c4c613c6e7a78754347f255e4abb6631f236deb5eae",
+   "bytes": 53215,
+   "description": "U8: Pillow LANCZOS resize of small RGBA/RGB inputs (premultiplied) + white composite, uint8"
+  },
+  {
+   "file": "ref_opaque.png",
+   "location": "committed",
+   "sha256": "803d81c457de3fc530484d8c30bdbdf22543514780eec927cce4d6199a068dbd",
+   "bytes": 20613,
+   "description": "Opaque 1536x1024 RGB reference (deterministic, make_opaque_reference)"
+  },
+  {
+   "file": "ref_rgba.png",
+   "location": "committed",
+   "sha256": "7489f9a36012b5c90d00dac49c318faa6b4ecf7e72ef119786c35b1467789b87",
+   "bytes": 42518,
+   "description": "640x800 RGBA reference with soft alpha, translucent pane, magenta under alpha 0 (make_rgba_reference)"
+  },
+  {
+   "file": "run_capture.sh",
+   "location": "committed",
+   "sha256": "fb53590eaf06cdce7aa2da08e11209a416079efbd716e35321ca1afd0d4ec8ac",
+   "bytes": 1364,
+   "description": ""
+  },
+  {
+   "file": "schedules.json",
+   "location": "committed",
+   "sha256": "a3b194dbaeb82d02400ab8cd6906ca2f9c29603099ebb71c25bd1b9ccf89bfc6",
+   "bytes": 16557,
+   "description": "U11: FlowMatchEuler sigmas/timesteps/mu for base and turbo (shift_terminal None) cases"
+  },
+  {
+   "file": "templates.json",
+   "location": "committed",
+   "sha256": "7386049ae273acd37239a42dbed7d2ccef2b05b45c78104d487d0d19328e35d1",
+   "bytes": 11187,
+   "description": "U2: exact template strings, bytes, token ids for 0-3 references; apply_chat_template contrast"
+  },
+  {
+   "file": "viggle_lora_layout.json",
+   "location": "committed",
+   "sha256": "c0c953630b1e6e502d5a549127d1b1de8eb914470c086d3372b26661a3cad030",
+   "bytes": 7943,
+   "description": "Viggle v0.2.1 LoRA key layout, rank, alpha source, licence"
+  },
+  {
+   "file": "alpha_t2i_bakery.png",
+   "location": "large",
+   "sha256": "2fc7da38f3ddc1a5ee793fddd640886f4bb8a58a2269660f48f0aecb4ce62676",
+   "bytes": 2207460,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "alpha_t2i_dragon.png",
+   "location": "large",
+   "sha256": "6a042d26a1961501c25e35f52a5f15d024a9315484c24e60f771b3614069f82f",
+   "bytes": 1051102,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "alpha_t2i_fox.png",
+   "location": "large",
+   "sha256": "255a4d448b7ff2679db2e7361c0351275800ab6eabfda801c1558127c88f3056",
+   "bytes": 1547781,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "alpha_t2i_juice.png",
+   "location": "large",
+   "sha256": "12709961b6ab0d9c5a7791298a5c5c820ac3d38b1ab9fc98e771a4e42adf559f",
+   "bytes": 845553,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "alpha_t2i_lake.png",
+   "location": "large",
+   "sha256": "939962b06e15f9db86030b38d9a061f01646890c76777f8af5fa9186e73de50c",
+   "bytes": 716938,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "alpha_t2i_teapot.png",
+   "location": "large",
+   "sha256": "558e9bea81599a8626bf6dde19cef8d6fc7b0728c937da284e509944e19e5064",
+   "bytes": 1316803,
+   "description": "t2i alpha-histogram render"
+  },
+  {
+   "file": "encode_record_bf16.json",
+   "location": "large",
+   "sha256": "6ece3d475f0405eb637332ccbdb38e1804b55f3f1cf5e4097be41fbccde69554",
+   "bytes": 1260,
+   "description": "capture record (stats, reference sizes)"
+  },
+  {
+   "file": "encode_record_fp32.json",
+   "location": "large",
+   "sha256": "3b878aadbba90bfeca4a8f7e9b33ed12cd4f1d67d65b626fa32f7989fc1cb093",
+   "bytes": 6926,
+   "description": "capture record (stats, reference sizes)"
+  },
+  {
+   "file": "p1_processor_pixels.safetensors",
+   "location": "large",
+   "sha256": "247b568e118fcff28b37959140d21581b02da71ebea1ea8a858f14b9c383d036",
+   "bytes": 50577744,
+   "description": "P1: pixel_values for 2 references (f32)"
+  },
+  {
+   "file": "p2_vision_fp32.safetensors",
+   "location": "large",
+   "sha256": "a96f3d6af2bf00f6b5cc3c36c8d0051600e407650a1217b276f9aedffb7044cb",
+   "bytes": 172806736,
+   "description": "P2: vision last hidden, merger output, 3 deepstack outputs (fp32)"
+  },
+  {
+   "file": "p3_p6_neg_bf16.safetensors",
+   "location": "large",
+   "sha256": "8e60689f58d9d8bcdaa6fa4ba2b27a352ca0caec45258c9ac30b94de76570711",
+   "bytes": 17082701,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_neg_fp32.safetensors",
+   "location": "large",
+   "sha256": "300bdca86d47a9ce809ac70dbdcf194aca2bc4e2e2a573ed10de70ac0fa120e9",
+   "bytes": 34163021,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_neg_lm_internals_bf16.safetensors",
+   "location": "large",
+   "sha256": "98ed776d771ac109c488d98422e46286f97194bfa185f783dbd163c4076ec391",
+   "bytes": 275173667,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_neg_lm_internals_fp32.safetensors",
+   "location": "large",
+   "sha256": "86c81b7b4cebbfb18c5a736dd840c59a3cabe56915f06201008bd339834b2ee1",
+   "bytes": 275173667,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_pos_bf16.safetensors",
+   "location": "large",
+   "sha256": "b77cfd7d2688baf0a63d0660e12c1c4a4e8d4d0e5ec3730bc9e741c4b4aa89c1",
+   "bytes": 17205660,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_pos_fp32.safetensors",
+   "location": "large",
+   "sha256": "0f94f587f569734ab96c2a90b136a0a15832409ab7b8fdb8ddb5e5b7238c8b7a",
+   "bytes": 34408860,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_pos_lm_internals_bf16.safetensors",
+   "location": "large",
+   "sha256": "8679b62a334fa5cd8ae0686c0f187e640e837804c0639f8485efa82b4448ae89",
+   "bytes": 277140122,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p6_pos_lm_internals_fp32.safetensors",
+   "location": "large",
+   "sha256": "d3180a0aba420d257bfa7786314c74076930f49dc2aa7c4523f9e609b94cb25b",
+   "bytes": 277140122,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p8_pos_bf16.safetensors",
+   "location": "large",
+   "sha256": "c7216751d6f5c2a3a2b9ba9b9226d59ac98eb8f301e1fa84b20562d7e68a5968",
+   "bytes": 8578431,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p8_pos_fp32.safetensors",
+   "location": "large",
+   "sha256": "bbf020f061e09bc5454fec0d8833af2e922e840bde707757b7d0a0d9153453ee",
+   "bytes": 17155455,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p8_pos_lm_internals_bf16.safetensors",
+   "location": "large",
+   "sha256": "eae4d9bfd748ba425370d219014bcf5b5fdefd74c37c503a5ad181884ac7bba4",
+   "bytes": 139094973,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_p8_pos_lm_internals_fp32.safetensors",
+   "location": "large",
+   "sha256": "e033b9d6b0c45531e47c422502a4090aeb89bda0cd99c8d5c6bc194d414230e1",
+   "bytes": 139094973,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_t2i_p8_bf16.safetensors",
+   "location": "large",
+   "sha256": "fc95d0db5363f4d8b6d1eaec0ab5db34fbe622539adc66d9614c039f4ceb2d9c",
+   "bytes": 221563,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_t2i_p8_fp32.safetensors",
+   "location": "large",
+   "sha256": "398c1f5111ea09952dc80ed7cb2bc17e7c88f3b5b8f8136ffa1535304fda1bbc",
+   "bytes": 442747,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p3_t2i_p8_lm_internals_fp32.safetensors",
+   "location": "large",
+   "sha256": "edf28d48e2c0d228bd9864058baf162de73513f01409e396bd80409c79e3898e",
+   "bytes": 5374800,
+   "description": "P3: trimmed pre-norm hidden states (+ LM internals when *_lm_internals_*)"
+  },
+  {
+   "file": "p4_opaque_roundtrip.png",
+   "location": "large",
+   "sha256": "022d8808242326900907cf52cab0bc4ac27adfadcfe9d18041ceb56eecdf3acc",
+   "bytes": 282995,
+   "description": "P4: VAE decode roundtrip PNG"
+  },
+  {
+   "file": "p4_rgba_roundtrip.png",
+   "location": "large",
+   "sha256": "f933cd7e0b169c8795fe2f87eac43aff6ac7e114d880dd2fde2442311d656a5f",
+   "bytes": 567001,
+   "description": "P4: VAE decode roundtrip PNG"
+  },
+  {
+   "file": "p4_vae_encode_fp32.safetensors",
+   "location": "large",
+   "sha256": "900b2a6f156dcb2d4e77ea8194953811ea4de4631fea9118306c057bd098e30b",
+   "bytes": 73759808,
+   "description": "P4: VAE input, mode, normalized, packed latents + decode roundtrip, opaque and RGBA refs"
+  },
+  {
+   "file": "p4_vae_encoder_internals_64x96_fp32.safetensors",
+   "location": "large",
+   "sha256": "720df3e49c8b504dd399cb7ad99776114c939c1a9de1616d001508b24469e8ac",
+   "bytes": 4996784,
+   "description": "P4 debug: per-module VAE encoder outputs on a 64x96 RGBA crop"
+  },
+  {
+   "file": "p5_rope_freqs.safetensors",
+   "location": "large",
+   "sha256": "51c3f99d1c92e3d2ba9375c5fbfd2802e56127bcce538498475605c3c4e9bc09",
+   "bytes": 12669952,
+   "description": "P5: complex RoPE tables per case (view_as_real)"
+  },
+  {
+   "file": "p6_inputs.safetensors",
+   "location": "large",
+   "sha256": "4f2d68670727a47af360288768d5c287ce614e1db52a32bea2b42e7b7b2eedca",
+   "bytes": 37041204,
+   "description": "P6: transformer inputs (prompt embeds, img mask, cond latents, noise)"
+  },
+  {
+   "file": "p6_internals_bf16.safetensors",
+   "location": "large",
+   "sha256": "78e833bf713f61749afe8898a9a238e6d1f3ce8a07144dbb828626f70e064493",
+   "bytes": 499712944,
+   "description": "P6 debug: block 0/31 activations, modulation, temb, K/V layers 0 and 31"
+  },
+  {
+   "file": "p6_internals_fp32.safetensors",
+   "location": "large",
+   "sha256": "fc700371096ff5a9f1fb85617fc9c5c1d46d83b3f9daa4ee6cb6eaecb4904ade",
+   "bytes": 999424936,
+   "description": "P6 debug: block 0/31 activations, modulation, temb, K/V layers 0 and 31"
+  },
+  {
+   "file": "p6_outputs_bf16.safetensors",
+   "location": "large",
+   "sha256": "d98b942171354e0cba08880f37bc7c2df2b878dd403cf061ff99aa96f349e36f",
+   "bytes": 3702156,
+   "description": "P6: full/extract/cached transformer outputs"
+  },
+  {
+   "file": "p6_outputs_fp32.safetensors",
+   "location": "large",
+   "sha256": "b660ae0230ef1db5c83012b6b77d2c00c5a47568e60b862008e166bde1abeae9",
+   "bytes": 7403656,
+   "description": "P6: full/extract/cached transformer outputs"
+  },
+  {
+   "file": "p7_lora_r128_bf16.safetensors",
+   "location": "large",
+   "sha256": "8cc0033dab9310a6256fceb6cf25a7aafaaab0d69aa671c1b306363b3356e0a5",
+   "bytes": 2380970,
+   "description": "P7: full forward with Viggle r128 via PEFT (unmerged) and without"
+  },
+  {
+   "file": "p7_lora_r128_fp32.safetensors",
+   "location": "large",
+   "sha256": "128f25b63758675583441055370cb675f699e643904775071ed85b99630e6892",
+   "bytes": 4761260,
+   "description": "P7: full forward with Viggle r128 via PEFT (unmerged) and without"
+  },
+  {
+   "file": "p8_base4_bf16.png",
+   "location": "large",
+   "sha256": "c5a7b524ca8e23ea80a7620443a4ef4cfb463701d3582f947f7190bb9fb2c994",
+   "bytes": 180803,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_base4_bf16.safetensors",
+   "location": "large",
+   "sha256": "10662d187fb1c3bfa4a5b373b9e452fc5c6a32672b74ec30cd98791320747b3f",
+   "bytes": 5506072,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_base4_fp32.png",
+   "location": "large",
+   "sha256": "73bfd1e8bf26b5115cab9d98e5da3787d7cb0162dff2dd2143c49da839149fcf",
+   "bytes": 174815,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_base4_fp32.safetensors",
+   "location": "large",
+   "sha256": "4339612de5949e3dd8c31ff5e313c6c597c9c8391ab881eeb1134a4d953305b6",
+   "bytes": 5506072,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_noise.safetensors",
+   "location": "large",
+   "sha256": "bf2e6c832e2591761c636e077f20d3f2471a6367dc32c1a049861919167a8124",
+   "bytes": 262368,
+   "description": "P8: injected initial latents (packed)"
+  },
+  {
+   "file": "p8_turbo6_bf16.png",
+   "location": "large",
+   "sha256": "f5eb7c94e825f05449fabc924e7ea83348789ddea83790ee9f82dfa8059810e4",
+   "bytes": 290705,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_turbo6_bf16.safetensors",
+   "location": "large",
+   "sha256": "a8e2cda722d8561d1f3cdf05eda2b953a31846a22aba4bb1f768950282cfbc57",
+   "bytes": 6030664,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_turbo6_fp32.png",
+   "location": "large",
+   "sha256": "a4d4d22b4feaa49978edafdbb3fce4792733aa9eea67aa4c13a071687066dc48",
+   "bytes": 298467,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "p8_turbo6_fp32.safetensors",
+   "location": "large",
+   "sha256": "6c8bd4f39a5806cbce9f5afd61fba65f796c5d75dc76ed16eba0f7bd6fb1767c",
+   "bytes": 6030664,
+   "description": "P8: end-to-end per-step latents, final latents, decoded RGBA (and PNG)"
+  },
+  {
+   "file": "pillow_reference_resize.safetensors",
+   "location": "large",
+   "sha256": "0721e23b644fd735494fbd3ca1ec45bbab9c74f63158d9383ff8ce56751c6b70",
+   "bytes": 14752176,
+   "description": "Full-size resized references (RGBA + white composite) as the pipeline sees them"
+  },
+  {
+   "file": "ref_opaque_resized_1248x832.png",
+   "location": "large",
+   "sha256": "61c06d64419e6cc557291db23eac7c5e14e34ac7571c3595c5167af5ffab1d82",
+   "bytes": 44652,
+   "description": "Resized reference image as fed to VL/VAE"
+  },
+  {
+   "file": "ref_opaque_resized_1248x832_white.png",
+   "location": "large",
+   "sha256": "b801a35b92a8f3cba1211376d54ff0ac7e86520681ae73db8bc1e0807168cc79",
+   "bytes": 39625,
+   "description": "Resized reference image as fed to VL/VAE"
+  },
+  {
+   "file": "ref_rgba_resized_928x1152.png",
+   "location": "large",
+   "sha256": "205e19808b9610dfa166570c78e44c7c1a1c3a078feb8a22a6c292fbf5f0de15",
+   "bytes": 148544,
+   "description": "Resized reference image as fed to VL/VAE"
+  },
+  {
+   "file": "ref_rgba_resized_928x1152_white.png",
+   "location": "large",
+   "sha256": "aa69ace6b057845a0ffedbe749d4592ce298d65838773dd1cdaccbcfe9b0abcb",
+   "bytes": 116273,
+   "description": "Resized reference image as fed to VL/VAE"
+  },
+  {
+   "file": "results.json",
+   "location": "large",
+   "sha256": "2975ec8aeb4f37552339be7ecc2857c627c7be5071d3ddd8c06a7bd41269279d",
+   "bytes": 7044,
+   "description": ""
+  }
+ ]
+}
