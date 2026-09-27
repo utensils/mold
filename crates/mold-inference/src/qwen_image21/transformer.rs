@@ -688,6 +688,7 @@ impl QwenImage21Transformer {
     }
 
     /// Prepare a text-to-image branch.
+    #[cfg(test)]
     pub(crate) fn prepare_t2i<'a>(
         &'a self,
         conditioning: &'a QwenImage21TextConditioning,

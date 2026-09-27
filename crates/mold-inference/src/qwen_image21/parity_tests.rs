@@ -521,3 +521,111 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
         eprintln!("lm_hidden_{index}: relative max {max_error:.3e}, mean {mean_error:.3e}");
     }
 }
+fn engine_paths(env: &Env) -> mold_core::ModelPaths {
+    mold_core::ModelPaths {
+        low_noise_transformer: None,
+        low_noise_distilled_lora: None,
+        transformer: env.transformer()[0].clone(),
+        transformer_shards: env.transformer(),
+        vae: env.vae(),
+        spatial_upscaler: None,
+        temporal_upscaler: None,
+        distilled_lora: None,
+        t5_encoder: None,
+        clip_encoder: None,
+        t5_tokenizer: None,
+        clip_tokenizer: None,
+        clip_encoder_2: None,
+        clip_tokenizer_2: None,
+        text_encoder_files: env.text_encoder(),
+        text_tokenizer: Some(env.tokenizer()),
+        decoder: None,
+    }
+}
+
+/// PSNR in dB of two `[H, W, 3]` float images in `[0, 1]`.
+fn psnr(a: &Tensor, b: &Tensor) -> f64 {
+    let mse = (a - b)
+        .unwrap()
+        .sqr()
+        .unwrap()
+        .mean_all()
+        .unwrap()
+        .to_dtype(DType::F64)
+        .unwrap()
+        .to_scalar::<f64>()
+        .unwrap();
+    10.0 * (1.0 / mse.max(1e-12)).log10()
+}
+
+/// P8 (base, 4 steps): the whole engine — reference preparation, vision,
+/// multimodal encode, VAE encode, joint-layout denoise with the prefix cache,
+/// decode — on upstream's own injected noise, against the upstream bf16
+/// render. The engine runs at its device's working dtype (BF16 on CUDA), so
+/// the gate is relative: mold's PSNR against upstream's fp32 render must be
+/// within 1 dB of upstream's own bf16 render's.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p8_base_end_to_end_matches_the_upstream_capture() {
+    use crate::engine::{InferenceEngine, LoadStrategy};
+    let Some(env) = env() else { return };
+    let mut engine = super::QwenImage21Engine::new(
+        "qwen-image-2.1:bf16".to_string(),
+        engine_paths(&env),
+        LoadStrategy::Sequential,
+        0,
+    );
+    engine.inject_initial_latents(env.capture("p8_noise.safetensors")["latents"].clone());
+    let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+        "prompt": P8_PROMPT,
+        "model": "qwen-image-2.1:bf16",
+        "width": 512,
+        "height": 512,
+        "steps": 4,
+        "guidance": 1.0,
+        "seed": 1234,
+        "output_format": "png"
+    }))
+    .unwrap();
+    let mut request = request;
+    request.edit_images = Some(vec![std::fs::read(testdata("ref_opaque.png")).unwrap()]);
+    let response = engine.generate(&request).unwrap();
+    let decoded = image::load_from_memory(&response.images[0].data)
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(decoded.dimensions(), (512, 512));
+    let ours = Tensor::from_vec(
+        decoded
+            .as_raw()
+            .iter()
+            .map(|byte| f32::from(*byte) / 255.0)
+            .collect::<Vec<_>>(),
+        (512, 512, 3),
+        &Device::Cpu,
+    )
+    .unwrap();
+    let rgb = |name: &str| {
+        env.capture(name)["decoded_rgba_float"]
+            .narrow(2, 0, 3)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+    };
+    let truth = rgb("p8_base4_fp32.safetensors");
+    let upstream_bf16 = rgb("p8_base4_bf16.safetensors");
+    let ours_psnr = psnr(&ours, &truth);
+    let theirs_psnr = psnr(&upstream_bf16, &truth);
+    let direct = psnr(&ours, &upstream_bf16);
+    eprintln!(
+        "P8 base4: mold vs fp32 {ours_psnr:.2} dB, upstream bf16 vs fp32 {theirs_psnr:.2} dB, mold vs upstream bf16 {direct:.2} dB"
+    );
+    std::fs::write(
+        std::env::temp_dir().join("qwen21_p8_base4_mold.png"),
+        &response.images[0].data,
+    )
+    .unwrap();
+    assert!(
+        ours_psnr >= theirs_psnr - 1.0,
+        "{ours_psnr} dB vs upstream's {theirs_psnr} dB"
+    );
+}

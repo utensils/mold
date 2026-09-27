@@ -22,8 +22,7 @@ use mold_candle::qwen3_vl::{
 };
 
 use super::conditioning::{
-    carries_alpha, expand_image_pad_tokens, image_conditioned_prompt_template, image_pad_count,
-    reference_canvas,
+    expand_image_pad_tokens, image_conditioned_prompt_template, image_pad_count, reference_canvas,
 };
 use super::{system_message_prefix, QwenImage21TextConditioning, QWEN_IMAGE_21_VAE_SCALE_FACTOR};
 use crate::encoders::qwen3::Qwen3Encoder;
@@ -44,8 +43,6 @@ pub(crate) struct PreparedReference {
     pub rgba: RgbaImage,
     /// The vision tower's copy: `rgba` pasted over white.
     pub vision_rgb: RgbImage,
-    /// Whether the SOURCE carried any transparency.
-    pub carries_alpha: bool,
 }
 
 impl PreparedReference {
@@ -116,11 +113,7 @@ pub(crate) fn prepare_decoded_reference(source: &RgbaImage) -> Result<PreparedRe
     let (width, height) = reference_canvas(source.width(), source.height());
     let rgba = resize_rgba_premultiplied(source, width, height, Filter::Lanczos, &mut || Ok(()))?;
     let vision_rgb = composite_over_white(&rgba);
-    Ok(PreparedReference {
-        carries_alpha: carries_alpha(source.pixels().map(|pixel| pixel.0[3])),
-        rgba,
-        vision_rgb,
-    })
+    Ok(PreparedReference { rgba, vision_rgb })
 }
 
 /// Tensors of the vision tower inside the Qwen3-VL text-encoder shards.
@@ -334,7 +327,6 @@ mod tests {
             (prepared.width(), prepared.height()),
             reference_canvas(64, 48)
         );
-        assert!(prepared.carries_alpha);
         assert_eq!(prepared.vision_rgb.dimensions(), prepared.rgba.dimensions());
         assert_eq!(prepared.vision_rgb, composite_over_white(&prepared.rgba));
         assert_eq!(
@@ -348,10 +340,6 @@ mod tests {
             prepared.pad_count().unwrap(),
             prepared.grid().height * prepared.grid().width / 4
         );
-        let opaque =
-            prepare_decoded_reference(&RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255])))
-                .unwrap();
-        assert!(!opaque.carries_alpha);
     }
 
     #[test]

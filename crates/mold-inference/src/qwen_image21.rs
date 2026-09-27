@@ -12,10 +12,10 @@ use candle_core::{DType, Device, Tensor};
 use crate::encoders::qwen3::{resolve_pad_token_id, Qwen3Encoder};
 
 pub(crate) mod attention;
-pub(crate) mod conditioning;
-pub(crate) mod layout;
 pub(crate) mod banded_conv;
+pub(crate) mod conditioning;
 pub(crate) mod exec_path;
+pub(crate) mod layout;
 pub(crate) mod pipeline;
 pub(crate) mod reference;
 pub(crate) mod scheduler;
