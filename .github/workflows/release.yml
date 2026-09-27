@@ -1182,6 +1182,22 @@ jobs:
       - name: Stable-named desktop DMG
         run: cp artifacts/Mold_*_aarch64.dmg artifacts/Mold-macos-arm64.dmg
 
+      # Mold Studio (the native macOS app) is the recommended Mac download, so
+      # the README and website link releases/latest/download/
+      # Mold-Studio-macos-arm64.dmg. Exactly one versioned native DMG must be
+      # present; copying a glob that matched none or several would publish the
+      # wrong bytes under the stable name.
+      - name: Stable-named Mold Studio DMG
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          native=(artifacts/Mold-native-*.dmg)
+          if [[ ${#native[@]} -ne 1 ]]; then
+            echo "::error::expected exactly one Mold-native-*.dmg, found ${#native[@]}"
+            exit 1
+          fi
+          cp "${native[0]}" artifacts/Mold-Studio-macos-arm64.dmg
+
       - name: Generate checksums
         run: cd artifacts && sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
 
@@ -1243,9 +1259,9 @@ jobs:
 
             ## Desktop apps
 
-            `Mold-macos-arm64.dmg` (also attached with its versioned name) — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+            **Mac: use Mold Studio.** `Mold-Studio-macos-arm64.dmg` (also attached as `Mold-native-*.dmg`) — the native macOS app (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
 
-            `Mold-native-*.dmg` — the native macOS app (Apple Silicon, macOS 26 or newer), signed, notarized and stapled. It updates itself through Sparkle; `mold-native-appcast.xml` beside it is that channel's feed.
+            `Mold-macos-arm64.dmg` (also attached with its versioned name) — the legacy Tauri desktop app for macOS, for Macs that cannot run macOS 26. Signed, notarized, and stapled. Stable link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
 
             `Mold-windows-x64-self-signed.exe` — self-signed NSIS installer. Verify and explicitly trust the attached `mold-windows-self-signing.cert.cer` before installation. This certificate is not publicly trusted and does not suppress SmartScreen by itself.
 

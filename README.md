@@ -125,12 +125,32 @@ current platform support.
 
 ## Mold Studio
 
-The desktop app puts New image, Queue, My images, Styles, Machines, and
-Settings in one window, in plain words, with six themes, for local and remote
-generation. It also pairs with the iPhone and Android companions.
+| Platform | Download |
+| --- | --- |
+| **macOS (recommended)** | **[Mold Studio for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)** — native, Apple Silicon, macOS 26+ |
+| macOS (legacy) | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg) — for Macs that cannot run macOS 26 |
+| Windows | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe) — see below |
+| Linux | Mold Desktop (Tauri) — source/CI builds, see below |
+| Android | [Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk) — see below |
 
-**[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
-· [Explore the desktop app](https://utensils.io/mold/guide/desktop)
+**On a Mac, use Mold Studio.** It is the native macOS app: signed,
+notarized, self-updating through Sparkle, with mold's own Metal engine built
+in, and it talks to any `mold serve` on your network too. Generate, a merged
+multi-machine Library, Queue, Models and Machines, all in one native window.
+[Mold Studio for Mac guide](https://utensils.io/mold/guide/macos)
+
+**[Download Mold Studio for Mac (Apple Silicon, macOS 26+)](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)**
+
+It installs as **Mold Studio.app** beside the older Tauri app (`Mold.app`),
+so both can live in /Applications while you move over. The Tauri app is now
+the **legacy** Mac download — keep it only for a Mac that cannot run macOS 26:
+[Download Mold Desktop for macOS (legacy)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg).
+
+On Windows and Linux the Tauri desktop app remains the default. It puts New
+image, Queue, My images, Styles, Machines, and Settings in one window, in plain
+words, with six themes, for local and remote generation, and pairs with the
+iPhone and Android companions.
+[Explore the desktop app](https://utensils.io/mold/guide/desktop)
 
 **[Download Mold for Windows (x86_64)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe)**
 — a self-signed NSIS installer. The published build is CPU / remote-hosts

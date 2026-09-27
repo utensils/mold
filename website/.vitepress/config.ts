@@ -106,6 +106,7 @@ export default defineConfig({
             { text: 'Generating Images', link: '/guide/generating' },
             { text: 'Video', link: '/guide/video' },
             { text: '3D Meshes', link: '/guide/mesh' },
+            { text: 'Mold Studio for Mac', link: '/guide/macos' },
             { text: 'Desktop App', link: '/guide/desktop' },
             { text: 'iPhone App', link: '/guide/iphone' },
             { text: 'Android App', link: '/guide/android' },

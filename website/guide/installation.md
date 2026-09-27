@@ -6,9 +6,14 @@ for current versions.
 
 ## Native apps
 
-- **macOS desktop:** download the signed and notarized
-  [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg),
-  then follow the [Desktop App guide](/guide/desktop).
+- **macOS (recommended):** download
+  [Mold Studio for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg),
+  the signed, notarized native app (Apple Silicon, macOS 26 or newer), then
+  follow the [Mold Studio for Mac guide](/guide/macos).
+- **macOS desktop (legacy):** the Tauri
+  [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)
+  is still published for Macs that cannot run macOS 26; see the
+  [Desktop App guide](/guide/desktop).
 - **Windows desktop (nightly):** download the self-signed
   [NSIS installer](https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe)
   and its [public certificate](https://github.com/utensils/mold/releases/download/latest/mold-windows-self-signing.cert.cer),

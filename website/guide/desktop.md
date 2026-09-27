@@ -5,7 +5,13 @@ The remote-only companions have dedicated [iPhone](/guide/iphone) and
 [Android](/guide/android) guides with download, pairing, and setup instructions.
 :::
 
-Mold Studio is the native desktop app for macOS, Linux, and Windows. It puts
+::: tip On a Mac? Use Mold Studio.
+[Mold Studio for Mac](/guide/macos) is the native macOS app and the
+recommended Mac download. This page covers the cross-platform Tauri desktop
+app, which is the default on Windows and Linux and the legacy app on macOS.
+:::
+
+The Mold desktop app runs on macOS, Linux, and Windows. It puts
 making a picture, the queue, everything you have made, your styles, your
 machines, and settings in one focused window, in plain words, with five themes
 that keep attention on your work.
@@ -25,9 +31,13 @@ machine status, and live generation progress in one native window._
 ## Download
 
 <div class="platform-downloads">
+  <a class="platform-download platform-download--primary" href="https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg">
+    <img src="/icons/apple.svg" alt="" />
+    <span><strong>Mold Studio for Mac</strong><small>Recommended · native · Apple Silicon · macOS 26+</small></span>
+  </a>
   <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg">
     <img src="/icons/apple.svg" alt="" />
-    <span><strong>macOS Desktop</strong><small>Signed and notarized · Apple Silicon</small></span>
+    <span><strong>macOS Desktop (legacy)</strong><small>Tauri app · for Macs before macOS 26</small></span>
   </a>
   <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe">
     <img src="/icons/windows.svg" alt="" />
@@ -39,8 +49,12 @@ machine status, and live generation progress in one native window._
   </a>
 </div>
 
-Every tagged release ships a signed, notarized, stapled macOS DMG. Open it and
-drag **Mold** to Applications; no quarantine dance needed. Version-pinned
+Every tagged release ships two signed, notarized, stapled macOS DMGs:
+**Mold Studio** (`Mold-Studio-macos-arm64.dmg`), the native app and the
+recommended Mac download, and this Tauri app (`Mold-macos-arm64.dmg`), kept as
+the legacy Mac download for Macs that cannot run macOS 26. Open the DMG and
+drag the app to Applications; no quarantine dance needed. The two install as
+**Mold Studio.app** and **Mold.app**, so both can sit side by side. Version-pinned
 downloads and `SHA256SUMS` are on the
 [releases page](https://github.com/utensils/mold/releases).
 
