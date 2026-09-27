@@ -1404,6 +1404,36 @@ pub fn fit_to_target_area(src_w: u32, src_h: u32, target_area: u32, align: u32) 
     clamp_to_megapixel_limit(width.max(align), height.max(align))
 }
 
+/// [`fit_to_target_area`] with the exact arithmetic of diffusers'
+/// `calculate_dimensions` (`pipeline_qwenimage21.py:149-156` at
+/// `e0abab83b`): `width = sqrt(area * ratio)`, `height = width / ratio`, each
+/// rounded with Python's `round()` — halves to EVEN — to the alignment grid.
+///
+/// [`fit_to_target_area`] rounds halves away from zero and derives both axes
+/// from a shared scale, so the two disagree on a tie such as a 4225x4096
+/// source (1056x1024 against upstream's 1024x1024). This is the one rule
+/// every surface uses for Qwen Image 2.1's last-reference output canvas and
+/// per-reference resize, so a client and the engine cannot land on
+/// different sides of a tie. No megapixel clamp is applied: the target area
+/// IS the contract. A degenerate aspect that rounds an axis to zero is lifted
+/// to one grid cell (upstream would hand the VAE a zero-size tensor).
+pub fn fit_to_target_area_ties_even(
+    src_w: u32,
+    src_h: u32,
+    target_area: u64,
+    align: u32,
+) -> (u32, u32) {
+    let ratio = f64::from(src_w.max(1)) / f64::from(src_h.max(1));
+    let align = align.max(1);
+    let width = (target_area as f64 * ratio).sqrt();
+    let height = width / ratio;
+    let snap = |value: f64| {
+        let cells = (value / f64::from(align)).round_ties_even().max(1.0);
+        (cells as u32).saturating_mul(align)
+    };
+    (snap(width), snap(height))
+}
+
 /// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
 pub(crate) fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
@@ -8550,6 +8580,36 @@ mod tests {
     fn fit_to_target_area_preserves_ratio_and_alignment() {
         let (w, h) = fit_to_target_area(1600, 900, 1024 * 1024, 16);
         assert_eq!((w, h), (1360, 768));
+    }
+
+    #[test]
+    fn ties_even_fit_matches_upstream_calculate_dimensions() {
+        // Goldens from diffusers `calculate_dimensions(1024 * 1024, w / h)`
+        // (`pipeline_qwenimage21.py:149-156`) under CPython 3.13.
+        for ((w, h), expected) in [
+            ((4225, 4096), (1024, 1024)),
+            ((4096, 4225), (1024, 1024)),
+            ((1600, 900), (1376, 768)),
+            ((1024, 1024), (1024, 1024)),
+            ((3000, 2000), (1248, 832)),
+            ((1, 1), (1024, 1024)),
+            ((640, 480), (1184, 896)),
+            ((1080, 1920), (768, 1376)),
+        ] {
+            assert_eq!(
+                fit_to_target_area_ties_even(w, h, 1024 * 1024, 32),
+                expected,
+                "{w}x{h}"
+            );
+        }
+        // 4225/4096 puts the width on an exact half cell (1040 / 32 = 32.5):
+        // half-away-from-zero would round it up to 1056.
+        assert_eq!(fit_to_target_area(4225, 4096, 1024 * 1024, 32).0, 1056);
+        // A degenerate aspect never produces a zero-size axis.
+        assert_eq!(
+            fit_to_target_area_ties_even(100_000, 1, 1024 * 1024, 32).1,
+            32
+        );
     }
 
     // ── LoRA validation tests ──────────────────────────────────────────────
