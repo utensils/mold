@@ -7,6 +7,11 @@ import { computed, ref } from "vue";
  * hatch, and a thumbnail preview with an explicit remove control. Surfaces own
  * what a picked File means (validation, probing, state) — this component only
  * acquires media and reports intent.
+ *
+ * The preview always sits on the kit's `.ms-alpha-bed` checkerboard, drawn on
+ * the IMAGE box itself (never a letterbox around it): an opaque picture covers
+ * it completely, and a transparent PNG/WebP — a Qwen Image 2.1 cut-out
+ * reference — shows exactly which pixels carry no colour.
  */
 const props = withDefaults(
   defineProps<{
@@ -133,7 +138,12 @@ function onDrop(event: DragEvent): void {
     />
 
     <figure v-if="previewUrl" class="image-well__preview">
-      <img :src="previewUrl" :alt="alt" :data-test="`${testId}-preview`" />
+      <img
+        class="ms-alpha-bed"
+        :src="previewUrl"
+        :alt="alt"
+        :data-test="`${testId}-preview`"
+      />
       <figcaption v-if="filename">{{ filename }}</figcaption>
     </figure>
 
@@ -268,6 +278,7 @@ function onDrop(event: DragEvent): void {
   display: block;
   max-width: 100%;
   max-height: 160px;
+  --ms-alpha-cell: 10px;
   border: 1px solid var(--mold-border, #bbb);
   border-radius: 10px;
 }
@@ -310,11 +321,19 @@ function onDrop(event: DragEvent): void {
   width: 100%;
   justify-self: stretch;
 }
-.image-well--touch .image-well__preview img {
-  width: 100%;
-  max-height: min(55vh, 440px);
-  object-fit: contain;
+/* The touch preview centres the picture at its own aspect instead of a
+ * letterboxed full-width box, so the alpha bed stays under the picture and
+ * the space beside it stays the plain print surface. */
+.image-well--touch .image-well__preview {
+  place-items: center;
   background: var(--color-print-surface, #111);
+  border-radius: 10px;
+}
+.image-well--touch .image-well__preview img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(55vh, 440px);
 }
 .image-well--touch .image-well__actions {
   display: grid;

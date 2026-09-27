@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import MediaTile from "./MediaTile.vue";
@@ -61,5 +63,37 @@ describe("MediaTile", () => {
     const wrapper = make({ src: "" });
     expect(wrapper.find("img").exists()).toBe(false);
     expect(wrapper.find(".ms-tile__ghost").exists()).toBe(true);
+  });
+});
+
+describe("MediaTile alpha", () => {
+  it("draws the checkerboard only for a print that carries alpha", async () => {
+    const opaque = make();
+    await opaque.find("img").trigger("load");
+    expect(opaque.find('[data-test="alpha-bed"]').exists()).toBe(false);
+    expect(opaque.attributes("data-alpha")).toBeUndefined();
+
+    const cutout = make({ alpha: true });
+    // While the bytes are pending the loading ghost owns the box; the board
+    // appears with the picture, never behind the shimmer.
+    expect(cutout.find('[data-test="alpha-bed"]').exists()).toBe(false);
+    await cutout.find("img").trigger("load");
+    const bed = cutout.find('[data-test="alpha-bed"]');
+    expect(bed.exists()).toBe(true);
+    expect(bed.classes()).toContain("ms-alpha-bed");
+    expect(cutout.attributes("data-alpha")).toBe("true");
+  });
+});
+
+describe("kit.css alpha bed", () => {
+  it("derives the checkerboard from the media bed so every theme gets one", () => {
+    const css = readFileSync(resolve(__dirname, "../kit.css"), "utf8");
+    const rule = css.slice(css.indexOf(".ms-alpha-bed {"));
+    expect(rule).toContain("conic-gradient(");
+    expect(rule).toContain("var(--mold-media-bed)");
+    expect(rule).toContain("color-mix(");
+    // No per-theme literal colours: both squares are mixes of theme tokens.
+    const body = rule.slice(0, rule.indexOf("}\n"));
+    expect(body).not.toMatch(/#[0-9a-f]{6}\b/i);
   });
 });
