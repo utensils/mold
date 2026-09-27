@@ -15,3 +15,15 @@ Moved verbatim from the root CLAUDE.md; loaded only when working under the paths
 **Model storage permissions invariant:** model weights, configs, support files, model roots, and runtime staging roots must never be rejected because of Unix owner/group identity or group/other write-mode bits. Shared storage and collaborative umasks such as `0664` are valid. Verify newly acquired bytes against pins; trust complete installed files at runtime using regular-file and symlink checks, canonical containment, and descriptor identity fencing; loaders that stage into a shared parent must construct from retained process descriptors rather than a replaceable pathname. Owner-only permission requirements remain appropriate for credentials, authorization records, and retained private evidence, never for runnable model artifacts.
 
 **Integrity belongs to acquisition and explicit verification.** `download::installed_artifact_identity` and `installed_file_is_complete` never read model bodies. Queueing, loading, repair no-ops and switching cannot call the hashing fallback. Missing private receipts resolve to tagged local installation identities, frozen per file identity/process; do not record expected manifest pins as observed SHA values. `mold info MODEL --verify` still reads current bytes. Same-size corruption is no longer guaranteed to be caught at runtime admission.
+
+## `mold run` behaviour (moved from the root CLAUDE.md)
+
+`mold run [MODEL] [PROMPT]` disambiguates the first positional at runtime: matches a known model name → model, otherwise → prompt.
+
+**Pipe-friendly**: `echo "a cat" | mold run flux2-klein | viu -`. stdin for prompt, stdout for image bytes when not a TTY. `--output -` forces stdout; `--image -` reads source from stdin. `IsTerminal` detection + SIGPIPE reset to default + `status!` macro route text to stderr.
+
+**Name resolution** (`manifest::resolve_model_name`): `model:tag` (e.g. `flux-dev:q4`); bare names try `:q8` → `:fp16` → `:bf16` → `:fp8`; legacy dash `flux-dev-q4` resolves to colon form.
+
+**Shell completions** — static via `clap_complete` + dynamic via `CompleteEnv` with `ArgValueCandidates` for model names.
+
+**Installed model integrity (user-facing summary).** Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
