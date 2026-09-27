@@ -373,4 +373,53 @@ mod tests {
             );
         }
     }
+
+    /// U8 at scale: both captured references go through `reference_canvas`
+    /// and the premultiplied Pillow LANCZOS to exactly upstream's resized
+    /// RGBA bytes, and their white composites (the vision copy) match too.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_FIXTURES"]
+    fn references_resize_to_the_captured_pillow_bytes() {
+        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
+            return;
+        };
+        let captured = candle_core::safetensors::load(
+            std::path::Path::new(&fixtures).join("pillow_reference_resize.safetensors"),
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let testdata =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qwen_image21");
+        for (case, file, canvas) in [
+            ("opaque", "ref_opaque.png", (1248, 832)),
+            ("rgba", "ref_rgba.png", (928, 1152)),
+        ] {
+            // `P:653-654`: a non-RGBA reference becomes opaque RGBA first.
+            let source = image::open(testdata.join(file)).unwrap().to_rgba8();
+            assert_eq!(reference_canvas(source.width(), source.height()), canvas);
+            let resized = crate::pillow_resize::resize_rgba_premultiplied(
+                &source,
+                canvas.0,
+                canvas.1,
+                crate::pillow_resize::Filter::Lanczos,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let expected = captured[&format!("{case}_resized_rgba")]
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap();
+            assert!(resized.as_raw() == &expected, "{case} resize");
+            let white = captured[&format!("{case}_resized_white")]
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap();
+            assert!(
+                crate::pillow_resize::composite_over_white(&resized).as_raw() == &white,
+                "{case} white"
+            );
+        }
+    }
 }

@@ -422,4 +422,125 @@ mod tests {
         assert!(!is_encoder_tensor("decoder.conv_in.weight"));
         assert!(!is_encoder_tensor("post_quant_conv.weight"));
     }
+
+    /// Relative max error of `actual` against an upstream capture with the
+    /// singleton frame axis (`[B, C, 1, H, W]`).
+    fn relative_error(actual: &Tensor, expected: &Tensor) -> f32 {
+        let expected = if expected.rank() == 5 {
+            expected.squeeze(2).unwrap()
+        } else {
+            expected.clone()
+        };
+        let error = (actual.to_dtype(DType::F32).unwrap() - &expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let peak = expected
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        error / peak.max(f32::MIN_POSITIVE)
+    }
+
+    fn parity_inputs() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let root = std::env::var_os("QWEN_IMAGE21_MODEL_ROOT")?;
+        let fixtures = std::env::var_os("QWEN_IMAGE21_FIXTURES")?;
+        Some((
+            std::path::PathBuf::from(root)
+                .join("shared/qwen-image21/vae/diffusion_pytorch_model.safetensors"),
+            std::path::PathBuf::from(fixtures),
+        ))
+    }
+
+    /// P4 (stages): every encoder stage of a 64x96 RGBA crop — including each
+    /// AvgDown3D shortcut, the zero-frame case among them — against the fp32
+    /// upstream capture. CPU, F32.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+    fn p4_encoder_stages_match_the_upstream_capture() {
+        let Some((vae_path, fixtures)) = parity_inputs() else {
+            return;
+        };
+        let device = Device::Cpu;
+        let progress = crate::progress::ProgressReporter::default();
+        let encoder =
+            QwenImage21VaeEncoder::load(&vae_path, &device, DType::F32, &progress).unwrap();
+        let captured = candle_core::safetensors::load(
+            fixtures.join("p4_vae_encoder_internals_64x96_fp32.safetensors"),
+            &device,
+        )
+        .unwrap();
+        let check = |name: &str, actual: &Tensor| {
+            let error = relative_error(actual, &captured[name]);
+            eprintln!("{name}: relative max error {error:.3e}");
+            assert!(error < 1e-4, "{name}: {error}");
+        };
+        let input = captured["input"].squeeze(2).unwrap();
+        let mut hidden = encoder.encoder.conv_in.forward(&input).unwrap();
+        check("encoder.conv_in", &hidden);
+        for (index, block) in encoder.encoder.down_blocks.iter().enumerate() {
+            let shortcut =
+                avg_down_shortcut(&hidden, block.out_dim, block.factor_t, block.factor_s).unwrap();
+            check(
+                &format!("encoder.down_blocks.{index}.avg_shortcut"),
+                &shortcut,
+            );
+            hidden = block.forward(&hidden).unwrap();
+            check(&format!("encoder.down_blocks.{index}"), &hidden);
+        }
+        let hidden = encoder.encoder.mid_block.forward(&hidden).unwrap();
+        check("encoder.mid_block", &hidden);
+        let hidden = encoder.encoder.norm_out.forward(&hidden).unwrap();
+        check("encoder.norm_out", &hidden);
+        let hidden = encoder
+            .encoder
+            .conv_out
+            .forward(&candle_nn::Activation::Silu.forward(&hidden).unwrap())
+            .unwrap();
+        check("encoder.conv_out", &hidden);
+        check("quant_conv", &encoder.quant_conv.forward(&hidden).unwrap());
+        check("mode", &encoder.encode_mode(&input).unwrap());
+    }
+
+    /// P4 (full): both captured references at their resized canvases — the
+    /// opaque 1248x832 and the transparent 928x1152 — through `encode_mode`
+    /// and `encode_packed`. CPU, F32.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+    fn p4_encode_packed_matches_the_upstream_capture() {
+        let Some((vae_path, fixtures)) = parity_inputs() else {
+            return;
+        };
+        let device = Device::Cpu;
+        let progress = crate::progress::ProgressReporter::default();
+        let encoder =
+            QwenImage21VaeEncoder::load(&vae_path, &device, DType::F32, &progress).unwrap();
+        let captured = candle_core::safetensors::load(
+            fixtures.join("p4_vae_encode_fp32.safetensors"),
+            &device,
+        )
+        .unwrap();
+        for case in ["opaque", "rgba"] {
+            let input = captured[&format!("{case}_input")].squeeze(2).unwrap();
+            let mode = encoder.encode_mode(&input).unwrap();
+            let error = relative_error(&mode, &captured[&format!("{case}_mode")]);
+            eprintln!("{case} mode: relative max error {error:.3e}");
+            assert!(error < 1e-4, "{case} mode {error}");
+            let packed = encoder.encode_packed(&input).unwrap();
+            let error = relative_error(&packed, &captured[&format!("{case}_packed")]);
+            eprintln!("{case} packed: relative max error {error:.3e}");
+            assert!(error < 1e-4, "{case} packed {error}");
+        }
+    }
 }
