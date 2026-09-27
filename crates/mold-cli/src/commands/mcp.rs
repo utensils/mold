@@ -1309,6 +1309,14 @@ struct GenerateImageArgs {
     /// `false` ever reaches the wire — see
     /// `commands::generate::FilingOptions::save_to_gallery`.
     save_to_gallery: Option<bool>,
+    /// Ordered reference images, base64 PNG/JPEG/WebP, sent as
+    /// `edit_images` in the order given. The recipe's
+    /// `capabilities.reference_images` decides whether the model reads them.
+    reference_images: Option<Vec<String>>,
+    /// Transparent background (`capabilities.transparency`). Only `true`
+    /// reaches the wire, so an ordinary request is byte-identical to one sent
+    /// before the field existed.
+    transparent_background: Option<bool>,
 }
 
 /// Arguments for `generate_mesh`.
@@ -2790,6 +2798,8 @@ fn build_generate_mesh_request(
             // Forwarded, not placeholdered: a mesh run that asked not to be
             // filed must not be filed.
             save_to_gallery: args.save_to_gallery,
+            reference_images: None,
+            transparent_background: None,
         },
         None,
     )?;
@@ -2835,12 +2845,17 @@ fn build_generate_request(
     let output_format = match args.output_format.as_deref().unwrap_or("png") {
         "png" => OutputFormat::Png,
         "jpeg" | "jpg" => OutputFormat::Jpeg,
+        "webp" => OutputFormat::Webp,
         other => {
             return Err(format!(
-                "unsupported output_format '{other}'; use png or jpeg"
+                "unsupported output_format '{other}'; use png, jpeg, or webp"
             ))
         }
     };
+    let edit_images = decode_mcp_reference_images(args.reference_images)?;
+    // Only an explicit `true` asks for anything; `false` is the same request
+    // as an absent field and never reaches the wire.
+    let transparent_background = (args.transparent_background == Some(true)).then_some(true);
 
     let mut config = Config::load_or_default();
     let model = args
@@ -2851,18 +2866,65 @@ fn build_generate_request(
             .map_err(|e| format!("failed to resolve installed catalog model '{model}': {e}"))?;
     }
     let model_cfg = config.resolved_model_config(&model);
-    let width = args
-        .width
-        .unwrap_or_else(|| model_cfg.effective_width(&config));
-    let height = args
-        .height
-        .unwrap_or_else(|| model_cfg.effective_height(&config));
+    let family = model_cfg.family.clone().or_else(|| {
+        mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
+            .map(|manifest| manifest.family.clone())
+    });
+    // Preflight what the recipe can already answer, in admission's own words.
+    // An unclassified model (a catalog id this side cannot resolve) is left
+    // to the server, whose recipe is the authority.
+    if let Some(family) = family.as_deref() {
+        if let Some(images) = edit_images.as_deref() {
+            let profile =
+                mold_core::generation_profile::reference_images_for_recipe(family, &model);
+            if profile.mode == mold_core::ControlMode::Hidden {
+                return Err(profile.reason.unwrap_or_else(|| {
+                    mold_core::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()
+                }));
+            }
+            let accepted = profile.accepted_formats();
+            for (index, image) in images.iter().enumerate() {
+                let format = mold_core::validation::sniff_image_input_format(image);
+                if !format.is_some_and(|format| accepted.contains(&format)) {
+                    return Err(format!(
+                        "reference_images[{index}] must be a {} image for this model",
+                        mold_core::generation_profile::image_input_format_list(accepted)
+                    ));
+                }
+            }
+        }
+        mold_core::validate_transparency_choice(
+            &mold_core::transparency_for_recipe(family, &model),
+            transparent_background,
+            output_format,
+        )?;
+    }
+    let (default_width, default_height) = (
+        model_cfg.effective_width(&config),
+        model_cfg.effective_height(&config),
+    );
+    let align = mold_core::dimension_alignment_for_model(&model, family.as_deref());
+    let (width, height) = match (args.width, args.height) {
+        (None, None) => last_reference_canvas_for(
+            family.as_deref(),
+            &model,
+            edit_images.as_deref(),
+            default_width,
+            default_height,
+            align,
+        )?
+        .unwrap_or((default_width, default_height)),
+        (width, height) => (
+            width.unwrap_or(default_width),
+            height.unwrap_or(default_height),
+        ),
+    };
 
     if width == 0 || height == 0 {
         return Err("width and height must be greater than zero".to_string());
     }
-    if width & 15 != 0 || height & 15 != 0 {
-        return Err("width and height must be multiples of 16".to_string());
+    if width % align != 0 || height % align != 0 {
+        return Err(format!("width and height must be multiples of {align}"));
     }
 
     Ok(GenerateRequest {
@@ -2900,7 +2962,7 @@ fn build_generate_request(
         cfg_plus: None,
         source_image: None,
         source_image_name: None,
-        edit_images: None,
+        edit_images,
         reference_weight: None,
         references: None,
         strength: 0.75,
@@ -2944,8 +3006,70 @@ fn build_generate_request(
         id_image_names: None,
         true_cfg: None,
         cfg_start_step: None,
-        transparent_background: None,
+        transparent_background,
     })
+}
+
+/// Decode `generate_image`'s `reference_images` (base64 PNG, JPEG, or WebP)
+/// into the ordered `edit_images` group. An absent or empty list is no
+/// references at all.
+fn decode_mcp_reference_images(
+    images: Option<Vec<String>>,
+) -> std::result::Result<Option<Vec<Vec<u8>>>, String> {
+    let Some(images) = images.filter(|images| !images.is_empty()) else {
+        return Ok(None);
+    };
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let bytes = general_purpose::STANDARD
+                .decode(value.trim())
+                .map_err(|error| {
+                    format!("reference_images[{index}] is not valid base64: {error}")
+                })?;
+            if mold_core::validation::sniff_image_input_format(&bytes).is_none() {
+                return Err(format!(
+                    "reference_images[{index}] must be a PNG, JPEG, or WebP image"
+                ));
+            }
+            Ok(bytes)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// The default canvas when the recipe sizes it from the references
+/// (`capabilities.reference_images.canvas == last-reference`, Qwen Image
+/// 2.1) and the caller chose neither dimension: the LAST reference's aspect
+/// at the model's default area on its grid, halves rounded to even exactly as
+/// upstream's `calculate_dimensions`. The same rule `mold run` applies.
+fn last_reference_canvas_for(
+    family: Option<&str>,
+    model: &str,
+    edit_images: Option<&[Vec<u8>]>,
+    default_width: u32,
+    default_height: u32,
+    align: u32,
+) -> std::result::Result<Option<(u32, u32)>, String> {
+    let (Some(family), Some(last)) = (family, edit_images.and_then(|images| images.last())) else {
+        return Ok(None);
+    };
+    if mold_core::generation_profile::reference_images_for_recipe(family, model).canvas
+        != Some(mold_core::ReferenceCanvasRule::LastReference)
+    {
+        return Ok(None);
+    }
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(last))
+        .with_guessed_format()
+        .and_then(|reader| reader.into_dimensions().map_err(std::io::Error::other))
+        .map_err(|error| format!("the last reference image's size could not be read: {error}"))?;
+    Ok(Some(mold_core::validation::fit_to_target_area_ties_even(
+        width,
+        height,
+        u64::from(default_width) * u64::from(default_height),
+        align,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3249,13 +3373,13 @@ fn builtin_tool_definitions() -> Value {
                         "type": "integer",
                         "minimum": 16,
                         "multipleOf": 16,
-                        "description": "Image width in pixels."
+                        "description": "Image width in pixels, a multiple of the model's grid (16 for most models; 32 for Qwen Image 2.1, LTX and MiniMax H3; the refusal names it). Omit both width and height to take the model default, or, on a model whose references size the canvas (Qwen Image 2.1), the last reference image's aspect ratio."
                     },
                     "height": {
                         "type": "integer",
                         "minimum": 16,
                         "multipleOf": 16,
-                        "description": "Image height in pixels."
+                        "description": "Image height in pixels, on the same grid as width."
                     },
                     "steps": {
                         "type": "integer",
@@ -3277,8 +3401,17 @@ fn builtin_tool_definitions() -> Value {
                     },
                     "output_format": {
                         "type": "string",
-                        "enum": ["png", "jpeg", "jpg"],
-                        "description": "Output image format. Defaults to png."
+                        "enum": ["png", "jpeg", "jpg", "webp"],
+                        "description": "Output image format. Defaults to png. webp is a single still frame; png and webp keep an alpha channel, jpeg cannot."
+                    },
+                    "reference_images": {
+                        "type": "array",
+                        "description": "Ordered reference images as base64 PNG, JPEG, or WebP, sent as edit_images in the order given; name each by position in the prompt (\"the jacket from image 1\"). Only models advertising capabilities.reference_images read them (Qwen Image 2.1 up to 10, FLUX.2 up to 4, Qwen-Image-Edit, SD1.5/SDXL one image prompt); WebP only where that block lists it. Alpha is never flattened.",
+                        "items": { "type": "string" }
+                    },
+                    "transparent_background": {
+                        "type": "boolean",
+                        "description": "Render the subject on a transparent background (models advertising capabilities.transparency, e.g. Qwen Image 2.1). Needs png or webp output; jpeg is refused. Describe only the subject in the prompt."
                     },
                     "expand": {
                         "type": "boolean",
@@ -3511,13 +3644,13 @@ fn builtin_tool_definitions() -> Value {
                         "type": "integer",
                         "minimum": 16,
                         "multipleOf": 16,
-                        "description": "Image width in pixels."
+                        "description": "Image width in pixels, a multiple of the model's grid (16 for most models; 32 for Qwen Image 2.1, LTX and MiniMax H3; the refusal names it). Omit both width and height to take the model default, or, on a model whose references size the canvas (Qwen Image 2.1), the last reference image's aspect ratio."
                     },
                     "height": {
                         "type": "integer",
                         "minimum": 16,
                         "multipleOf": 16,
-                        "description": "Image height in pixels."
+                        "description": "Image height in pixels, on the same grid as width."
                     },
                     "steps": {
                         "type": "integer",
@@ -3539,8 +3672,17 @@ fn builtin_tool_definitions() -> Value {
                     },
                     "output_format": {
                         "type": "string",
-                        "enum": ["png", "jpeg", "jpg"],
-                        "description": "Output image format. Defaults to png."
+                        "enum": ["png", "jpeg", "jpg", "webp"],
+                        "description": "Output image format. Defaults to png. webp is a single still frame; png and webp keep an alpha channel, jpeg cannot."
+                    },
+                    "reference_images": {
+                        "type": "array",
+                        "description": "Ordered reference images as base64 PNG, JPEG, or WebP, sent as edit_images in the order given; name each by position in the prompt (\"the jacket from image 1\"). Only models advertising capabilities.reference_images read them (Qwen Image 2.1 up to 10, FLUX.2 up to 4, Qwen-Image-Edit, SD1.5/SDXL one image prompt); WebP only where that block lists it. Alpha is never flattened.",
+                        "items": { "type": "string" }
+                    },
+                    "transparent_background": {
+                        "type": "boolean",
+                        "description": "Render the subject on a transparent background (models advertising capabilities.transparency, e.g. Qwen Image 2.1). Needs png or webp output; jpeg is refused. Describe only the subject in the prompt."
                     },
                     "expand": {
                         "type": "boolean",
@@ -6611,6 +6753,176 @@ mod tests {
         assert_eq!(wire(None), None, "absent means save");
         assert_eq!(wire(Some(true)), None, "an explicit true says nothing new");
         assert_eq!(wire(Some(false)), Some(false), "only false is sent");
+    }
+
+    fn encoded_image(width: u32, height: u32, format: image::ImageFormat) -> String {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height))
+            .write_to(&mut bytes, format)
+            .unwrap();
+        general_purpose::STANDARD.encode(bytes.into_inner())
+    }
+
+    fn qwen21_args(value: Value) -> GenerateImageArgs {
+        let mut base = json!({ "prompt": "a red lantern", "model": "qwen-image-2.1:bf16" });
+        base.as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    /// `reference_images` become `edit_images` in the order given, PNG/JPEG
+    /// and WebP alike, and with no size chosen the canvas follows the LAST
+    /// reference at the model's default area on its 32 px grid.
+    #[test]
+    fn reference_images_are_the_ordered_edit_group_and_size_the_canvas() {
+        let square = encoded_image(640, 640, image::ImageFormat::Png);
+        let wide = encoded_image(1920, 1080, image::ImageFormat::WebP);
+        let req = build_generate_request(
+            qwen21_args(json!({ "reference_images": [square.clone(), wide.clone()] })),
+            None,
+        )
+        .unwrap();
+        let edits = req.edit_images.as_ref().expect("edit_images");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            general_purpose::STANDARD.encode(&edits[0]),
+            square,
+            "order is preserved"
+        );
+        assert_eq!(
+            (req.width, req.height),
+            mold_core::validation::fit_to_target_area_ties_even(1920, 1080, 1024 * 1024, 32)
+        );
+
+        // An explicit size wins; no references keeps the model default.
+        let req = build_generate_request(
+            qwen21_args(json!({ "reference_images": [wide], "width": 1344, "height": 768 })),
+            None,
+        )
+        .unwrap();
+        assert_eq!((req.width, req.height), (1344, 768));
+        let req = build_generate_request(qwen21_args(json!({})), None).unwrap();
+        assert_eq!(req.edit_images, None);
+        assert_eq!((req.width, req.height), (1024, 1024));
+    }
+
+    #[test]
+    fn reference_images_are_refused_where_the_recipe_cannot_read_them() {
+        let png = encoded_image(64, 64, image::ImageFormat::Png);
+        let args: GenerateImageArgs = serde_json::from_value(json!({
+            "prompt": "a cat", "model": "flux-dev:q8", "reference_images": [png]
+        }))
+        .unwrap();
+        assert_eq!(
+            build_generate_request(args, None).unwrap_err(),
+            mold_core::REFERENCE_IMAGES_UNSUPPORTED_REASON
+        );
+
+        // FLUX.2 [klein] reads PNG and JPEG references, not WebP.
+        let webp = encoded_image(64, 64, image::ImageFormat::WebP);
+        let args: GenerateImageArgs = serde_json::from_value(json!({
+            "prompt": "a cat", "model": "flux2-klein:q8", "reference_images": [webp]
+        }))
+        .unwrap();
+        assert_eq!(
+            build_generate_request(args, None).unwrap_err(),
+            "reference_images[0] must be a PNG or JPEG image for this model"
+        );
+
+        let args = qwen21_args(json!({ "reference_images": ["bm90IGFuIGltYWdl"] }));
+        assert!(build_generate_request(args, None)
+            .unwrap_err()
+            .contains("PNG, JPEG, or WebP"));
+    }
+
+    /// Only an explicit `true` reaches the wire, and the refusals are
+    /// admission's own sentences.
+    #[test]
+    fn transparent_background_is_sent_only_when_asked_and_needs_alpha() {
+        let wire = |value: Value| {
+            build_generate_request(qwen21_args(value), None).map(|req| req.transparent_background)
+        };
+        assert_eq!(wire(json!({})), Ok(None));
+        assert_eq!(wire(json!({ "transparent_background": false })), Ok(None));
+        assert_eq!(
+            wire(json!({ "transparent_background": true })),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            wire(json!({ "transparent_background": true, "output_format": "webp" })),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            wire(json!({ "transparent_background": true, "output_format": "jpeg" })),
+            Err("transparent_background needs a format with an alpha channel; use png or webp instead of jpeg".to_string())
+        );
+
+        let args: GenerateImageArgs = serde_json::from_value(json!({
+            "prompt": "a cat", "model": "flux-dev:q8", "transparent_background": true
+        }))
+        .unwrap();
+        assert_eq!(
+            build_generate_request(args, None).unwrap_err(),
+            mold_core::TRANSPARENCY_UNSUPPORTED_REASON
+        );
+    }
+
+    #[test]
+    fn webp_is_a_still_output_format_and_the_grid_is_the_models() {
+        let req =
+            build_generate_request(qwen21_args(json!({ "output_format": "webp" })), None).unwrap();
+        assert_eq!(req.output_format, Some(OutputFormat::Webp));
+        assert!(
+            build_generate_request(qwen21_args(json!({ "output_format": "gif" })), None)
+                .unwrap_err()
+                .contains("use png, jpeg, or webp")
+        );
+
+        // 1008 is on FLUX's 16 px grid but not on Qwen Image 2.1's 32.
+        assert_eq!(
+            build_generate_request(qwen21_args(json!({ "width": 1008, "height": 1024 })), None)
+                .unwrap_err(),
+            "width and height must be multiples of 32"
+        );
+        let flux: GenerateImageArgs = serde_json::from_value(json!({
+            "prompt": "a cat", "model": "flux-dev:q8", "width": 1008, "height": 1024
+        }))
+        .unwrap();
+        build_generate_request(flux, None).unwrap();
+
+        let tools = tool_definitions();
+        for name in ["generate_image", "generate_image_async"] {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            let properties = &tool["inputSchema"]["properties"];
+            assert_eq!(
+                properties["output_format"]["enum"],
+                json!(["png", "jpeg", "jpg", "webp"]),
+                "{name}"
+            );
+            assert_eq!(
+                properties["reference_images"]["type"],
+                json!("array"),
+                "{name}"
+            );
+            assert_eq!(
+                properties["transparent_background"]["type"],
+                json!("boolean"),
+                "{name}"
+            );
+            assert!(
+                properties["width"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("32 for Qwen Image 2.1"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

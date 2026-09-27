@@ -473,7 +473,7 @@ impl ImageInputFormat {
 }
 
 /// "PNG or JPEG", "PNG, JPEG, or WebP": the list a refusal names.
-fn image_input_format_list(formats: &[ImageInputFormat]) -> String {
+pub fn image_input_format_list(formats: &[ImageInputFormat]) -> String {
     let labels: Vec<&str> = formats.iter().map(|format| format.label()).collect();
     match labels.as_slice() {
         [] => String::new(),
@@ -639,7 +639,23 @@ pub fn validate_transparency_against(
     profile: &TransparencyCapabilitiesProfile,
     request: &crate::GenerateRequest,
 ) -> Result<(), String> {
-    if request.transparent_background != Some(true) {
+    validate_transparency_choice(
+        profile,
+        request.transparent_background,
+        request.resolved_output_format(),
+    )
+}
+
+/// [`validate_transparency_against`] on the two facts it reads, for a client
+/// preflight that has not built a whole request yet (`mold run --transparent`
+/// resolves its container long before the request exists). Same sentences,
+/// because it IS the same check.
+pub fn validate_transparency_choice(
+    profile: &TransparencyCapabilitiesProfile,
+    transparent_background: Option<bool>,
+    format: OutputFormat,
+) -> Result<(), String> {
+    if transparent_background != Some(true) {
         return Ok(());
     }
     if matches!(profile.mode, ControlMode::Hidden) {
@@ -648,7 +664,6 @@ pub fn validate_transparency_against(
             .clone()
             .unwrap_or_else(|| TRANSPARENCY_UNSUPPORTED_REASON.to_string()));
     }
-    let format = request.resolved_output_format();
     if !profile.formats.contains(&format) {
         let alpha = profile
             .formats
@@ -3316,6 +3331,25 @@ mod tests {
             crate::validation::validate_generate_request(&req).unwrap();
             validate_request_against_generation_profile(&profile, &req).unwrap();
         }
+        // The request-free preflight a client runs before it has a request
+        // answers with the same sentences, because it is the same check.
+        let qwen_transparency = transparency_for_recipe("qwen-image21", "qwen-image-2.1:bf16");
+        assert_eq!(
+            validate_transparency_choice(&qwen_transparency, Some(true), OutputFormat::Jpeg)
+                .unwrap_err(),
+            expected
+        );
+        validate_transparency_choice(&qwen_transparency, Some(true), OutputFormat::Webp).unwrap();
+        validate_transparency_choice(&qwen_transparency, Some(false), OutputFormat::Jpeg).unwrap();
+        assert_eq!(
+            validate_transparency_choice(
+                &transparency_for_recipe("flux", "flux-dev:q8"),
+                Some(true),
+                OutputFormat::Png
+            )
+            .unwrap_err(),
+            TRANSPARENCY_UNSUPPORTED_REASON
+        );
 
         // `false` asks for nothing, anywhere, and normalizes away.
         flux.transparent_background = Some(false);
