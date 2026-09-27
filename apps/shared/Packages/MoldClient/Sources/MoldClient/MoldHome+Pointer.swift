@@ -1,3 +1,6 @@
+// The embedded engine's home: a Mac concept. The iOS companion is
+// remote-only and has no mold home of its own.
+#if os(macOS)
 import Foundation
 
 public extension MoldHome {
@@ -37,3 +40,5 @@ public extension MoldHome {
         return nil
     }
 }
+
+#endif

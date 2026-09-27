@@ -142,7 +142,7 @@ struct RefineTests {
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
-            .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
+            .appending(path: "../shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures")
         let data = try Data(contentsOf: fixtures.appending(path: "models-workstation.json"))
         return try MoldJSON.decoder.decode([Model].self, from: data)
     }

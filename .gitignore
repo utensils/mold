@@ -125,3 +125,7 @@ apps/macos/Version.yml
 apps/macos/dist/
 # `make engine`'s default cargo target dir (Makefile ENGINE_TARGET).
 apps/macos/rust/target/
+# Swift packages shared by the macOS app and the iOS companion.
+apps/shared/**/.build/
+apps/shared/**/.swiftpm/
+apps/shared/**/build/

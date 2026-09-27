@@ -9,6 +9,8 @@ PROJECT  := Mold.xcodeproj
 SCHEME   := Mold
 CONFIG   ?= Debug
 BUILD    := $(CURDIR)/build
+# MoldClient and MoldStyle are shared with the iOS companion (apps/ios).
+PACKAGES := ../shared/Packages
 APP      := $(BUILD)/$(CONFIG)/Mold Studio.app
 
 # Dev builds are signed with a real identity when this Mac has one, so the
@@ -140,8 +142,8 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
 	@scripts/tests/engine-freshness.sh
-	@cd Packages/MoldClient && swift test
-	@cd Packages/MoldStyle && swift test
+	@cd $(PACKAGES)/MoldClient && swift test
+	@cd $(PACKAGES)/MoldStyle && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
 	@# Every failing test and its issue, then the verdict -- `tail -5` alone
@@ -155,29 +157,29 @@ lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	@# MoldStyle is the design system and of course imports SwiftUI. MoldClient
 	@# is the wire layer: it must stay usable from tests and from a CLI, so a UI
 	@# import there is the violation worth catching.
-	@! grep -rlnE '^import (SwiftUI|AppKit)' Packages/MoldClient/Sources \
+	@! grep -rlnE '^import (SwiftUI|AppKit|UIKit)' $(PACKAGES)/MoldClient/Sources \
 	  || { echo "LAYER VIOLATION: MoldClient imports a UI framework"; exit 1; }
 	@! grep -rln 'HTTPBackend(' Sources --include='*.swift' \
 	  | grep -v 'HostStore+Reachability.swift' \
 	  || { echo "LAYER VIOLATION: a backend is constructed outside the composition root"; exit 1; }
 	@# One decoder configures snake_case conversion. A bare JSONDecoder()
 	@# silently decodes every multi-word field as nil rather than failing.
-	@! grep -rn 'JSONDecoder()' Sources Packages/*/Sources Packages/*/Tests --include='*.swift' \
+	@! grep -rn 'JSONDecoder()' Sources $(PACKAGES)/*/Sources $(PACKAGES)/*/Tests --include='*.swift' \
 	  | grep -v 'MoldJSON.swift' \
 	  || { echo "DECODER VIOLATION: use MoldJSON.decoder"; exit 1; }
 	@# URLSession's `.lines` drops empty lines, and an empty line is what ends an
 	@# SSE frame. `moldLines()` is the accumulator that keeps them.
-	@! grep -rn 'bytes\.lines' Packages/MoldClient/Sources --include='*.swift' \
+	@! grep -rn 'bytes\.lines' $(PACKAGES)/MoldClient/Sources --include='*.swift' \
 	  || { echo "SSE VIOLATION: use bytes.moldLines()"; exit 1; }
 	@echo "  layers ok"
 
 lint-color: ## No literal colors -- the system owns the palette
-	@! grep -rnE 'Color\((red|hue|white):|Color\(hex' Sources Packages/*/Sources --include='*.swift' \
+	@! grep -rnE 'Color\((red|hue|white):|Color\(hex' Sources $(PACKAGES)/*/Sources --include='*.swift' \
 	  || { echo "COLOR VIOLATION: use a semantic color or a material"; exit 1; }
 	@echo "  color ok"
 
 lint-size: ## Advisory: flag files over 150 lines
-	@find Sources Packages/*/Sources -name '*.swift' -exec wc -l {} + \
+	@find Sources $(PACKAGES)/*/Sources -name '*.swift' -exec wc -l {} + \
 	  | awk '$$1 > 150 && $$2 != "total" { print "  large: " $$2 " (" $$1 " lines)" }'
 
 # A type's size is the sum of Type.swift and every Type+Concern.swift beside
@@ -186,7 +188,7 @@ lint-size: ## Advisory: flag files over 150 lines
 TYPE_MAX ?= 600
 
 lint-type-size: ## Advisory: flag a type whose files together exceed $(TYPE_MAX) lines
-	@find Sources Packages/*/Sources -name '*.swift' -exec wc -l {} + \
+	@find Sources $(PACKAGES)/*/Sources -name '*.swift' -exec wc -l {} + \
 	  | awk -v max=$(TYPE_MAX) '$$2 != "total" { \
 	      name = $$2; sub(/.*\//, "", name); sub(/\.swift$$/, "", name); sub(/\+.*$$/, "", name); \
 	      total[name] += $$1 } \
@@ -284,4 +286,4 @@ appcast: ## Generate and sign a channel's appcast (needs MOLD_NATIVE_SPARKLE_KEY
 	  --download-url-prefix "https://github.com/utensils/mold/releases/download/$(APPCAST_TAG)/"
 
 clean: ## Remove build output and the generated project
-	@rm -rf $(BUILD) $(PROJECT) $(DIST) Packages/*/.build
+	@rm -rf $(BUILD) $(PROJECT) $(DIST) $(PACKAGES)/*/.build

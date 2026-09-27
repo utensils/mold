@@ -63,7 +63,7 @@ public final class SecretStore: Sendable {
         in fileManager: FileManager = .default
     ) -> URL {
         let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appending(path: "Library/Application Support")
+            ?? URL.homeDirectory.appending(path: "Library/Application Support")
         // The app's `NativeUAT` gate, spelled again here because MoldClient
         // cannot import the app: a Release build reads no UAT hook, so it can
         // never be pointed at the throwaway directory.

@@ -65,7 +65,7 @@ struct MenuSurfaceTests {
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
-        return ["Sources/Mold", "Packages/MoldStyle/Sources", "Packages/MoldClient/Sources"]
+        return ["Sources/Mold", "../shared/Packages/MoldStyle/Sources", "../shared/Packages/MoldClient/Sources"]
             .flatMap { path -> [URL] in
                 let files = FileManager.default.enumerator(at: macos.appending(path: path),
                                                            includingPropertiesForKeys: nil)

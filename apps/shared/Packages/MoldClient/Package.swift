@@ -6,7 +6,7 @@ import PackageDescription
 // Makefile fails the build if a UI import appears here.
 let package = Package(
     name: "MoldClient",
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
         .library(name: "MoldClient", targets: ["MoldClient"])
     ],

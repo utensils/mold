@@ -43,7 +43,7 @@ struct PrivateHostnameTests {
             macos.appending(path: "Sources"),
             macos.appending(path: "Tests"),
         ]
-        let packages = macos.appending(path: "Packages")
+        let packages = macos.appending(path: "../shared/Packages")
         let names = (try? FileManager.default.contentsOfDirectory(at: packages, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         for package in names {
             roots.append(package.appending(path: "Sources"))

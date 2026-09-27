@@ -522,15 +522,15 @@ the bare shape or the keyed one that also seeds an in-flight session and the
 | Path                  | What                                                              |
 | --------------------- | ----------------------------------------------------------------- |
 | `Sources/Mold/`        | The app. `AppStores.swift` is the composition root; `MoldApp.swift` is the scenes and the menu bar |
-| `Packages/MoldClient/` | Wire types and transport. **Never imports SwiftUI or AppKit**      |
-| `Packages/MoldStyle/`  | Chrome tokens, panel surfaces, layouts                            |
+| `../shared/Packages/MoldClient/` | Wire types and transport, shared with the iOS companion (`apps/ios`). **Never imports SwiftUI, AppKit or UIKit** |
+| `../shared/Packages/MoldStyle/`  | Chrome tokens, panel surfaces, layouts (macOS and iOS)            |
 | `rust/mold-macos-ffi/` | The C ABI around mold's engine. Its own cargo root                |
 | `scripts/`             | Sign, DMG, notarize, appcast, and the release path's fail-closed gates |
 
 ## The rules `make lint` enforces
 
 - `MoldClient` must not import a UI framework — it has to stay usable from
-  tests and from anything that isn't this app.
+  tests, from the iOS companion, and from anything that isn't this app.
 - A concrete backend is built **only** in `HostStore+Reachability.swift`, so
   what the app is talking to is a decision in one file. That is what made
   running mold's engine in-process a new host in the list rather than a

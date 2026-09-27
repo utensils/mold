@@ -1,3 +1,6 @@
+// The embedded engine's home: a Mac concept. The iOS companion is
+// remote-only and has no mold home of its own.
+#if os(macOS)
 import Foundation
 
 /// Where mold keeps its models, its database and its gallery on this Mac.
@@ -70,3 +73,5 @@ public struct MoldHome: Equatable, Sendable {
         return URL(filePath: path)
     }
 }
+
+#endif

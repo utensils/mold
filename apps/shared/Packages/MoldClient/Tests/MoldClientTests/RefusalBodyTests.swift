@@ -40,7 +40,10 @@ private struct HeldOpen: AsyncSequence, Sendable {
         HeldOpen(prefix: Array(body)), within: .milliseconds(200))
     let elapsed = ContinuousClock.now - started
 
-    #expect(elapsed < .seconds(2))
+    // The failure this guards is a wait of 3,600 s. The bound is wide on
+    // purpose: the whole suite runs in parallel in about two seconds, and on an
+    // iOS Simulator scheduling alone pushed a correct read past a 2 s bound.
+    #expect(elapsed < .seconds(10))
     // What arrived before the deadline is what there is to report, and it is
     // enough: the refusal decodes.
     #expect(read == body)
@@ -52,7 +55,9 @@ private struct HeldOpen: AsyncSequence, Sendable {
     let body = Data(#"{"error":"nope"}"#.utf8)
     let started = ContinuousClock.now
     let read = await RefusalBody.read(Array(body).async, within: .seconds(30))
-    #expect(ContinuousClock.now - started < .seconds(1))
+    // Well under the 30 s deadline it must not wait on, and wide enough that a
+    // loaded parallel run (the iOS Simulator took 1.9 s) cannot trip it.
+    #expect(ContinuousClock.now - started < .seconds(10))
     #expect(read == body)
 }
 

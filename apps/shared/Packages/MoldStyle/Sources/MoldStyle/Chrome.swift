@@ -34,8 +34,13 @@ public enum Chrome {
 }
 
 public extension Chrome {
-    /// Hairline separator. `separatorColor` already resolves for light and dark.
+    /// Hairline separator. The system separator already resolves for light
+    /// and dark on both platforms.
+    #if canImport(AppKit)
     static let hairline = Color(nsColor: .separatorColor)
+    #else
+    static let hairline = Color(uiColor: .separator)
+    #endif
 
     /// Washes are built from `.primary` and `.accentColor` on purpose: they
     /// inherit the system appearance and the user's own accent, so there is

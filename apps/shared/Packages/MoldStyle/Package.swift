@@ -5,7 +5,7 @@ import PackageDescription
 // hosts, or generation -- it is the bottom of the stack and depends on nothing.
 let package = Package(
     name: "MoldStyle",
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
         .library(name: "MoldStyle", targets: ["MoldStyle"])
     ],

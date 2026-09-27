@@ -498,7 +498,7 @@ extension FakeFixtures {
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
-            .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
+            .appending(path: "../shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures")
         let data = try! Data(contentsOf: fixtures.appending(path: name))
         return try! MoldJSON.decoder.decode(ConfigListing.self, from: data)
     }
@@ -536,7 +536,7 @@ extension FakeFixtures {
             .deletingLastPathComponent() // Tests/MoldTests
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // apps/macos
-            .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
+            .appending(path: "../shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures")
         let data = try! Data(contentsOf: fixtures.appending(path: name))
         return try! MoldJSON.decoder.decode(CatalogCredentialStatus.self, from: data)
     }

@@ -1372,7 +1372,7 @@ mod tests {
             ),
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../apps/macos/Packages/MoldClient/Sources/MoldClient/MeshViewerCamera.swift"
+                "/../../apps/shared/Packages/MoldClient/Sources/MoldClient/MeshViewerCamera.swift"
             ),
         ];
 

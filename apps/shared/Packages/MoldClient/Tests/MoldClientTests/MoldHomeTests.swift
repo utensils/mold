@@ -1,3 +1,6 @@
+// The embedded engine's home: a Mac concept. The iOS companion is
+// remote-only and has no mold home of its own.
+#if os(macOS)
 import Foundation
 import Testing
 
@@ -85,3 +88,5 @@ func ignoresAPointerThatIsNotAnAbsolutePath(contents: String) throws {
                                home: home)
     #expect(uat.unavailableReason == nil)
 }
+
+#endif

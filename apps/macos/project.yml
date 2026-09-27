@@ -59,9 +59,9 @@ settings:
 
 packages:
   MoldClient:
-    path: Packages/MoldClient
+    path: ../shared/Packages/MoldClient
   MoldStyle:
-    path: Packages/MoldStyle
+    path: ../shared/Packages/MoldStyle
   # Pinned to an EXACT version, not a range. This is the one dependency that
   # can replace the whole app on someone's Mac; which revision does that is a
   # reviewed decision, not whatever happened to resolve on a release runner.

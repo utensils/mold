@@ -1,3 +1,6 @@
+// The embedded engine's home: a Mac concept. The iOS companion is
+// remote-only and has no mold home of its own.
+#if os(macOS)
 import Foundation
 import Testing
 
@@ -42,3 +45,5 @@ struct MoldHomePointerTests {
         #expect(MoldHome.pointerRefusal(environment: environment) == nil)
     }
 }
+
+#endif
