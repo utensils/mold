@@ -1376,12 +1376,24 @@ pub async fn run(
     // The container above is a family/recipe decision that never saw the
     // filename. Reconcile the two here — above the family policy, so wan,
     // ltx-video and LTX-2 all get it, and before any weight is read (#1050).
-    let output_format = reconcile_video_format_with_output_extension(
-        output_format,
-        output.as_deref(),
-        format != OutputFormat::Png,
-        delivery_capabilities_for_run(local),
-    )
+    // A still render (no frames, or wan's single frame, #798) reconciles
+    // against still containers: `png` names a PNG there, never an APNG, and
+    // WebP is a still format, not the animated container `is_video` reports.
+    let renders_still = effective_frames.is_none_or(|frames| frames <= 1) && !is_h3;
+    let output_format = if renders_still {
+        reconcile_still_format_with_output_extension(
+            output_format,
+            output.as_deref(),
+            format != OutputFormat::Png,
+        )
+    } else {
+        reconcile_video_format_with_output_extension(
+            output_format,
+            output.as_deref(),
+            format != OutputFormat::Png,
+            delivery_capabilities_for_run(local),
+        )
+    }
     .map_err(anyhow::Error::msg)?;
     // The mesh half of the same rule. A 3-D render has one container, so this
     // only ever agrees or refuses — and it refuses before a weight is read.
@@ -2746,6 +2758,53 @@ pub(crate) fn reconcile_video_format_with_output_extension(
         ));
     }
     Ok(named)
+}
+
+/// The still container an `--output` extension names.
+fn still_container_named_by_extension(extension: &str) -> Option<OutputFormat> {
+    match extension {
+        "png" => Some(OutputFormat::Png),
+        "jpg" | "jpeg" => Some(OutputFormat::Jpeg),
+        "webp" => Some(OutputFormat::Webp),
+        _ => None,
+    }
+}
+
+/// The still-render half of [`reconcile_video_format_with_output_extension`].
+///
+/// A still's container is `--format`'s alone (PNG when omitted), so the only
+/// thing to reconcile is an explicit `--format` that disagrees with the name a
+/// caller typed. The video rule read a `.png` name as APNG and WebP as an
+/// animated container, which on a WebP still refused `-o x.png` for naming
+/// "APNG"; here both sides are named as the stills they are.
+pub(crate) fn reconcile_still_format_with_output_extension(
+    resolved: OutputFormat,
+    output: Option<&str>,
+    format_is_explicit: bool,
+) -> Result<OutputFormat, String> {
+    if !format_is_explicit {
+        return Ok(resolved);
+    }
+    let Some(path) = output.filter(|path| *path != "-") else {
+        return Ok(resolved);
+    };
+    let Some(named) = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .and_then(|extension| still_container_named_by_extension(&extension))
+    else {
+        return Ok(resolved);
+    };
+    if named == resolved || still_container_named_by_extension(resolved.extension()).is_none() {
+        return Ok(resolved);
+    }
+    Err(format!(
+        "--output '{path}' names {}, but --format selected {} — rename the output or drop \
+         --format so the saved bytes match the extension",
+        container_label(named),
+        container_label(resolved)
+    ))
 }
 
 /// The line a 3-D run prints instead of `Generating {w}x{h}`.
@@ -4735,6 +4794,40 @@ mod tests {
             ),
             Ok(OutputFormat::Apng)
         );
+    }
+
+    #[test]
+    fn a_webp_still_named_png_is_refused_as_png_not_apng() {
+        let error = reconcile_still_format_with_output_extension(
+            OutputFormat::Webp,
+            Some("still.png"),
+            true,
+        )
+        .expect_err("--format webp -o still.png disagrees");
+        assert!(
+            error.contains("names PNG, but --format selected WebP"),
+            "got: {error}"
+        );
+        assert!(!error.contains("APNG"), "got: {error}");
+    }
+
+    #[test]
+    fn still_names_that_agree_or_carry_no_claim_pass_through() {
+        for (resolved, path, explicit) in [
+            (OutputFormat::Webp, Some("still.webp"), true),
+            (OutputFormat::Jpeg, Some("still.JPG"), true),
+            (OutputFormat::Png, Some("still.png"), true),
+            (OutputFormat::Webp, Some("-"), true),
+            (OutputFormat::Webp, None, true),
+            (OutputFormat::Webp, Some("still.bin"), true),
+            (OutputFormat::Png, Some("still.webp"), false),
+        ] {
+            assert_eq!(
+                reconcile_still_format_with_output_extension(resolved, path, explicit),
+                Ok(resolved),
+                "{path:?} should keep {resolved}"
+            );
+        }
     }
 
     #[test]
