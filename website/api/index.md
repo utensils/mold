@@ -283,8 +283,10 @@ exactly as it treats every other capabilities-advertised block on an older
 host.
 
 An explicit `output_format` a recipe does not advertise is a `422` at
-admission, named as `requests[N]: output format 'x' is not available for this
-recipe`, so a client learns at submit time rather than watching the job hold.
+admission, `output format 'x' is not available for this recipe`, so a client
+learns at submit time rather than watching the job hold. A refusal names the
+child it is about (`requests[N]: …`) only when the call carried more than one
+request; a single `/api/generate` or one-child batch gets the bare message.
 A 3-D model is the one exception: it has a single deliverable container, so an
 explicit raster format is coerced to `glb` rather than refused.
 
