@@ -126,12 +126,49 @@ impl GgufQwen3Arch {
                 && arch.head_dim.is_multiple_of(2),
             "GGUF Qwen3 architecture is inconsistent: {arch:?}"
         );
+        if let Some(value) = find("rope.dimension_sections") {
+            validate_mrope_sections(value)?;
+        }
         Ok(arch)
     }
 
     fn kv_repeat(&self) -> usize {
         self.n_heads / self.n_kv_heads
     }
+}
+
+/// Refuse a GGUF whose `rope.dimension_sections` disagrees with the MRoPE
+/// split the multimodal forward applies (`QWEN3_VL_MROPE_SECTIONS`). llama.cpp
+/// writes four sections (T, H, W and an extra axis Qwen3-VL leaves at 0); the
+/// official Qwen3-VL-8B GGUFs carry `[24, 20, 20, 0]`.
+fn validate_mrope_sections(value: &gguf_file::Value) -> Result<()> {
+    let gguf_file::Value::Array(entries) = value else {
+        anyhow::bail!("GGUF rope.dimension_sections is not an array: {value:?}");
+    };
+    let sections = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .to_i32()
+                .map(i64::from)
+                .or_else(|_| entry.to_u32().map(i64::from))
+                .or_else(|_| entry.to_i64())
+                .or_else(|_| entry.to_u64().map(|v| v as i64))
+                .map_err(|_| {
+                    anyhow::anyhow!("GGUF rope.dimension_sections holds a non-integer: {entry:?}")
+                })
+        })
+        .collect::<Result<Vec<i64>>>()?;
+    let expected = qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS.map(|s| s as i64);
+    let matches = sections.len() >= 3
+        && sections[..3] == expected
+        && sections[3..].iter().all(|extra| *extra == 0);
+    anyhow::ensure!(
+        matches,
+        "GGUF rope.dimension_sections {sections:?} does not match the Qwen3-VL MRoPE sections \
+         {expected:?} this encoder implements"
+    );
+    Ok(())
 }
 
 // ── RMS Layer Norm ───────────────────────────────────────────────────────────
@@ -1066,6 +1103,56 @@ mod tests {
             gguf_file::Value::U32(7),
         );
         assert!(GgufQwen3Arch::from_metadata(&bad).is_err());
+    }
+
+    /// The multimodal forward hard-codes Qwen3-VL-8B's MRoPE sections
+    /// (`QWEN3_VL_MROPE_SECTIONS`); a GGUF declaring different
+    /// `rope.dimension_sections` must be refused at load, not rendered with
+    /// the wrong frequency split. The official files carry `[24, 20, 20, 0]`
+    /// as an I32 array (read from `Qwen3VL-8B-Instruct-Q8_0.gguf` and
+    /// `-Q4_K_M.gguf`); llama.cpp writes four sections, the fourth unused
+    /// by Qwen3-VL.
+    #[test]
+    fn mrope_sections_are_validated_against_the_gguf_metadata() {
+        let sections = |values: &[i32]| {
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "general.architecture".to_string(),
+                gguf_file::Value::String("qwen3vl".to_string()),
+            );
+            metadata.insert(
+                "qwen3vl.rope.dimension_sections".to_string(),
+                gguf_file::Value::Array(values.iter().map(|v| gguf_file::Value::I32(*v)).collect()),
+            );
+            GgufQwen3Arch::from_metadata(&metadata)
+        };
+        assert!(sections(&[24, 20, 20, 0]).is_ok());
+        assert!(sections(&[24, 20, 20]).is_ok());
+        for bad in [
+            &[16, 24, 24, 0][..],
+            &[24, 20, 20, 8],
+            &[20, 20, 24, 0],
+            &[24, 20],
+        ] {
+            let error = sections(bad).unwrap_err().to_string();
+            assert!(
+                error.contains("dimension_sections"),
+                "{bad:?} refused without naming the key: {error}"
+            );
+        }
+        // A non-integer array is refused too.
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "qwen3vl.rope.dimension_sections".to_string(),
+            gguf_file::Value::Array(vec![gguf_file::Value::F32(24.0)]),
+        );
+        metadata.insert(
+            "general.architecture".to_string(),
+            gguf_file::Value::String("qwen3vl".to_string()),
+        );
+        assert!(GgufQwen3Arch::from_metadata(&metadata).is_err());
+        // Files that declare none (every stock Qwen3 GGUF) are unaffected.
+        assert!(GgufQwen3Arch::from_metadata(&HashMap::new()).is_ok());
     }
 
     /// The RoPE base is live: the same weights under a different
