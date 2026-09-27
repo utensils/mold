@@ -1107,11 +1107,17 @@ mod tests {
     #[test]
     #[ignore = "needs the staged Qwen3-VL-8B GGUF and the Qwen Image 2.1 text-encoder shards"]
     fn the_real_text_encoders_price_as_measured() {
-        let tiers = PathBuf::from(std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR").unwrap());
+        let tiers = PathBuf::from(
+            std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR")
+                .expect("MOLD_QWEN_IMAGE21_TIERS_DIR must name the staged tier directory"),
+        );
         let q8 = text_encoder_device_bytes(&[tiers.join("Qwen3VL-8B-Instruct-Q8_0.gguf")]).unwrap();
         let q4 =
             text_encoder_device_bytes(&[tiers.join("Qwen3VL-8B-Instruct-Q4_K_M.gguf")]).unwrap();
-        let shared = PathBuf::from(std::env::var("MOLD_QWEN_IMAGE21_SHARED_DIR").unwrap());
+        let shared = PathBuf::from(
+            std::env::var("MOLD_QWEN_IMAGE21_SHARED_DIR")
+                .expect("MOLD_QWEN_IMAGE21_SHARED_DIR must name shared/qwen-image21"),
+        );
         let bf16 = text_encoder_device_bytes(
             &(1..=4)
                 .map(|i| shared.join(format!("text_encoder/model-0000{i}-of-00004.safetensors")))

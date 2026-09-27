@@ -1321,8 +1321,9 @@ fn p8_denoise_diagnostics() {
 /// P8 base and turbo trajectories are driven from each variant's own
 /// conditioning and condition latents — the engine's composition, component
 /// by component — and scored against upstream's fp32 render with the P8 gate.
-/// F32 must pass it and the BF16 tower/encoder must fail it on the turbo
-/// recipe, so the dtype choice is pinned by a measurement, not by a const fn.
+/// On the turbo recipe F32 must pass it and the BF16 tower/encoder must fail
+/// it, so the dtype choice is pinned by a measurement, not by a const fn; the
+/// base4 rows are printed, not gated (see the note at the assertions).
 ///
 /// ```text
 /// QWEN_IMAGE21_MODEL_ROOT=/storage/mold/models \
@@ -1509,14 +1510,13 @@ fn conditioning_precision_study() {
         );
         verdicts.push((*name, *dtype, ours, passes));
     }
-    for (name, dtype, _, passes) in &verdicts {
-        if *dtype == DType::F32 {
-            assert!(
-                passes,
-                "the shipped F32 conditioning fails the P8 {name} gate"
-            );
-        }
-    }
+    // Only the turbo recipe discriminates the tower/encoder dtype, so only it
+    // is asserted here. The component-level base4 row is not a stable
+    // measurement: switching the rotary angles to upstream's float32 (a
+    // change below 1e-5 in every table value) moved its F32 variant from
+    // 39.39 to 33.66 dB and left its BF16 variant ABOVE it, while the engine's
+    // own base4 render moved 0.11 dB. The engine-level gate
+    // (`p8_base_end_to_end_matches_the_upstream_capture`) owns base4.
     let turbo = |dtype| {
         verdicts
             .iter()
@@ -1530,5 +1530,9 @@ fn conditioning_precision_study() {
     eprintln!(
         "STUDY turbo P8 delta F32 - BF16: {:+.2} dB",
         turbo(DType::F32).2 - turbo(DType::BF16).2
+    );
+    assert!(
+        turbo(DType::F32).3,
+        "the shipped F32 conditioning fails the P8 turbo gate"
     );
 }

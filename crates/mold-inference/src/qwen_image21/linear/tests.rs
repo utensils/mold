@@ -745,9 +745,15 @@ fn parity_device() -> Device {
 #[test]
 #[ignore = "needs the staged Qwen Image 2.1 tier checkpoints and the BF16 shards"]
 fn every_staged_tier_dequantizes_to_the_bf16_shards() {
-    let tiers_dir = PathBuf::from(std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR").unwrap());
-    let bf16_dir =
-        PathBuf::from(std::env::var("MOLD_QWEN_IMAGE21_BF16_DIR").unwrap()).join("transformer");
+    let tiers_dir = PathBuf::from(
+        std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR")
+            .expect("MOLD_QWEN_IMAGE21_TIERS_DIR must name the staged tier directory"),
+    );
+    let bf16_dir = PathBuf::from(
+        std::env::var("MOLD_QWEN_IMAGE21_BF16_DIR")
+            .expect("MOLD_QWEN_IMAGE21_BF16_DIR must name the BF16 model directory"),
+    )
+    .join("transformer");
     let device = parity_device();
     let bf16_paths = vec![
         bf16_dir.join("diffusion_pytorch_model-00001-of-00002.safetensors"),
@@ -860,7 +866,10 @@ fn every_staged_tier_dequantizes_to_the_bf16_shards() {
 #[test]
 #[ignore = "needs the staged Qwen Image 2.1 tier checkpoints"]
 fn every_staged_tiers_linear_arms_compute_with_their_weights() {
-    let tiers_dir = PathBuf::from(std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR").unwrap());
+    let tiers_dir = PathBuf::from(
+        std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR")
+            .expect("MOLD_QWEN_IMAGE21_TIERS_DIR must name the staged tier directory"),
+    );
     let device = parity_device();
     let dtype = if device.is_cuda() {
         DType::BF16

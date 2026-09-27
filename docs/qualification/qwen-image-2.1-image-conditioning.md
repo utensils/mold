@@ -113,10 +113,15 @@ that BF16 FAILS the turbo gate.
 | DeepStack 0 / 1 / 2, mean                              | 3.00e-2 / 6.22e-2 / 8.13e-2 | 4.69e-6 / 9.02e-6 / 1.20e-5 |
 | P8 prompt_embeds (P3 p8_pos, BF16 LM), mean            | 3.15e-1                     | 4.36e-2                     |
 | VAE encoder packed latents opaque / rgba, mean         | 1.33e-2 / 1.58e-2           | 1.77e-6 / 1.62e-6           |
-| P8 base4 (component study), margin over upstream bf16  | +6.11 dB (43.71)            | +1.79 dB (39.39)            |
-| P8 turbo6 (component study), margin over upstream bf16 | **−6.43 dB (26.79)**        | +4.51 dB (37.72)            |
+| P8 base4 (component study), margin over upstream bf16  | +4.71 dB (42.31)            | −3.93 dB (33.66)            |
+| P8 turbo6 (component study), margin over upstream bf16 | **−6.39 dB (26.83)**        | +2.99 dB (36.20)            |
 
-Turbo P8 delta, F32 − BF16: **+10.94 dB**. The 6-step distilled trajectory
+Turbo P8 delta, F32 − BF16: **+9.37 dB**. The study asserts the turbo rows
+only. Its base4 rows are not a stable measurement: the switch to upstream's
+float32 rotary angles (a sub-1e-5 change to every table value) moved the F32
+base4 row from 39.39 to 33.66 dB and left the BF16 row above it (43.71 →
+42.31), while the engine's own base4 render moved 0.11 dB (38.69 → 38.80).
+Base4 is gated at engine level only. The 6-step distilled trajectory
 amplifies conditioning error; the 4-step base render does not discriminate (its
 BF16 variant happens to land closer to upstream fp32 on this one case).
 
