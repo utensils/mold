@@ -140,51 +140,58 @@ pub(crate) fn expand_image_pad_tokens(text: &str, pad_counts: &[usize]) -> Resul
     Ok(expanded)
 }
 
+/// Whether an RGBA plane carries transparency: any alpha byte below 255.
+pub(crate) fn carries_alpha(alpha: impl IntoIterator<Item = u8>) -> bool {
+    alpha.into_iter().any(|value| value < 255)
+}
+
 /// What the decoded alpha plane becomes in the published artifact.
+///
+/// The checkpoint always decodes RGBA, and an opaque text-to-image render is
+/// NOT all-255: the M1 capture measured edge alpha as low as 204 on every one
+/// of six 40-step 1024² renders (`testdata/qwen_image21/alpha_histograms.json`).
+/// So the choice is made from what the REQUEST asked for, never from the
+/// decoded plane and never with a threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputAlpha {
-    /// Publish RGB. Chosen when transparency was not requested and every
-    /// alpha byte is 255, which keeps a v0.32 text-to-image PNG/JPEG byte-for
-    /// byte: the RGB channels are unchanged and PNG stays `ColorType::Rgb`.
+    /// Drop the alpha plane: the RGB channels are published unchanged, so a
+    /// text-to-image PNG/JPEG is byte-for-byte what v0.32 produced.
     Rgb,
     /// Publish RGBA (PNG / WebP).
     Rgba,
     /// JPEG cannot carry alpha: composite over white — the convention the
-    /// checkpoint itself uses for its vision input (`P:266-270`) — and tell
-    /// the caller with a request warning.
+    /// checkpoint itself uses for its vision input
+    /// (`pipeline_qwenimage21.py:266-270`) — and say so in a request warning.
     CompositeOverWhite,
 }
 
 impl OutputAlpha {
-    /// The alpha rule. `format_carries_alpha` is true for PNG and WebP.
-    ///
-    /// A transparency request always publishes RGBA even when the model
-    /// happened to paint an opaque canvas — the caller asked for an alpha
-    /// channel. Without the request, an opaque plane is RGB (never an
-    /// invented threshold: 254 is not 255). A JPEG with transparency
-    /// requested is refused before any weights load; reaching here with one
-    /// still composites rather than silently dropping alpha.
+    /// RGBA iff transparency was requested OR at least one reference image
+    /// carries alpha; otherwise RGB. `format_carries_alpha` is true for PNG
+    /// and WebP. JPEG with transparency requested is refused at admission and
+    /// in the engine; JPEG with an alpha-carrying reference composites.
     pub(crate) fn decide(
         transparent_requested: bool,
+        reference_carries_alpha: bool,
         format_carries_alpha: bool,
-        alpha: &[u8],
     ) -> Self {
-        let opaque = alpha.iter().all(|&value| value == 255);
-        match (format_carries_alpha, transparent_requested, opaque) {
-            (_, false, true) => Self::Rgb,
-            (true, _, _) => Self::Rgba,
-            (false, _, _) => Self::CompositeOverWhite,
+        match (
+            transparent_requested || reference_carries_alpha,
+            format_carries_alpha,
+        ) {
+            (false, _) => Self::Rgb,
+            (true, true) => Self::Rgba,
+            (true, false) => Self::CompositeOverWhite,
         }
     }
 
     /// The request warning attached when alpha had to be flattened.
     pub(crate) fn warning(self) -> Option<&'static str> {
         (self == Self::CompositeOverWhite).then_some(
-            "Qwen Image 2.1 produced transparent pixels, which JPEG cannot store; they were composited over white. Choose PNG or WebP to keep the alpha channel.",
+            "Qwen Image 2.1 kept a reference image's transparency, which JPEG cannot store; it was composited over white. Choose PNG or WebP to keep the alpha channel.",
         )
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,26 +273,104 @@ mod tests {
     }
 
     #[test]
-    fn alpha_rule_keeps_opaque_text_to_image_rgb() {
-        let opaque = [255u8; 16];
-        let mut translucent = opaque;
-        translucent[3] = 254;
-        assert_eq!(OutputAlpha::decide(false, true, &opaque), OutputAlpha::Rgb);
-        assert_eq!(OutputAlpha::decide(false, false, &opaque), OutputAlpha::Rgb);
+    fn alpha_rule_follows_the_request_never_the_decoded_plane() {
+        use OutputAlpha::{CompositeOverWhite, Rgb, Rgba};
+        // Plain text-to-image drops alpha whatever the model painted.
+        assert_eq!(OutputAlpha::decide(false, false, true), Rgb);
+        assert_eq!(OutputAlpha::decide(false, false, false), Rgb);
+        assert_eq!(OutputAlpha::decide(true, false, true), Rgba);
+        assert_eq!(OutputAlpha::decide(false, true, true), Rgba);
+        assert_eq!(OutputAlpha::decide(false, true, false), CompositeOverWhite);
+        assert_eq!(OutputAlpha::decide(true, true, false), CompositeOverWhite);
+        assert!(CompositeOverWhite.warning().is_some());
+        assert!(Rgba.warning().is_none() && Rgb.warning().is_none());
+        assert!(!carries_alpha([255u8; 8]));
+        assert!(carries_alpha([255, 255, 254]));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TemplateFixture {
+        system_prompt: String,
+        img_token_id: u32,
+        cases: Vec<TemplateCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TemplateCase {
+        references: usize,
+        text: String,
+        input_ids: Vec<u32>,
+        image_grid_thw: Option<Vec<[usize; 3]>>,
+    }
+
+    /// U2: the processor strings the pipeline built for 0–3 references,
+    /// recorded from the upstream processor call (M1 `templates.json`).
+    #[test]
+    fn templates_match_the_captured_processor_strings() {
+        let fixture: TemplateFixture =
+            serde_json::from_str(include_str!("../../testdata/qwen_image21/templates.json"))
+                .unwrap();
         assert_eq!(
-            OutputAlpha::decide(false, true, &translucent),
-            OutputAlpha::Rgba
+            fixture.system_prompt,
+            super::super::QWEN_IMAGE_21_SYSTEM_PROMPT
         );
-        assert_eq!(OutputAlpha::decide(true, true, &opaque), OutputAlpha::Rgba);
-        assert_eq!(
-            OutputAlpha::decide(false, false, &translucent),
-            OutputAlpha::CompositeOverWhite
-        );
-        assert_eq!(
-            OutputAlpha::decide(true, false, &opaque),
-            OutputAlpha::CompositeOverWhite
-        );
-        assert!(OutputAlpha::CompositeOverWhite.warning().is_some());
-        assert!(OutputAlpha::Rgba.warning().is_none());
+        assert_eq!(fixture.cases.len(), 4);
+        for case in &fixture.cases {
+            assert_eq!(
+                image_conditioned_prompt_template("a test prompt", case.references),
+                case.text,
+                "{} references",
+                case.references
+            );
+            // One `<|image_pad|>` per 2x2 merged patch group of each grid, in
+            // order — what `expand_image_pad_tokens` must produce.
+            let counts: Vec<usize> = case
+                .image_grid_thw
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|[t, h, w]| t * h * w / 4)
+                .collect();
+            let expanded = expand_image_pad_tokens(&case.text, &counts).unwrap();
+            assert_eq!(
+                expanded.matches(IMAGE_PAD_TOKEN).count(),
+                case.input_ids
+                    .iter()
+                    .filter(|id| **id == fixture.img_token_id)
+                    .count()
+            );
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DimensionFixture {
+        rows: Vec<DimensionRow>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DimensionRow {
+        area: u64,
+        ratio: f64,
+        width: u32,
+        height: u32,
+    }
+
+    /// U1: every captured `calculate_dimensions` row, including exact `.5`
+    /// ties resolved both ways by Python's half-to-even `round`.
+    #[test]
+    fn calculate_dimensions_matches_every_captured_row() {
+        let fixture: DimensionFixture = serde_json::from_str(include_str!(
+            "../../testdata/qwen_image21/calculate_dimensions.json"
+        ))
+        .unwrap();
+        assert!(fixture.rows.len() >= 20);
+        for row in fixture.rows {
+            assert_eq!(
+                mold_core::calculate_dimensions_ties_even(row.area, row.ratio, 32),
+                (row.width, row.height),
+                "ratio {}",
+                row.ratio
+            );
+        }
     }
 }

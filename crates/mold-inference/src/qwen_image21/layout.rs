@@ -682,6 +682,92 @@ mod tests {
         assert!(QwenImage21JointLayout::build(&split, &valid, &[(2, 4)], (2, 2)).is_err());
     }
 
+    #[derive(serde::Deserialize)]
+    struct CapturedLayout {
+        img_shapes: Vec<[usize; 3]>,
+        text_len_after_drop: usize,
+        joint_len: usize,
+        prefix_len: usize,
+        target_tokens: usize,
+        segments: Vec<(usize, usize, bool)>,
+    }
+
+    /// P5: the joint layout of every captured case (two references with CFG,
+    /// one reference, text-to-image) equals upstream's `build_token_metadata`,
+    /// `_qwenimage21_prefix_segments` and `QwenImage21Rope` exactly
+    /// (`testdata/qwen_image21/p5_layout.*`).
+    #[test]
+    fn layout_matches_the_captured_upstream_layouts() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qwen_image21");
+        let cases: std::collections::BTreeMap<String, CapturedLayout> =
+            serde_json::from_slice(&std::fs::read(dir.join("p5_layout.json")).unwrap()).unwrap();
+        let tensors =
+            candle_core::safetensors::load(dir.join("p5_layout.safetensors"), &Device::Cpu)
+                .unwrap();
+        let ints = |name: &str| -> Vec<i64> { tensors[name].to_vec1::<i64>().unwrap() };
+        let bools = |name: &str| -> Vec<bool> {
+            tensors[name]
+                .to_vec1::<u8>()
+                .unwrap()
+                .into_iter()
+                .map(|value| value != 0)
+                .collect()
+        };
+        assert_eq!(cases.len(), 4);
+        for (case, captured) in &cases {
+            let text_len = captured.text_len_after_drop;
+            let slots = &bools(&format!("{case}.vl_img_mask"))[..text_len];
+            let (condition, target) = captured.img_shapes.split_at(captured.img_shapes.len() - 1);
+            let condition: Vec<(usize, usize)> =
+                condition.iter().map(|[_, h, w]| (*h, *w)).collect();
+            let layout = QwenImage21JointLayout::build(
+                slots,
+                &[vec![true; text_len]],
+                &condition,
+                (target[0][1], target[0][2]),
+            )
+            .unwrap();
+            assert_eq!(layout.total_len(), captured.joint_len, "{case}");
+            assert_eq!(layout.prefix_len(), captured.prefix_len, "{case}");
+            assert_eq!(layout.target_tokens(), captured.target_tokens, "{case}");
+            assert_eq!(
+                layout.image_ids(),
+                ints(&format!("{case}.image_ids")),
+                "{case}"
+            );
+            let target_mask = bools(&format!("{case}.target_token_mask"));
+            assert!(
+                target_mask[..layout.prefix_len()].iter().all(|t| !t),
+                "{case}"
+            );
+            assert!(
+                target_mask[layout.prefix_len()..].iter().all(|t| *t),
+                "{case}"
+            );
+            for (axis, name) in ["rope_frame", "rope_height", "rope_width"]
+                .iter()
+                .enumerate()
+            {
+                let expected = ints(&format!("{case}.{name}"));
+                let actual: Vec<i64> = layout.rope().iter().map(|c| i64::from(c[axis])).collect();
+                assert_eq!(actual, expected, "{case} {name}");
+            }
+            let prefix_segments: Vec<(usize, usize, bool)> = layout
+                .segments()
+                .iter()
+                .filter(|segment| segment.kind != SegmentKind::Target)
+                .map(|segment| {
+                    (
+                        segment.start,
+                        segment.end(),
+                        segment.kind == SegmentKind::Text,
+                    )
+                })
+                .collect();
+            assert_eq!(prefix_segments, captured.segments, "{case}");
+        }
+    }
+
     #[test]
     fn text_to_image_layout_is_text_then_target() {
         let valid = vec![vec![true, true, false], vec![true; 3]];

@@ -1424,6 +1424,13 @@ pub fn fit_to_target_area_ties_even(
     align: u32,
 ) -> (u32, u32) {
     let ratio = f64::from(src_w.max(1)) / f64::from(src_h.max(1));
+    calculate_dimensions_ties_even(target_area, ratio, align)
+}
+
+/// diffusers `calculate_dimensions(target_area, ratio)` on an `align` grid,
+/// exactly; [`fit_to_target_area_ties_even`] derives `ratio` from a source
+/// image's `width / height`.
+pub fn calculate_dimensions_ties_even(target_area: u64, ratio: f64, align: u32) -> (u32, u32) {
     let align = align.max(1);
     let width = (target_area as f64 * ratio).sqrt();
     let height = width / ratio;
