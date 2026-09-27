@@ -272,8 +272,8 @@ impl QwenImage21Engine {
             text_encoder_bytes,
             denoise_workspace_bytes,
             decode_peak_bytes,
-            host_total_bytes: crate::device::total_system_memory_bytes().unwrap_or(0),
-            host_available_bytes: crate::device::available_system_memory_bytes().unwrap_or(0),
+            host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+            host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
             already_parked_bytes: text_encoder.parked_bytes(),
             keep_te_ram: crate::device::keep_te_ram_mode(),
         });

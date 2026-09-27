@@ -14,6 +14,7 @@
 //! - `MOLD_QWEN_IMAGE21_TIER_RENDER_DIR`: where the PNGs go
 //! - `MOLD_QWEN_IMAGE21_TIERS` (optional): comma-separated tier names
 //! - `MOLD_QWEN_IMAGE21_TIER_RENDER_SIZE` (optional): `WxH`, default 1024x1024
+//! - `MOLD_QWEN_IMAGE21_TIER_RENDER_STEPS` (optional): default 40
 
 use std::path::PathBuf;
 
@@ -103,13 +104,23 @@ fn every_tier_renders_through_the_engine() {
         let model = format!("qwen-image-2.1:{tier}");
         let mut engine =
             QwenImage21Engine::new(model.clone(), paths(transformer), LoadStrategy::Eager, 0);
+        // Surface the engine's residency decisions (encoder / transformer
+        // parks) in the test log.
+        engine.set_on_progress(Box::new(|event| {
+            if let crate::progress::ProgressEvent::Info { message } = event {
+                eprintln!("ENGINE-INFO {message}");
+            }
+        }));
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "A red fox curled asleep on a mossy stone in a misty pine forest at dawn, \
                        soft golden light, a hand-painted wooden sign reading \"MOON CAFE\"",
             "model": model,
             "width": width,
             "height": height,
-            "steps": 40,
+            "steps": std::env::var("MOLD_QWEN_IMAGE21_TIER_RENDER_STEPS")
+                .ok()
+                .and_then(|steps| steps.parse::<u32>().ok())
+                .unwrap_or(40),
             "guidance": 1.0,
             "seed": 210001,
             "output_format": "png"
@@ -126,13 +137,33 @@ fn every_tier_renders_through_the_engine() {
             .unwrap_or_else(|error| panic!("{tier}: {error:#}"));
         let image = &response.images[0];
         assert_eq!((image.width, image.height), (width, height), "{tier}");
-        let path = out.join(format!("qwen-image-2.1-{tier}-{width}x{height}.png"));
+        let suffix = std::env::var("MOLD_QWEN_IMAGE21_TIER_RENDER_SUFFIX").unwrap_or_default();
+        let path = out.join(format!(
+            "qwen-image-2.1-{tier}-{width}x{height}{suffix}.png"
+        ));
         std::fs::write(&path, &image.data).unwrap();
         eprintln!(
             "TIER-RENDER {tier}: load {load_secs:.1}s, render {:.1}s -> {}",
             started.elapsed().as_secs_f64(),
             path.display()
         );
+        // A warm second request on the same engine: whatever the residency
+        // decision parked (encoder, transformer) must come back and render the
+        // same seed to the same bytes.
+        if std::env::var("MOLD_QWEN_IMAGE21_TIER_RENDER_REPEAT").as_deref() == Ok("1") {
+            let started = std::time::Instant::now();
+            let again = engine
+                .generate(&request)
+                .unwrap_or_else(|error| panic!("{tier} repeat: {error:#}"));
+            assert!(
+                again.images[0].data == image.data,
+                "{tier}: the warm repeat rendered different bytes"
+            );
+            eprintln!(
+                "TIER-RENDER {tier}: warm repeat {:.1}s, identical bytes",
+                started.elapsed().as_secs_f64()
+            );
+        }
         engine.unload();
     }
 }
