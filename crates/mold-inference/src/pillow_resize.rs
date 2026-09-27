@@ -256,8 +256,6 @@ fn shift_for_div255(value: u32) -> u32 {
 }
 
 /// `MULDIV255(a, b)` (`ImagingUtils.h:20`): `a * b / 255`, rounded.
-// Consumed by the Qwen Image 2.1 reference preparation.
-#[cfg_attr(not(test), allow(dead_code))]
 fn mul_div255(a: u8, b: u8) -> u8 {
     shift_for_div255(u32::from(a) * u32::from(b) + 128) as u8
 }
@@ -270,7 +268,6 @@ fn mul_div255(a: u8, b: u8) -> u8 {
 /// through, anything else divides by alpha with integer truncation and
 /// clips). Colour under `α = 0` therefore becomes 0, which is what the Qwen
 /// Image 2.1 VAE is trained to read.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resize_rgba_premultiplied(
     source: &RgbaImage,
     width: u32,

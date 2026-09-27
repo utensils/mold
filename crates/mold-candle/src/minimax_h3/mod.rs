@@ -128,8 +128,9 @@ pub use presentation::{
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub use private_runtime_observation::{H3PrivateWorkspaceCapture, H3PrivateWorkspaceObservation};
 pub use processor::{
-    create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
-    GridThw, PackedVisionPatches, QwenMmTokenType, SampledVideo,
+    create_mm_token_type_ids, pack_qwen_vision_u8, pack_qwen_vision_u8_torchvision,
+    qwen_mrope_positions, sample_video_frames, GridThw, PackedVisionPatches, ProcessorError,
+    QwenMmTokenType, SampledVideo,
 };
 pub use qwen_nvfp4::{
     expected_h3_qwen_nvfp4_awq_schema, inspect_h3_qwen_nvfp4_awq_header,
@@ -181,6 +182,7 @@ pub use turbo_lora::{
     H3_TURBO_LORA_TENSOR_COUNT, H3_TURBO_LORA_TRAINING_RANK, H3_TURBO_LORA_WEIGHT_DTYPE,
 };
 pub use turbo_runtime::{H3TurboBlockDeltas, H3TurboLoraDelta, H3TurboLoraRuntime};
+pub use vision::{Qwen3VlVisionDimensions, Qwen3VlVisionModel};
 pub use visual_condition::{
     ConditionEncodeMode, SignedRgbPixels, Uint8RgbPixels, UnitRgbPixels, H3_IMAGENET_MEAN,
     H3_IMAGENET_STD, H3_LATENTS_MEAN, H3_LATENTS_STD,

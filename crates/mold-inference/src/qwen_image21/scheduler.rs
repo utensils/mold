@@ -13,21 +13,31 @@ pub(crate) use crate::qwen_image::sampling::{
     QwenImageScheduler as QwenImage21Scheduler, QwenShiftPolicy,
 };
 
-/// Viggle's 6-step turbo trajectory (`Viggle/Qwen-Image-2.1-viggle-turbo`
-/// model card): these are the pipeline's raw `sigmas=` — the mu shift is
-/// still applied — with `shift_terminal: null`.
-pub(crate) const TURBO_BASE_SIGMAS: [f64; 6] = [1.0, 0.9375, 0.875, 0.75, 0.5, 0.25];
-
-/// Which trajectory a checkpoint samples.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which trajectory a checkpoint samples: the shipped scheduler, or a turbo
+/// tier's fixed recipe (`mold_core::manifest::qwen_image21_turbo_schedule`,
+/// the one authority for its sigmas and terminal shift).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ScheduleKind {
     /// The shipped scheduler: linspace sigmas, dynamic shift, terminal 0.02.
     Base,
-    /// The distilled turbo recipe: fixed six base sigmas, dynamic shift, no
-    /// terminal stretch. Selected by the turbo tier together with its
-    /// distilled LoRA.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Turbo,
+    /// A distilled turbo recipe: its raw sigmas under the dynamic mu shift,
+    /// with its own terminal (Viggle: none).
+    Turbo(mold_core::manifest::QwenTurboSchedule),
+}
+
+impl ScheduleKind {
+    /// The kind a model's tier samples.
+    pub(crate) fn for_model(model: &str) -> Self {
+        mold_core::manifest::qwen_image21_turbo_schedule(model).map_or(Self::Base, Self::Turbo)
+    }
+}
+
+fn turbo_policy(turbo: &mold_core::manifest::QwenTurboSchedule) -> QwenShiftPolicy {
+    match turbo.shift_terminal {
+        // The only terminal the family ships is the base config's 0.02.
+        Some(_) => QwenShiftPolicy::DynamicResolution,
+        None => QwenShiftPolicy::DynamicNoTerminal,
+    }
 }
 
 /// Build the scheduler for `steps` over `target_tokens` latent tokens.
@@ -35,8 +45,9 @@ pub(crate) enum ScheduleKind {
 /// `mu` always comes from the TARGET tokens alone
 /// (`pipeline_qwenimage21.py:724`, `latents.shape[1]`): condition-image
 /// tokens never move the schedule. A turbo render at a step count other than
-/// its six keeps the no-terminal policy over the default linspace and returns
-/// a warning, because there is no published trajectory to follow.
+/// its recipe's keeps the recipe's policy over the default linspace and
+/// returns a warning, because there is no published trajectory to follow
+/// (admission pins the step count, so only a direct engine caller gets here).
 pub(crate) fn scheduler_for(
     kind: ScheduleKind,
     steps: usize,
@@ -47,19 +58,19 @@ pub(crate) fn scheduler_for(
             QwenImage21Scheduler::new(steps, target_tokens, QwenShiftPolicy::DynamicResolution),
             None,
         ),
-        ScheduleKind::Turbo if steps == TURBO_BASE_SIGMAS.len() => (
+        ScheduleKind::Turbo(turbo) if steps == turbo.sigmas.len() => (
             QwenImage21Scheduler::with_base_sigmas(
-                &TURBO_BASE_SIGMAS,
+                turbo.sigmas,
                 target_tokens,
-                QwenShiftPolicy::DynamicNoTerminal,
+                turbo_policy(&turbo),
             ),
             None,
         ),
-        ScheduleKind::Turbo => (
-            QwenImage21Scheduler::new(steps, target_tokens, QwenShiftPolicy::DynamicNoTerminal),
+        ScheduleKind::Turbo(turbo) => (
+            QwenImage21Scheduler::new(steps, target_tokens, turbo_policy(&turbo)),
             Some(format!(
                 "The Qwen Image 2.1 turbo distill was trained for {} steps; {steps} steps use an evenly spaced trajectory instead",
-                TURBO_BASE_SIGMAS.len()
+                turbo.sigmas.len()
             )),
         ),
     }
@@ -169,7 +180,7 @@ mod tests {
                 case.name
             );
             let kind = if case.name.starts_with("turbo") {
-                ScheduleKind::Turbo
+                ScheduleKind::for_model("qwen-image-2.1-turbo:bf16")
             } else {
                 ScheduleKind::Base
             };
@@ -205,11 +216,17 @@ mod tests {
         let (via, _) = scheduler_for(ScheduleKind::Base, 40, 4096);
         assert_eq!(base.sigmas, via.sigmas);
         assert!((base.sigmas[39] - 0.02).abs() < 1e-12);
-        let (turbo, _) = scheduler_for(ScheduleKind::Turbo, 6, 4096);
+        let turbo_kind = ScheduleKind::for_model("qwen-image-2.1-turbo:bf16");
+        assert!(matches!(turbo_kind, ScheduleKind::Turbo(_)));
+        assert_eq!(
+            ScheduleKind::for_model("qwen-image-2.1:bf16"),
+            ScheduleKind::Base
+        );
+        let (turbo, _) = scheduler_for(turbo_kind, 6, 4096);
         assert_eq!(turbo.sigmas.len(), 7);
         assert!(turbo.sigmas[5] > 0.25 && turbo.sigmas[5] < 0.5);
         assert_eq!(*turbo.sigmas.last().unwrap(), 0.0);
-        let (other, warning) = scheduler_for(ScheduleKind::Turbo, 8, 4096);
+        let (other, warning) = scheduler_for(turbo_kind, 8, 4096);
         assert_eq!(other.sigmas.len(), 9);
         assert!(warning.unwrap().contains("6 steps"));
     }

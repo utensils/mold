@@ -3809,10 +3809,12 @@ fn build_plan(
     let qwen21_te_plan = (context.family == "qwen-image21"
         && memory.load_strategy == mold_inference::LoadStrategy::Eager)
         .then(|| {
-            crate::memory_preflight::qwen_image21_eager_plan(
+            crate::memory_preflight::qwen_image21_eager_plan_for_request(
                 context.paths,
                 hint,
                 Some(device_budget),
+                context.request,
+                None,
             )
         })
         .flatten();

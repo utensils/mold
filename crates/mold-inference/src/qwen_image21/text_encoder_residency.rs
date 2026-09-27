@@ -430,8 +430,8 @@ pub fn render_workspace_bytes(
     batch: u32,
     vae_dtype_bytes: u32,
 ) -> (u64, u64) {
-    let joint =
-        u64::from(width) * u64::from(height) / 256 + super::LEGACY_PREFIX_CACHE_TOKENS as u64;
+    let joint = crate::device::QwenImage21SequenceShape::for_request(width, height, &[])
+        .joint_tokens() as u64;
     let denoise = crate::device::activation_bytes(
         width,
         height,
