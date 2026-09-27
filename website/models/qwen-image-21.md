@@ -81,13 +81,18 @@ variant.
 The transformer and text encoder dominate memory. BF16 needs about 14.8 GB for
 the transformer alone; INT8 ConvRot needs 7.8 GB.
 
-| VRAM    | Recommendation                                    |
-| ------- | ------------------------------------------------- |
-| ≥ 44 GB | `bf16`; everything stays resident at 1024²        |
-| 32 GB   | `bf16` with the Q8 text encoder (`auto` picks it) |
-| 24 GB   | `int8-conv` (or `q8`) with the Q8 text encoder    |
-| 16 GB   | `q4` with `MOLD_QWEN3_VARIANT=q4`, 1024² only     |
-| ≤ 12 GB | `q3` or `q2`, sequential loading                  |
+| VRAM    | Recommendation                                    | Measured peak at 1024²                 |
+| ------- | ------------------------------------------------- | -------------------------------------- |
+| ≥ 44 GB | `bf16`; everything stays resident at 1024²        | 37.3 GB (`int8-conv` 31.9, `q4` 25.5)  |
+| 32 GB   | `bf16` with the Q8 text encoder (`auto` picks it) | 25.3 GB                                |
+| 24 GB   | `int8-conv` (or `q8`) with the Q8 text encoder    | 18.7 GB (`q8` 19.1, `q4` 19.6)         |
+| 16 GB   | `q4` with `MOLD_QWEN3_VARIANT=q4`, 1024² only     | 12.8 GB                                |
+| ≤ 12 GB | `q3` or `q2`, sequential loading                  | 7.8 GB (`q2` 6.7); encoder runs on CPU |
+
+The peaks are whole-process device memory sampled with `nvidia-smi` on an
+NVIDIA L40S during a server render, with the smaller cards simulated by
+`MOLD_RESERVE_VRAM_MB`. Denoise time is 14–20 s at 1024² on every tier; the
+12 GB plan adds about 25 s of CPU text encoding.
 
 At the 2K presets the encoder is parked in host RAM for the denoise, and the
 transformer is released before the VAE decode when the card cannot hold both.
