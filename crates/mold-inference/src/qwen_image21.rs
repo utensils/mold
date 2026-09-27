@@ -14,6 +14,7 @@ use crate::encoders::qwen3::{resolve_pad_token_id, Qwen3Encoder};
 pub(crate) mod linear;
 pub(crate) mod pipeline;
 pub(crate) mod scheduler;
+pub mod text_encoder_residency;
 pub(crate) mod transformer;
 pub(crate) mod vae;
 

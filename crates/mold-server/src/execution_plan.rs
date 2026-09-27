@@ -3771,6 +3771,30 @@ fn build_plan(
                 0
             }
         });
+    // Qwen Image 2.1 eager: the engine's own text-encoder plan
+    // (`qwen_image21::text_encoder_residency::plan`, asked through the same
+    // `memory_preflight` helper that chose Eager) decides what the encoder
+    // components are — Resident, or DropReload with a cold host park — and
+    // what they cost: the chosen language model's device bytes on ONE anchor
+    // (the lowest-ordered shard), never the 17.5 GB of shard files, which also
+    // carry the vision tower and `lm_head` the encoder does not load.
+    let qwen21_te_plan = (context.family == "qwen-image21"
+        && memory.load_strategy == mold_inference::LoadStrategy::Eager)
+        .then(|| {
+            crate::memory_preflight::qwen_image21_eager_plan(
+                context.paths,
+                hint,
+                Some(device_budget),
+            )
+        })
+        .flatten();
+    let qwen21_te_anchor = qwen21_te_plan.as_ref().and_then(|_| {
+        context
+            .artifacts
+            .keys()
+            .find(|role| role.is_text_encoder())
+            .cloned()
+    });
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -3846,7 +3870,13 @@ fn build_plan(
                 }
                 ComponentLoadStrategy::StreamedBlocks
             } else if role.is_text_encoder() {
-                ComponentLoadStrategy::DropReload
+                use mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency;
+                match qwen21_te_plan.as_ref() {
+                    Some(plan) if plan.decision.residency == Qwen21TeResidency::Resident => {
+                        ComponentLoadStrategy::Resident
+                    }
+                    _ => ComponentLoadStrategy::DropReload,
+                }
             } else {
                 ComponentLoadStrategy::Resident
             };
@@ -3866,12 +3896,27 @@ fn build_plan(
                 {
                     0
                 }
-                _ => bytes,
+                _ => match qwen21_te_plan.as_ref().filter(|_| role.is_text_encoder()) {
+                    Some(plan)
+                        if qwen21_te_anchor.as_ref() == Some(role) && plan.choice.on_gpu() =>
+                    {
+                        plan.text_encoder_bytes
+                    }
+                    Some(_) => 0,
+                    None => bytes,
+                },
             };
             // The host park rides on the SAME anchor the device peak does, so
-            // a multi-shard encoder is charged once.
+            // a multi-shard encoder is charged once. A Qwen Image 2.1 park is a
+            // COLD charge like Mistral3's: a warm hit finds it already parked.
             let host = if mistral_peak_anchor.as_ref() == Some(role) {
                 mistral_host_park_bytes
+            } else if qwen21_te_anchor.as_ref() == Some(role) {
+                use mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency;
+                qwen21_te_plan
+                    .as_ref()
+                    .filter(|plan| plan.decision.residency == Qwen21TeResidency::ParkHost)
+                    .map_or(0, |plan| plan.text_encoder_bytes)
             } else {
                 0
             };
