@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | `QWEN_IMAGE21_MODEL_ROOT` | the models directory (`$MOLD_HOME/models`) | required |
 //! | `QWEN_IMAGE21_BENCH_OUTPUT` | receipt/artifact directory | required |
-//! | `QWEN_IMAGE21_BENCH_MODE` | `legacy`, `flash`, `ops`, `fast`, `fast-cfgbatch` | `legacy` |
+//! | `QWEN_IMAGE21_BENCH_MODE` | `legacy`, `flash`, `ops`, `fast` | `legacy` |
 //! | `QWEN_IMAGE21_BENCH_TIER` | transformer tier | `bf16` |
 //! | `QWEN_IMAGE21_BENCH_WIDTH` / `_HEIGHT` | canvas, multiples of 32 | 1024 |
 //! | `QWEN_IMAGE21_BENCH_GUIDANCE` | true-CFG scale | 1.0 |
@@ -125,19 +125,21 @@ impl Drop for PeakSampler {
     }
 }
 
-/// A named harness mode: the execution path it asks the transformer to run,
-/// and whether guided steps batch both CFG branches into one forward.
+/// A named harness mode: the execution path it asks the transformer to run.
+///
+/// There is no batched-CFG mode: `official_cuda_cfg_batch_probe` measured
+/// its best case (equal-length rows, no key padding) 3–6% SLOWER than two
+/// batch-1 forwards at every canvas, so the engine keeps sequential CFG (A8).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BenchMode {
     pub name: &'static str,
     pub path: Qwen21ExecPath,
-    pub cfg_batch: bool,
 }
 
 pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
     let legacy = Qwen21ExecPath::legacy();
-    let (name, path, cfg_batch) = match name {
-        "legacy" => ("legacy", legacy, false),
+    let (name, path) = match name {
+        "legacy" => ("legacy", legacy),
         // FlashAttention alone; every elementwise op stays legacy.
         "flash" => (
             "flash",
@@ -145,7 +147,6 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
                 attention: TargetAttention::FastStill,
                 ..legacy
             },
-            false,
         ),
         // The fused elementwise ops alone; attention stays legacy math.
         "ops" => (
@@ -154,36 +155,18 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
                 attention: TargetAttention::Legacy,
                 ..Qwen21ExecPath::cuda_fast()
             },
-            false,
         ),
-        "fast" => ("fast", Qwen21ExecPath::cuda_fast(), false),
-        "fast-cfgbatch" => ("fast-cfgbatch", Qwen21ExecPath::cuda_fast(), true),
-        other => anyhow::bail!(
-            "QWEN_IMAGE21_BENCH_MODE={other}: expected legacy, flash, ops, fast, or fast-cfgbatch"
-        ),
+        "fast" => ("fast", Qwen21ExecPath::cuda_fast()),
+        other => {
+            anyhow::bail!("QWEN_IMAGE21_BENCH_MODE={other}: expected legacy, flash, ops, or fast")
+        }
     };
-    Ok(BenchMode {
-        name,
-        path,
-        cfg_batch,
-    })
+    Ok(BenchMode { name, path })
 }
 
-/// Put `mode` into effect on a loaded transformer. The attention dispatch is
-/// wired through the joint-layout seam; the elementwise knobs are not yet, so
-/// a mode that needs them is refused by name rather than silently measured
-/// as something else.
-pub(super) fn install_mode(
-    transformer: &mut QwenImage21Transformer,
-    mode: &BenchMode,
-) -> Result<()> {
-    anyhow::ensure!(
-        !mode.cfg_batch,
-        "mode {} needs batched CFG, which this harness drives only through the engine",
-        mode.name
-    );
+/// Put `mode` into effect on a loaded transformer.
+pub(super) fn install_mode(transformer: &mut QwenImage21Transformer, mode: &BenchMode) {
     transformer.set_exec_path(mode.path);
-    Ok(())
 }
 
 pub(super) fn transformer_paths(root: &Path, tier: &str) -> Result<Vec<PathBuf>> {
@@ -419,7 +402,7 @@ fn official_cuda_mode_benchmark() -> Result<()> {
         crate::qwen_image21::transformer_dtype(&device),
         &progress,
     )?;
-    install_mode(&mut transformer, &mode)?;
+    install_mode(&mut transformer, &mode);
     device.synchronize()?;
     phases.insert(
         "transformer_load_seconds".into(),
@@ -581,7 +564,6 @@ fn official_cuda_mode_benchmark() -> Result<()> {
             "fused_adaln": mode.path.fused_adaln,
             "f32_rope_tables": mode.path.f32_rope_tables,
             "round_timestep_to_dtype": mode.path.round_timestep_to_dtype,
-            "cfg_batch": mode.cfg_batch,
         },
         "tier": tier,
         "width": width,

@@ -135,7 +135,7 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
         dtype,
         &progress,
     )?;
-    install_mode(&mut transformer, &bench_mode("legacy")?)?;
+    install_mode(&mut transformer, &bench_mode("legacy")?);
     let eps = transformer.cfg.eps;
     let inner = transformer.cfg.inner_dim();
     let (lh, lw) = (64usize, 64usize);
