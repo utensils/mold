@@ -182,6 +182,7 @@ async fn response_from_canonical_bytes(
             seed_used: metadata.seed,
             gpu,
             request_warnings: Vec::new(),
+            prefix_cache: None,
         });
     }
     let image = image::load_from_memory(&bytes)
@@ -206,6 +207,7 @@ async fn response_from_canonical_bytes(
         seed_used: metadata.seed,
         gpu,
         request_warnings: Vec::new(),
+        prefix_cache: None,
     })
 }
 
@@ -6627,6 +6629,7 @@ mod tests {
                 model: "flux2-klein:q8".into(),
                 seed_used: 7,
                 gpu: Some(0),
+                prefix_cache: None,
             }),
         )
         .await;
@@ -6745,6 +6748,7 @@ mod tests {
                 true_cfg: None,
                 cfg_start_step: None,
                 has_alpha: None,
+                prefix_cache: None,
                 transparent_background: None,
             },
             timestamp,

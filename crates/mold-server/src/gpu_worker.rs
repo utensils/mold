@@ -5013,6 +5013,7 @@ fn finish_generation_success(
     // The render's wall-clock time rides the embedded metadata as well as the
     // gallery row, so a mirrored or imported print keeps it.
     metadata.record_generation_time(response.generation_time_ms);
+    metadata.apply_render_facts(&response);
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
         metadata.upscale_model = None;
@@ -7539,6 +7540,7 @@ mod tests {
                 model: facts.media.canonical_model.clone(),
                 seed_used: facts.media.seed,
                 gpu: None,
+                prefix_cache: None,
             },
             identity_echo: crate::h3_private_bridge::H3TerminalIdentityEcho {
                 device_id: facts.device_id.clone(),
@@ -8586,6 +8588,7 @@ mod tests {
                 model: self.name.clone(),
                 seed_used: 7,
                 gpu: None,
+                prefix_cache: None,
             })
         }
 
@@ -8632,6 +8635,7 @@ mod tests {
                 model: self.name.clone(),
                 seed_used: 1,
                 gpu: None,
+                prefix_cache: None,
             })
         }
 
@@ -9929,6 +9933,7 @@ mod tests {
                 model: self.name.clone(),
                 seed_used: 1,
                 gpu: None,
+                prefix_cache: None,
             })
         }
 
@@ -11230,6 +11235,7 @@ mod tests {
                 model: request.model.clone(),
                 seed_used: 1,
                 gpu: Some(0),
+                prefix_cache: None,
             };
             let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
             let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
@@ -12956,6 +12962,7 @@ mod tests {
             model: "mock-model".to_string(),
             seed_used: 7,
             gpu: None,
+            prefix_cache: None,
         }
     }
 
@@ -13858,6 +13865,7 @@ mod tests {
             model: job.request.model.clone(),
             seed_used: 7,
             gpu: None,
+            prefix_cache: None,
         };
 
         let err = upscale_generated_image_on_worker(

@@ -325,6 +325,7 @@ mod tests {
                 seed_used: req.seed.unwrap_or(42),
                 video: None,
                 gpu: None,
+                prefix_cache: None,
             })
         }
 
@@ -1266,6 +1267,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         }
     }
@@ -18105,6 +18107,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         };
         let mut rec = GenerationRecord::from_save(
@@ -19085,6 +19088,7 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: None,
         };
         let rec = GenerationRecord::from_save(
@@ -21076,6 +21080,7 @@ mod tests {
             model: "ltx-2-19b-dev:fp8".into(),
             seed_used: 7,
             gpu: None,
+            prefix_cache: None,
         };
         let img = ImageData {
             data: waveform,
@@ -21129,6 +21134,7 @@ mod tests {
             model: "flux-dev:q8".into(),
             seed_used: 1,
             gpu: None,
+            prefix_cache: None,
         };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
@@ -21168,6 +21174,7 @@ mod tests {
             model: "ltx-2-19b-dev:fp8".into(),
             seed_used: 1,
             gpu: None,
+            prefix_cache: None,
         };
         let mut headers = axum::http::HeaderMap::new();
         let body = crate::routes::apply_media_headers(&clip, img(), &mut headers);

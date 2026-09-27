@@ -417,6 +417,7 @@ impl MoldClient {
                 seed_used,
                 gpu,
                 request_warnings,
+                prefix_cache: None,
             });
         }
 
@@ -449,6 +450,7 @@ impl MoldClient {
                 seed_used,
                 gpu,
                 request_warnings,
+                prefix_cache: None,
             });
         }
 
@@ -496,6 +498,7 @@ impl MoldClient {
             video,
             gpu,
             request_warnings,
+            prefix_cache: None,
         })
     }
 
@@ -777,6 +780,7 @@ impl MoldClient {
                                 seed_used: complete.seed_used,
                                 gpu: complete.gpu,
                                 request_warnings,
+                                prefix_cache: None,
                             });
                         }
 
@@ -805,6 +809,7 @@ impl MoldClient {
                                 seed_used: complete.seed_used,
                                 gpu: complete.gpu,
                                 request_warnings,
+                                prefix_cache: None,
                             });
                         }
 
@@ -878,6 +883,7 @@ impl MoldClient {
                             video,
                             gpu: complete.gpu,
                             request_warnings,
+                            prefix_cache: None,
                         });
                     }
                     "error" => {

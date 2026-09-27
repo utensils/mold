@@ -221,6 +221,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         true_cfg: None,
         cfg_start_step: None,
         has_alpha: None,
+        prefix_cache: None,
         transparent_background: None,
     }
 }

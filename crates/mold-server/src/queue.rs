@@ -1504,6 +1504,7 @@ async fn upscale_generated_image_on_single_worker(
         model: req.model.clone(),
         seed_used: req.seed.unwrap_or(0),
         gpu: None,
+        prefix_cache: None,
     };
     apply_upscale_response_to_image_generation(req, &mut response, img, upscaled)
         .map_err(|e| format!("upscale failed: {e}"))
@@ -2669,6 +2670,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // The same duration the GPU worker embeds, so a print made on the
             // CPU fallback keeps its time through an export or a rescan too.
             metadata.record_generation_time(response.generation_time_ms);
+            metadata.apply_render_facts(&response);
             if let Some(video) = response.video.as_ref() {
                 metadata.apply_video_output(video);
                 // The source print is not itself upscaled. Its requested
@@ -4524,6 +4526,7 @@ mod tests {
             seed_used: 99,
             gpu: Some(1),
             request_warnings: Vec::new(),
+            prefix_cache: None,
         };
         let result = SavedOutputNames {
             output: Some("print.png".to_string()),
@@ -5677,6 +5680,7 @@ mod tests {
             model: generation.model.clone(),
             seed_used: 7,
             gpu: Some(origin.gpu.ordinal),
+            prefix_cache: None,
         };
         let work = crate::scheduler::ScheduledOwnerWork::new(
             "legacy-sibling-post-upscale",
@@ -6743,6 +6747,7 @@ mod tests {
             model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
             seed_used: 42,
             gpu: Some(0),
+            prefix_cache: None,
         };
         let mut metadata =
             OutputMetadata::from_generate_request(&request, response.seed_used, None, "test");
@@ -6902,6 +6907,7 @@ mod tests {
             model: request.model.clone(),
             seed_used: 42,
             gpu: Some(0),
+            prefix_cache: None,
         };
         let mut metadata = OutputMetadata::from_generate_request(&request, 42, None, "test");
         metadata.apply_video_output(&video);
@@ -7187,6 +7193,7 @@ mod tests {
             model: "flux-dev:q4".to_string(),
             seed_used: 7,
             gpu: Some(0),
+            prefix_cache: None,
         };
 
         let event = build_sse_complete_event(
@@ -7245,6 +7252,7 @@ mod tests {
             model: "ltx-2.3-22b-dev:fp8".to_string(),
             seed_used: 11,
             gpu: Some(1),
+            prefix_cache: None,
         };
         let waveform_img = ImageData {
             data: audio.thumbnail.clone(),
@@ -7292,6 +7300,7 @@ mod tests {
             model: "ltx-2-19b-dev:fp8".to_string(),
             seed_used: 2,
             gpu: None,
+            prefix_cache: None,
         };
         let waveform_img = ImageData {
             data: vec![],
@@ -7373,6 +7382,7 @@ mod tests {
             model: "ltx-2-19b-distilled:fp8".to_string(),
             seed_used: 7,
             gpu: Some(0),
+            prefix_cache: None,
         };
         // The `img` the caller synthesizes from the video thumbnail — must be
         // ignored for the video branch.
@@ -7483,6 +7493,7 @@ mod tests {
             model: "m".to_string(),
             seed_used: 0,
             gpu: None,
+            prefix_cache: None,
         };
         let event = build_sse_complete_event(
             &resp,
@@ -7508,6 +7519,7 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let event = build_sse_complete_event(
             &resp,
@@ -7542,6 +7554,7 @@ mod tests {
             model: "flux-dev:q4".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let metadata =
             OutputMetadata::from_generate_request(&req, resp.seed_used, None, "test-version");
@@ -7609,6 +7622,7 @@ mod tests {
             model: "flux-dev:q4".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let message = build_sse_completion_message(
             &response,
@@ -7645,6 +7659,7 @@ mod tests {
             model: "flux-dev:q4".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let message = build_sse_completion_message(
             &response,
@@ -7678,6 +7693,7 @@ mod tests {
             model: "flux-dev:q4".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let img = fake_image();
         let upscaled = mold_core::UpscaleResponse {
@@ -7773,6 +7789,7 @@ mod tests {
             model: "ltx-video:fp16".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let img = fake_image();
         let upscaled = mold_core::UpscaleResponse {

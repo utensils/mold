@@ -109,6 +109,20 @@ pub(crate) struct Denoised {
     pub(crate) latent_height: usize,
     pub(crate) latent_width: usize,
     pub(crate) warnings: Vec<String>,
+    /// What the denoise did with its prompt prefix's K/V — the print's
+    /// provenance (`OutputMetadata::prefix_cache`).
+    pub(crate) prefix_cache: mold_core::PrefixCacheOutcome,
+}
+
+/// The print's prefix-cache provenance from the per-branch decisions.
+pub(crate) fn prefix_cache_outcome(
+    decisions: &[super::PrefixCacheDecision],
+) -> mold_core::PrefixCacheOutcome {
+    if decisions.contains(&super::PrefixCacheDecision::Recompute) {
+        mold_core::PrefixCacheOutcome::Recomputed
+    } else {
+        mold_core::PrefixCacheOutcome::Retained
+    }
 }
 
 /// The prefix-cache budget of the denoise about to run on `device` with
@@ -350,7 +364,14 @@ impl QwenImage21Engine {
     /// `reference_encoders_on_card` is what the loaded vision tower and VAE
     /// encoder hold on the card right now ([`Self::reference_encoders_on_card`]):
     /// they are credited back into the usable memory like every other weight
-    /// this render loads, and charged to every phase.
+    /// this render loads, and charged to every phase they stay for.
+    /// `adapter_bytes` is the installed LoRA stack
+    /// (`text_encoder_residency::lora_stack_bytes`), likewise resident.
+    ///
+    /// The decision is made AFTER the encode, so the encode phase is not
+    /// charged (`encode_complete`): it is over, and charging it again parked
+    /// the transformer for the decode on cards with room for both.
+    #[allow(clippy::too_many_arguments)]
     fn settle_text_encoder_residency(
         progress: &ProgressReporter,
         paths: &ModelPaths,
@@ -359,6 +380,7 @@ impl QwenImage21Engine {
         ordinal: usize,
         vae_dtype: DType,
         reference_encoders_on_card: u64,
+        adapter_bytes: u64,
     ) -> Result<super::text_encoder_residency::Qwen21TeDecision> {
         use super::text_encoder_residency as residency;
         let device = if !text_encoder.on_gpu || text_encoder.device.is_cpu() {
@@ -375,6 +397,7 @@ impl QwenImage21Engine {
         let resident_now = transformer_bytes
             .saturating_add(vae_bytes)
             .saturating_add(reference_encoders_on_card)
+            .saturating_add(adapter_bytes)
             .saturating_add(if text_encoder.model.is_some() {
                 text_encoder_bytes
             } else {
@@ -427,15 +450,12 @@ impl QwenImage21Engine {
             transformer_bytes,
             vae_bytes,
             text_encoder_bytes,
-            // What is actually loaded — a text-to-image request after a
-            // reference one still has the tower on the card.
-            reference_encoder_bytes: reference_encoders_on_card.max(
-                if device == residency::TeDevice::Cpu {
-                    phases.reference_vae_encoder_bytes
-                } else {
-                    phases.reference_encoder_bytes
-                },
-            ),
+            // What is actually loaded, which is also what the planner priced
+            // (the tower on the text encoder's placed device) — and a
+            // text-to-image request after a reference one still has it.
+            reference_encoder_bytes: reference_encoders_on_card,
+            adapter_bytes,
+            encode_complete: true,
             encode_workspace_bytes: phases.encode_workspace_bytes,
             denoise_workspace_bytes: phases.denoise_workspace_bytes,
             decode_peak_bytes: phases.decode_peak_bytes,
@@ -468,6 +488,9 @@ impl QwenImage21Engine {
                 text_encoder.drop_weights();
             }
         }
+        // The planner credits this engine's park back exactly as `decide` just
+        // did (`already_parked_bytes`), instead of asking for a second copy.
+        residency::record_parked_text_encoder_bytes(paths, text_encoder.parked_bytes());
         Ok(decision)
     }
 
@@ -969,6 +992,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings: cache_warning.into_iter().collect(),
+            prefix_cache: prefix_cache_outcome(&decisions),
         })
     }
 
@@ -1015,10 +1039,14 @@ impl QwenImage21Engine {
         seed: u64,
         started: Instant,
         warnings: Vec<String>,
+        prefix_cache: mold_core::PrefixCacheOutcome,
     ) -> Result<GenerateResponse> {
         let format = req.resolved_output_format();
         let alpha = alpha_output_for_request(req)?;
-        let output_metadata = build_output_metadata(req, seed, None);
+        let output_metadata = build_output_metadata(req, seed, None).map(|mut metadata| {
+            metadata.prefix_cache = Some(prefix_cache);
+            metadata
+        });
         let data = encode_image_with_alpha(
             rgba,
             format,
@@ -1046,6 +1074,7 @@ impl QwenImage21Engine {
             seed_used: seed,
             video: None,
             gpu: None,
+            prefix_cache: Some(prefix_cache),
         })
     }
 
@@ -1147,6 +1176,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings,
+            prefix_cache,
         } = Self::denoise(
             progress,
             req,
@@ -1181,7 +1211,7 @@ impl QwenImage21Engine {
             &vae_device,
             vae_dtype,
         )?;
-        Self::response(req, &image, seed, started, warnings)
+        Self::response(req, &image, seed, started, warnings, prefix_cache)
     }
 
     fn generate_eager(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
@@ -1263,6 +1293,9 @@ impl QwenImage21Engine {
             self.active_lora = wanted_lora;
         }
         let reference_encoders_on_card = Self::reference_encoders_on_card(loaded);
+        let adapter_bytes = super::text_encoder_residency::lora_stack_bytes(
+            lora_entries.iter().map(|entry| entry.path.as_path()),
+        );
         let residency = Self::settle_text_encoder_residency(
             progress,
             &self.base.paths,
@@ -1271,7 +1304,19 @@ impl QwenImage21Engine {
             self.base.gpu_ordinal,
             loaded.vae_dtype,
             reference_encoders_on_card,
+            adapter_bytes,
         )?;
+        if residency.release_reference_encoders
+            && (loaded.vision.is_some() || loaded.vae_encoder.is_some())
+        {
+            progress.info(&format!(
+                "Releasing the Qwen3-VL vision tower and VAE encoder: {}",
+                residency.reason
+            ));
+            loaded.vision = None;
+            loaded.vae_encoder = None;
+            loaded.device.synchronize()?;
+        }
         let transformer_format =
             super::text_encoder_residency::transformer_format(&self.base.paths);
         let Denoised {
@@ -1279,6 +1324,7 @@ impl QwenImage21Engine {
             latent_height,
             latent_width,
             warnings,
+            prefix_cache,
         } = Self::denoise(
             progress,
             req,
@@ -1328,7 +1374,7 @@ impl QwenImage21Engine {
                 &vae_device,
                 vae_dtype,
             )?;
-            return Self::response(req, &image, seed, started, warnings);
+            return Self::response(req, &image, seed, started, warnings, prefix_cache);
         }
         let decode = || {
             Self::decode_rgba(
@@ -1343,7 +1389,7 @@ impl QwenImage21Engine {
         };
         if residency.transformer_decode != TransformerDecode::ParkHost {
             let image = decode()?;
-            return Self::response(req, &image, seed, started, warnings);
+            return Self::response(req, &image, seed, started, warnings, prefix_cache);
         }
         progress.info(&format!(
             "Parking Qwen Image 2.1 transformer: {}",
@@ -1370,7 +1416,7 @@ impl QwenImage21Engine {
             self.base.loaded = None;
         }
         let image = outcome.result?;
-        Self::response(req, &image, seed, started, warnings)
+        Self::response(req, &image, seed, started, warnings, prefix_cache)
     }
 }
 
@@ -1457,6 +1503,8 @@ impl InferenceEngine for QwenImage21Engine {
     fn unload(&mut self) {
         self.active_lora.clear();
         self.base.unload();
+        // The park went with the engine.
+        super::text_encoder_residency::record_parked_text_encoder_bytes(&self.base.paths, 0);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1504,6 +1552,21 @@ fn device_label(device: &Device) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A print records whether its prefix was retained or recomputed; one
+    /// recomputing branch makes the whole render a recompute.
+    #[test]
+    fn the_prefix_cache_outcome_is_recorded_per_render() {
+        use super::super::PrefixCacheDecision::{Recompute, Retain};
+        assert_eq!(
+            prefix_cache_outcome(&[Retain, Retain]),
+            mold_core::PrefixCacheOutcome::Retained
+        );
+        assert_eq!(
+            prefix_cache_outcome(&[Retain, Recompute]),
+            mold_core::PrefixCacheOutcome::Recomputed
+        );
+    }
 
     fn request() -> GenerateRequest {
         serde_json::from_value(serde_json::json!({

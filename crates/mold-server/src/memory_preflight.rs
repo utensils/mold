@@ -1726,7 +1726,10 @@ pub(crate) fn qwen_image21_eager_plan(
         host.total_bytes,
         host.spendable_bytes(),
         &[],
-        1,
+        Qwen21RequestFacts {
+            branches: 1,
+            ..Qwen21RequestFacts::default()
+        },
     )
 }
 
@@ -1740,6 +1743,7 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
     available_bytes: Option<u64>,
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    adapter_bytes: u64,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     let host = crate::h3_admission::current_h3_host_memory();
     qwen_image21_eager_plan_with_host(
@@ -1749,7 +1753,56 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
         host.total_bytes,
         host.spendable_bytes(),
         &qwen_image21_reference_dimensions(req, projection),
-        qwen_image21_prefix_branches(req),
+        Qwen21RequestFacts {
+            branches: qwen_image21_prefix_branches(req),
+            adapter_bytes,
+            text_encoder_on_host: qwen_image21_text_encoder_placed_on_host(req),
+        },
+    )
+}
+
+/// What a concrete request adds to the Qwen Image 2.1 plan beyond its canvas
+/// and references. `Default` is a plain text-to-image request.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Qwen21RequestFacts {
+    /// CFG branches that carry a prefix.
+    pub(crate) branches: usize,
+    /// The LoRA stack's device bytes ([`qwen_image21_adapter_bytes`]).
+    pub(crate) adapter_bytes: u64,
+    /// `advanced.qwen = cpu`: the encoder and its vision tower run on the
+    /// host.
+    pub(crate) text_encoder_on_host: bool,
+}
+
+/// The adapter stack's device bytes, priced exactly as the engine prices the
+/// stack it installs (`QwenImage21Engine::lora_entries` →
+/// `text_encoder_residency::lora_stack_bytes`): a turbo tier's distilled
+/// adapter first, then the caller's.
+pub(crate) fn qwen_image21_adapter_bytes(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    lora_paths: &[std::path::PathBuf],
+) -> u64 {
+    let turbo = mold_core::manifest::qwen_image21_turbo_schedule(&req.model)
+        .and(paths.distilled_lora.as_deref());
+    mold_inference::qwen_image21::text_encoder_residency::lora_stack_bytes(
+        turbo
+            .into_iter()
+            .chain(lora_paths.iter().map(std::path::PathBuf::as_path)),
+    )
+}
+
+/// Whether the request authored the Qwen3-VL encoder onto the host — the
+/// engine's own `effective_device_ref` over `advanced.qwen`, so the plan and
+/// the render place it identically.
+pub(crate) fn qwen_image21_text_encoder_placed_on_host(req: &GenerateRequest) -> bool {
+    matches!(
+        mold_inference::device::effective_device_ref(
+            req.placement.as_ref(),
+            |advanced| advanced.qwen.clone(),
+            true,
+        ),
+        mold_core::types::DeviceRef::Cpu
     )
 }
 
@@ -1827,12 +1880,12 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     host_total_bytes: u64,
     host_available_bytes: u64,
     references: &[(u32, u32)],
-    branches: usize,
+    facts: Qwen21RequestFacts,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
     let available = available_bytes.filter(|bytes| *bytes > 0)?;
-    let request = qwen_image21_render_request(paths, hint, references, branches);
+    let request = qwen_image21_render_request(paths, hint, references, facts.branches.max(1));
     let cache_budget = qwen_image21_cache_budget_for(paths, &request, Some(available));
     let phases = residency::render_phases(&request, cache_budget);
     let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
@@ -1848,9 +1901,13 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
         },
         usable_free_bytes: available,
         phases,
+        adapter_bytes: facts.adapter_bytes,
+        text_encoder_on_host: facts.text_encoder_on_host,
         host_total_bytes,
         host_available_bytes,
-        already_parked_bytes: 0,
+        // The park the engine holds for this model, credited exactly as the
+        // engine's own decision credits it.
+        already_parked_bytes: residency::parked_text_encoder_bytes(paths),
         keep_te_ram: mold_inference::device::keep_te_ram_mode(),
     })
     .ok()?;
@@ -1860,7 +1917,50 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     // An encoder that would only fit on the host makes every eager request a
     // CPU encode of an 8B model; Sequential (encoder alone on the card, then
     // the transformer) is the faster plan there.
-    (plan.choice.on_gpu() && plan.decision.eager_peak_bytes <= available).then_some(plan)
+    // An AUTHORED host placement is the operator's choice, not a fallback,
+    // and the eager engine honours it the same way.
+    ((plan.choice.on_gpu() || facts.text_encoder_on_host)
+        && plan.decision.eager_peak_bytes <= available)
+        .then_some(plan)
+}
+
+/// The SEQUENTIAL Qwen Image 2.1 plan's device peak for a concrete request —
+/// the engine's own phase sizing
+/// (`text_encoder_residency::sequential_peak_bytes`), the largest phase
+/// rather than every weight beside the reference workspace. `None` for any
+/// other family, or when no card is known (the generic estimate stands).
+/// A `paths` without text-encoder files is a plan that placed the encoder
+/// on the host, which charges the card nothing for the encode.
+pub(crate) fn qwen_image21_sequential_peak(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    adapter_bytes: u64,
+) -> Option<u64> {
+    use mold_inference::qwen_image21::text_encoder_residency as residency;
+    let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
+    let available = available_bytes.filter(|bytes| *bytes > 0)?;
+    let references = qwen_image21_reference_dimensions(req, projection);
+    let request =
+        qwen_image21_render_request(paths, hint, &references, qwen_image21_prefix_branches(req));
+    let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
+    residency::sequential_peak_bytes(&residency::Qwen21SequentialInputs {
+        paths,
+        qwen3_variant: variant.as_deref(),
+        device: if cfg!(feature = "metal") {
+            residency::TeDevice::Metal
+        } else {
+            residency::TeDevice::Cuda
+        },
+        text_encoder_on_device: !paths.text_encoder_files.is_empty()
+            && !qwen_image21_text_encoder_placed_on_host(req),
+        usable_free_bytes: available,
+        request: &request,
+        adapter_bytes,
+    })
+    .ok()
 }
 
 pub(crate) fn select_server_load_strategy_for_budget(
@@ -2186,6 +2286,40 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     gemma_competes: bool,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> GenerationMemoryBudget {
+    let lora_paths = req
+        .caller_lora_stack()
+        .into_iter()
+        .map(|lora| std::path::PathBuf::from(lora.path))
+        .collect::<Vec<_>>();
+    estimate_generation_memory_for_request_with_loras(
+        req,
+        paths,
+        hint,
+        offload_policy,
+        available_memory_bytes,
+        request_has_lora,
+        gemma_competes,
+        projection,
+        &lora_paths,
+    )
+}
+
+/// [`estimate_generation_memory_for_request_with_projection`] with the
+/// adapter stack named explicitly — the planner's `effective_loras`, because a
+/// durable job's request is the SCRUBBED copy, which carries no `loras`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_generation_memory_for_request_with_loras(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    offload_policy: GenerationOffloadPolicy,
+    available_memory_bytes: Option<u64>,
+    request_has_lora: bool,
+    gemma_competes: bool,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    lora_paths: &[std::path::PathBuf],
+) -> GenerationMemoryBudget {
+    let qwen21_adapter_bytes = qwen_image21_adapter_bytes(req, paths, lora_paths);
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
@@ -2284,8 +2418,14 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // the workspace inside that decision is the whole render's, so it replaces
     // the generic `peak + activation` rather than adding to it. `None` is a
     // Sequential plan (or another family), which keeps the generic estimate.
-    let qwen21_plan =
-        qwen_image21_eager_plan_for_request(paths, hint, available_memory_bytes, req, projection);
+    let qwen21_plan = qwen_image21_eager_plan_for_request(
+        paths,
+        hint,
+        available_memory_bytes,
+        req,
+        projection,
+        qwen21_adapter_bytes,
+    );
     // Weight bytes the wan arm below discounted because parking can free them.
     // Kept so the plan can re-add them and ask the engine's own question — will
     // this render park? — rather than inferring it from the discounted peak.
@@ -2351,8 +2491,22 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 hint,
                 &qwen_image21_reference_dimensions(req, projection),
             ));
+            let qwen21_sequential = if qwen21_plan.is_none() {
+                qwen_image21_sequential_peak(
+                    paths,
+                    hint,
+                    available_memory_bytes,
+                    req,
+                    projection,
+                    qwen21_adapter_bytes,
+                )
+            } else {
+                None
+            };
             let peak = if let Some(plan) = &qwen21_plan {
                 plan.decision.eager_peak_bytes
+            } else if let Some(sequential) = qwen21_sequential {
+                sequential
             } else if wan && offload_policy.metal {
                 // Wan's sequential Metal engine drops its text encoder before
                 // it loads the transformer and VAE. Price those phases
@@ -2677,6 +2831,11 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     // The two forwards are also sequential, so CFG is a bounded additive term
     // rather than a multiplier — see `crate::wan_admission`.
     let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
+    // Qwen Image 2.1 runs its CFG branches one after another at batch 1
+    // (batched CFG measured slower), and its family estimate already carries
+    // both branches' prefix term and the hint's batch — so neither multiplier
+    // applies to it; the reference arm below prices each branch's cache.
+    let qwen21 = hint.is_some_and(|h| h.family == ActivationFamily::QwenImage21Dit);
     let cfg_factor = if !wan && cfg_active(req.guidance) && req.negative_prompt.is_some() {
         2
     } else {
@@ -2736,7 +2895,11 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         activation_memory_for_estimate(hint, qwen_quantized)
     };
 
-    let mut activation = base.saturating_mul(batch).saturating_mul(cfg_factor);
+    let mut activation = if qwen21 {
+        base
+    } else {
+        base.saturating_mul(batch).saturating_mul(cfg_factor)
+    };
 
     if !wan && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
         let request_images = req.edit_images.as_ref().filter(|images| !images.is_empty());
@@ -2820,9 +2983,9 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             let cache =
                 qwen_image21_prefix_cache_bytes(shape, branches, dtype, qwen21_cache_budget);
             let workspace = qwen_image21_reference_workspace_bytes(base, shape, hint.batch, dtype);
+            // The workspace already carries the hint's batch, and the CFG
+            // branches share it one after another; only their caches add up.
             activation = workspace
-                .saturating_mul(batch)
-                .saturating_mul(cfg_factor)
                 .saturating_add(cache)
                 .max(qwen_image21_encode_phase_bytes(shape, dtype));
         }
@@ -2882,9 +3045,13 @@ fn qwen_image21_reference_dimensions(
             })
             .collect();
     }
+    // The projection stores at most `PROJECTED_EDIT_DIMENSION_SLOTS` sizes but
+    // counts every reference; the rest are priced at the reference area every
+    // reference is resized to, so a queued job prices exactly as many
+    // references as its hydrated request does.
     projection
         .map(|projection| {
-            projection
+            let mut dimensions = projection
                 .edit_images
                 .iter()
                 .map(|dimensions| {
@@ -2894,7 +3061,13 @@ fn qwen_image21_reference_dimensions(
                         ProjectedImageDimensions::UnreadableHeader => FALLBACK,
                     }
                 })
-                .collect()
+                .take(projection.edit_image_count as usize)
+                .collect::<Vec<_>>();
+            dimensions.resize(
+                (projection.edit_image_count as usize).max(dimensions.len()),
+                FALLBACK,
+            );
+            dimensions
         })
         .unwrap_or_default()
 }
@@ -5615,13 +5788,13 @@ mod qwen_image21_reference_memory_tests {
             base, shape, hint.batch, dtype,
         );
         let reference_pixels = 1024 * 1024 * 4;
-        assert_eq!(text_only, base * 2);
+        assert_eq!(text_only, base);
         // The encode phase (reference encoders and their working set) is over
         // before the denoise allocates, so the charge is the larger of the
         // two, never their sum.
         assert_eq!(
             with_one,
-            (workspace * 2 + cache).max(qwen_image21_encode_phase_bytes(shape, dtype))
+            (workspace + cache).max(qwen_image21_encode_phase_bytes(shape, dtype))
                 + reference_pixels
         );
         assert!(with_one > text_only);
@@ -5732,6 +5905,169 @@ mod qwen_image21_residency_tests {
         path
     }
 
+    /// A queued job is priced from its stored projection, which keeps only
+    /// `PROJECTED_EDIT_DIMENSION_SLOTS` sizes. Qwen Image 2.1 takes ten
+    /// references, so the missing sizes are padded from `edit_image_count`
+    /// with the reference-area fallback every reference is resized to: the
+    /// queued and the hydrated request price the SAME ten references.
+    #[test]
+    fn a_queued_ten_reference_job_prices_every_reference_like_the_hydrated_one() {
+        let mut hydrated = qwen21_request(10);
+        hydrated.model = "qwen-image-2.1:bf16".into();
+        let mut sanitized = hydrated.clone();
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            edit_image_count: 10,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader;
+                crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+            ],
+            ..Default::default()
+        };
+        let queued = qwen_image21_reference_dimensions(&sanitized, Some(&projection));
+        assert_eq!(queued.len(), 10);
+        assert_eq!(queued, qwen_image21_reference_dimensions(&hydrated, None));
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let price = |req: &GenerateRequest, projection| {
+            estimate_generation_memory_for_request_with_projection(
+                req,
+                &paths,
+                hint(1024, 1024),
+                cuda_policy(),
+                Some(44 * GIB),
+                false,
+                false,
+                projection,
+            )
+            .peak_memory_bytes
+        };
+        assert_eq!(price(&sanitized, Some(&projection)), price(&hydrated, None));
+    }
+
+    fn qwen21_request(references: usize) -> GenerateRequest {
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "put the cat in the jacket",
+            "model": "qwen-image-2.1:int8-conv",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        if references > 0 {
+            // Unreadable headers price the reference area, 1024x1024 each.
+            req.edit_images = Some(vec![vec![0u8; 16]; references]);
+        }
+        req
+    }
+
+    fn cuda_policy() -> GenerationOffloadPolicy {
+        GenerationOffloadPolicy::new(
+            false,
+            mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+                mold_core::GpuBackend::Cuda,
+                None,
+                None,
+            ),
+            false,
+        )
+    }
+
+    /// The sequential engine runs its phases one after another — the Qwen3-VL
+    /// encode (encoder, vision tower and their working set), the VAE encode,
+    /// the denoise with the transformer alone, the decode with the VAE alone —
+    /// and drops each phase's weights before the next loads. Its peak is the
+    /// LARGEST phase. Pricing it as the generic `max(weights) + activation`
+    /// charged the 17.6 GB encoder shards beside the reference denoise
+    /// workspace, so int8-conv with one reference on a 24 GB card (26.17 GB
+    /// usable) asked for 27.8 GB and waited in the queue for memory it could
+    /// never get.
+    #[test]
+    fn a_24gb_card_renders_a_reference_request_sequentially_by_its_largest_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = qwen21_paths(dir.path(), 7_256_783_064);
+        paths.transformer = int8_convrot_transformer(dir.path());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&paths.transformer)
+            .unwrap()
+            .set_len(7_256_783_064)
+            .unwrap();
+        let usable = 26_170_000_000;
+        for (label, transformer) in [
+            ("int8-conv", paths.transformer.clone()),
+            (
+                "bf16",
+                sized(dir.path(), "bf16.safetensors", 14_230_280_616),
+            ),
+        ] {
+            let paths = ModelPaths {
+                transformer,
+                ..paths.clone()
+            };
+            let budget = estimate_generation_memory_for_request_with_projection(
+                &qwen21_request(1),
+                &paths,
+                hint(1024, 1024),
+                cuda_policy(),
+                Some(usable),
+                false,
+                false,
+                None,
+            );
+            assert_eq!(
+                budget.load_strategy,
+                mold_inference::LoadStrategy::Sequential,
+                "{label}"
+            );
+            assert_eq!(
+                budget.fits_available_memory,
+                Some(true),
+                "{label}: sequential peak {} over {usable}",
+                budget.peak_memory_bytes
+            );
+            // Every phase is still charged: the largest one alone is more
+            // than the transformer's weights.
+            assert!(budget.peak_memory_bytes > 7_256_783_064, "{label}");
+        }
+        // The decode is a phase too: at 2K the VAE decode alone (~28 GB under
+        // cuDNN) exceeds a 24 GB card, so even the smallest q4 transformer is
+        // refused here rather than admitted, denoised for minutes, and run out
+        // of memory in the decode.
+        let q4 = ModelPaths {
+            transformer: sized(dir.path(), "q4.gguf", 4_197_494_816),
+            ..paths.clone()
+        };
+        for (width, height) in [(2048, 2048), (2752, 1536)] {
+            let mut req = qwen21_request(0);
+            req.width = width;
+            req.height = height;
+            let budget = estimate_generation_memory_for_request_with_projection(
+                &req,
+                &q4,
+                hint(width, height),
+                cuda_policy(),
+                Some(usable),
+                false,
+                false,
+                None,
+            );
+            let conv = mold_inference::conv_policy::resolve_for(
+                mold_inference::conv_policy::policy_for_family("qwen-image21"),
+            );
+            let decode =
+                mold_inference::device::qwen_image21_vae_decode_peak_bytes(width, height, conv, 2);
+            assert!(budget.peak_memory_bytes >= decode, "{width}x{height}");
+            assert_eq!(
+                budget.fits_available_memory,
+                Some(false),
+                "{width}x{height}: peak {}",
+                budget.peak_memory_bytes
+            );
+        }
+    }
+
     /// The int8-conv tier's measured W8A8 workspace reaches the server's
     /// denoise charge, read from the checkpoint header; a BF16 (or
     /// unreadable) transformer and every other family charge nothing extra.
@@ -5791,7 +6127,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("a 24 GB card plans the int8 tier eager");
         assert!(matches!(
@@ -5823,7 +6162,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("a 48 GB card plans bf16 eager");
         assert_eq!(
@@ -5899,7 +6241,10 @@ mod qwen_image21_residency_tests {
             256 * GIB,
             200 * GIB,
             &[(1024, 1024)],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("one reference plans eager");
         // The 1024² decode is ~7 GB under cuDNN (the CUDA build); a build that
@@ -5920,6 +6265,80 @@ mod qwen_image21_residency_tests {
         assert!(plan.decision.eager_peak_bytes <= 44 * GIB);
     }
 
+    /// The plan charges what the engine will hold: the request's LoRA stack
+    /// (and a turbo tier's distilled adapter) in every phase, and nothing on
+    /// the card for an encoder the request placed on the host.
+    #[test]
+    fn the_eager_plan_charges_adapters_and_honours_a_host_placed_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let plan = |facts: Qwen21RequestFacts| {
+            qwen_image21_eager_plan_with_host(
+                &paths,
+                hint(1024, 1024),
+                Some(64 * GIB),
+                256 * GIB,
+                200 * GIB,
+                &[],
+                facts,
+            )
+            .expect("plans eager")
+        };
+        let plain = plan(Qwen21RequestFacts {
+            branches: 1,
+            ..Default::default()
+        });
+        let adapted = plan(Qwen21RequestFacts {
+            branches: 1,
+            adapter_bytes: GIB,
+            ..Default::default()
+        });
+        assert_eq!(
+            adapted.decision.eager_peak_bytes,
+            plain.decision.eager_peak_bytes + GIB
+        );
+        let host = plan(Qwen21RequestFacts {
+            branches: 1,
+            text_encoder_on_host: true,
+            ..Default::default()
+        });
+        assert!(!host.choice.on_gpu());
+        assert!(host.decision.eager_peak_bytes < plain.decision.eager_peak_bytes);
+
+        // The stack is priced from the files: the caller's adapters, and a
+        // turbo tier's distilled one first.
+        let adapter = sized(dir.path(), "style.safetensors", 300_000_000);
+        let distilled = sized(dir.path(), "turbo.safetensors", 1_400_000_000);
+        let turbo_paths = ModelPaths {
+            distilled_lora: Some(distilled),
+            ..paths.clone()
+        };
+        let mut req = qwen21_request(0);
+        req.model = "qwen-image-2.1-turbo:bf16".into();
+        assert_eq!(
+            qwen_image21_adapter_bytes(&req, &turbo_paths, std::slice::from_ref(&adapter)),
+            1_700_000_000
+        );
+        req.model = "qwen-image-2.1:bf16".into();
+        assert_eq!(
+            qwen_image21_adapter_bytes(&req, &turbo_paths, &[adapter]),
+            300_000_000
+        );
+        // `advanced.qwen = cpu` is the engine's own placement reading.
+        let mut placed: GenerateRequest = qwen21_request(0);
+        placed.placement = Some(
+            serde_json::from_value(serde_json::json!({
+                "text_encoders": { "kind": "auto" },
+                "advanced": { "qwen": { "kind": "cpu" } }
+            }))
+            .unwrap(),
+        );
+        assert!(qwen_image21_text_encoder_placed_on_host(&placed));
+        assert!(!qwen_image21_text_encoder_placed_on_host(&qwen21_request(
+            0
+        )));
+    }
+
     /// References enter the eager plan through the engine's own phase sizing
     /// (`text_encoder_residency::render_phases`): they never lower the peak,
     /// and a 24 GB card cannot plan ten references eager at all.
@@ -5934,7 +6353,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[],
-            1,
+            Qwen21RequestFacts {
+                branches: 1,
+                ..Default::default()
+            },
         )
         .expect("text-to-image plans eager");
         let extra = mold_inference::device::qwen_image21_reference_extra_bytes(
@@ -5956,7 +6378,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[(1536, 1024)],
-            2,
+            Qwen21RequestFacts {
+                branches: 2,
+                ..Default::default()
+            },
         )
         .filter(|plan| plan.decision.residency == plain.decision.residency)
         {
@@ -5969,7 +6394,10 @@ mod qwen_image21_residency_tests {
             64 * GIB,
             48 * GIB,
             &[(1536, 1024); 10],
-            2,
+            Qwen21RequestFacts {
+                branches: 2,
+                ..Default::default()
+            },
         )
         .is_none());
         assert_eq!(

@@ -244,6 +244,7 @@ fn generate_loaded(
         generation_time_ms: started.elapsed().as_millis() as u64,
         model: req.model.clone(),
         seed_used: SEED,
+        prefix_cache: None,
     })
 }
 

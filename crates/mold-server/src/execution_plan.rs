@@ -1832,6 +1832,10 @@ pub enum ExecutionPlanError {
         /// The ceiling THAT rejection's peak was compared against, so a
         /// scheduler-side refusal prints the pair the decision used.
         admissible_ceiling_bytes: Option<u64>,
+        /// The usable figure that ceiling was derived from, so the scheduler
+        /// can scale the SAME ceiling rule to the card's whole capacity when
+        /// it asks whether the request could EVER be admitted.
+        usable_bytes: Option<u64>,
         /// That rejection's remediation, so a refusal the scheduler composes
         /// itself still carries the planner's reason — for FLUX.2, why the
         /// transformer could not stream.
@@ -2475,6 +2479,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
             admissible_ceiling_bytes: None,
+            usable_bytes: None,
             advice: None,
             eligible_device_ids: Vec::new(),
         };
@@ -2516,6 +2521,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         reason,
         required_peak_bytes: cheapest.map_or(0, |rejection| rejection.predicted_peak_bytes),
         admissible_ceiling_bytes: cheapest.map(|rejection| rejection.admissible_ceiling_bytes),
+        usable_bytes: cheapest.map(|rejection| rejection.available_bytes),
         advice: cheapest.and_then(|rejection| rejection.advice.clone()),
         eligible_device_ids: rejections
             .iter()
@@ -3492,6 +3498,11 @@ fn build_plan(
         context.family,
     ));
     let request_has_lora = !context.effective_loras.is_empty();
+    let lora_paths = context
+        .effective_loras
+        .iter()
+        .map(|lora| lora.path.clone())
+        .collect::<Vec<_>>();
     let wan_block_offload_policy = mold_inference::wan::block_offload::AdmissionPolicy::from_values(
         device.backend,
         context
@@ -3538,21 +3549,21 @@ fn build_plan(
         .flatten();
     let total_peak_budget =
         device_budget.saturating_add(cuda_peak_baseline.map_or(0, |baseline| baseline.bytes));
-    let initial_memory =
-        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
-            context.request,
-            context.paths,
-            hint,
-            crate::memory_preflight::GenerationOffloadPolicy::new(
-                context.offload_requested,
-                wan_block_offload_policy,
-                device.backend == GpuBackend::Metal,
-            ),
-            Some(total_peak_budget),
-            request_has_lora,
-            gemma_competes,
-            context.projection,
-        );
+    let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
+        context.request,
+        context.paths,
+        hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            context.offload_requested,
+            wan_block_offload_policy,
+            device.backend == GpuBackend::Metal,
+        ),
+        Some(total_peak_budget),
+        request_has_lora,
+        gemma_competes,
+        context.projection,
+        &lora_paths,
+    );
     // A process-wide offload preference is advisory for concrete formats
     // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
     // The family capability gate above remains a typed error; this path-level
@@ -3615,21 +3626,21 @@ fn build_plan(
         })
         .all(|(_, cpu)| *cpu);
     let gpu_paths = gpu_resident_paths(context.paths, &placements);
-    let mut memory =
-        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
-            context.request,
-            &gpu_paths,
-            hint,
-            crate::memory_preflight::GenerationOffloadPolicy::new(
-                initial_memory.block_offload && !transformer_on_cpu,
-                wan_block_offload_policy,
-                device.backend == GpuBackend::Metal,
-            ),
-            Some(total_peak_budget),
-            request_has_lora,
-            gemma_competes,
-            context.projection,
-        );
+    let mut memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
+        context.request,
+        &gpu_paths,
+        hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            initial_memory.block_offload && !transformer_on_cpu,
+            wan_block_offload_policy,
+            device.backend == GpuBackend::Metal,
+        ),
+        Some(total_peak_budget),
+        request_has_lora,
+        gemma_competes,
+        context.projection,
+        &lora_paths,
+    );
     if memory.fits_available_memory != Some(true)
         && context.capabilities.supports_vae_cpu
         && context
@@ -3641,7 +3652,7 @@ fn build_plan(
     {
         placements.insert(ComponentRole::Vae, true);
         let gpu_paths = gpu_resident_paths(context.paths, &placements);
-        memory = crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
+        memory = crate::memory_preflight::estimate_generation_memory_for_request_with_loras(
             context.request,
             &gpu_paths,
             hint,
@@ -3654,6 +3665,7 @@ fn build_plan(
             request_has_lora,
             gemma_competes,
             context.projection,
+            &lora_paths,
         );
     }
     if memory.fits_available_memory != Some(true) {
@@ -3827,7 +3839,15 @@ fn build_plan(
                 hint,
                 Some(device_budget),
                 context.request,
-                None,
+                // The scrubbed durable request carries neither its reference
+                // bytes nor its adapters: both come from the plan's own
+                // projection and frozen stack, as the memory estimate reads them.
+                context.projection,
+                crate::memory_preflight::qwen_image21_adapter_bytes(
+                    context.request,
+                    context.paths,
+                    &lora_paths,
+                ),
             )
         })
         .flatten();
@@ -5870,9 +5890,12 @@ fn load_plan_independent_components(
 /// render's cost, not the engine that is resident. Rebuilding for either
 /// would reload the whole transformer to arrive at a state the engine reaches
 /// in place. What the engine IS (checkpoint content, dtype, quantization,
-/// encoder variant, semantic config, authored placement) still moves both
-/// identities, and a load-strategy or block-offload change is still caught by
-/// the separate planned-mode comparison.
+/// encoder variant, semantic config, authored AND resolved component
+/// placement) still moves both identities, and a load-strategy or
+/// block-offload change is still caught by the separate planned-mode
+/// comparison. The adapter stack stays frozen on the plan and its device
+/// bytes are charged by the Qwen Image 2.1 memory estimate
+/// (`text_encoder_residency::lora_stack_bytes`).
 fn engine_settles_per_request(family: &str) -> bool {
     family == "qwen-image21"
 }
@@ -5887,8 +5910,10 @@ fn engine_settles_per_request(family: &str) -> bool {
 /// because an eager engine — which retains no residency the cache could credit
 /// — is compared by the EXACT identity: leaving either in it rebuilt the engine
 /// on every LoRA toggle (UAT, 2026-09-27). The stack itself stays frozen on the
-/// plan (`effective_loras`), is re-validated at dispatch, and is still charged
-/// by the memory estimate. Every other family keeps both in the exact identity.
+/// plan (`effective_loras`), is re-validated at dispatch, and its adapter
+/// bytes are charged in every phase of the residency budget. Each component's
+/// resolved placement stays in both identities. Every other family keeps both
+/// in the exact identity.
 fn engine_fingerprints(
     model: &str,
     device: &DeviceFact,
@@ -5901,7 +5926,26 @@ fn engine_fingerprints(
     let load_plan_independent = load_plan_independent_components(components);
     if engine_settles_per_request(&engine_config.family) {
         let not_an_adapter = |role: &ComponentRole| !matches!(role, ComponentRole::Lora(_));
-        let mut engine = load_plan_independent;
+        // The per-request load plan (strategy, predicted bytes) is stripped,
+        // but each component's resolved PLACEMENT stays: an engine built with
+        // a host-placed encoder or VAE computes in different arithmetic than
+        // one with it on the card, so serving another placement's plan from
+        // it would make the pixels depend on which engine happened to be warm.
+        let mut engine = components
+            .iter()
+            .filter(|(role, _)| not_an_adapter(role))
+            .map(|(role, plan)| {
+                (
+                    role.clone(),
+                    ComponentExecutionPlan {
+                        load_strategy: ComponentLoadStrategy::Resident,
+                        predicted_vram_bytes: 0,
+                        predicted_host_bytes: 0,
+                        ..plan.clone()
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         engine.retain(|role, _| not_an_adapter(role));
         // The authored constraints are derived from the same artifact set, so
         // an adapter adds a `Lora` role there too.
@@ -10105,6 +10149,104 @@ mod tests {
     /// must be blind to both; adding, removing or rescaling an adapter must
     /// not tear down and reload 28 GB of weights. Every other family keeps
     /// rebuilding on either.
+    /// The engine identity of a Qwen Image 2.1 plan ignores what the engine
+    /// settles per request (component load strategies, predicted bytes,
+    /// adapters) but NOT where a component was placed: an engine built with a
+    /// host-placed text encoder (or VAE) encodes (or decodes) in different
+    /// arithmetic than one with it on the card, so reusing it would make the
+    /// pixels depend on which engine happened to be warm.
+    #[test]
+    fn a_qwen_image21_engine_identity_keeps_each_components_placement() {
+        let device = DeviceFact {
+            total_vram_bytes: None,
+            cuda_peak_baseline: None,
+            id: "cuda:stable-device".into(),
+            ordinal: 0,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 9)),
+            available_vram_bytes: 46 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([
+                (
+                    ComponentRole::Transformer,
+                    ResolvedComponentConstraint::Auto,
+                ),
+                (
+                    ComponentRole::QwenShard(0),
+                    ResolvedComponentConstraint::Auto,
+                ),
+            ]),
+        };
+        let component = |role: ComponentRole,
+                         placement: ResolvedComponentPlacement,
+                         load_strategy: ComponentLoadStrategy,
+                         vram: u64| ComponentExecutionPlan {
+            role: role.clone(),
+            artifact_path: PathBuf::from(format!("/models/{role:?}")),
+            content_fingerprint: ContentFingerprint(format!("{role:?}")),
+            dtype: Some(PlannedDType::Bf16),
+            quantization: None,
+            placement,
+            load_strategy,
+            predicted_vram_bytes: vram,
+            predicted_host_bytes: 0,
+        };
+        let on_card = ResolvedComponentPlacement::Device("cuda:stable-device".into());
+        let plan = |text_placement: ResolvedComponentPlacement,
+                    text_strategy: ComponentLoadStrategy,
+                    text_vram: u64| {
+            BTreeMap::from([
+                (
+                    ComponentRole::Transformer,
+                    component(
+                        ComponentRole::Transformer,
+                        on_card.clone(),
+                        ComponentLoadStrategy::Resident,
+                        15 * GIB,
+                    ),
+                ),
+                (
+                    ComponentRole::QwenShard(0),
+                    component(
+                        ComponentRole::QwenShard(0),
+                        text_placement,
+                        text_strategy,
+                        text_vram,
+                    ),
+                ),
+            ])
+        };
+        let config = frozen_config_for_family("qwen-image21");
+        let identity = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>| {
+            engine_fingerprints(
+                "qwen-image-2.1:bf16",
+                &device,
+                &effective,
+                components,
+                &config,
+                &[],
+                false,
+            )
+        };
+        let resident = identity(&plan(
+            on_card.clone(),
+            ComponentLoadStrategy::Resident,
+            15 * GIB,
+        ));
+        // A per-request park of the SAME on-card encoder is the same engine.
+        let parked = identity(&plan(on_card.clone(), ComponentLoadStrategy::ParkedCpu, 0));
+        assert_eq!(resident, parked);
+        // A host-placed encoder is a different engine, in both identities.
+        let host = identity(&plan(
+            ResolvedComponentPlacement::Cpu,
+            ComponentLoadStrategy::Resident,
+            0,
+        ));
+        assert_ne!(resident.0, host.0);
+        assert_ne!(resident.1, host.1);
+    }
+
     #[test]
     fn a_qwen_image21_warm_engine_serves_any_adapter_stack() {
         let device = DeviceFact {

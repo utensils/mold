@@ -63,9 +63,19 @@ pub struct Qwen21TeBudget {
     /// Device bytes of the loaded text encoder ([`text_encoder_device_bytes`]).
     pub text_encoder_bytes: u64,
     /// Device bytes of the reference encoders (vision tower and VAE encoder)
-    /// an eager engine keeps loaded after a reference request — resident
-    /// through every phase ([`Qwen21RenderPhases::reference_encoder_bytes`]).
+    /// an eager engine keeps loaded after a reference request
+    /// ([`Qwen21RenderPhases::reference_encoder_bytes`]). They are needed for
+    /// the encode only, so [`decide`] releases them before it parks the text
+    /// encoder or the transformer.
     pub reference_encoder_bytes: u64,
+    /// Device bytes of the render's LoRA stack in its bypass slots
+    /// ([`lora_stack_bytes`]) — resident beside the transformer through every
+    /// phase.
+    pub adapter_bytes: u64,
+    /// The encode has already run (the engine's post-encode decision): its
+    /// phase is over and is not charged again. The planner, which prices the
+    /// whole render, leaves it false.
+    pub encode_complete: bool,
     /// Encode-phase working set above the resident weights (vision attention,
     /// the multimodal prompt's rows and scores). Gone before the denoise.
     pub encode_workspace_bytes: u64,
@@ -116,6 +126,10 @@ pub struct Qwen21TeDecision {
     pub residency: Qwen21TeResidency,
     pub transformer_decode: TransformerDecode,
     pub reason: &'static str,
+    /// Release the loaded vision tower and VAE encoder after the encode. They
+    /// are the cheapest thing on the card to give back (a reload from page
+    /// cache next reference request), so they go before the text encoder does.
+    pub release_reference_encoders: bool,
     /// Device bytes the eager render needs under this decision — the largest
     /// of its phases (encode, denoise, decode) with the allocator margin.
     /// This is what `memory_preflight` prices eager at.
@@ -139,31 +153,46 @@ impl Qwen21TeBudget {
         }
     }
 
-    /// Prompt encode: transformer, VAE, the encoder and the reference
-    /// encoders all on the card, plus the encode working set.
+    fn references(&self, kept: bool) -> u64 {
+        if kept {
+            self.reference_encoder_bytes
+        } else {
+            0
+        }
+    }
+
+    /// Prompt encode: transformer, VAE, the encoder, the adapters and the
+    /// reference encoders all on the card, plus the encode working set.
+    /// Nothing once the encode has run.
     fn encode_phase(&self) -> u64 {
+        if self.encode_complete {
+            return 0;
+        }
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
             .saturating_add(self.text_encoder_bytes)
             .saturating_add(self.reference_encoder_bytes)
+            .saturating_add(self.adapter_bytes)
             .saturating_add(self.encode_workspace_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
-    fn denoise_phase(&self, te: bool) -> u64 {
+    fn denoise_phase(&self, te: bool, references: bool) -> u64 {
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
             .saturating_add(self.te(te))
-            .saturating_add(self.reference_encoder_bytes)
+            .saturating_add(self.references(references))
+            .saturating_add(self.adapter_bytes)
             .saturating_add(self.denoise_workspace_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
-    fn decode_phase(&self, te: bool, transformer: bool) -> u64 {
+    fn decode_phase(&self, te: bool, transformer: bool, references: bool) -> u64 {
         self.transformer(transformer)
             .saturating_add(self.vae_bytes)
             .saturating_add(self.te(te))
-            .saturating_add(self.reference_encoder_bytes)
+            .saturating_add(self.references(references))
+            .saturating_add(if transformer { self.adapter_bytes } else { 0 })
             .saturating_add(self.decode_peak_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
@@ -172,11 +201,12 @@ impl Qwen21TeBudget {
     /// another — the encode's working set is freed before the denoise
     /// allocates its own, and the denoise's before the decode — so the
     /// render needs the LARGEST phase, never their sum; what stays resident
-    /// across phases (weights, a resident encoder) is counted in each.
-    fn peak(&self, te: bool, transformer_through_decode: bool) -> u64 {
+    /// across phases (weights, adapters, a resident encoder) is counted in
+    /// each.
+    fn peak(&self, te: bool, transformer_through_decode: bool, references: bool) -> u64 {
         self.encode_phase()
-            .max(self.denoise_phase(te))
-            .max(self.decode_phase(te, transformer_through_decode))
+            .max(self.denoise_phase(te, references))
+            .max(self.decode_phase(te, transformer_through_decode, references))
     }
 
     fn host_floor(&self) -> u64 {
@@ -223,14 +253,15 @@ impl Qwen21TeBudget {
 }
 
 /// The one Qwen Image 2.1 residency decision for an eager engine: where the
-/// text encoder lives between encodes, and where the transformer lives while
-/// the VAE decodes.
+/// text encoder lives between encodes, where the transformer lives while the
+/// VAE decodes, and whether the loaded reference encoders stay.
 ///
-/// 1. Everything resident when `transformer + VAE + TE + max(activation,
-///    decode)` (and the encode phase) fits.
-/// 2. Otherwise the encoder leaves the card after encoding — parked in host
-///    RAM when the host has room, dropped otherwise.
-/// 3. If the decode still does not fit beside the transformer, the
+/// 1. Everything resident when every phase fits.
+/// 2. Otherwise the reference encoders (vision tower, VAE encoder) are
+///    released after the encode — the cheapest bytes to give back.
+/// 3. Otherwise the encoder leaves the card after encoding too — parked in
+///    host RAM when the host has room, dropped otherwise.
+/// 4. If the decode still does not fit beside the transformer, the
 ///    transformer is parked to host RAM for the decode and restored after
 ///    (dropped, and reloaded next request, if the host cannot take it).
 pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
@@ -245,11 +276,13 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
     } else {
         budget
     };
+    let has_references = budget.reference_encoder_bytes > 0;
     let resident = |reason| Qwen21TeDecision {
         residency: Qwen21TeResidency::Resident,
         transformer_decode: TransformerDecode::Resident,
         reason,
-        eager_peak_bytes: budget.peak(true, true),
+        release_reference_encoders: false,
+        eager_peak_bytes: budget.peak(true, true, true),
     };
     if budget.device == TeDevice::Metal {
         return resident("unified memory: a park copies nothing");
@@ -257,12 +290,21 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
     if budget.usable_free_bytes == 0 {
         return resident("the card could not be measured");
     }
-    if budget.peak(true, true) <= budget.usable_free_bytes {
+    if budget.peak(true, true, true) <= budget.usable_free_bytes {
         return resident(if budget.device == TeDevice::Cpu {
             "the encoder is placed on the host; weights and workspace fit the card"
         } else {
             "weights, encoder and workspace fit the card"
         });
+    }
+    if has_references && budget.peak(true, true, false) <= budget.usable_free_bytes {
+        return Qwen21TeDecision {
+            residency: Qwen21TeResidency::Resident,
+            transformer_decode: TransformerDecode::Resident,
+            reason: "the reference encoders leave the card after encoding; the encoder stays",
+            release_reference_encoders: true,
+            eager_peak_bytes: budget.peak(true, true, false),
+        };
     }
     if budget.device == TeDevice::Cpu {
         let transformer_parks = budget.host_can_park_transformer(false);
@@ -275,7 +317,8 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
             },
             reason:
                 "the encoder is on the host; the transformer leaves the card for the VAE decode",
-            eager_peak_bytes: budget.peak(true, false),
+            release_reference_encoders: has_references,
+            eager_peak_bytes: budget.peak(true, false, false),
         };
     }
     let te_parks = budget.host_can_park_te();
@@ -284,7 +327,7 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
     } else {
         Qwen21TeResidency::Drop
     };
-    if budget.peak(false, true) <= budget.usable_free_bytes {
+    if budget.peak(false, true, false) <= budget.usable_free_bytes {
         return Qwen21TeDecision {
             residency,
             transformer_decode: TransformerDecode::Resident,
@@ -295,7 +338,8 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
             } else {
                 "the encoder leaves the card for denoise; the host has no room to park it"
             },
-            eager_peak_bytes: budget.peak(false, true),
+            release_reference_encoders: has_references,
+            eager_peak_bytes: budget.peak(false, true, false),
         };
     }
     let transformer_parks = budget.host_can_park_transformer(te_parks);
@@ -311,7 +355,8 @@ pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
         } else {
             "the encoder leaves the card, and the transformer is released for the VAE decode"
         },
-        eager_peak_bytes: budget.peak(false, false),
+        release_reference_encoders: has_references,
+        eager_peak_bytes: budget.peak(false, false, false),
     }
 }
 
@@ -326,6 +371,12 @@ pub struct Qwen21PlanInputs<'a> {
     pub usable_free_bytes: u64,
     /// The request's phase working sets ([`render_phases`]).
     pub phases: Qwen21RenderPhases,
+    /// The request's LoRA stack in device bytes ([`lora_stack_bytes`]).
+    pub adapter_bytes: u64,
+    /// The text encoder is PLACED on the host (`advanced.qwen = cpu`, the
+    /// engine's `effective_device_ref`): it and the vision tower that runs
+    /// on its device charge the card nothing.
+    pub text_encoder_on_host: bool,
     pub host_total_bytes: u64,
     pub host_available_bytes: u64,
     pub already_parked_bytes: u64,
@@ -389,7 +440,12 @@ fn gguf_variant_device_bytes(variant: &mold_core::manifest::Qwen3Variant) -> u64
 pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
     let transformer_bytes = transformer_device_bytes(inputs.paths);
     let vae_bytes = file_bytes(&inputs.paths.vae);
-    let (is_cuda, is_metal) = match inputs.device {
+    let placed_device = if inputs.text_encoder_on_host {
+        TeDevice::Cpu
+    } else {
+        inputs.device
+    };
+    let (is_cuda, is_metal) = match placed_device {
         TeDevice::Cuda => (true, false),
         TeDevice::Metal => (false, true),
         TeDevice::Cpu => (false, false),
@@ -406,7 +462,7 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
         Qwen3Choice::Gguf { variant, .. } => gguf_variant_device_bytes(variant),
     };
     let device = if choice.on_gpu() {
-        inputs.device
+        placed_device
     } else {
         TeDevice::Cpu
     };
@@ -416,13 +472,17 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
         transformer_bytes,
         vae_bytes,
         text_encoder_bytes,
-        // The vision tower lives on the text encoder's device: a host-placed
-        // encoder puts it on the host with it.
-        reference_encoder_bytes: if choice.on_gpu() {
-            inputs.phases.reference_encoder_bytes
-        } else {
+        // The vision tower loads on the text encoder's PLACED device, not on
+        // wherever the encoder variant then lands: an encoder that falls
+        // back to the host still leaves the tower on the card
+        // (`QwenImage21Engine::reference_encoders_on_card` charges the same).
+        reference_encoder_bytes: if placed_device == TeDevice::Cpu {
             inputs.phases.reference_vae_encoder_bytes
+        } else {
+            inputs.phases.reference_encoder_bytes
         },
+        adapter_bytes: inputs.adapter_bytes,
+        encode_complete: false,
         encode_workspace_bytes: inputs.phases.encode_workspace_bytes,
         denoise_workspace_bytes: inputs.phases.denoise_workspace_bytes,
         decode_peak_bytes: inputs.phases.decode_peak_bytes,
@@ -471,6 +531,141 @@ pub fn render_workspace_bytes(
         denoise,
         crate::device::qwen_image21_vae_decode_peak_bytes(width, height, conv, vae_dtype_bytes),
     )
+}
+
+/// Everything the SEQUENTIAL plan's peak reads.
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen21SequentialInputs<'a> {
+    pub paths: &'a mold_core::ModelPaths,
+    /// `MOLD_QWEN3_VARIANT`, as the engine reads it.
+    pub qwen3_variant: Option<&'a str>,
+    /// The card's backend.
+    pub device: TeDevice,
+    /// Whether the text encoder (and with it the vision tower) is placed on
+    /// the card; a host placement charges the card nothing for the encode.
+    pub text_encoder_on_device: bool,
+    /// Usable device bytes with nothing of this render resident.
+    pub usable_free_bytes: u64,
+    pub request: &'a Qwen21RenderRequest<'a>,
+    /// The request's LoRA stack in device bytes ([`lora_stack_bytes`]),
+    /// installed on the denoise's transformer.
+    pub adapter_bytes: u64,
+}
+
+/// The device peak of the SEQUENTIAL engine
+/// (`QwenImage21Engine::generate_sequential`), which runs its phases one after
+/// another and releases each phase's weights before the next loads:
+///
+/// 1. the Qwen3-VL encode — the encoder (the variant it picks with the whole
+///    card free), the vision tower and the encode working set;
+/// 2. the VAE encode of the references;
+/// 3. the denoise — the transformer alone, its workspace and the prefix
+///    cache it retains (planned against the transformer alone, as the
+///    engine's denoise-time sample sees it);
+/// 4. the decode — the VAE alone and its decode peak.
+///
+/// The peak is the LARGEST phase plus the allocator margin, never their sum.
+pub fn sequential_peak_bytes(inputs: &Qwen21SequentialInputs<'_>) -> anyhow::Result<u64> {
+    let request = inputs.request;
+    let transformer_bytes = transformer_device_bytes(inputs.paths);
+    let vae_bytes = file_bytes(&inputs.paths.vae);
+    let cache_budget = match inputs.device {
+        TeDevice::Cuda => {
+            prefix_cache_budget(request, Some(inputs.usable_free_bytes), transformer_bytes)
+        }
+        _ => super::PrefixCacheBudget::RequestOnly,
+    };
+    let phases = render_phases(request, cache_budget);
+    let encode = if inputs.text_encoder_on_device && inputs.device != TeDevice::Cpu {
+        let choice = choose_qwen3_vl_variant(
+            inputs.qwen3_variant,
+            inputs.device == TeDevice::Cuda,
+            inputs.device == TeDevice::Metal,
+            inputs.usable_free_bytes,
+        )?;
+        let text_encoder_bytes = if !choice.on_gpu() {
+            0
+        } else {
+            match choice {
+                Qwen3Choice::Bf16 { .. } => {
+                    text_encoder_device_bytes(&inputs.paths.text_encoder_files)
+                        .unwrap_or(mold_core::manifest::QWEN3_8B_FP16_SIZE)
+                }
+                Qwen3Choice::Gguf { variant, .. } => gguf_variant_device_bytes(variant),
+            }
+        };
+        text_encoder_bytes
+            .saturating_add(
+                phases
+                    .reference_encoder_bytes
+                    .saturating_sub(phases.reference_vae_encoder_bytes),
+            )
+            .saturating_add(phases.encode_workspace_bytes)
+    } else {
+        0
+    };
+    let vae_encode = phases.reference_vae_encoder_bytes;
+    let denoise = transformer_bytes
+        .saturating_add(inputs.adapter_bytes)
+        .saturating_add(phases.denoise_workspace_bytes);
+    let decode = vae_bytes.saturating_add(phases.decode_peak_bytes);
+    Ok(encode
+        .max(vae_encode)
+        .max(denoise)
+        .max(decode)
+        .saturating_add(ALLOCATOR_MARGIN_BYTES))
+}
+
+/// Device bytes a LoRA stack takes in its bypass slots, charged beside the
+/// transformer in every phase: the adapter files' sizes. The bypass registry
+/// holds each adapter's `down`/`up` pair in the working dtype, which a BF16
+/// adapter file stores at the same width (an F32 file is priced at twice its
+/// resident size — the safe direction). The engine and every planner price
+/// the same paths through this one function: a turbo tier's distilled
+/// adapter first, then the caller's stack.
+pub fn lora_stack_bytes<'a>(paths: impl IntoIterator<Item = &'a Path>) -> u64 {
+    paths.into_iter().map(file_bytes).sum()
+}
+
+/// Host bytes each model's eager engine holds in a text-encoder park, keyed by
+/// the transformer checkpoint — published by the engine after every residency
+/// decision so the planner credits the SAME park the engine does
+/// (`already_parked_bytes`) instead of asking for room for a second copy.
+fn parked_registry() -> &'static std::sync::Mutex<std::collections::BTreeMap<PathBuf, u64>> {
+    static PARKED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<PathBuf, u64>>> =
+        std::sync::OnceLock::new();
+    PARKED.get_or_init(Default::default)
+}
+
+fn park_key(paths: &mold_core::ModelPaths) -> PathBuf {
+    paths
+        .transformer_shards
+        .first()
+        .unwrap_or(&paths.transformer)
+        .clone()
+}
+
+/// Record the host bytes the engine for `paths` holds in its encoder park
+/// (zero when it holds none).
+pub fn record_parked_text_encoder_bytes(paths: &mold_core::ModelPaths, bytes: u64) {
+    let mut registry = parked_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if bytes == 0 {
+        registry.remove(&park_key(paths));
+    } else {
+        registry.insert(park_key(paths), bytes);
+    }
+}
+
+/// The host bytes the engine for `paths` holds in its encoder park.
+pub fn parked_text_encoder_bytes(paths: &mold_core::ModelPaths) -> u64 {
+    parked_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&park_key(paths))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// One Qwen Image 2.1 request, as the phase sizing reads it.
@@ -661,6 +856,8 @@ mod tests {
             vae_bytes: 675_509_688,
             text_encoder_bytes: 10_531_655_680,
             reference_encoder_bytes: 0,
+            adapter_bytes: 0,
+            encode_complete: false,
             encode_workspace_bytes: 0,
             denoise_workspace_bytes: activation,
             decode_peak_bytes: decode_peak(width, height),
@@ -757,7 +954,7 @@ mod tests {
     fn a_48gb_card_at_2k_parks_the_encoder_only() {
         for (width, height) in [(2048, 2048), (2752, 1536)] {
             let budget = bf16_engine(CARD_48GB, width, height);
-            assert!(budget.peak(true, true) > CARD_48GB);
+            assert!(budget.peak(true, true, true) > CARD_48GB);
             let decision = decide(&budget);
             assert_eq!(
                 decision.residency,
@@ -775,7 +972,7 @@ mod tests {
     fn a_40gb_card_at_2k_also_parks_the_transformer_for_decode() {
         for (width, height) in [(2048, 2048), (2752, 1536)] {
             let budget = bf16_engine(CARD_40GB, width, height);
-            assert!(budget.peak(false, true) > CARD_40GB);
+            assert!(budget.peak(false, true, true) > CARD_40GB);
             let decision = decide(&budget);
             assert_eq!(decision.residency, Qwen21TeResidency::ParkHost);
             assert_eq!(
@@ -849,7 +1046,7 @@ mod tests {
             + budget.text_encoder_bytes
             + budget.reference_encoder_bytes;
         assert_eq!(
-            budget.peak(true, true),
+            budget.peak(true, true, true),
             resident + 8 * GIB + ALLOCATOR_MARGIN_BYTES
         );
         let decision = decide(&budget);
@@ -937,6 +1134,117 @@ mod tests {
         assert_eq!(t2i.encode_workspace_bytes, 0);
     }
 
+    /// The engine decides AFTER the encode, so the encode phase is over and
+    /// is not charged: a reference render whose encode working set is the
+    /// largest phase must not park anything once that phase has run.
+    #[test]
+    fn the_post_encode_decision_does_not_charge_the_finished_encode() {
+        let planned = Qwen21TeBudget {
+            reference_encoder_bytes: 2 * GIB,
+            encode_workspace_bytes: 16 * GIB,
+            denoise_workspace_bytes: 4 * GIB,
+            ..bf16_engine(CARD_48GB, 1024, 1024)
+        };
+        let resident = planned.transformer_bytes
+            + planned.vae_bytes
+            + planned.text_encoder_bytes
+            + planned.reference_encoder_bytes;
+        assert!(resident + 16 * GIB + ALLOCATOR_MARGIN_BYTES > CARD_48GB);
+        assert!(resident + 4 * GIB + ALLOCATOR_MARGIN_BYTES <= CARD_48GB);
+        let after_encode = Qwen21TeBudget {
+            encode_complete: true,
+            ..planned
+        };
+        let decision = decide(&after_encode);
+        assert_eq!(decision.residency, Qwen21TeResidency::Resident);
+        assert!(!decision.release_reference_encoders);
+        assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+    }
+
+    /// The loaded vision tower and VAE encoder are the first bytes given back:
+    /// a card that holds everything but them keeps the text encoder and
+    /// releases them after the encode.
+    #[test]
+    fn the_reference_encoders_are_released_before_the_encoder_parks() {
+        let base = bf16_engine(CARD_48GB, 1024, 1024);
+        let resident = base.transformer_bytes + base.vae_bytes + base.text_encoder_bytes;
+        // Room for the resident weights and the denoise, but not also for
+        // the 2.6 GB of reference encoders.
+        let workspace = CARD_48GB - resident - ALLOCATOR_MARGIN_BYTES - GIB;
+        let budget = Qwen21TeBudget {
+            reference_encoder_bytes: 2_618_000_000,
+            denoise_workspace_bytes: workspace,
+            encode_complete: true,
+            ..base
+        };
+        let decision = decide(&budget);
+        assert_eq!(
+            decision.residency,
+            Qwen21TeResidency::Resident,
+            "{decision:?}"
+        );
+        assert!(decision.release_reference_encoders);
+        assert!(decision.eager_peak_bytes <= CARD_48GB);
+        // Without references there is nothing to release.
+        let plain = Qwen21TeBudget {
+            reference_encoder_bytes: 0,
+            ..budget
+        };
+        assert!(!decide(&plain).release_reference_encoders);
+    }
+
+    /// A LoRA stack sits beside the transformer through every phase.
+    #[test]
+    fn adapters_are_charged_in_every_phase() {
+        let base = bf16_engine(CARD_48GB, 1024, 1024);
+        let with = Qwen21TeBudget {
+            adapter_bytes: 2 * GIB,
+            ..base
+        };
+        assert_eq!(
+            with.peak(true, true, true),
+            base.peak(true, true, true) + 2 * GIB
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = dir.path().join("style.safetensors");
+        std::fs::File::create(&adapter)
+            .unwrap()
+            .set_len(677_000_000)
+            .unwrap();
+        assert_eq!(lora_stack_bytes([adapter.as_path()]), 677_000_000);
+        assert_eq!(lora_stack_bytes(std::iter::empty::<&Path>()), 0);
+    }
+
+    /// The planner credits the engine's own park, which the engine publishes.
+    #[test]
+    fn the_engines_park_is_published_for_the_planner() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = mold_core::ModelPaths {
+            transformer: dir.path().join("published-transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            low_noise_transformer: None,
+            vae: PathBuf::new(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            low_noise_distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        assert_eq!(parked_text_encoder_bytes(&paths), 0);
+        record_parked_text_encoder_bytes(&paths, 15 * GIB);
+        assert_eq!(parked_text_encoder_bytes(&paths), 15 * GIB);
+        record_parked_text_encoder_bytes(&paths, 0);
+        assert_eq!(parked_text_encoder_bytes(&paths), 0);
+    }
+
     #[test]
     fn a_host_without_room_drops_and_never_forbids_a_park() {
         let tight_host = Qwen21TeBudget {
@@ -1004,7 +1312,7 @@ mod tests {
         let decision = decide(&cpu);
         assert_eq!(decision.residency, Qwen21TeResidency::Resident);
         assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
-        assert!(decision.eager_peak_bytes < cpu.peak(true, true));
+        assert!(decision.eager_peak_bytes < cpu.peak(true, true, true));
         assert_eq!(
             decide(&quantized_engine(0, 2048, 2048)).residency,
             Qwen21TeResidency::Resident

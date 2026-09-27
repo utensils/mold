@@ -1290,6 +1290,7 @@ impl WuerstchenEngine {
             seed_used: seed,
             video: None,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }
@@ -1519,6 +1520,7 @@ impl WuerstchenEngine {
             seed_used: seed,
             video: None,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }

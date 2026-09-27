@@ -853,6 +853,7 @@ impl Hunyuan3dEngine {
                 seed_used: seed,
                 gpu: Some(self.base.gpu_ordinal),
                 request_warnings: Vec::new(),
+                prefix_cache: None,
             });
         }
         let (bounds_min, bounds_max) = mesh.bounds();
@@ -888,6 +889,7 @@ impl Hunyuan3dEngine {
             seed_used: seed,
             gpu: Some(self.base.gpu_ordinal),
             request_warnings: Vec::new(),
+            prefix_cache: None,
         })
     }
 
@@ -1054,6 +1056,7 @@ impl Hunyuan3dEngine {
             seed_used: seed,
             gpu: Some(self.base.gpu_ordinal),
             request_warnings: Vec::new(),
+            prefix_cache: None,
         })
     }
 
@@ -1250,6 +1253,7 @@ impl Hunyuan3dEngine {
             seed_used: seed,
             gpu: Some(self.base.gpu_ordinal),
             request_warnings: Vec::new(),
+            prefix_cache: None,
         })
     }
 

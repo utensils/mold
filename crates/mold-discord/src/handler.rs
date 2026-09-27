@@ -352,6 +352,7 @@ mod tests {
             model: "ltx-2-19b-distilled:fp8".to_string(),
             seed_used: 7,
             gpu: None,
+            prefix_cache: None,
         }
     }
 
@@ -386,6 +387,7 @@ mod tests {
             model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
             seed_used: 9,
             gpu: None,
+            prefix_cache: None,
         }
     }
 
@@ -530,6 +532,7 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 5,
             gpu: None,
+            prefix_cache: None,
         };
         let payload = plan_delivery(&resp, 5).attachment.expect("payload");
         assert_eq!(payload.filename, "mold-5.png");
@@ -548,6 +551,7 @@ mod tests {
             model: "empty".to_string(),
             seed_used: 0,
             gpu: None,
+            prefix_cache: None,
         };
         let delivery = plan_delivery(&resp, 0);
         assert!(delivery.attachment.is_none());

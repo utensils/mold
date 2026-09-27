@@ -1140,6 +1140,7 @@ impl SD3Engine {
             seed_used: seed,
             video: None,
             gpu: None,
+            prefix_cache: None,
         })
     }
 }
@@ -1515,6 +1516,7 @@ impl SD3Engine {
                 seed_used: seed,
                 video: None,
                 gpu: None,
+                prefix_cache: None,
             })
         })()
     }

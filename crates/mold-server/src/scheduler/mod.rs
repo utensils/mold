@@ -3392,7 +3392,11 @@ impl Coordinator {
                         .and_then(|sample| sample.effective_capacity_bytes)
                         .unwrap_or(0)
                 } else {
-                    worker.gpu.total_vram_bytes
+                    schedulable_total_vram_bytes(
+                        worker.gpu.total_vram_bytes,
+                        worker.gpu.backend,
+                        mold_inference::device::reserved_vram_bytes(),
+                    )
                 };
                 (id, capacity)
             })
@@ -8288,6 +8292,34 @@ fn insufficient_vram_is_terminal(
     largest_eligible_total_vram_bytes > 0 && required_peak_bytes > largest_eligible_total_vram_bytes
 }
 
+/// What a card can EVER make usable: its physical total less the operator's
+/// `MOLD_RESERVE_VRAM_MB`, which every usable-free sample subtracts and no
+/// amount of waiting returns. Metal's sampled figure is already the effective
+/// pool. An unknown total (`0`) stays unknown.
+fn schedulable_total_vram_bytes(total: u64, backend: mold_core::GpuBackend, reserve: u64) -> u64 {
+    if total == 0 || backend == mold_core::GpuBackend::Metal {
+        return total;
+    }
+    total.saturating_sub(reserve)
+}
+
+/// The most this request could ever be admitted against on a card of
+/// `capacity` usable bytes: the SAME ceiling rule the refusal applied
+/// (`admissible_ceiling / usable` — 90% for a heuristic estimate), scaled to
+/// the whole capacity.
+fn admissible_capacity_bytes(
+    capacity: u64,
+    admissible_ceiling_bytes: Option<u64>,
+    usable_bytes: Option<u64>,
+) -> u64 {
+    match (admissible_ceiling_bytes, usable_bytes) {
+        (Some(ceiling), Some(usable)) if usable > 0 && ceiling < usable => {
+            (u128::from(capacity) * u128::from(ceiling) / u128::from(usable)) as u64
+        }
+        _ => capacity,
+    }
+}
+
 fn largest_eligible_total_vram_bytes(
     eligible_device_ids: &[String],
     total_vram_bytes_by_device_id: &BTreeMap<String, u64>,
@@ -8312,21 +8344,42 @@ fn classify_generation_plan_failure(
 ) -> GenerationPlanFailure {
     match &error {
         crate::execution_plan::ExecutionPlanError::InsufficientVram {
+            reason,
             required_peak_bytes,
             admissible_ceiling_bytes,
+            usable_bytes,
             advice,
             eligible_device_ids,
-            ..
         } => {
             let largest_eligible_total_vram_bytes = largest_eligible_total_vram_bytes(
                 eligible_device_ids,
                 total_vram_bytes_by_device_id,
             );
-            if insufficient_vram_is_terminal(
-                *required_peak_bytes,
+            let admissible_capacity = admissible_capacity_bytes(
                 largest_eligible_total_vram_bytes,
-            ) {
-                GenerationPlanFailure::Terminal(error)
+                *admissible_ceiling_bytes,
+                *usable_bytes,
+            );
+            if insufficient_vram_is_terminal(*required_peak_bytes, admissible_capacity) {
+                // Name the requirement against what the card could EVER
+                // admit, not only what happened to be free: this refusal is
+                // final, and "wait" is not the advice it gives.
+                GenerationPlanFailure::Terminal(
+                    crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                        reason: format!(
+                            "{reason}; this request needs ~{:.1} GB, and no eligible device can \
+                             ever admit more than ~{:.1} GB, so it cannot run here under any \
+                             load strategy",
+                            *required_peak_bytes as f64 / 1_000_000_000.0,
+                            admissible_capacity as f64 / 1_000_000_000.0,
+                        ),
+                        required_peak_bytes: *required_peak_bytes,
+                        admissible_ceiling_bytes: *admissible_ceiling_bytes,
+                        usable_bytes: *usable_bytes,
+                        advice: advice.clone(),
+                        eligible_device_ids: eligible_device_ids.clone(),
+                    },
+                )
             } else {
                 GenerationPlanFailure::Transient(TransientPlanFailure {
                     message: error.to_string(),
@@ -13057,6 +13110,7 @@ mod tests {
                 reason: "metal:0 is currently busy".to_string(),
                 required_peak_bytes: 20 * GIB,
                 admissible_ceiling_bytes: Some(18 * GIB),
+                usable_bytes: None,
                 advice: None,
                 eligible_device_ids: vec!["metal:0".to_string()],
             },
@@ -13102,6 +13156,7 @@ mod tests {
                 reason: "both CUDA lanes are currently busy".to_string(),
                 required_peak_bytes: 18 * GIB,
                 admissible_ceiling_bytes: Some(16 * GIB),
+                usable_bytes: None,
                 advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
             },
@@ -16407,6 +16462,7 @@ mod tests {
                     model: "flux-dev:q4".to_string(),
                     seed_used: 1,
                     gpu: Some(0),
+                    prefix_cache: None,
                 },
                 image: mold_core::ImageData {
                     data: vec![1],
@@ -16595,6 +16651,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 seed_used: 7,
                 gpu: Some(0),
+                prefix_cache: None,
             },
             image: original.clone(),
             output_metadata: None,
@@ -16770,6 +16827,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 seed_used: 9,
                 gpu: Some(0),
+                prefix_cache: None,
             },
             image: original.clone(),
             output_metadata: None,
@@ -19727,6 +19785,69 @@ mod tests {
         );
     }
 
+    /// A request can only ever be admitted up to the ceiling its family's
+    /// estimate is compared against — 90% of what is usable for a heuristic
+    /// estimate — of what the card can EVER make usable: its physical total
+    /// less the operator's `MOLD_RESERVE_VRAM_MB`, which no amount of waiting
+    /// returns. A peak above that is terminal at once, not a hold after an
+    /// idle grace: int8-conv with a reference on a 24 GB card waited in the
+    /// queue for memory it could never get.
+    #[test]
+    fn a_peak_over_the_cards_admissible_capacity_is_terminal_at_once() {
+        const GIB: u64 = 1 << 30;
+        // 46 GB card with a 21.5 GB operator reserve: 24.5 GB can ever be
+        // usable, whatever else happens.
+        assert_eq!(
+            schedulable_total_vram_bytes(46 * GIB, mold_core::GpuBackend::Cuda, 21 * GIB),
+            25 * GIB
+        );
+        // Metal's figure is already the effective pool; no reserve applies.
+        assert_eq!(
+            schedulable_total_vram_bytes(46 * GIB, mold_core::GpuBackend::Metal, 21 * GIB),
+            46 * GIB
+        );
+        let capacities = BTreeMap::from([("cuda:0".to_string(), 25 * GIB)]);
+        let classify = |required: u64, ceiling: u64, usable: u64| {
+            classify_generation_plan_failure(
+                crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                    reason: "short".to_string(),
+                    required_peak_bytes: required,
+                    admissible_ceiling_bytes: Some(ceiling),
+                    usable_bytes: Some(usable),
+                    advice: None,
+                    eligible_device_ids: vec!["cuda:0".to_string()],
+                },
+                &capacities,
+            )
+        };
+        // Un-derated family (ceiling == usable): over 25 GiB is terminal.
+        assert!(matches!(
+            classify(26 * GIB, 20 * GIB, 20 * GIB),
+            GenerationPlanFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            classify(24 * GIB, 20 * GIB, 20 * GIB),
+            GenerationPlanFailure::Transient(_)
+        ));
+        // A 90% family can never be admitted above 22.5 GiB on this card.
+        assert!(matches!(
+            classify(23 * GIB, 18 * GIB, 20 * GIB),
+            GenerationPlanFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            classify(22 * GIB, 18 * GIB, 20 * GIB),
+            GenerationPlanFailure::Transient(_)
+        ));
+        // The refusal names the requirement and the capacity it can never
+        // exceed.
+        let GenerationPlanFailure::Terminal(error) = classify(26 * GIB, 20 * GIB, 20 * GIB) else {
+            unreachable!()
+        };
+        let message = error.to_string();
+        assert!(message.contains("27.9 GB"), "{message}");
+        assert!(message.contains("26.8 GB"), "{message}");
+    }
+
     /// #641: an honest LTX-2 estimate makes an impossible shape's predicted
     /// peak exceed the card. Left as `Transient`, that job would re-resolve on
     /// every scheduler tick and queue forever.
@@ -19743,6 +19864,7 @@ mod tests {
                 reason: "larger than every device".to_string(),
                 required_peak_bytes: 33_474_340_818,
                 admissible_ceiling_bytes: Some(21_474_836_480),
+                usable_bytes: None,
                 advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string()],
             },
@@ -19775,6 +19897,7 @@ mod tests {
                     reason: "currently short of VRAM".to_string(),
                     required_peak_bytes: 12 * GIB,
                     admissible_ceiling_bytes: Some(10 * GIB),
+                    usable_bytes: None,
                     advice: None,
                     eligible_device_ids: eligible_device_ids
                         .iter()

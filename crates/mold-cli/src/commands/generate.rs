@@ -3877,6 +3877,7 @@ impl BatchOutputs {
             model: self.last_model,
             seed_used: self.last_seed_used,
             gpu: None,
+            prefix_cache: None,
         }
     }
 }
@@ -6136,6 +6137,7 @@ mod tests {
             model: "ltx-video:bf16".to_string(),
             seed_used: 91,
             gpu: Some(0),
+            prefix_cache: None,
         };
 
         let error = finalize_local_batch_outputs(
@@ -7752,6 +7754,7 @@ mod audio_batch_passthrough_tests {
             model: "ltx-2-19b-dev:fp8".to_string(),
             seed_used: seed,
             gpu: None,
+            prefix_cache: None,
         }
     }
 

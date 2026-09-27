@@ -57,3 +57,5 @@ bytes, format and generation metadata (allowing an absent elapsed generation
 time to become known). It retains the original archive identity and source-media
 pins. This recovers interrupted historical re-imports without treating a filename
 match as permission to replace another print's provenance.
+
+- **A request no card can EVER admit is refused at once, never parked.** `classify_generation_plan_failure` makes an `InsufficientVram` terminal when its peak exceeds what the largest eligible card could ever admit: the physical total less `MOLD_RESERVE_VRAM_MB` (`schedulable_total_vram_bytes`; Metal's effective pool as sampled), scaled by the SAME ceiling rule the refusal used (`usable_bytes` rides the error beside `admissible_ceiling_bytes`, so a 90%-derated family is bounded at 90% of capacity). The refusal names the requirement and that capacity. Anything that could fit an idle card stays transient and is bounded by the idle grace as before. Qwen Image 2.1's SEQUENTIAL plan is priced by its largest phase (`text_encoder_residency::sequential_peak_bytes`, decode included), so a request the sequential engine can run is never refused on the eager plan's sum.

@@ -2824,6 +2824,11 @@ pub struct GenerateResponse {
     /// Additive; empty on every response that carried no advisory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_warnings: Vec<String>,
+    /// What the render did with its prompt prefix's K/V (Qwen Image 2.1
+    /// only), carried to the print's [`OutputMetadata::prefix_cache`].
+    /// Additive; absent for every other family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<PrefixCacheOutcome>,
 }
 
 /// LTX-2 still-image conditioning preprocessing as actually executed —
@@ -3155,6 +3160,17 @@ pub enum GenerationOutputMode {
     Sequence,
 }
 
+/// What a Qwen Image 2.1 render did with its prompt prefix's K/V
+/// ([`OutputMetadata::prefix_cache`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixCacheOutcome {
+    /// Every CFG branch prefilled once and reused its prefix K/V.
+    Retained,
+    /// At least one branch recomputed its prefix every step.
+    Recomputed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
     #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
@@ -3443,6 +3459,13 @@ pub struct OutputMetadata {
     /// no alpha channel, or a print from before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_alpha: Option<bool>,
+    /// Whether a Qwen Image 2.1 render RETAINED its prompt prefix's K/V across
+    /// steps or RECOMPUTED it every step. On the CUDA fast path that is
+    /// decided by the card's free memory, and the two are not bit-identical
+    /// (`pipeline_qwenimage21.py:585-589`), so a print records which one made
+    /// it. Absent for every other family and for older prints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<PrefixCacheOutcome>,
     /// The request asked for a transparent background
     /// (`GenerateRequest.transparent_background`). Recorded only when
     /// `Some(true)`, so an ordinary print's metadata is unchanged; Reuse
@@ -3675,6 +3698,7 @@ impl OutputMetadata {
             // A fact about the stored file; the encoder or the publication
             // path (`apply_still_output`) records it.
             has_alpha: None,
+            prefix_cache: None,
             transparent_background: (req.transparent_background == Some(true)).then_some(true),
             version: version.into(),
         }
@@ -3691,6 +3715,12 @@ impl OutputMetadata {
     /// Record the still that was actually produced: its raster size and
     /// whether its container carries alpha (`has_alpha`), read from the
     /// encoded header so the gallery row describes the file that exists.
+    /// Record what the engine reported about HOW it rendered — facts the
+    /// request cannot predict (today: Qwen Image 2.1's prefix-cache outcome).
+    pub fn apply_render_facts(&mut self, response: &GenerateResponse) {
+        self.prefix_cache = response.prefix_cache;
+    }
+
     pub fn apply_still_output(&mut self, image: &ImageData) {
         self.apply_output_dimensions(image.width, image.height);
         self.has_alpha = crate::still_image::encoded_still_has_alpha(&image.data).then_some(true);
@@ -6791,6 +6821,30 @@ mod tests {
         assert_eq!(round.transparent_background, Some(true));
         let context = ExpandContext::for_generation("qwen-image21", &req, None);
         assert_eq!(context.transparent_background, Some(true));
+    }
+
+    #[test]
+    fn render_facts_record_the_prefix_cache_outcome_and_round_trip() {
+        let request = serde_json::from_value::<GenerateRequest>(serde_json::json!({
+            "prompt": "p", "model": "qwen-image-2.1:bf16", "width": 8, "height": 8,
+            "steps": 4, "guidance": 1.0, "batch_size": 1
+        }))
+        .unwrap();
+        let mut metadata = OutputMetadata::from_generate_request(&request, 1, None, "v");
+        assert_eq!(metadata.prefix_cache, None);
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert!(json.get("prefix_cache").is_none(), "absent stays absent");
+        let response: GenerateResponse = serde_json::from_value(serde_json::json!({
+            "images": [], "generation_time_ms": 1, "model": "qwen-image-2.1:bf16",
+            "seed_used": 1, "prefix_cache": "recomputed"
+        }))
+        .unwrap();
+        metadata.apply_render_facts(&response);
+        assert_eq!(metadata.prefix_cache, Some(PrefixCacheOutcome::Recomputed));
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["prefix_cache"], "recomputed");
+        let back: OutputMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(back.prefix_cache, Some(PrefixCacheOutcome::Recomputed));
     }
 
     #[test]

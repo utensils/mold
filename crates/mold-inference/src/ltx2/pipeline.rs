@@ -1118,6 +1118,7 @@ impl Ltx2Engine {
             model: self.model_name.clone(),
             seed_used: plan.seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 
@@ -1294,6 +1295,7 @@ impl Ltx2Engine {
             model: self.model_name.clone(),
             seed_used: plan.seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 
@@ -1389,6 +1391,7 @@ impl Ltx2Engine {
             model: self.model_name.clone(),
             seed_used: plan.seed,
             gpu: None,
+            prefix_cache: None,
         })
     }
 
