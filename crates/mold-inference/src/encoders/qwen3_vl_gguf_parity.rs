@@ -290,9 +290,7 @@ fn gguf_conditioning_tracks_the_bf16_encoder_on_the_t2i_template() {
 /// unequal T/H/W axes, the visual rows spliced in, DeepStack after the early
 /// layers, and (at two references, ~2.1k tokens) more than one attention
 /// chunk — against the BF16 shards on the same reference-conditioned
-/// template, under the text test's gate: per-token cosine >= 0.995 mean
-/// against the F32 oracle, and no token further from it than the BF16 tier's
-/// own worst. The vision tower runs once, in its shipped F32
+/// template. The vision tower runs once, in its shipped F32
 /// (`reference::vision_tower_dtype`), and every language model receives the
 /// same rows — the tower always runs from the BF16 shards whatever the LM
 /// tier, so this measures the LM alone.
@@ -300,11 +298,25 @@ fn gguf_conditioning_tracks_the_bf16_encoder_on_the_t2i_template() {
 /// Measured on an L40S (2 references, 2,097 tokens, 2,058 visual): the GGUF
 /// code path fed UNQUANTIZED weights matches the oracle exactly (cosine
 /// 1.000000 on every token), so what remains is quantization. Q8_0 holds the
-/// gate on text rows (mean 0.99891, worst 0.99285) but NOT on visual rows
-/// (mean 0.99412, worst 0.40068, 146 rows under 0.99) against BF16's own
-/// 0.99635 / 0.45722 — this test fails on Q8_0 as it stands, and that is a
-/// finding about Q8_0's auto-eligibility for reference-conditioned prompts,
-/// not a tolerance to relax. Q4_K_M: mean 0.90302, worst 0.06854.
+/// text gate on the TEXT rows (mean 0.99891, worst 0.99285) but not on the
+/// visual rows (mean 0.99412, worst 0.40068, 146 rows under 0.99) against
+/// BF16's own 0.99635 / 0.45722. Q4_K_M: mean 0.90302, worst 0.06854.
+///
+/// What that visual-row loss costs was measured END TO END
+/// (`qwen_image21::parity_tests::reference_text_encoder_variant_study`): on
+/// the 6-step turbo P8 reference render the Q8_0 encoder lands 1.32 dB below
+/// upstream's own bf16 pipeline and fails the P8 turbo gate the BF16 encoder
+/// passes. So the gate is no longer "Q8_0 must match BF16 on every row" but
+/// the policy that measurement chose, asserted on both halves:
+/// 1. the GGUF code path itself is the oracle's arithmetic (unquantized
+///    weights, cosine >= 0.99999 mean / 0.999 worst);
+/// 2. every tier auto mode selects for TEXT-TO-IMAGE holds the text test's
+///    gate on this forward's text rows (mean >= 0.995, worst no further than
+///    BF16's own worst text row) — the multimodal path does not corrupt the
+///    rows Q8_0 is trusted with;
+/// 3. auto mode selects NO GGUF tier for a reference-conditioned request,
+///    whatever the card has free (`choose_qwen3_vl_variant`), so the visual
+///    rows are only ever encoded by a quantized tier someone named.
 #[test]
 #[ignore = "needs the Qwen3-VL-8B GGUF files and the Qwen Image 2.1 text-encoder shards"]
 fn gguf_multimodal_conditioning_tracks_the_bf16_encoder() {
@@ -365,14 +377,16 @@ fn gguf_multimodal_conditioning_tracks_the_bf16_encoder() {
         .filter(|(_, valid)| **valid)
         .map(|(slot, _)| *slot)
         .collect::<Vec<bool>>();
+    let part = |cos: &[f64], visual: bool| {
+        cos.iter()
+            .zip(&slots)
+            .filter(|(_, slot)| **slot == visual)
+            .map(|(c, _)| *c)
+            .collect::<Vec<f64>>()
+    };
     let breakdown = |label: &str, cos: &[f64]| {
         for (kind, visual) in [("text", false), ("visual", true)] {
-            let mut part = cos
-                .iter()
-                .zip(&slots)
-                .filter(|(_, slot)| **slot == visual)
-                .map(|(c, _)| *c)
-                .collect::<Vec<f64>>();
+            let mut part = part(cos, visual);
             part.sort_by(f64::total_cmp);
             let at = |q: f64| part[((part.len() - 1) as f64 * q) as usize];
             eprintln!(
@@ -394,6 +408,7 @@ fn gguf_multimodal_conditioning_tracks_the_bf16_encoder() {
         bf16_cos.len()
     );
     breakdown("bf16-in-bf16", &bf16_cos);
+    let (_, bf16_text_min) = summary(&part(&bf16_cos, false));
     let mut failures = Vec::new();
     let tiers = env_dir("MOLD_QWEN_IMAGE21_TIERS_DIR");
 
@@ -487,17 +502,44 @@ fn gguf_multimodal_conditioning_tracks_the_bf16_encoder() {
             cos.len()
         );
         breakdown(file, &cos);
-        // The tiers the encoder picks on its own must hold the text gate on
-        // the multimodal path too; an explicit-only tier is reported.
+        // Gate 2: a tier auto mode picks for text-to-image must hold the text
+        // gate on this forward's text rows; an explicit-only tier is reported.
         if auto {
             gated += 1;
-            if !(mean >= 0.995 && min >= bf16_min) {
+            let (text_mean, text_min) = summary(&part(&cos, false));
+            if !(text_mean >= 0.995 && text_min >= bf16_text_min) {
                 failures.push(format!(
-                    "{file}: multimodal mean {mean} / worst {min} fail the gate (BF16 worst {bf16_min})"
+                    "{file}: multimodal text rows mean {text_mean} / worst {text_min} fail the \
+                     text gate (BF16 worst text row {bf16_text_min})"
                 ));
             }
         }
     }
     assert!(gated > 0, "no auto-eligible GGUF tier was gated");
+    // Gate 3: no card size makes auto mode encode a reference prompt with a
+    // GGUF tier, on CUDA or on Metal.
+    for free_gb in [0u64, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 80] {
+        for (is_cuda, is_metal) in [(true, false), (false, true), (false, false)] {
+            for preference in [None, Some("auto")] {
+                let choice = crate::encoders::variant_resolution::choose_qwen3_vl_variant(
+                    preference,
+                    is_cuda,
+                    is_metal,
+                    free_gb * 1_000_000_000,
+                    true,
+                )
+                .unwrap();
+                if let crate::encoders::variant_resolution::Qwen3Choice::Gguf { variant, .. } =
+                    choice
+                {
+                    failures.push(format!(
+                        "auto mode picked {} for a reference request at {free_gb} GB free \
+                         (cuda {is_cuda}, metal {is_metal})",
+                        variant.tag
+                    ));
+                }
+            }
+        }
+    }
     assert!(failures.is_empty(), "{failures:#?}");
 }

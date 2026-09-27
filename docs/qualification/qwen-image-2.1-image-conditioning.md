@@ -148,16 +148,71 @@ Before the rotary tables matched upstream's float32 `rope_params`
 (`transformer_qwenimage21.py:673-675`) bit for bit, mold evaluated the angles
 in f64. Measured on the same L40S, same run otherwise:
 
-| Rotary angles       | base4 vs fp32 | base4 vs upstream bf16 | turbo6 vs fp32 | turbo6 vs upstream bf16 |
-| ------------------- | ------------- | ---------------------- | -------------- | ----------------------- |
-| f64 (v0.32)         | 38.69 dB      | 34.26 dB               | 36.23 dB       | 37.88 dB                |
-| float32 (upstream)  | 38.80 dB      | 34.75 dB               | 34.67 dB       | 40.53 dB                |
+| Rotary angles      | base4 vs fp32 | base4 vs upstream bf16 | turbo6 vs fp32 | turbo6 vs upstream bf16 |
+| ------------------ | ------------- | ---------------------- | -------------- | ----------------------- |
+| f64 (v0.32)        | 38.69 dB      | 34.26 dB               | 36.23 dB       | 37.88 dB                |
+| float32 (upstream) | 38.80 dB      | 34.75 dB               | 34.67 dB       | 40.53 dB                |
 
 Matching upstream's arithmetic moves the turbo render 2.65 dB closer to
 upstream's own bf16 render and 1.56 dB further from the fp32 truth: the f64
 angles were accidentally more accurate than the reference being ported, and
 the 6-step turbo amplifies either. The port follows upstream; the turbo margin
 was re-derived on the float32 angles (it was +1.5 dB against the f64 +3.01).
+
+## Why reference prompts never auto-select a quantized text encoder
+
+Text-to-image auto mode falls back from the BF16 Qwen3-VL-8B shards to the
+official Q8_0 GGUF when BF16 does not fit beside the transformer and VAE
+(`variant_resolution::choose_qwen3_vl_variant`). For a reference-conditioned
+request it does not: auto mode keeps BF16 on the card, or BF16 on the CPU
+(Metal: on the unified pool), and the planner (`text_encoder_residency::plan`,
+`sequential_peak_bytes`) reads the same rule. An explicit
+`MOLD_QWEN3_VARIANT=q8|q4` still wins and logs a warning; an eager engine
+that auto-loaded the GGUF before any request reloads the BF16 shards when the
+first reference request arrives.
+
+The hidden-state gate
+(`encoders::qwen3_vl_gguf_parity::gguf_multimodal_conditioning_tracks_the_bf16_encoder`,
+2 references, 2,097 tokens) localizes the Q8_0 loss to the visual rows: text
+rows mean 0.99891 / worst 0.99285, visual rows mean 0.99412 / worst 0.40068
+(146 under 0.99), against BF16-in-BF16's 0.99635 / 0.45722. The GGUF code path
+on unquantized weights matches the F32 oracle exactly, so this is
+quantization. Whether it matters was decided end to end:
+
+```sh
+MOLD_MODELS_DIR=/storage/mold/models \
+QWEN_IMAGE21_MODEL_ROOT=/storage/mold/models \
+QWEN_IMAGE21_FIXTURES=/storage/mold/fixtures/qwen_image21/captures \
+QWEN_IMAGE21_TE_STUDY_DIR=/tmp/te_study CUDA_VISIBLE_DEVICES=3 \
+  cargo test --profile dev-fast -p mold-ai-inference --features cuda,cudnn,flash-attn --lib \
+  qwen_image21::parity_tests::reference_text_encoder_variant_study -- --ignored --nocapture
+```
+
+Same engine, BF16 transformer, upstream's injected P8 noise, 512², seed 1234;
+only the language model differs. All twelve renders were reviewed and each
+pair is visually equivalent.
+
+| Recipe | Case             | Q8-TE vs BF16-TE | BF16-TE vs fp32 | Q8-TE vs fp32 | upstream bf16 vs fp32 |
+| ------ | ---------------- | ---------------- | --------------- | ------------- | --------------------- |
+| base4  | text-to-image    | 39.08 dB         | —               | —             | —                     |
+| base4  | 1 reference (P8) | 40.99 dB         | 38.80 dB        | 42.20 dB      | 37.59 dB              |
+| base4  | 3 references     | 37.11 dB         | —               | —             | —                     |
+| turbo6 | text-to-image    | 33.47 dB         | —               | —             | —                     |
+| turbo6 | 1 reference (P8) | 34.58 dB         | 34.67 dB        | **31.90 dB**  | 33.22 dB              |
+| turbo6 | 3 references     | 31.98 dB         | —               | —             | —                     |
+
+The Q8-vs-BF16 distance on reference prompts is the same order as on
+text-to-image, where Q8_0 stays auto-selectable. The discriminating number is
+the one the P8 gate reads: on the 6-step turbo trajectory, which amplifies
+conditioning error (see the F32 vision tower above), the Q8_0 encoder lands
+1.32 dB BELOW upstream's own bf16 pipeline and 2.32 dB short of the P8 turbo
+gate the shipped path holds — a larger loss than the BF16 vision tower this
+record rejects at 33.48 dB. The 4-step base render does not discriminate
+(Q8 happens to land closer to fp32 there). The study asserts the turbo
+verdict: BF16 passes the P8 turbo gate, Q8_0 does not. The hidden-state test
+now gates the policy rather than row equality: the GGUF path is exact on
+unquantized weights, Q8_0's multimodal text rows hold the text gate, and no
+card size makes auto mode pick a GGUF tier for a reference request.
 
 ## Cost
 

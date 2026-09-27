@@ -64,15 +64,21 @@ The conditioner's language model can run from the BF16 shards or from the
 official [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF)
 files, chosen by `MOLD_QWEN3_VARIANT`:
 
-| Value            | Language model                          |
-| ---------------- | --------------------------------------- |
-| `auto` (default) | BF16 if it fits, otherwise Q8_0         |
-| `bf16`           | BF16 shards (about 16.4 GB)             |
-| `q8`             | Q8_0 GGUF (8.7 GB)                      |
-| `q4`             | Q4_K_M GGUF (5.0 GB), **explicit only** |
+| Value            | Language model                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------- |
+| `auto` (default) | BF16 if it fits, otherwise Q8_0 (text-to-image) or BF16 on the CPU (reference images) |
+| `bf16`           | BF16 shards (about 16.4 GB)                                                           |
+| `q8`             | Q8_0 GGUF (8.7 GB)                                                                    |
+| `q4`             | Q4_K_M GGUF (5.0 GB), **explicit only**                                               |
 
 Q4_K_M fails the hidden-state parity gate against BF16, so `auto` never picks
-it; set `MOLD_QWEN3_VARIANT=q4` to accept that trade on a small card. The
+it; set `MOLD_QWEN3_VARIANT=q4` to accept that trade on a small card. With
+reference images, `auto` never picks a quantized language model at all: Q8_0
+loses precision on the image rows, and on the 6-step turbo recipe that
+measured below upstream's own bf16 pipeline. When BF16 does not fit on the
+card, a reference request encodes on the CPU instead (on Apple Silicon, BF16
+stays on the unified pool). An explicit `MOLD_QWEN3_VARIANT=q8` still applies
+to reference requests, with a warning. The
 vision tower is always read from the BF16 shards, whatever the language-model
 variant.
 

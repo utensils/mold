@@ -59,11 +59,13 @@ struct LoadedQwenImage21 {
     /// Loaded on the first reference-conditioned request, then kept.
     vae_encoder: Option<QwenImage21VaeEncoder>,
     text_paths: Vec<PathBuf>,
+    tokenizer: PathBuf,
     vae_path: PathBuf,
     device: Device,
     text_device: Device,
     vae_device: Device,
     dtype: DType,
+    text_dtype: DType,
     vae_dtype: DType,
 }
 
@@ -315,19 +317,18 @@ impl QwenImage21Engine {
         device: &Device,
         dtype: DType,
         free_vram: u64,
+        reference_conditioned: bool,
         progress: &ProgressReporter,
     ) -> Result<Qwen3Encoder> {
         let preference = crate::runtime_env::value("MOLD_QWEN3_VARIANT");
         let (paths, is_gguf, on_gpu, _label) =
-            crate::encoders::variant_resolution::resolve_qwen3_variant(
+            crate::encoders::variant_resolution::resolve_qwen3_vl_variant(
                 progress,
                 preference.as_deref(),
                 device,
                 free_vram,
                 bf16_paths,
-                !bf16_paths.is_empty(),
-                false,
-                crate::encoders::variant_resolution::Qwen3Size::Vl8b,
+                reference_conditioned,
             )?;
         let device = if on_gpu { device.clone() } else { Device::Cpu };
         if is_gguf {
@@ -351,6 +352,22 @@ impl QwenImage21Engine {
                 progress,
             )
         }
+    }
+
+    /// Whether a resident encoder must be replaced by the BF16 shards before
+    /// it encodes this request: a reference request, a quantized encoder, and
+    /// no explicit GGUF `MOLD_QWEN3_VARIANT` asking for it.
+    fn reference_request_needs_bf16_encoder(
+        reference_conditioned: bool,
+        encoder_is_quantized: bool,
+        preference: Option<&str>,
+    ) -> bool {
+        reference_conditioned
+            && encoder_is_quantized
+            && crate::encoders::variant_resolution::qwen3_vl_explicit_gguf_on_references(
+                preference, true,
+            )
+            .is_none()
     }
 
     /// Free device bytes on the text encoder's device, or zero when it cannot
@@ -593,12 +610,16 @@ impl QwenImage21Engine {
         );
         self.base.progress.stage_start(&text_label);
         let text_start = Instant::now();
+        // Loaded before any request is known, so as for text-to-image; a
+        // reference request that finds an auto-selected GGUF here reloads the
+        // BF16 shards (`generate_eager`).
         let text_encoder = Self::load_text_encoder(
             &text_paths,
             &tokenizer,
             &text_device,
             text_dtype,
             Self::free_vram_for(&text_device, self.base.gpu_ordinal),
+            false,
             &self.base.progress,
         )?;
         self.base
@@ -613,11 +634,13 @@ impl QwenImage21Engine {
             vision: None,
             vae_encoder: None,
             text_paths,
+            tokenizer,
             vae_path,
             device,
             text_device,
             vae_device,
             dtype,
+            text_dtype,
             vae_dtype,
         });
         Ok(())
@@ -1124,6 +1147,7 @@ impl QwenImage21Engine {
             &text_device,
             text_dtype,
             Self::free_vram_for(&text_device, self.base.gpu_ordinal),
+            !references.is_empty(),
             progress,
         )?;
         progress.stage_done(&text_label, text_start.elapsed());
@@ -1247,6 +1271,30 @@ impl QwenImage21Engine {
             .loaded
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Qwen Image 2.1 was not loaded"))?;
+        // The resident encoder was chosen at load, before any request: when
+        // that choice was an AUTO-selected GGUF, a reference request swaps in
+        // the BF16 shards, which it then keeps
+        // (`variant_resolution::choose_qwen3_vl_variant`).
+        if Self::reference_request_needs_bf16_encoder(
+            !references.is_empty(),
+            loaded.text_encoder.is_quantized,
+            crate::runtime_env::value("MOLD_QWEN3_VARIANT").as_deref(),
+        ) {
+            progress.info(
+                "Reloading the Qwen3-VL-8B text encoder from the BF16 shards: auto mode never \
+                 encodes a reference-conditioned prompt with a quantized language model",
+            );
+            loaded.text_encoder.drop_weights();
+            loaded.text_encoder = Self::load_text_encoder(
+                &loaded.text_paths,
+                &loaded.tokenizer,
+                &loaded.text_device,
+                loaded.text_dtype,
+                Self::free_vram_for(&loaded.text_device, self.base.gpu_ordinal),
+                true,
+                progress,
+            )?;
+        }
         // A previous request may have parked or dropped the encoder; this
         // restores it (a host→device copy, or a reload) and is a no-op when
         // it stayed resident.
@@ -1759,6 +1807,19 @@ mod tests {
             super::super::scheduler::transformer_timestep(0.9, DType::BF16),
             0.8984375
         );
+    }
+
+    /// The eager engine picks its encoder at load, before any request; a
+    /// reference request that finds an AUTO-selected GGUF there swaps in the
+    /// BF16 shards, and an explicit GGUF variant is kept.
+    #[test]
+    fn a_reference_request_replaces_an_auto_selected_gguf_encoder() {
+        let needs = QwenImage21Engine::reference_request_needs_bf16_encoder;
+        assert!(needs(true, true, None));
+        assert!(needs(true, true, Some("auto")));
+        assert!(!needs(true, true, Some("q8")), "an explicit tier wins");
+        assert!(!needs(true, false, None), "BF16 is already resident");
+        assert!(!needs(false, true, None), "text-to-image keeps the GGUF");
     }
 
     #[test]

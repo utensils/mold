@@ -454,8 +454,13 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
         .usable_free_bytes
         .saturating_sub(transformer_bytes)
         .saturating_sub(vae_bytes);
-    let choice =
-        choose_qwen3_vl_variant(inputs.qwen3_variant, is_cuda, is_metal, free_for_encoder)?;
+    let choice = choose_qwen3_vl_variant(
+        inputs.qwen3_variant,
+        is_cuda,
+        is_metal,
+        free_for_encoder,
+        inputs.phases.reference_conditioned,
+    )?;
     let text_encoder_bytes = match choice {
         Qwen3Choice::Bf16 { .. } => text_encoder_device_bytes(&inputs.paths.text_encoder_files)
             .unwrap_or(mold_core::manifest::QWEN3_8B_FP16_SIZE),
@@ -582,6 +587,7 @@ pub fn sequential_peak_bytes(inputs: &Qwen21SequentialInputs<'_>) -> anyhow::Res
             inputs.device == TeDevice::Cuda,
             inputs.device == TeDevice::Metal,
             inputs.usable_free_bytes,
+            phases.reference_conditioned,
         )?;
         let text_encoder_bytes = if !choice.on_gpu() {
             0
@@ -689,6 +695,9 @@ pub struct Qwen21RenderRequest<'a> {
 /// `memory_preflight` and `execution_plan` all read.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Qwen21RenderPhases {
+    /// The request carries reference images, so no GGUF language model is
+    /// auto-selected for it ([`choose_qwen3_vl_variant`]).
+    pub reference_conditioned: bool,
     /// Vision tower + VAE encoder weights, resident through every phase once
     /// a reference request has loaded them.
     pub reference_encoder_bytes: u64,
@@ -750,6 +759,7 @@ pub fn render_phases(
         request.references,
     );
     Qwen21RenderPhases {
+        reference_conditioned: !request.references.is_empty(),
         reference_encoder_bytes: crate::device::qwen_image21_reference_encoder_bytes(shape),
         reference_vae_encoder_bytes: if request.references.is_empty() {
             0
@@ -1243,6 +1253,67 @@ mod tests {
         assert_eq!(parked_text_encoder_bytes(&paths), 15 * GIB);
         record_parked_text_encoder_bytes(&paths, 0);
         assert_eq!(parked_text_encoder_bytes(&paths), 0);
+    }
+
+    /// The planner and the engine read the same reference rule: on a card
+    /// where text-to-image auto-selects the Q8_0 language model, a
+    /// reference-conditioned request plans the BF16 shards on the host.
+    #[test]
+    fn a_reference_request_plans_no_auto_gguf_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = mold_core::ModelPaths {
+            transformer: dir.path().join("absent-transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            low_noise_transformer: None,
+            vae: PathBuf::new(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            low_noise_distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let references = [(1024u32, 1024u32)];
+        let choice = |references: &[(u32, u32)]| {
+            let request = Qwen21RenderRequest {
+                format: None,
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                references,
+                branches: 1,
+                vae_dtype_bytes: 2,
+            };
+            let phases = render_phases(&request, super::super::PrefixCacheBudget::RequestOnly);
+            assert_eq!(phases.reference_conditioned, !references.is_empty());
+            plan(&Qwen21PlanInputs {
+                paths: &paths,
+                qwen3_variant: None,
+                device: TeDevice::Cuda,
+                usable_free_bytes: 12 * 1_000_000_000,
+                phases,
+                adapter_bytes: 0,
+                text_encoder_on_host: false,
+                host_total_bytes: 256 * GIB,
+                host_available_bytes: 200 * GIB,
+                already_parked_bytes: 0,
+                keep_te_ram: KeepTeRamMode::Auto,
+            })
+            .unwrap()
+            .choice
+        };
+        assert!(matches!(
+            choice(&[]),
+            Qwen3Choice::Gguf { variant, on_gpu: true } if variant.tag == "q8"
+        ));
+        assert_eq!(choice(&references), Qwen3Choice::Bf16 { on_gpu: false });
     }
 
     #[test]

@@ -1536,3 +1536,172 @@ fn conditioning_precision_study() {
         "the shipped F32 conditioning fails the P8 turbo gate"
     );
 }
+
+/// One engine render for [`reference_text_encoder_variant_study`]: `recipe`
+/// is `base4` or `turbo6`, `references` names testdata images, and the
+/// language model is whatever `MOLD_QWEN3_VARIANT` names. Upstream's P8 noise
+/// is injected so every variant starts from the same latents.
+fn te_variant_render(env: &Env, recipe: &str, references: &[&str], variant: &str) -> Vec<u8> {
+    use crate::engine::{InferenceEngine, LoadStrategy};
+    // SAFETY: the study runs single-threaded (`--test-threads=1`); the engine
+    // reads the variable per call in test builds (`runtime_env`).
+    std::env::set_var("MOLD_QWEN3_VARIANT", variant);
+    let mut paths = engine_paths(env);
+    let (model, steps) = match recipe {
+        "base4" => ("qwen-image-2.1:bf16", 4),
+        "turbo6" => {
+            paths.distilled_lora = Some(viggle(env, 256));
+            ("qwen-image-2.1-turbo:bf16", 6)
+        }
+        other => panic!("no recipe {other}"),
+    };
+    let mut engine =
+        super::QwenImage21Engine::new(model.to_string(), paths, LoadStrategy::Sequential, 0);
+    engine.set_on_progress(Box::new(|event| {
+        if let crate::progress::ProgressEvent::Info { message } = event {
+            if message.contains("Qwen3") || message.contains("BF16") {
+                eprintln!("ENGINE-INFO {message}");
+            }
+        }
+    }));
+    engine.inject_initial_latents(env.capture("p8_noise.safetensors")["latents"].clone());
+    let prompt = match references.len() {
+        0 | 1 => P8_PROMPT,
+        _ => TE_STUDY_MULTI_PROMPT,
+    };
+    let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+        "prompt": prompt,
+        "model": model,
+        "width": 512,
+        "height": 512,
+        "steps": steps,
+        "guidance": 1.0,
+        "seed": 1234,
+        "output_format": "png"
+    }))
+    .unwrap();
+    if !references.is_empty() {
+        request.edit_images = Some(
+            references
+                .iter()
+                .map(|name| std::fs::read(testdata(name)).unwrap())
+                .collect(),
+        );
+    }
+    let response = engine.generate(&request).unwrap();
+    std::env::remove_var("MOLD_QWEN3_VARIANT");
+    response.images[0].data.clone()
+}
+
+const TE_STUDY_MULTI_PROMPT: &str = "Place the house from image 1 under the sky of image 3, and \
+     hang the sign from image 2 on its porch, warm sunset light.";
+
+/// `[H, W, 3]` in `[0, 1]` from encoded PNG bytes (alpha, if any, dropped).
+fn png_rgb(bytes: &[u8]) -> Tensor {
+    let decoded = image::load_from_memory(bytes).unwrap().to_rgb8();
+    let (width, height) = decoded.dimensions();
+    Tensor::from_vec(
+        decoded
+            .as_raw()
+            .iter()
+            .map(|byte| f32::from(*byte) / 255.0)
+            .collect::<Vec<_>>(),
+        (height as usize, width as usize, 3),
+        &Device::Cpu,
+    )
+    .unwrap()
+}
+
+/// End-to-end evidence for the Q8_0 language model on reference-conditioned
+/// prompts: the same engine, transformer (BF16), injected P8 noise, seed and
+/// references, with the BF16 text-encoder shards against the official Q8_0
+/// GGUF (both named explicitly through `MOLD_QWEN3_VARIANT`). Also renders
+/// the text-to-image prompt, where Q8_0 stays auto-selectable, as the drift
+/// yardstick, and a 3-reference case with no upstream capture. Writes every
+/// PNG to `QWEN_IMAGE21_TE_STUDY_DIR` for visual review.
+///
+/// Measured on an L40S (CUDA fast path), PSNR of the Q8-TE render against the
+/// BF16-TE render: base4 t2i 39.08 / ref1 40.99 / ref3 37.11 dB, turbo6 t2i
+/// 33.47 / ref1 34.58 / ref3 31.98 dB — visually equivalent on all twelve
+/// renders. Against upstream's fp32 P8 capture, base4 ref1 reads 38.80 dB
+/// (BF16) and 42.20 dB (Q8), but turbo6 ref1 reads 34.67 dB (BF16) and
+/// 31.90 dB (Q8): 1.32 dB BELOW upstream's own bf16 pipeline (33.22 dB) and
+/// 2.32 dB short of the P8 turbo gate ([`P8_TURBO_MARGIN_DB`]). The 4-step
+/// base render does not discriminate conditioning precision
+/// (`conditioning_precision_study`); the 6-step turbo, which amplifies it,
+/// does. That is why auto mode never picks a GGUF language model for a
+/// reference request (`variant_resolution::choose_qwen3_vl_variant`), and
+/// this study asserts exactly that verdict on the turbo recipe.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT, QWEN_IMAGE21_FIXTURES, QWEN_IMAGE21_TE_STUDY_DIR and the Q8_0 GGUF in the models dir"]
+fn reference_text_encoder_variant_study() {
+    let env = env();
+    let out = PathBuf::from(
+        std::env::var_os("QWEN_IMAGE21_TE_STUDY_DIR")
+            .expect("QWEN_IMAGE21_TE_STUDY_DIR must be set to run this study"),
+    );
+    std::fs::create_dir_all(&out).unwrap();
+    let truth = |recipe: &str| {
+        env.capture(&format!("p8_{recipe}_fp32.safetensors"))["decoded_rgba_float"]
+            .narrow(2, 0, 3)
+            .unwrap()
+            .clamp(0f32, 1f32)
+            .unwrap()
+    };
+    let cases: [(&str, &[&str]); 3] = [
+        ("t2i", &[]),
+        ("ref1", &["ref_opaque.png"]),
+        (
+            "ref3",
+            &["ref_opaque.png", "ref_rgba.png", "ref_opaque.png"],
+        ),
+    ];
+    let recipes: Vec<String> = std::env::var("QWEN_IMAGE21_TE_STUDY_RECIPES")
+        .map(|list| list.split(',').map(str::to_string).collect())
+        .unwrap_or_else(|_| vec!["base4".into(), "turbo6".into()]);
+    let mut turbo_verdicts = Vec::new();
+    for recipe in &recipes {
+        for (case, references) in cases {
+            let mut renders = Vec::new();
+            for variant in ["bf16", "q8"] {
+                let bytes = te_variant_render(&env, recipe, references, variant);
+                let path = out.join(format!("te_study_{recipe}_{case}_{variant}.png"));
+                std::fs::write(&path, &bytes).unwrap();
+                renders.push(png_rgb(&bytes));
+            }
+            let direct = psnr(&renders[1], &renders[0]);
+            let upstream = if case == "ref1" {
+                let truth = truth(recipe);
+                let upstream_bf16 = psnr(
+                    &env.capture(&format!("p8_{recipe}_bf16.safetensors"))["decoded_rgba_float"]
+                        .narrow(2, 0, 3)
+                        .unwrap()
+                        .clamp(0f32, 1f32)
+                        .unwrap(),
+                    &truth,
+                );
+                let (bf16, q8) = (psnr(&renders[0], &truth), psnr(&renders[1], &truth));
+                if recipe == "turbo6" {
+                    turbo_verdicts.push((
+                        p8_gate(bf16, upstream_bf16, P8_TURBO_MARGIN_DB),
+                        p8_gate(q8, upstream_bf16, P8_TURBO_MARGIN_DB),
+                    ));
+                }
+                format!(
+                    ", vs upstream fp32: bf16-TE {bf16:.2} dB, q8-TE {q8:.2} dB, upstream bf16 {upstream_bf16:.2} dB"
+                )
+            } else {
+                String::new()
+            };
+            eprintln!("TE-STUDY {recipe} {case}: q8-TE vs bf16-TE {direct:.2} dB{upstream}");
+        }
+    }
+    for (bf16_passes, q8_passes) in turbo_verdicts {
+        assert!(bf16_passes, "the BF16 text encoder fails the P8 turbo gate");
+        assert!(
+            !q8_passes,
+            "the Q8_0 text encoder passes the P8 turbo gate: its exclusion from auto mode for \
+             reference requests is no longer evidenced"
+        );
+    }
+}

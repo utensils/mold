@@ -277,6 +277,7 @@ fn choose_qwen3_variant_routed(
     free_vram: u64,
     have_bf16: bool,
     prefer_gguf: bool,
+    auto_gguf: bool,
 ) -> Result<(Qwen3Choice, Qwen3Route)> {
     let registry = qwen3_registry(qwen3_size);
     let size_label = registry.size_label;
@@ -323,7 +324,7 @@ fn choose_qwen3_variant_routed(
             if prefer_gguf {
                 // Flux.2 path: prefer GGUF because it's smaller and faster to load.
                 // Try quantized variants (largest first) on GPU.
-                if is_cuda || is_metal {
+                if auto_gguf && (is_cuda || is_metal) {
                     if let Some(variant) = registry
                         .variants
                         .iter()
@@ -362,7 +363,7 @@ fn choose_qwen3_variant_routed(
             }
 
             // BF16 won't fit (or shards missing) — try quantized variants (largest first)
-            if is_cuda || is_metal || !have_bf16 {
+            if auto_gguf && (is_cuda || is_metal || !have_bf16) {
                 if let Some(variant) = registry
                     .variants
                     .iter()
@@ -387,7 +388,7 @@ fn choose_qwen3_variant_routed(
             }
 
             // On Metal, never fall back to CPU (same memory pool). Use smallest quantized variant on GPU.
-            if is_metal {
+            if is_metal && auto_gguf {
                 if let Some(variant) = registry
                     .variants
                     .iter()
@@ -402,6 +403,12 @@ fn choose_qwen3_variant_routed(
                         Qwen3Route::MetalSmallest,
                     ));
                 }
+            }
+
+            // A request no GGUF tier may serve on its own keeps the BF16 shards
+            // on the unified pool rather than moving them to the CPU cores.
+            if is_metal && have_bf16 {
+                return Ok((Qwen3Choice::Bf16 { on_gpu: true }, Qwen3Route::Auto));
             }
 
             // Fall back to BF16 on CPU (only if shards are available)
@@ -419,40 +426,30 @@ fn choose_qwen3_variant_routed(
     }
 }
 
-/// [`resolve_qwen3_variant`]'s decision without the acquisition.
-#[allow(clippy::too_many_arguments)]
-pub fn choose_qwen3_variant(
-    qwen3_size: Qwen3Size,
-    preference: Option<&str>,
-    is_cuda: bool,
-    is_metal: bool,
-    free_vram: u64,
-    have_bf16: bool,
-    prefer_gguf: bool,
-) -> Result<Qwen3Choice> {
-    choose_qwen3_variant_routed(
-        qwen3_size,
-        preference,
-        is_cuda,
-        is_metal,
-        free_vram,
-        have_bf16,
-        prefer_gguf,
-    )
-    .map(|(choice, _)| choice)
-}
-
 /// Qwen Image 2.1's Qwen3-VL-8B decision: the BF16 shards are always
 /// installed (the vision tower lives there), and auto mode is the Z-Image arm
 /// — BF16 when it fits, else the largest official GGUF that fits. `free_vram`
 /// is what the card has left once the transformer and VAE are resident.
+///
+/// `reference_conditioned` (the request carries `edit_images`) takes every
+/// GGUF tier out of AUTO mode, leaving BF16 on the card or, when it does not
+/// fit, BF16 on the CPU (Metal: on the unified pool). Measured end to end on
+/// the P8 captures (`docs/qualification/qwen-image-2.1-image-conditioning.md`,
+/// `qwen_image21::parity_tests::reference_text_encoder_variant_study`): the
+/// Q8_0 language model renders the 6-step turbo reference case at 31.90 dB
+/// against upstream's fp32 render where the BF16 shards render 34.67 dB, i.e.
+/// 1.32 dB BELOW upstream's own bf16 pipeline and 2.32 dB short of the P8
+/// turbo gate the shipped path holds; its hidden-state loss is confined to
+/// the visual rows (`qwen3_vl_gguf_parity`). An explicit `MOLD_QWEN3_VARIANT`
+/// still wins — [`qwen3_vl_explicit_gguf_on_references`] names it.
 pub fn choose_qwen3_vl_variant(
     preference: Option<&str>,
     is_cuda: bool,
     is_metal: bool,
     free_vram: u64,
+    reference_conditioned: bool,
 ) -> Result<Qwen3Choice> {
-    choose_qwen3_variant(
+    choose_qwen3_variant_routed(
         Qwen3Size::Vl8b,
         preference,
         is_cuda,
@@ -460,7 +457,26 @@ pub fn choose_qwen3_vl_variant(
         free_vram,
         true,
         false,
+        !reference_conditioned,
     )
+    .map(|(choice, _)| choice)
+}
+
+/// The warning an explicit GGUF `MOLD_QWEN3_VARIANT` earns on a
+/// reference-conditioned Qwen Image 2.1 request ([`choose_qwen3_vl_variant`]),
+/// or `None` when the choice is not an explicit GGUF tier.
+pub fn qwen3_vl_explicit_gguf_on_references(
+    preference: Option<&str>,
+    reference_conditioned: bool,
+) -> Option<String> {
+    let tag = preference.filter(|tag| *tag != "bf16" && *tag != "auto")?;
+    reference_conditioned.then(|| {
+        format!(
+            "MOLD_QWEN3_VARIANT={tag} is explicit, so the quantized Qwen3-VL-8B encodes this \
+             reference-conditioned prompt; auto mode would use the BF16 shards, because the \
+             quantized language model measurably degrades image-conditioned renders"
+        )
+    })
 }
 
 /// Resolve which Qwen3 encoder variant to use and where to place it.
@@ -477,7 +493,7 @@ pub fn choose_qwen3_vl_variant(
 ///   Qwen3-4B (Klein-4B / Z-Image), Qwen3-8B (Klein-9B), or Qwen3-VL-8B (Qwen
 ///   Image 2.1, whose list is sha-pinned and verified before use).
 ///
-/// The decision is [`choose_qwen3_variant`]; this adds the acquisition and the
+/// The decision is `choose_qwen3_variant_routed`; this adds the acquisition and the
 /// progress lines.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn resolve_qwen3_variant(
@@ -489,6 +505,58 @@ pub(crate) fn resolve_qwen3_variant(
     have_bf16: bool,
     prefer_gguf: bool,
     qwen3_size: Qwen3Size,
+) -> Result<(Vec<PathBuf>, bool, bool, String)> {
+    resolve_qwen3_variant_with(
+        progress,
+        preference,
+        gpu_device,
+        free_vram,
+        bf16_paths,
+        have_bf16,
+        prefer_gguf,
+        qwen3_size,
+        true,
+    )
+}
+
+/// [`resolve_qwen3_variant`] for Qwen Image 2.1's Qwen3-VL-8B, with
+/// [`choose_qwen3_vl_variant`]'s reference rule.
+pub(crate) fn resolve_qwen3_vl_variant(
+    progress: &ProgressReporter,
+    preference: Option<&str>,
+    gpu_device: &Device,
+    free_vram: u64,
+    bf16_paths: &[PathBuf],
+    reference_conditioned: bool,
+) -> Result<(Vec<PathBuf>, bool, bool, String)> {
+    if let Some(warning) = qwen3_vl_explicit_gguf_on_references(preference, reference_conditioned) {
+        tracing::warn!("{warning}");
+        progress.info(&format!("Warning: {warning}"));
+    }
+    resolve_qwen3_variant_with(
+        progress,
+        preference,
+        gpu_device,
+        free_vram,
+        bf16_paths,
+        !bf16_paths.is_empty(),
+        false,
+        Qwen3Size::Vl8b,
+        !reference_conditioned,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn resolve_qwen3_variant_with(
+    progress: &ProgressReporter,
+    preference: Option<&str>,
+    gpu_device: &Device,
+    free_vram: u64,
+    bf16_paths: &[PathBuf],
+    have_bf16: bool,
+    prefer_gguf: bool,
+    qwen3_size: Qwen3Size,
+    auto_gguf: bool,
 ) -> Result<(Vec<PathBuf>, bool, bool, String)> {
     let is_cuda = gpu_device.is_cuda();
     let is_metal = gpu_device.is_metal();
@@ -502,6 +570,7 @@ pub(crate) fn resolve_qwen3_variant(
         free_vram,
         have_bf16,
         prefer_gguf,
+        auto_gguf,
     )?;
     let device_word = |on_gpu: bool| if on_gpu { "GPU" } else { "CPU" };
     match (choice, route) {
@@ -924,26 +993,69 @@ mod tests {
             Qwen3Choice::Bf16 { on_gpu } => ("bf16", on_gpu),
             Qwen3Choice::Gguf { variant, on_gpu } => (variant.tag, on_gpu),
         };
-        let auto = |free| tag(choose_qwen3_vl_variant(None, true, false, free).unwrap());
+        let auto = |free| tag(choose_qwen3_vl_variant(None, true, false, free, false).unwrap());
         assert_eq!(auto(30 * GB), ("bf16", true));
         assert_eq!(auto(12 * GB), ("q8", true));
         // Q4_K_M fails the conditioning gate, so auto mode never picks it.
         assert_eq!(auto(8 * GB), ("bf16", false));
         assert_eq!(auto(5 * GB), ("bf16", false));
         assert_eq!(
-            tag(choose_qwen3_vl_variant(Some("auto"), false, true, 5 * GB).unwrap()),
+            tag(choose_qwen3_vl_variant(Some("auto"), false, true, 5 * GB, false).unwrap()),
             ("q8", true),
             "Metal takes the smallest auto-eligible GGUF on the unified pool"
         );
         assert_eq!(
-            tag(choose_qwen3_vl_variant(Some("q4"), true, false, 40 * GB).unwrap()),
+            tag(choose_qwen3_vl_variant(Some("q4"), true, false, 40 * GB, false).unwrap()),
             ("q4", true)
         );
         assert_eq!(
-            tag(choose_qwen3_vl_variant(Some("bf16"), true, false, 5 * GB).unwrap()),
+            tag(choose_qwen3_vl_variant(Some("bf16"), true, false, 5 * GB, false).unwrap()),
             ("bf16", false)
         );
-        assert!(choose_qwen3_vl_variant(Some("q6"), true, false, 40 * GB).is_err());
+        assert!(choose_qwen3_vl_variant(Some("q6"), true, false, 40 * GB, false).is_err());
+    }
+
+    /// A reference-conditioned request never auto-selects a GGUF tier: BF16 on
+    /// the card when it fits, else BF16 on the CPU (Metal: the unified pool).
+    /// An explicit tag still wins, and is the case that earns the warning.
+    #[test]
+    fn a_reference_request_never_auto_selects_a_gguf_language_model() {
+        const GB: u64 = 1_000_000_000;
+        let tag = |choice: Qwen3Choice| match choice {
+            Qwen3Choice::Bf16 { on_gpu } => ("bf16", on_gpu),
+            Qwen3Choice::Gguf { variant, on_gpu } => (variant.tag, on_gpu),
+        };
+        let cuda = |preference, free| {
+            tag(choose_qwen3_vl_variant(preference, true, false, free, true).unwrap())
+        };
+        assert_eq!(cuda(None, 30 * GB), ("bf16", true));
+        // The same card auto-selects q8 for text-to-image
+        // (`the_vl_variant_choice_follows_the_free_card`).
+        assert_eq!(cuda(None, 12 * GB), ("bf16", false));
+        assert_eq!(cuda(Some("auto"), 5 * GB), ("bf16", false));
+        assert_eq!(
+            tag(choose_qwen3_vl_variant(None, false, true, 5 * GB, true).unwrap()),
+            ("bf16", true),
+            "Metal keeps BF16 on the unified pool rather than the smallest GGUF"
+        );
+        assert_eq!(cuda(Some("q8"), 40 * GB), ("q8", true));
+        assert_eq!(cuda(Some("q4"), 40 * GB), ("q4", true));
+
+        assert!(qwen3_vl_explicit_gguf_on_references(Some("q8"), true)
+            .is_some_and(|warning| warning.contains("MOLD_QWEN3_VARIANT=q8")));
+        assert_eq!(
+            qwen3_vl_explicit_gguf_on_references(Some("q8"), false),
+            None
+        );
+        assert_eq!(
+            qwen3_vl_explicit_gguf_on_references(Some("bf16"), true),
+            None
+        );
+        assert_eq!(
+            qwen3_vl_explicit_gguf_on_references(Some("auto"), true),
+            None
+        );
+        assert_eq!(qwen3_vl_explicit_gguf_on_references(None, true), None);
     }
 
     /// An explicit tag the VL list does not carry names the tags it does.
