@@ -3071,16 +3071,33 @@ mod tests {
         assert_eq!(output.frames, 124);
         assert_eq!(output.audio_sample_rate, contract::AUDIO_SAMPLE_RATE_HZ);
 
-        // The image is normalized onto the contract's own 2048 short-edge
-        // canvas, so Qwen sees (2048/32)^2 vision pads and the visual VAE
-        // receives that exact canvas. The audio reference contributes no
-        // vision pads and one 32 kHz stereo condition block.
+        // Reference images are scaled DOWN onto the 2048 short-edge canvas and
+        // never up (#1464, `reference_image_dimensions` in mold-core, after
+        // ComfyUI `comfy_extras/nodes_minimax_h3.py:298-303`), then aligned to
+        // the 32-pixel grid with ties-to-even: the 48x48 fixture keeps its
+        // native geometry and lands on a 64x64 canvas, so Qwen sees
+        // (64/32)^2 = 4 vision pads and the visual VAE receives that exact
+        // canvas. The audio reference contributes no vision pads and one
+        // 32 kHz stereo condition block.
+        let shape = mold_core::minimax_h3::reference_prepared_shape(
+            &request.references.as_ref().unwrap()[0],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                shape.normalized_width,
+                shape.normalized_height,
+                shape.visual_rows
+            ),
+            (Some(64), Some(64), 4),
+            "the phase trace below is only meaningful on the contract's own canvas"
+        );
         assert_eq!(
             *trace.lock().unwrap(),
             vec![
-                "vision:1:4096".to_string(),
+                "vision:1:4".to_string(),
                 "vision:2:0".into(),
-                "encode-visual:1:2048x2048x1".into(),
+                "encode-visual:1:64x64x1".into(),
                 "encode-audio:2:80".into(),
                 // Both VAEs and the retained media are released here, before
                 // the transformer is loaded, so none of it sits inside the
