@@ -687,13 +687,16 @@ jobs:
       - name: Test private MiniMax H3 foundations
         if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
-      - name: Test the MiniMax H3 conditioner cache with the cache enabled
-        # The cache is deliberately inert under `h3-private-uat`, so the step
-        # above runs every one of its tests against a disabled cache. Filtered
-        # to the module because the unfiltered `--features h3` graph carries
-        # private-UAT-only fixtures that only the capture feature satisfies.
+      - name: Test the public MiniMax H3 inference build
+        # The whole `mold-ai-inference` lib suite under the public `h3` graph,
+        # in the build this step always compiled. It covers the conditioner
+        # cache ENABLED (inert under `h3-private-uat`, so the step above runs
+        # its tests against a disabled cache) and every test whose answer the
+        # public engine changes. It was filtered to `minimax_h3::conditioner_cache`
+        # until the unfiltered suite was repaired: with nothing running it, 16
+        # `h3`-only assertions drifted red across #1010, #1464, #1601 and #1746.
         if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
-        run: cargo test -p mold-ai-inference --lib --features h3 minimax_h3::conditioner_cache
+        run: cargo test -p mold-ai-inference --lib --features h3
       # One lint pass over the optional-feature union replaces the former
       # per-feature clippy steps (PuLID x3, mesh, mDNS, the `mold` CLI
       # feature set) and the `h3,mp4` runtime compile check: `h3` is added
