@@ -5419,6 +5419,24 @@ describe("MobileApp generation queue", () => {
     });
   });
 
+  it("auto-saves a completed WebP still to Photos byte-for-byte", async () => {
+    // Qwen Image 2.1 transparent prints can be WebP stills; the alpha travels
+    // in the original bytes, so nothing may drop or re-encode them.
+    apiFetchTo.mockResolvedValueOnce({
+      blob: () => Promise.resolve(new Blob(["webp-still"], { type: "image/webp" })),
+    } as Response);
+    admitCompletedPrints("transparent print.webp");
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("save this transparent print");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/transparent%20print.webp");
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
+      dataB64: btoa("webp-still"),
+    });
+  });
+
   it("auto-saves both post-upscale stills to Photos", async () => {
     serveStillModel();
     apiFetchTo
@@ -12758,6 +12776,29 @@ describe("MobileApp Library organization", () => {
     await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
     await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
     expect(wrapper?.find("[data-test='mobile-gallery-save-status']").exists()).toBe(false);
+  });
+
+  it("saves a selected WebP still to Photos as an image", async () => {
+    installLibraryApi();
+    const libraryApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) =>
+      path === "/api/gallery"
+        ? Promise.resolve([libraryPrint("transparent.webp", nowSecs + 4)])
+        : libraryApi(callTarget, path, init),
+    );
+    await openLibrary();
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper!.findAll("[data-test='gallery-item']")[0]!.trigger("click");
+    apiFetchTo.mockImplementation(async () => new Response(new Blob(["webp-still"])));
+    invoke.mockClear();
+
+    await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", { dataB64: btoa("webp-still") });
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Saved 1 of 1",
+    );
   });
 
   it("fans a bulk favorite out through /api/gallery/organize", async () => {

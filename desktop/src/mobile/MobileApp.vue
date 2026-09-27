@@ -290,7 +290,7 @@ import {
   mobileMediaBudgetValidationError,
   sourceConditioningValidationError,
 } from "../lib/generateValidation";
-import { base64ToDataUrl, blobToBase64, isStillImageFile } from "../lib/image";
+import { base64ToDataUrl, blobToBase64, isStillImageFile, PHOTO_SAVE_FORMATS } from "../lib/image";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
@@ -4018,9 +4018,12 @@ function setGenerationStatus(message: string, isError = false): void {
 
 async function saveCompletedStillToPhotos(result: CompleteEvent, target: ApiTarget): Promise<void> {
   if (!mobileSettings.autoSavePhotos) return;
+  // A multi-frame WebP is a clip, not a still: only a single-frame
+  // completion widens the PNG/JPEG pair to every still output container.
+  const formats = (result.video_frames ?? 1) > 1 ? undefined : PHOTO_SAVE_FORMATS;
   const filenames = [result.original_filename, result.filename].filter(
     (filename, index, all): filename is string =>
-      !!filename && isStillImageFile(filename) && all.indexOf(filename) === index,
+      !!filename && isStillImageFile(filename, formats) && all.indexOf(filename) === index,
   );
   const saves = filenames.map(async (filename) => {
     const response = await apiFetchTo(target, galleryMediaPath(filename, "host"));
@@ -9992,7 +9995,7 @@ watch(
 const gallerySaveTargets = computed(() =>
   selectedRepresentatives().filter(
     (print) =>
-      isStillImageFile(print.filename) ||
+      isStillImageFile(print.filename, PHOTO_SAVE_FORMATS) ||
       isVideoItem(print) ||
       print.filename.toLowerCase().endsWith(".glb"),
   ),

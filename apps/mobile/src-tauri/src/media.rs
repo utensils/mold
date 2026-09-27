@@ -14,10 +14,24 @@ fn decode_image(data_b64: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "the selected print contains invalid image data".to_string())?;
     let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
     let jpeg = bytes.starts_with(&[0xff, 0xd8, 0xff]);
-    if png || jpeg {
+    if png || jpeg || is_still_webp(&bytes) {
         Ok(bytes)
     } else {
-        Err("the selected print is not a PNG or JPEG image".to_string())
+        Err("the selected print is not a PNG, JPEG or still WebP image".to_string())
+    }
+}
+
+/// A RIFF/WEBP container that is one frame. A Qwen Image 2.1 transparent print
+/// can be a WebP still, its alpha in the original bytes; an animated WebP
+/// (the VP8X animation flag, 0x02) is a clip and never goes to Photos as one.
+fn is_still_webp(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+    match &bytes[12..16] {
+        b"VP8 " | b"VP8L" => true,
+        b"VP8X" => bytes.get(20).is_some_and(|flags| flags & 0x02 == 0),
+        _ => false,
     }
 }
 
@@ -566,60 +580,59 @@ async fn platform_save_image(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "android"))]
+/// Hands the ORIGINAL bytes to PhotoKit as the asset's photo resource. A
+/// `UIImage` round trip (`UIImageWriteToSavedPhotosAlbum`) re-encodes the
+/// picture, so a transparent PNG or WebP print could land in Photos without
+/// its alpha; the asset created here is byte-identical to the host's file.
+#[cfg(target_os = "ios")]
 async fn platform_save_image(
-    window: tauri::WebviewWindow,
+    _window: tauri::WebviewWindow,
     bytes: Vec<u8>,
     _data_b64: String,
 ) -> Result<(), String> {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    window
-        .with_webview(move |_webview| {
-            #[cfg(target_os = "ios")]
-            {
-                use core::ffi::c_void;
-                use objc2_foundation::NSData;
-                use objc2_ui_kit::UIImage;
+    // PhotoKit's synchronous change block must never run on the main thread.
+    tauri::async_runtime::spawn_blocking(move || save_image_bytes(&bytes))
+        .await
+        .map_err(|error| error.to_string())?
+}
 
-                unsafe extern "C" {
-                    fn UIImageWriteToSavedPhotosAlbum(
-                        image: *mut c_void,
-                        completion_target: *mut c_void,
-                        completion_selector: *mut c_void,
-                        context_info: *mut c_void,
-                    );
-                }
+#[cfg(target_os = "ios")]
+fn save_image_bytes(bytes: &[u8]) -> Result<(), String> {
+    use block2::{DynBlock, RcBlock};
+    use objc2_foundation::NSData;
+    use objc2_photos::{PHAssetCreationRequest, PHAssetResourceType, PHPhotoLibrary};
 
-                let result = (|| {
-                    // SAFETY: NSData copies the bytes and UIImage validates
-                    // them. Tauri invokes this callback on the UIKit main
-                    // thread.
-                    let data =
-                        unsafe { NSData::dataWithBytes_length(bytes.as_ptr().cast(), bytes.len()) };
-                    let image = require_platform_image(UIImage::imageWithData(&data), "save")?;
-                    unsafe {
-                        UIImageWriteToSavedPhotosAlbum(
-                            std::ptr::from_ref::<UIImage>(&image).cast_mut().cast(),
-                            core::ptr::null_mut(),
-                            core::ptr::null_mut(),
-                            core::ptr::null_mut(),
-                        )
-                    };
-                    Ok(())
-                })();
-                let _ = sender.send(result);
-            }
+    let data = NSData::with_bytes(bytes);
+    let changes = RcBlock::new(move || {
+        // SAFETY: PhotoKit invokes this inside its change transaction, where a
+        // creation request is valid; the resource copies the retained NSData.
+        unsafe {
+            PHAssetCreationRequest::creationRequestForAsset().addResourceWithType_data_options(
+                PHAssetResourceType::Photo,
+                &data,
+                None,
+            );
+        }
+    });
+    let change_ptr = std::ptr::from_ref::<DynBlock<dyn Fn()>>(&changes).cast_mut();
+    // SAFETY: The block stays alive for this synchronous PhotoKit transaction.
+    unsafe { PHPhotoLibrary::sharedPhotoLibrary().performChangesAndWait_error(change_ptr) }.map_err(
+        |error| {
+            format!(
+                "could not save image to Photos: {}",
+                error.localizedDescription()
+            )
+        },
+    )
+}
 
-            #[cfg(not(target_os = "ios"))]
-            {
-                let _ = (_webview, bytes);
-                let _ = sender.send(Err(
-                    "saving images is available in the mobile builds".to_string()
-                ));
-            }
-        })
-        .map_err(|error| format!("could not save image to Photos: {error}"))?;
-    wait_for_image_action(receiver, "save").await
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+async fn platform_save_image(
+    _window: tauri::WebviewWindow,
+    _bytes: Vec<u8>,
+    _data_b64: String,
+) -> Result<(), String> {
+    Err("saving images is available in the mobile builds".to_string())
 }
 
 #[cfg(target_os = "ios")]
@@ -983,6 +996,32 @@ mod tests {
         assert!(super::decode_image(&encode(&[0xff, 0xd8, 0xff, 0xe0])).is_ok());
         assert!(super::decode_image(&encode(b"not an image")).is_err());
         assert!(super::decode_image("not base64!").is_err());
+    }
+
+    /// A RIFF/WEBP container whose first chunk is `chunk` with `payload`.
+    fn webp(chunk: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+        bytes.extend_from_slice(chunk);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn accepts_a_still_webp_verbatim_but_refuses_an_animation() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        // Lossy, lossless, and an extended still carrying alpha (VP8X flag 0x10).
+        for still in [
+            webp(b"VP8 ", &[0; 10]),
+            webp(b"VP8L", &[0; 10]),
+            webp(b"VP8X", &[0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ] {
+            assert_eq!(super::decode_image(&encode(&still)).unwrap(), still);
+        }
+        // VP8X animation flag (0x02): a clip, which Photos must not take as a still.
+        let animated = webp(b"VP8X", &[0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(super::decode_image(&encode(&animated)).is_err());
+        assert!(super::decode_image(&encode(b"RIFF\0\0\0\0WAVEfmt ")).is_err());
     }
 
     #[test]

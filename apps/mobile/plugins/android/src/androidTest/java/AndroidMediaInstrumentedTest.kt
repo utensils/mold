@@ -107,6 +107,18 @@ class AndroidMediaInstrumentedTest {
     }
 
     @Test
+    fun savesAStillWebpVerbatimSoItsAlphaSurvives() {
+        val uri = media.saveImage(RGBA_WEBP_BASE64)
+        try {
+            val saved = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            assertArrayEquals(Base64.decode(RGBA_WEBP_BASE64, Base64.DEFAULT), saved)
+            assertEquals("image/webp", context.contentResolver.getType(uri))
+        } finally {
+            context.contentResolver.delete(uri, null, null)
+        }
+    }
+
+    @Test
     fun preparesAuthenticatedAnimationForTheAndroidShareSheet() {
         val host = startExportHost("GIF89a uat".toByteArray(), "image/gif")
         try {
@@ -305,5 +317,8 @@ class AndroidMediaInstrumentedTest {
         // Opaque 1x1 PNG. The native bridge retains the original bytes.
         private const val PNG_BASE64 =
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+        // Lossless 1x1 half-transparent red WebP still (VP8L).
+        private const val RGBA_WEBP_BASE64 = "UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAEAcQ/Y8CBiKi/wEA"
     }
 }

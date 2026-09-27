@@ -347,7 +347,25 @@ internal class AndroidMedia(context: Context) {
                 ImageData(bytes, "image/png", "png")
             bytes.size >= 3 && bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() && bytes[2] == 0xff.toByte() ->
                 ImageData(bytes, "image/jpeg", "jpg")
-            else -> throw IllegalArgumentException("the selected print is not a PNG or JPEG image")
+            isStillWebp(bytes) -> ImageData(bytes, "image/webp", "webp")
+            else -> throw IllegalArgumentException("the selected print is not a PNG, JPEG or still WebP image")
+        }
+    }
+
+    /**
+     * A one-frame RIFF/WEBP container: a transparent Qwen Image 2.1 print can be
+     * a WebP still with its alpha in the original bytes. The VP8X animation
+     * flag (0x02) marks a clip, which never goes to Photos as a still. Mirrors
+     * `is_still_webp` in the Tauri crate's `media.rs`.
+     */
+    private fun isStillWebp(bytes: ByteArray): Boolean {
+        if (bytes.size < 16) return false
+        fun ascii(from: Int) = String(bytes, from, 4, Charsets.US_ASCII)
+        if (ascii(0) != "RIFF" || ascii(8) != "WEBP") return false
+        return when (ascii(12)) {
+            "VP8 ", "VP8L" -> true
+            "VP8X" -> bytes.size > 20 && bytes[20].toInt() and 0x02 == 0
+            else -> false
         }
     }
 

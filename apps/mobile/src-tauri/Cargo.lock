@@ -2064,6 +2064,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6ea9a706f18e32cf8a0723e99855af4f135282891e07259301bae9135ae3872"
 dependencies = [
+ "bitflags 2.13.1",
  "block2",
  "dispatch2",
  "objc2",

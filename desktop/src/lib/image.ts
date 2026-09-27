@@ -31,6 +31,13 @@ export function base64ToDataUrl(b64: string, mime?: string): string {
 }
 
 /**
+ * The still containers the phone hands to Photos verbatim: every still output
+ * format mold writes. A transparent Qwen Image 2.1 print can be a WebP still,
+ * and its alpha lives in the original bytes, so none of these is re-encoded.
+ */
+export const PHOTO_SAVE_FORMATS: readonly ImageInputFormat[] = ["png", "jpeg", "webp"];
+
+/**
  * True for the still-image formats the engine accepts as `source_image` /
  * `mask_image` / keyframe conditioning: PNG and JPEG only. The gallery also
  * holds WebP/GIF/APNG/MP4 outputs, which the generate endpoints reject — so the
