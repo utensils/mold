@@ -1119,6 +1119,14 @@ mod registry_tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn scales(registry: &LoraRegistry, key: &str) -> Vec<f32> {
+        registry
+            .adapters_for(key)
+            .iter()
+            .map(|adapter| adapter.scale)
+            .collect()
+    }
+
     fn registry_for(path: &Path, scale: f64) -> Result<LoraRegistry> {
         build_registry(
             &[Qwen21LoraEntry {
@@ -1128,6 +1136,67 @@ mod registry_tests {
             &Device::Cpu,
             DType::F32,
         )
+    }
+
+    /// Metadata alpha ≠ r, an `alpha_pattern` override, a per-layer `.alpha`
+    /// tensor, and rsLoRA — each read back from the `LinearLoraAdapter` the
+    /// production registry builds, not from a test-only formula.
+    #[test]
+    fn the_registry_scales_by_peft_alpha_over_rank() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peft.safetensors");
+        let stem = |module: &str| format!("transformer.transformer_blocks.0.{module}");
+        let q = stem("attn.to_q");
+        let k = stem("attn.to_k");
+        let v = stem("attn.to_v");
+        write_adapter(
+            &path,
+            &[
+                (&format!("{q}.lora_A.weight"), vec![4, 8]),
+                (&format!("{q}.lora_B.weight"), vec![8, 4]),
+                (&format!("{k}.lora_A.weight"), vec![4, 8]),
+                (&format!("{k}.lora_B.weight"), vec![8, 4]),
+                (&format!("{v}.lora_A.weight"), vec![4, 8]),
+                (&format!("{v}.lora_B.weight"), vec![8, 4]),
+                (&format!("{v}.alpha"), vec![]),
+            ],
+            Some(r#"{"lora_alpha": 8, "r": 4, "alpha_pattern": {"attn.to_k": 2}}"#),
+        );
+        let registry = registry_for(&path, 0.5).unwrap();
+        // 0.5 · 8 / 4
+        assert_eq!(
+            scales(&registry, "transformer_blocks.0.attn.to_q.weight"),
+            [1.0]
+        );
+        // 0.5 · 2 / 4 (the pattern)
+        assert_eq!(
+            scales(&registry, "transformer_blocks.0.attn.to_k.weight"),
+            [0.25]
+        );
+        // The `.alpha` tensor wins over the metadata: its value is
+        // `(0 + 7·6) % 13 / 13 - 0.4` from `write_adapter`'s fill.
+        let tensor_alpha = (42 % 13) as f64 / 13.0 - 0.4;
+        let expected = (0.5 * (tensor_alpha as f32 as f64) / 4.0) as f32;
+        assert_eq!(
+            scales(&registry, "transformer_blocks.0.attn.to_v.weight"),
+            [expected]
+        );
+
+        let rslora = dir.path().join("rslora.safetensors");
+        write_adapter(
+            &rslora,
+            &[
+                (&format!("{q}.lora_A.weight"), vec![16, 8]),
+                (&format!("{q}.lora_B.weight"), vec![8, 16]),
+            ],
+            Some(r#"{"lora_alpha": 8, "r": 16, "use_rslora": true}"#),
+        );
+        let registry = registry_for(&rslora, 0.5).unwrap();
+        // 0.5 · 8 / sqrt(16)
+        assert_eq!(
+            scales(&registry, "transformer_blocks.0.attn.to_q.weight"),
+            [1.0]
+        );
     }
 
     /// A DoRA adapter is refused by name — declared in its metadata or
