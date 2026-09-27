@@ -854,6 +854,7 @@ function applyMask(mask: string): void {
         :sets-canvas="stripCanvas"
         :ordinal-base="stripOrdinalBase"
         :max="referenceMax"
+        :required="plan.required"
         touch-friendly
         add-label="Add photos"
         empty-label="Add photos"
