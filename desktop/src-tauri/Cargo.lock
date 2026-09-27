@@ -4038,6 +4038,7 @@ dependencies = [
  "dirs 6.0.0",
  "fs2",
  "hf-hub",
+ "image",
  "indicatif 0.17.11",
  "libc",
  "reqwest 0.12.28",

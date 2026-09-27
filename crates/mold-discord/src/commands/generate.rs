@@ -879,11 +879,8 @@ pub(crate) fn last_reference_canvas(
     if profile.canvas != Some(mold_core::ReferenceCanvasRule::LastReference) {
         return None;
     }
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(references.last()?))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()?;
+    let (width, height) =
+        mold_core::reference_image::oriented_dimensions(references.last()?).ok()?;
     let (default_w, default_h) = defaults
         .map(|d| (d.default_width, d.default_height))
         .unwrap_or((1024, 1024));
@@ -2773,6 +2770,30 @@ mod tests {
             Some(mold_core::validation::fit_to_target_area_ties_even(
                 1920,
                 1080,
+                1024 * 1024,
+                32
+            ))
+        );
+        // EXIF Orientation 6 on landscape-stored pixels: portrait, as the
+        // engine decodes it.
+        let rotated =
+            vec![
+                std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg",
+                ))
+                .unwrap(),
+            ];
+        assert_eq!(
+            last_reference_canvas(
+                &qwen,
+                &rotated,
+                Some(&defaults),
+                Some("qwen-image21"),
+                "qwen-image-2.1:bf16"
+            ),
+            Some(mold_core::validation::fit_to_target_area_ties_even(
+                48,
+                96,
                 1024 * 1024,
                 32
             ))

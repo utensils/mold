@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -183,5 +185,31 @@ describe("stagedReferenceDimensions", () => {
       { width: 1170, height: 2532 },
       null,
     ]);
+  });
+
+  it("reads a rotated phone photo upright, over the picker's stored size", () => {
+    // Pillow-written 96x48 pixels with EXIF Orientation = 6 — the file
+    // `mold_core::reference_image` pins too.
+    const relative =
+      "crates/mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg";
+    let directory = process.cwd();
+    while (!existsSync(resolve(directory, relative))) {
+      if (dirname(directory) === directory) throw new Error(relative);
+      directory = dirname(directory);
+    }
+    const bytes = readFileSync(resolve(directory, relative)).toString("base64");
+    const [read] = stagedReferenceDimensions([
+      { base64: bytes, width: 96, height: 48 },
+    ]);
+    expect(read).toEqual({ width: 48, height: 96 });
+    expect(
+      referenceCanvasSize({
+        canvas: "last-reference",
+        references: [read!],
+        defaults: { width: 1024, height: 1024 },
+        alignment: 32,
+        intent: "model-default",
+      }),
+    ).toEqual(fitToTargetAreaTiesEven(48, 96, 1024 * 1024, 32));
   });
 });
