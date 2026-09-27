@@ -105,6 +105,27 @@ pub enum AttentionChunkPolicy {
 #[cfg(not(feature = "flash-attn"))]
 static FLASH_FALLBACK_WARNED: OnceLock<()> = OnceLock::new();
 
+thread_local! {
+    /// FlashAttention kernel launches this thread has made through this module.
+    static FLASH_DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of FlashAttention kernel calls this module has dispatched on
+/// the CALLING thread. A resolved `Flash` backend or a true [`takes_flash`]
+/// is a request, never proof — an ineligible tensor or an unmatched mask arm
+/// quietly takes math — so a test asserting the kernel ran reads this delta
+/// (the `conv_policy::cudnn_dispatch_count` pattern). Per thread, because a
+/// launch is issued synchronously by its caller and a process-wide counter
+/// would count a concurrently running test's kernels too.
+pub fn flash_dispatch_count() -> u64 {
+    FLASH_DISPATCHES.with(std::cell::Cell::get)
+}
+
+#[cfg(feature = "flash-attn")]
+fn record_flash_dispatch() {
+    FLASH_DISPATCHES.with(|count| count.set(count.get() + 1));
+}
+
 impl AttentionBackend {
     /// Resolve the backend for a still. Equivalent to
     /// `resolve_for(AttentionPolicy::Image)`; retained because most call sites
@@ -481,6 +502,7 @@ pub(crate) fn flash_causal_bottom_right(
     v: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
+    record_flash_dispatch();
     candle_flash_attn::flash_attn_windowed(
         &to_flash_layout(q)?,
         &to_flash_layout(k)?,
@@ -548,6 +570,7 @@ pub(crate) fn flash_varlen_keys(
         cu_k.push(cu_k.last().copied().unwrap_or(0) + keep.len() as u32);
     }
     let max_k = key_index.iter().map(Vec::len).max().unwrap_or(0);
+    record_flash_dispatch();
     let out = candle_flash_attn::flash_attn_varlen(
         &q_packed,
         &k_packed,
@@ -868,6 +891,7 @@ fn flash_attention_eligible(
     let q_t = to_flash_layout(q)?;
     let k_t = to_flash_layout(k)?;
     let v_t = to_flash_layout(v)?;
+    record_flash_dispatch();
     let out = candle_flash_attn::flash_attn(&q_t, &k_t, &v_t, scale, false)?;
     // Output is `[B, N, H, D]`; restore `[B, H, N, D]` for callers, who go on
     // to `reshape` it and so need it contiguous.
