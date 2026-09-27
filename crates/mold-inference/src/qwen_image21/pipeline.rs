@@ -146,6 +146,14 @@ fn denoise_cache_budget(
     super::PrefixCacheBudget::Headroom(super::prefix_cache_headroom(free, 0, workspace))
 }
 
+/// The request warnings a denoise raises, in the order they were decided: an
+/// off-recipe turbo trajectory (`scheduler::scheduler_for`), then a prefix
+/// cache that did not fit. Both change what the render is, so both reach the
+/// response rather than the progress log alone.
+fn denoise_request_warnings(schedule: Option<String>, cache: Option<String>) -> Vec<String> {
+    schedule.into_iter().chain(cache).collect()
+}
+
 /// The positive prompt the encoder reads: the model card's RGBA recipe
 /// around the user's text when a transparent background was asked for
 /// (`mold_core::transparency`), else the text unchanged. The negative prompt
@@ -847,8 +855,8 @@ impl QwenImage21Engine {
             req.steps as usize,
             latent_tokens,
         );
-        if let Some(warning) = schedule_warning {
-            progress.info(&warning);
+        if let Some(warning) = &schedule_warning {
+            progress.info(warning);
         }
         let mut latents = match initial_latents {
             Some(latents) => {
@@ -973,7 +981,7 @@ impl QwenImage21Engine {
             latents,
             latent_height,
             latent_width,
-            warnings: cache_warning.into_iter().collect(),
+            warnings: denoise_request_warnings(schedule_warning, cache_warning),
         })
     }
 
@@ -1522,6 +1530,27 @@ mod tests {
             positive_prompt(&req),
             "This is an RGBA image with transparency. a red ceramic teapot. The image has alpha channel and the background is transparent."
         );
+    }
+
+    /// A turbo tier walked at a step count it was not distilled for is an
+    /// off-recipe render; that warning is a request warning, not only a
+    /// progress line.
+    #[test]
+    fn an_off_recipe_turbo_schedule_is_a_request_warning() {
+        use super::super::scheduler::{scheduler_for, ScheduleKind};
+        let (_, schedule) = scheduler_for(
+            ScheduleKind::for_model("qwen-image-2.1-turbo:bf16"),
+            8,
+            4096,
+        );
+        assert!(schedule.is_some());
+        let warnings =
+            denoise_request_warnings(schedule.clone(), Some("cache recomputes".to_string()));
+        assert_eq!(
+            warnings,
+            vec![schedule.unwrap(), "cache recomputes".to_string()]
+        );
+        assert!(denoise_request_warnings(None, None).is_empty());
     }
 
     #[test]
