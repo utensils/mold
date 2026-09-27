@@ -227,10 +227,12 @@ impl H3ConditionerConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn released_config() -> String {
+    /// The released H3 conditioner `config.json` (shared with the vision
+    /// tower's tests).
+    pub(in crate::minimax_h3) fn released_config() -> String {
         r#"{
               "architectures":["Qwen3VLForConditionalGeneration"],
               "image_token_id":151655,"video_token_id":151656,

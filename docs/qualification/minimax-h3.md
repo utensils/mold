@@ -576,6 +576,39 @@ cannot emit a record the runtime will refuse solely for size.
   after the exact path passes; it must never supply golden fixtures or close a
   full-precision acceptance row.
 
+### Vision merger activation (2026-09-27)
+
+The Qwen3-VL vision tower's output merger and three DeepStack mergers run on
+exact erf GELU; only the 27 blocks' MLP uses the configured
+`gelu_pytorch_tanh`. Every H3 upstream agrees: diffusers' H3 pipeline loads
+transformers' `Qwen3VLForConditionalGeneration`
+(`modular_pipelines/minimax_h3/encoders.py:17`), whose
+`Qwen3VLVisionPatchMerger.act_fn = nn.GELU()` ignores `hidden_act`
+(`modeling_qwen3_vl.py:181`, transformers 5.17.0), and ComfyUI's H3
+conditioner calls bare `F.gelu` in both mergers (`qwen35.py:560`,
+`qwen3vl.py:36` at `a73d24ba`) while its block MLP alone passes
+`approximate="tanh"` (`qwen35.py:483`). Mold's port used tanh in the mergers
+until this date, so every image-conditioned H3 render (FL2VA endpoint, Ref2VA
+references) moves slightly.
+
+Evidence: `released_h3_tower_matches_the_fp32_transformers_capture`
+(`mold-candle` `minimax_h3/vision.rs`) runs the installed conditioner's own
+`visual.*` weights against a float32 transformers capture
+(`crates/mold-candle/testdata/minimax_h3/vision/`, 320x256 synthetic image,
+80 merged rows). Relative mean error against the oracle, fp32 on the CPU:
+
+| Output      | erf (now) | tanh (before) |
+| ----------- | --------- | ------------- |
+| merger      | 6.7e-6    | 1.16e-4       |
+| deepstack 0 | 2.0e-6    | 6.14e-4       |
+| deepstack 1 | 2.8e-6    | 2.45e-4       |
+| deepstack 2 | 4.5e-6    | 4.97e-4       |
+
+In BF16 (the runtime dtype) the change sits under BF16 rounding noise but
+still moves every output toward the oracle (merger mean 4.454e-2 -> 4.452e-2,
+DeepStack 1.334e-2 -> 1.311e-2, 1.910e-2 -> 1.904e-2, 3.095e-2 -> 3.082e-2).
+Qwen Image 2.1 shares the tower and the same erf mergers.
+
 ## Scheduler and device boundary
 
 The frozen admission contract in
