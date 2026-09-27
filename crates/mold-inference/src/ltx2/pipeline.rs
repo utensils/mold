@@ -3526,6 +3526,12 @@ mod tests {
     /// encoder on a card the transformer chose to skip).
     #[test]
     fn resolve_prompt_encoder_device_keeps_cpu_when_transformer_is_cpu() {
+        // `MOLD_LTX2_GEMMA_DEVICE` / `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`
+        // are process-global and also mutated by `device`'s own combined
+        // test and by `resolver_picks_cpu_when_env_pins_cpu` below.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
         let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
         unsafe {
@@ -3623,6 +3629,11 @@ mod tests {
     /// device in CI isn't possible.
     #[test]
     fn resolver_picks_cpu_when_env_pins_cpu() {
+        // See `resolve_prompt_encoder_device_keeps_cpu_when_transformer_is_cpu`
+        // above: this pair of vars is also mutated by `device`'s tests.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
         let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
         unsafe {

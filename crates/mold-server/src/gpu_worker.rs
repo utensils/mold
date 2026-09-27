@@ -13241,7 +13241,7 @@ mod tests {
     /// available". The failure is the model's, so the hold is the model's.
     #[tokio::test]
     async fn three_model_specific_failures_hold_the_model_and_leave_the_device_schedulable() {
-        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        crate::gpu_pool::clear_model_specific_failures_for_tests("breaker-nonfinite-model");
         let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
         let model = "breaker-nonfinite-model";
         let error = mold_inference::model_specific_error(
@@ -13282,14 +13282,14 @@ mod tests {
             "the refusal names the model, not the device: {refusal}"
         );
 
-        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        crate::gpu_pool::clear_model_specific_failures_for_tests("breaker-nonfinite-model");
     }
 
     /// The other half of the same rule: an unmarked failure is still the
     /// device's, and three of them still degrade it exactly as before.
     #[tokio::test]
     async fn three_unmarked_failures_still_degrade_the_device() {
-        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        crate::gpu_pool::clear_model_specific_failures_for_tests("breaker-cuda-model");
         let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
         let model = "breaker-cuda-model";
 
@@ -13313,7 +13313,7 @@ mod tests {
             "an unmarked failure is not a model hold"
         );
 
-        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        crate::gpu_pool::clear_model_specific_failures_for_tests("breaker-cuda-model");
     }
 
     /// A shutdown abort is a deliberate cancellation, not evidence that this

@@ -2129,12 +2129,18 @@ mod tests {
         )
         .expect("constructor");
 
-        std::env::set_var("MOLD_DEVICE", "cpu");
+        // `MOLD_DEVICE` is process-global and also mutated by
+        // `sdxl::pipeline`'s and `expand`'s own tests; take the crate-shared
+        // lock so cargo's parallel runner can't interleave with them.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::EnvVarGuard::set("MOLD_DEVICE", "cpu");
         let err = SD15Engine::load(&mut engine).expect_err(
             "synthetic single-file checkpoint can't satisfy SD1.5's full tensor set; \
              dispatch should land in the candle constructor and fail there",
         );
-        std::env::remove_var("MOLD_DEVICE");
+        drop(_restore);
 
         let msg = err.to_string();
         // Proof we got past the dispatch: the error originates from the
