@@ -1516,6 +1516,57 @@ mod tests {
             .is_err());
     }
 
+    /// The GGUF language model builds its MRoPE tables itself
+    /// (`qwen3_vl_inject::mrope_cos_sin`) rather than gathering from a 1-D
+    /// table; both must be the same `(cos, sin)` for the real Qwen3-VL-8B
+    /// geometry (head_dim 128, theta 5e6, sections [24, 20, 20]) when the
+    /// T, H and W axes DISAGREE — the only case the text-only tests, where
+    /// all three axes are equal, never reach.
+    #[test]
+    fn the_gguf_mrope_tables_match_the_bf16_gather_on_unequal_axes() {
+        let cfg = Qwen3BF16Config {
+            max_position_embeddings: 4096,
+            ..Qwen3BF16Config::qwen3_image_21_text_encoder()
+        };
+        let rotary = RotaryEmbedding::new(&cfg, DType::F32, &Device::Cpu).unwrap();
+        // A text prefix, one 3x4 merged image (T fixed, H/W varying), then
+        // text resuming past the image's largest position, with positions
+        // large enough that an inv_freq ulp would show in the angle.
+        let (mut t, mut h, mut w) = (Vec::new(), Vec::new(), Vec::new());
+        for p in 0..5u32 {
+            t.push(p);
+            h.push(p);
+            w.push(p);
+        }
+        for row in 0..3u32 {
+            for col in 0..4u32 {
+                t.push(5);
+                h.push(5 + row);
+                w.push(5 + col);
+            }
+        }
+        for p in 9..40u32 {
+            t.push(p * 97);
+            h.push(p * 97);
+            w.push(p * 97);
+        }
+        let mrope = [t, h, w];
+        assert_ne!(mrope[1], mrope[2], "the axes must disagree");
+        let sections = super::super::qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS;
+        let (cos, sin) = rotary.mrope_tables(&mrope, sections).unwrap();
+        let (gguf_cos, gguf_sin) = super::super::qwen3_vl_inject::mrope_cos_sin(
+            &mrope,
+            cfg.head_dim,
+            cfg.rope_theta,
+            sections,
+            &Device::Cpu,
+        )
+        .unwrap();
+        assert_eq!(gguf_cos.dims(), cos.dims());
+        assert_eq!(flat(&gguf_cos), flat(&cos));
+        assert_eq!(flat(&gguf_sin), flat(&sin));
+    }
+
     #[test]
     fn the_multimodal_query_chunk_covers_short_prompts_whole() {
         // One 1024² reference plus a prompt (~1.3k tokens) runs as one chunk.
