@@ -473,6 +473,84 @@ pub fn render_workspace_bytes(
     )
 }
 
+/// Everything the SEQUENTIAL plan's peak reads.
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen21SequentialInputs<'a> {
+    pub paths: &'a mold_core::ModelPaths,
+    /// `MOLD_QWEN3_VARIANT`, as the engine reads it.
+    pub qwen3_variant: Option<&'a str>,
+    /// The card's backend.
+    pub device: TeDevice,
+    /// Whether the text encoder (and with it the vision tower) is placed on
+    /// the card; a host placement charges the card nothing for the encode.
+    pub text_encoder_on_device: bool,
+    /// Usable device bytes with nothing of this render resident.
+    pub usable_free_bytes: u64,
+    pub request: &'a Qwen21RenderRequest<'a>,
+}
+
+/// The device peak of the SEQUENTIAL engine
+/// (`QwenImage21Engine::generate_sequential`), which runs its phases one after
+/// another and releases each phase's weights before the next loads:
+///
+/// 1. the Qwen3-VL encode — the encoder (the variant it picks with the whole
+///    card free), the vision tower and the encode working set;
+/// 2. the VAE encode of the references;
+/// 3. the denoise — the transformer alone, its workspace and the prefix
+///    cache it retains (planned against the transformer alone, as the
+///    engine's denoise-time sample sees it);
+/// 4. the decode — the VAE alone and its decode peak.
+///
+/// The peak is the LARGEST phase plus the allocator margin, never their sum.
+pub fn sequential_peak_bytes(inputs: &Qwen21SequentialInputs<'_>) -> anyhow::Result<u64> {
+    let request = inputs.request;
+    let transformer_bytes = transformer_device_bytes(inputs.paths);
+    let vae_bytes = file_bytes(&inputs.paths.vae);
+    let cache_budget = match inputs.device {
+        TeDevice::Cuda => {
+            prefix_cache_budget(request, Some(inputs.usable_free_bytes), transformer_bytes)
+        }
+        _ => super::PrefixCacheBudget::RequestOnly,
+    };
+    let phases = render_phases(request, cache_budget);
+    let encode = if inputs.text_encoder_on_device && inputs.device != TeDevice::Cpu {
+        let choice = choose_qwen3_vl_variant(
+            inputs.qwen3_variant,
+            inputs.device == TeDevice::Cuda,
+            inputs.device == TeDevice::Metal,
+            inputs.usable_free_bytes,
+        )?;
+        let text_encoder_bytes = if !choice.on_gpu() {
+            0
+        } else {
+            match choice {
+                Qwen3Choice::Bf16 { .. } => {
+                    text_encoder_device_bytes(&inputs.paths.text_encoder_files)
+                        .unwrap_or(mold_core::manifest::QWEN3_8B_FP16_SIZE)
+                }
+                Qwen3Choice::Gguf { variant, .. } => gguf_variant_device_bytes(variant),
+            }
+        };
+        text_encoder_bytes
+            .saturating_add(
+                phases
+                    .reference_encoder_bytes
+                    .saturating_sub(phases.reference_vae_encoder_bytes),
+            )
+            .saturating_add(phases.encode_workspace_bytes)
+    } else {
+        0
+    };
+    let vae_encode = phases.reference_vae_encoder_bytes;
+    let denoise = transformer_bytes.saturating_add(phases.denoise_workspace_bytes);
+    let decode = vae_bytes.saturating_add(phases.decode_peak_bytes);
+    Ok(encode
+        .max(vae_encode)
+        .max(denoise)
+        .max(decode)
+        .saturating_add(ALLOCATOR_MARGIN_BYTES))
+}
+
 /// One Qwen Image 2.1 request, as the phase sizing reads it.
 #[derive(Clone, Copy, Debug)]
 pub struct Qwen21RenderRequest<'a> {

@@ -1863,6 +1863,42 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     (plan.choice.on_gpu() && plan.decision.eager_peak_bytes <= available).then_some(plan)
 }
 
+/// The SEQUENTIAL Qwen Image 2.1 plan's device peak for a concrete request —
+/// the engine's own phase sizing
+/// (`text_encoder_residency::sequential_peak_bytes`), the largest phase
+/// rather than every weight beside the reference workspace. `None` for any
+/// other family, or when no card is known (the generic estimate stands).
+/// A `paths` without text-encoder files is a plan that placed the encoder
+/// on the host, which charges the card nothing for the encode.
+pub(crate) fn qwen_image21_sequential_peak(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Option<u64> {
+    use mold_inference::qwen_image21::text_encoder_residency as residency;
+    let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
+    let available = available_bytes.filter(|bytes| *bytes > 0)?;
+    let references = qwen_image21_reference_dimensions(req, projection);
+    let request =
+        qwen_image21_render_request(paths, hint, &references, qwen_image21_prefix_branches(req));
+    let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
+    residency::sequential_peak_bytes(&residency::Qwen21SequentialInputs {
+        paths,
+        qwen3_variant: variant.as_deref(),
+        device: if cfg!(feature = "metal") {
+            residency::TeDevice::Metal
+        } else {
+            residency::TeDevice::Cuda
+        },
+        text_encoder_on_device: !paths.text_encoder_files.is_empty(),
+        usable_free_bytes: available,
+        request: &request,
+    })
+    .ok()
+}
+
 pub(crate) fn select_server_load_strategy_for_budget(
     paths: &ModelPaths,
     available_bytes: Option<u64>,
@@ -2351,8 +2387,15 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 hint,
                 &qwen_image21_reference_dimensions(req, projection),
             ));
+            let qwen21_sequential = if qwen21_plan.is_none() {
+                qwen_image21_sequential_peak(paths, hint, available_memory_bytes, req, projection)
+            } else {
+                None
+            };
             let peak = if let Some(plan) = &qwen21_plan {
                 plan.decision.eager_peak_bytes
+            } else if let Some(sequential) = qwen21_sequential {
+                sequential
             } else if wan && offload_policy.metal {
                 // Wan's sequential Metal engine drops its text encoder before
                 // it loads the transformer and VAE. Price those phases
@@ -5730,6 +5773,129 @@ mod qwen_image21_residency_tests {
         let path = dir.join("qwen_image_2.1_int8_convrot.safetensors");
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    fn qwen21_request(references: usize) -> GenerateRequest {
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "put the cat in the jacket",
+            "model": "qwen-image-2.1:int8-conv",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        if references > 0 {
+            // Unreadable headers price the reference area, 1024x1024 each.
+            req.edit_images = Some(vec![vec![0u8; 16]; references]);
+        }
+        req
+    }
+
+    fn cuda_policy() -> GenerationOffloadPolicy {
+        GenerationOffloadPolicy::new(
+            false,
+            mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+                mold_core::GpuBackend::Cuda,
+                None,
+                None,
+            ),
+            false,
+        )
+    }
+
+    /// The sequential engine runs its phases one after another — the Qwen3-VL
+    /// encode (encoder, vision tower and their working set), the VAE encode,
+    /// the denoise with the transformer alone, the decode with the VAE alone —
+    /// and drops each phase's weights before the next loads. Its peak is the
+    /// LARGEST phase. Pricing it as the generic `max(weights) + activation`
+    /// charged the 17.6 GB encoder shards beside the reference denoise
+    /// workspace, so int8-conv with one reference on a 24 GB card (26.17 GB
+    /// usable) asked for 27.8 GB and waited in the queue for memory it could
+    /// never get.
+    #[test]
+    fn a_24gb_card_renders_a_reference_request_sequentially_by_its_largest_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = qwen21_paths(dir.path(), 7_256_783_064);
+        paths.transformer = int8_convrot_transformer(dir.path());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&paths.transformer)
+            .unwrap()
+            .set_len(7_256_783_064)
+            .unwrap();
+        let usable = 26_170_000_000;
+        for (label, transformer) in [
+            ("int8-conv", paths.transformer.clone()),
+            (
+                "bf16",
+                sized(dir.path(), "bf16.safetensors", 14_230_280_616),
+            ),
+        ] {
+            let paths = ModelPaths {
+                transformer,
+                ..paths.clone()
+            };
+            let budget = estimate_generation_memory_for_request_with_projection(
+                &qwen21_request(1),
+                &paths,
+                hint(1024, 1024),
+                cuda_policy(),
+                Some(usable),
+                false,
+                false,
+                None,
+            );
+            assert_eq!(
+                budget.load_strategy,
+                mold_inference::LoadStrategy::Sequential,
+                "{label}"
+            );
+            assert_eq!(
+                budget.fits_available_memory,
+                Some(true),
+                "{label}: sequential peak {} over {usable}",
+                budget.peak_memory_bytes
+            );
+            // Every phase is still charged: the largest one alone is more
+            // than the transformer's weights.
+            assert!(budget.peak_memory_bytes > 7_256_783_064, "{label}");
+        }
+        // The decode is a phase too: at 2K the VAE decode alone (~28 GB under
+        // cuDNN) exceeds a 24 GB card, so even the smallest q4 transformer is
+        // refused here rather than admitted, denoised for minutes, and run out
+        // of memory in the decode.
+        let q4 = ModelPaths {
+            transformer: sized(dir.path(), "q4.gguf", 4_197_494_816),
+            ..paths.clone()
+        };
+        for (width, height) in [(2048, 2048), (2752, 1536)] {
+            let mut req = qwen21_request(0);
+            req.width = width;
+            req.height = height;
+            let budget = estimate_generation_memory_for_request_with_projection(
+                &req,
+                &q4,
+                hint(width, height),
+                cuda_policy(),
+                Some(usable),
+                false,
+                false,
+                None,
+            );
+            let conv = mold_inference::conv_policy::resolve_for(
+                mold_inference::conv_policy::policy_for_family("qwen-image21"),
+            );
+            let decode =
+                mold_inference::device::qwen_image21_vae_decode_peak_bytes(width, height, conv, 2);
+            assert!(budget.peak_memory_bytes >= decode, "{width}x{height}");
+            assert_eq!(
+                budget.fits_available_memory,
+                Some(false),
+                "{width}x{height}: peak {}",
+                budget.peak_memory_bytes
+            );
+        }
     }
 
     /// The int8-conv tier's measured W8A8 workspace reaches the server's
