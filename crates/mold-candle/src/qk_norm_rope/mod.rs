@@ -51,6 +51,15 @@ pub fn rms_norm_rope_i(
     if cos.dtype() != DType::F32 || sin.dtype() != DType::F32 || weight.dtype() != x.dtype() {
         candle::bail!("rms_norm_rope_i needs F32 tables and a weight in x's dtype");
     }
+    for (name, t) in [("weight", weight), ("cos", cos), ("sin", sin)] {
+        if !t.device().same_device(x.device()) {
+            candle::bail!(
+                "rms_norm_rope_i: {name} is on device {:?}, x on {:?}",
+                t.device().location(),
+                x.device().location()
+            );
+        }
+    }
     #[cfg(feature = "cuda")]
     if x.device().is_cuda() && cuda::supports(x.dtype(), head_dim) {
         return cuda::forward(x, weight, cos, sin, eps);
@@ -124,6 +133,41 @@ mod tests {
         let (x, w, c, s) = inputs(&Device::Cpu, DType::F32);
         assert!(rms_norm_rope_i(&x, &w.narrow(0, 0, 64).unwrap(), &c, &s, 1e-6).is_err());
         assert!(rms_norm_rope_i(&x, &w, &c.to_dtype(DType::BF16).unwrap(), &s, 1e-6).is_err());
+    }
+
+    /// Tables on another device than `x` are refused with an error — the
+    /// fused kernel carries `sin` outside candle's op3 device check and would
+    /// otherwise dereference a foreign allocation. Skips without CUDA.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tables_on_another_device_are_refused() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (x, w, c, s) = inputs(&device, DType::BF16);
+        let cpu = |t: &Tensor| t.to_device(&Device::Cpu).unwrap();
+        for (label, result) in [
+            ("sin", rms_norm_rope_i(&x, &w, &c, &cpu(&s), 1e-6)),
+            ("cos", rms_norm_rope_i(&x, &w, &cpu(&c), &s, 1e-6)),
+            ("weight", rms_norm_rope_i(&x, &cpu(&w), &c, &s, 1e-6)),
+            ("kernel sin", cuda::forward(&x, &w, &c, &cpu(&s), 1e-6)),
+        ] {
+            let err = result.expect_err(label).to_string();
+            assert!(err.contains("device"), "{label}: {err}");
+        }
+        // A second candle CUDA device (its own stream and identity) on the
+        // same GPU: `sin` passes the "is CUDA" test, so only an explicit
+        // same-device check stops the kernel reading it off-stream.
+        let other = Device::new_cuda_with_stream(0).unwrap();
+        assert!(!other.same_device(&device));
+        let foreign = s.to_device(&other).unwrap();
+        for (label, result) in [
+            ("foreign sin", rms_norm_rope_i(&x, &w, &c, &foreign, 1e-6)),
+            ("kernel foreign sin", cuda::forward(&x, &w, &c, &foreign, 1e-6)),
+        ] {
+            let err = result.expect_err(label).to_string();
+            assert!(err.contains("device"), "{label}: {err}");
+        }
     }
 
     /// The CUDA kernel is the composite, bit for bit, in every dtype it
