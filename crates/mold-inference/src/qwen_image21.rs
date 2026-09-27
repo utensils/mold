@@ -11,6 +11,7 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::encoders::qwen3::{resolve_pad_token_id, Qwen3Encoder};
 
+pub(crate) mod linear;
 pub(crate) mod pipeline;
 pub(crate) mod scheduler;
 pub(crate) mod transformer;
@@ -41,6 +42,13 @@ pub fn metal_transformer_dtype(value: Option<&str>) -> DType {
             DType::BF16
         }
     }
+}
+
+/// The `MOLD_QWEN_IMAGE21_QMATMUL` decision for a raw value — the engine's own
+/// parser, exported so mold-server's execution identity canonicalizes the
+/// spelling to the arm that will actually run.
+pub fn qmatmul_env_enabled(value: Option<&str>) -> bool {
+    linear::parse_qwen_image21_qmatmul(value)
 }
 
 /// Bound request-local retention without truncating the authored prompt.

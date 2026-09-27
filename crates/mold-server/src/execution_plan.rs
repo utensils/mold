@@ -396,6 +396,7 @@ pub enum RuntimeSemanticVariable {
     Qwen2Variant,
     Qwen3Variant,
     QwenImage21Dtype,
+    QwenImage21QMatMul,
     QwenFp8Cache,
     QwenQMatMul,
     ReserveVramMb,
@@ -1092,6 +1093,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
         "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
         "MOLD_QWEN_IMAGE21_DTYPE" => RuntimeSemanticVariable::QwenImage21Dtype,
+        // Swaps the Qwen Image 2.1 GGUF linear arm (per-forward dequant vs
+        // candle's QMatMul), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_QWEN_IMAGE21_QMATMUL" => RuntimeSemanticVariable::QwenImage21QMatMul,
         "MOLD_QWEN_FP8_CACHE" => RuntimeSemanticVariable::QwenFp8Cache,
         "MOLD_QWEN_QMATMUL" => RuntimeSemanticVariable::QwenQMatMul,
         "MOLD_RESERVE_VRAM_MB" => RuntimeSemanticVariable::ReserveVramMb,
@@ -1217,6 +1222,12 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             ))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
+        // Not a hand-mirror: the engine's own parser decides the arm.
+        Some(value) if variable == RuntimeSemanticVariable::QwenImage21QMatMul => {
+            CanonicalRuntimeValue::Boolean(mold_inference::qwen_image21::qmatmul_env_enabled(Some(
+                value,
+            )))
+        }
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {
             CanonicalRuntimeValue::Boolean(matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -9098,6 +9109,20 @@ mod tests {
         let f32 = runtime_semantic_setting(name, Some("f32"));
         assert_ne!(f32, default);
         assert_eq!(f32, runtime_semantic_setting(name, Some(" FP32 ")));
+    }
+
+    #[test]
+    fn qwen_image21_qmatmul_identity_is_the_arm_not_the_spelling() {
+        let name = "MOLD_QWEN_IMAGE21_QMATMUL";
+        let on = runtime_semantic_setting(name, Some("1"));
+        for value in ["true", " ON ", "yes"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), on);
+        }
+        let off = runtime_semantic_setting(name, Some("0"));
+        assert_ne!(on, off);
+        for value in ["off", "no", "banana"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), off);
+        }
     }
 
     #[test]
