@@ -21,6 +21,9 @@ public extension RenderDraft {
     func selectingOutputFormat(
         _ format: String, output: OutputCapabilities?
     ) -> RenderDraft {
+        // A format with no alpha channel while the transparent toggle is on:
+        // a menu Picker ignores `.disabled` on its rows, so refuse it here.
+        if transparencyBlocksFormat(format) { return self }
         var draft = self
         draft.outputFormat = format
         if draft.supportsAudio,

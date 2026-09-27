@@ -74,6 +74,22 @@ private func wire(_ draft: RenderDraft) throws -> [String: Any] {
     #expect(draft.adopting(qwen, isNewModel: false).outputFormat == "png")
 }
 
+@Test func whileOnPickingJPEGIsRefused() throws {
+    // A menu-style Picker on macOS ignores `.disabled` on its items, so the
+    // JPEG row stays clickable: the pick itself must be refused, or the
+    // request carries a pair admission rejects.
+    let qwen = try qwen21()
+    let output = qwen.capabilities.output
+    var draft = RenderDraft().adopting(qwen, isNewModel: true)
+    draft = draft.settingTransparentBackground(true, output: output)
+    // The pick is a no-op: the recipe's own default (PNG) still applies.
+    #expect(draft.selectingOutputFormat("jpeg", output: output) == draft)
+    #expect(draft.selectingOutputFormat("webp", output: output).outputFormat == "webp")
+    // Off, JPEG is an ordinary pick again.
+    draft = draft.settingTransparentBackground(false, output: output)
+    #expect(draft.selectingOutputFormat("jpeg", output: output).outputFormat == "jpeg")
+}
+
 // MARK: - Reuse and persistence
 
 private func metadata(_ json: String) throws -> OutputMetadata {
