@@ -4218,6 +4218,146 @@ describe("CreatePage layout and behavior", () => {
     ]);
   });
 
+  it("restores the transparent-background toggle from a queued request", async () => {
+    const job = {
+      id: "rgba-print",
+      request: {
+        prompt: "a floating logo",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3,
+        transparent_background: true,
+      },
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      serverId: null,
+    } as Job;
+    streamJobsRef.value = [job];
+    const form = useGenerateForm();
+    form.state.value.transparentBackground = false;
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit("open", job);
+    await nextTick();
+
+    expect(form.state.value.transparentBackground).toBe(true);
+  });
+
+  it("clears the transparent-background toggle when a selected job omits it", async () => {
+    const job = {
+      id: "opaque-print",
+      request: {
+        prompt: "a plain render",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3,
+      },
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      serverId: null,
+    } as Job;
+    streamJobsRef.value = [job];
+    const form = useGenerateForm();
+    form.state.value.transparentBackground = true;
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit("open", job);
+    await nextTick();
+
+    expect(form.state.value.transparentBackground).toBe(false);
+  });
+
+  it("names restored Qwen Image 2.1 references without a false Target image label", async () => {
+    const model = {
+      ...installedModelRow("qwen-image-2.1:bf16", "qwen-image21"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "qwen21-recipe",
+        default_recipe_id: "default",
+        recipes: [qwenImage21Recipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([model]);
+    const job = {
+      id: "qwen21-print",
+      request: {
+        prompt: "a scene",
+        model: "qwen-image-2.1:bf16",
+        width: 1024,
+        height: 1024,
+        steps: 40,
+        guidance: 1,
+        edit_images: ["AAAA", "BBBB"],
+      },
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      serverId: null,
+    } as Job;
+    streamJobsRef.value = [job];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit("open", job);
+    await nextTick();
+
+    const form = useGenerateForm();
+    // Qwen Image 2.1's `replaces` relation has no target image (#772) — a
+    // restored reference is never mislabeled "Target image" for a family
+    // whose profile does not advertise `primary_is_target`.
+    expect(
+      form.state.value.imageAttachments.map((item) => item.filename),
+    ).toEqual(["Reference 1", "Reference 2"]);
+  });
+
   // ── File under (Create-time Library organization) ─────────────────────
   const filingCapabilities = {
     gallery: { organize: true },
