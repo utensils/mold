@@ -95,8 +95,9 @@ pub fn cudnn_compiled() -> bool {
 /// bytes is about clips versus stills, not about which operator is doing the
 /// arithmetic.
 pub fn policy_for_family(family: &str) -> ConvPolicy {
-    match family {
-        "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => ConvPolicy::Video,
+    // Canonical engine family, exactly as `attention::policy_for_family`.
+    match crate::canonical_engine_family(family) {
+        "wan" | "ltx2" => ConvPolicy::Video,
         // Mirrors `attention::policy_for_family`. Qwen Image 2.1's
         // convolutions are all in its VAE, whose full-resolution 3x3 convs
         // are also the 2K memory peak under im2col.
@@ -282,7 +283,7 @@ mod tests {
             "wan",
             "ltx2",
             "ltx-2",
-            "ltx-2.3",
+            "ltx2.3",
             "flux",
             "flux2",
             "sd15",

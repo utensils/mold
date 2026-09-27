@@ -146,7 +146,7 @@ pub mod wuerstchen;
 pub mod zimage;
 
 pub use batch::{
-    batch_execution_capability_for_family, production_batch_capabilities,
+    batch_execution_capability_for_family, canonical_engine_family, production_batch_capabilities,
     production_family_capabilities, production_family_capability_for_family,
     validate_runtime_batch_capability, BackendApplicability, BackendQualification,
     ComponentPlacementCapability, DeterminismGuarantee, FamilyBatchCapability, MediaKind,

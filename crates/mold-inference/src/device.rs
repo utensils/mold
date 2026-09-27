@@ -2689,7 +2689,9 @@ pub fn usable_free_for_residency(
 /// unknown slugs — the FLUX factor is the most common diffusion default and
 /// errs toward a conservative-but-not-over-budget estimate.
 pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
-    match family_slug {
+    // Canonical engine family: an alias (`flux.2`, `sd3.5`, `ltx2.3`, …)
+    // must be priced as the engine it constructs, not as the FLUX fallback.
+    match crate::canonical_engine_family(family_slug) {
         "flux" => ActivationFamily::FluxDit,
         "flux2" => ActivationFamily::Flux2Dit,
         "sd3" => ActivationFamily::Sd3Mmdit,
@@ -2699,7 +2701,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image21" => ActivationFamily::QwenImage21Dit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
-        "hunyuan3d" | "hunyuan-3d" => ActivationFamily::Hunyuan3dShape,
+        "hunyuan3d" => ActivationFamily::Hunyuan3dShape,
         // LTX-Video (0.9.6 / 0.9.8 2B or 13B): loads the entire transformer
         // into VRAM during each generate call. The file-size-based preflight
         // applies normally — the 13B BF16 checkpoint is ~26 GB and must be
@@ -2708,7 +2710,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         // LTX-2 (19B / 22B): streaming-loaded transformer — only a couple of
         // blocks are GPU-resident at peak, so the preflight skips the
         // file-size estimate and uses a fixed streaming cap instead.
-        "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        "ltx2" => ActivationFamily::Ltx2Video,
         // Wan 2.1/2.2: fully GPU-resident transformer at every shipped size —
         // 1.3B, 5B, and both A14B experts, which are resident one at a time
         // rather than streamed. The file-size preflight applies in full, and
