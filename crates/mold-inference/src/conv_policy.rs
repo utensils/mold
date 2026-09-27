@@ -22,8 +22,8 @@
 //! * [`ConvPolicy::Paint`] — the new material-paint stage uses its qualified
 //!   cuDNN recipe where available. Existing shape generation keeps Image.
 //! * [`ConvPolicy::FastStill`] — a still family that chose throughput over
-//!   archived-seed byte stability. FLUX.1 and FLUX.2 only, and exactly the
-//!   families [`crate::attention::AttentionPolicy::FastStill`] names.
+//!   archived-seed byte stability. FLUX.1, FLUX.2 and Qwen Image 2.1, exactly
+//!   the families [`crate::attention::AttentionPolicy::FastStill`] names.
 //!
 //! `MOLD_CONV={cudnn,im2col}` overrides both directions. It shapes output, so
 //! it is registered in [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`].
@@ -57,7 +57,7 @@ pub enum ConvPolicy {
     /// Stills whose family chose throughput over archived-seed byte
     /// stability: cuDNN wherever the feature is compiled in.
     ///
-    /// FLUX.1 and FLUX.2 only, mirroring
+    /// FLUX.1, FLUX.2 and Qwen Image 2.1, mirroring
     /// [`crate::attention::AttentionPolicy::FastStill`]. Their convolutions
     /// are all in the VAE — the transformer is linear throughout — which is
     /// why the scope is applied around encode and decode rather than around
@@ -97,7 +97,10 @@ pub fn cudnn_compiled() -> bool {
 pub fn policy_for_family(family: &str) -> ConvPolicy {
     match family {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => ConvPolicy::Video,
-        "flux" | "flux2" => ConvPolicy::FastStill,
+        // Mirrors `attention::policy_for_family`. Qwen Image 2.1's
+        // convolutions are all in its VAE, whose full-resolution 3x3 convs
+        // are also the 2K memory peak under im2col.
+        "flux" | "flux2" | "qwen-image21" => ConvPolicy::FastStill,
         _ => ConvPolicy::Image,
     }
 }
@@ -287,6 +290,7 @@ mod tests {
             "sd3",
             "z-image",
             "qwen-image",
+            "qwen-image21",
             "wuerstchen",
             "ltx-video",
             "minimax-h3",
@@ -310,6 +314,7 @@ mod tests {
         // And the two fast arms are not interchangeable: flux is a still.
         assert_eq!(policy_for_family("flux"), ConvPolicy::FastStill);
         assert_eq!(policy_for_family("flux2"), ConvPolicy::FastStill);
+        assert_eq!(policy_for_family("qwen-image21"), ConvPolicy::FastStill);
         assert_eq!(policy_for_family("wan"), ConvPolicy::Video);
     }
 
