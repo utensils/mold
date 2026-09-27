@@ -64,7 +64,25 @@ impl LinearLoraAdapter {
     /// For a fused target, the contribution lands in
     /// `out[..., offset..offset+length]` — rows outside that range are
     /// left untouched. Returns the new tensor (candle is functional).
+    /// Production stacks go through [`apply_adapters`], which shares one
+    /// projection cache across the stack ([`Self::apply_sharing`]).
+    #[cfg(test)]
     pub fn apply(&self, x: &Tensor, out: &Tensor) -> Result<Tensor> {
+        self.apply_sharing(x, out, &mut LoraProjections::default())
+    }
+
+    /// [`Self::apply`], reusing any `x @ downᵀ` that `projections` already
+    /// holds for this adapter's `down` tensor. Two adapters that share one
+    /// `down` — ComfyUI's fused Qwen Image 2.1 `gate_up` LoRA split onto its
+    /// two halves (`comfy/lora.py:331-333` splits only the `up` rows) —
+    /// then project the input once. The shared projection is the very
+    /// tensor the unshared path computes, so the output is bit-identical.
+    pub(crate) fn apply_sharing(
+        &self,
+        x: &Tensor,
+        out: &Tensor,
+        projections: &mut LoraProjections,
+    ) -> Result<Tensor> {
         // Nothing to do for zero-scale adapters; skip the matmul so a
         // user-disabled-but-still-attached adapter is genuinely free.
         if self.scale == 0.0 {
@@ -74,11 +92,11 @@ impl LinearLoraAdapter {
         let dtype = out.dtype();
         let device = out.device();
 
-        let down = adapter_to_runtime(&self.down, device, dtype)?;
         let up = adapter_to_runtime(&self.up, device, dtype)?;
 
         // delta = (x @ down.T) @ up.T, shape [..., adapter_out_rows]
-        let delta = matmul_through_lora(x, &down, &up)?;
+        let projected = projections.project(x, &self.down, device, dtype)?;
+        let delta = expand_through_lora(x, &projected, &up)?;
 
         // scale = adapter scale; apply via affine for one fused kernel.
         let delta = delta.affine(self.scale as f64, 0.0)?;
@@ -221,12 +239,106 @@ impl LoraLinear {
 pub(crate) fn apply_adapters(
     adapters: &[LinearLoraAdapter],
     x: &Tensor,
+    out: Tensor,
+) -> Result<Tensor> {
+    apply_adapters_sharing(adapters, x, out, &mut LoraProjections::default())
+}
+
+/// [`apply_adapters`] with a caller-owned projection cache, so adapters on
+/// DIFFERENT linears fed the same input (a split `gate_layer` / `proj` pair)
+/// can share one `x @ downᵀ`.
+pub(crate) fn apply_adapters_sharing(
+    adapters: &[LinearLoraAdapter],
+    x: &Tensor,
     mut out: Tensor,
+    projections: &mut LoraProjections,
 ) -> Result<Tensor> {
     for adapter in adapters {
-        out = adapter.apply(x, &out)?;
+        out = adapter.apply_sharing(x, &out, projections)?;
     }
     Ok(out)
+}
+
+/// The down projections `x @ downᵀ` already computed for ONE input `x`,
+/// keyed by the identity of the `down` tensor (a registry hands every target
+/// of one LoRA layer a clone of the same `down`, so they share an id) and
+/// the dtype the projection ran in. A projection for a different input is
+/// never reused: asking with another `x` empties the cache first.
+#[derive(Default)]
+pub(crate) struct LoraProjections {
+    input: Option<candle_core::TensorId>,
+    computed: Vec<(candle_core::TensorId, DType, Tensor)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROJECTIONS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many `x @ downᵀ` projections this thread has computed (not reused).
+#[cfg(test)]
+pub(crate) fn lora_projection_count() -> usize {
+    PROJECTIONS_COMPUTED.with(std::cell::Cell::get)
+}
+
+impl LoraProjections {
+    /// `x @ downᵀ` flattened to 2-D (`[tokens, rank]`), computed once per
+    /// (`down`, dtype) for this `x`.
+    fn project(
+        &mut self,
+        x: &Tensor,
+        down: &Tensor,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor> {
+        if self.input != Some(x.id()) {
+            self.input = Some(x.id());
+            self.computed.clear();
+        }
+        let key = down.id();
+        if let Some((_, _, projected)) = self
+            .computed
+            .iter()
+            .find(|(id, cached_dtype, _)| *id == key && *cached_dtype == dtype)
+        {
+            return Ok(projected.clone());
+        }
+        let runtime_down = adapter_to_runtime(down, device, dtype)?;
+        let projected = project_through_lora(x, &runtime_down)?;
+        #[cfg(test)]
+        PROJECTIONS_COMPUTED.with(|count| count.set(count.get() + 1));
+        self.computed.push((key, dtype, projected.clone()));
+        Ok(projected)
+    }
+}
+
+/// Move adapter stacks to `device`, keeping every `down`/`up` that several
+/// adapters share ONE tensor after the move (so [`LoraProjections`] still
+/// recognises them as shared). `moved` carries the mapping across calls, so
+/// the two halves of a split MLP can be moved separately and stay linked.
+pub(crate) fn move_adapters_sharing(
+    adapters: &[LinearLoraAdapter],
+    device: &Device,
+    moved: &mut HashMap<candle_core::TensorId, Tensor>,
+) -> Result<Vec<LinearLoraAdapter>> {
+    let mut move_one = |tensor: &Tensor| -> Result<Tensor> {
+        if let Some(existing) = moved.get(&tensor.id()) {
+            return Ok(existing.clone());
+        }
+        let on_device = tensor.to_device(device)?;
+        moved.insert(tensor.id(), on_device.clone());
+        Ok(on_device)
+    };
+    adapters
+        .iter()
+        .map(|adapter| {
+            Ok(LinearLoraAdapter {
+                down: move_one(&adapter.down)?,
+                up: move_one(&adapter.up)?,
+                ..adapter.clone()
+            })
+        })
+        .collect()
 }
 
 impl candle_core::Module for LoraLinear {
@@ -256,21 +368,29 @@ fn adapter_to_runtime(t: &Tensor, device: &Device, dtype: DType) -> Result<Tenso
 
 /// Run `(x @ down.T) @ up.T` reshaping to a 2-D matmul where possible.
 /// Mirrors the LTX-2 helper so we share the perf characteristics.
+#[cfg(test)]
 fn matmul_through_lora(x: &Tensor, down: &Tensor, up: &Tensor) -> Result<Tensor> {
+    expand_through_lora(x, &project_through_lora(x, down)?, up)
+}
+
+/// The first half of [`matmul_through_lora`]: `x @ downᵀ`, with a rank-3/4
+/// `x` flattened to one 2-D matmul.
+fn project_through_lora(x: &Tensor, down: &Tensor) -> Result<Tensor> {
     let down_t = down.t()?;
-    let up_t = up.t()?;
     Ok(match *x.dims() {
-        [b0, b1, t, h] => x
-            .reshape((b0 * b1 * t, h))?
-            .matmul(&down_t)?
-            .matmul(&up_t)?
-            .reshape((b0, b1, t, ()))?,
-        [b, t, h] => x
-            .reshape((b * t, h))?
-            .matmul(&down_t)?
-            .matmul(&up_t)?
-            .reshape((b, t, ()))?,
-        _ => x.matmul(&down_t)?.matmul(&up_t)?,
+        [b0, b1, t, h] => x.reshape((b0 * b1 * t, h))?.matmul(&down_t)?,
+        [b, t, h] => x.reshape((b * t, h))?.matmul(&down_t)?,
+        _ => x.matmul(&down_t)?,
+    })
+}
+
+/// The second half: `projected @ upᵀ`, reshaped back to `x`'s leading dims.
+fn expand_through_lora(x: &Tensor, projected: &Tensor, up: &Tensor) -> Result<Tensor> {
+    let delta = projected.matmul(&up.t()?)?;
+    Ok(match *x.dims() {
+        [b0, b1, t, _] => delta.reshape((b0, b1, t, ()))?,
+        [b, t, _] => delta.reshape((b, t, ()))?,
+        _ => delta,
     })
 }
 

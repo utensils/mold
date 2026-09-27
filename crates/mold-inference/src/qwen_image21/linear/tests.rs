@@ -211,6 +211,71 @@ fn gate_and_proj_adapters_land_on_their_halves_of_a_fused_linear() {
     assert_eq!(max_abs(&bp, &cp), 0.0);
 }
 
+/// ComfyUI's fused `img_mlp.gate_up` LoRA lands on BOTH halves with ONE
+/// shared `down` (`comfy/lora.py:331-333` splits only the `up` rows), so the
+/// MLP must project its input through `A` once, not once per half — on the
+/// split checkpoint, on the fused one, and after a device round trip — and
+/// sharing the projection must not move a single bit.
+#[test]
+fn a_fused_gate_up_lora_projects_its_input_once() {
+    use crate::flux::lora_bypass::lora_projection_count;
+    let down = tensor(2, DIM, 4.0);
+    let half = |salt: f32, scale: f32| LinearLoraAdapter {
+        down: down.clone(),
+        up: tensor(HIDDEN, 2, salt),
+        scale,
+        fused_slice: None,
+    };
+    let x = input(4, DIM);
+    let (mut split, mut fused) = split_and_fused();
+    split
+        .set_adapters(vec![half(5.0, 0.7)], vec![half(6.0, -0.4)])
+        .unwrap();
+    fused
+        .set_adapters(vec![half(5.0, 0.7)], vec![half(6.0, -0.4)])
+        .unwrap();
+
+    // Unshared reference: each half's own linear, each projecting x itself.
+    let Q21GateUp::Split { gate, proj } = &split else {
+        unreachable!()
+    };
+    let before = lora_projection_count();
+    let reference = (gate.forward(&x).unwrap(), proj.forward(&x).unwrap());
+    assert_eq!(lora_projection_count() - before, 2);
+
+    let moved_split = split.to_device(&Device::Cpu).unwrap();
+    let moved_fused = fused.to_device(&Device::Cpu).unwrap();
+    for (label, mlp) in [
+        ("split", &split),
+        ("fused", &fused),
+        ("split after to_device", &moved_split),
+        ("fused after to_device", &moved_fused),
+    ] {
+        let before = lora_projection_count();
+        let (g, p) = mlp.forward(&x).unwrap();
+        assert_eq!(lora_projection_count() - before, 1, "{label}");
+        if label.starts_with("split") {
+            assert_eq!(max_abs(&g, &reference.0), 0.0, "{label}");
+            assert_eq!(max_abs(&p, &reference.1), 0.0, "{label}");
+        } else {
+            assert!(max_abs(&g, &reference.0) < 1e-5, "{label}");
+            assert!(max_abs(&p, &reference.1) < 1e-5, "{label}");
+        }
+    }
+
+    // Adapters with their own `down` still project separately.
+    let (mut independent, _) = split_and_fused();
+    independent
+        .set_adapters(
+            vec![adapter(HIDDEN, 4.0, 0.7)],
+            vec![adapter(HIDDEN, 6.0, 0.7)],
+        )
+        .unwrap();
+    let before = lora_projection_count();
+    independent.forward(&x).unwrap();
+    assert_eq!(lora_projection_count() - before, 2);
+}
+
 #[test]
 fn set_adapters_refuses_a_stack_that_does_not_fit() {
     let mut linear = Q21Linear::dense(candle_nn::Linear::new(tensor(6, DIM, 1.0), None)).unwrap();
