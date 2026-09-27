@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::conditioning::OutputAlpha;
-use super::scheduler::{scheduler_for, transformer_timestep, ScheduleKind};
+use super::scheduler::{scheduler_for, step_timestep, ScheduleKind};
 use super::transformer::QwenImage21Transformer;
 use super::vae::QwenImage21Vae;
 use super::{
@@ -362,6 +362,7 @@ impl QwenImage21Engine {
             }
         };
 
+        let exec_path = super::exec_path::Qwen21ExecPath::resolve(device);
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
@@ -389,9 +390,10 @@ impl QwenImage21Engine {
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
-            // The diffusion transformer takes normalized `[0, 1]` time,
-            // rounded through the working dtype exactly as upstream divides it.
-            let timestep = transformer_timestep(scheduler.current_sigma(), dtype);
+            // The diffusion transformer takes normalized `[0, 1]` time. The
+            // fast path rounds it through the working dtype exactly as
+            // upstream divides it; the v0.32 path keeps its f64 value.
+            let timestep = step_timestep(&scheduler, dtype, exec_path.round_timestep_to_dtype);
             let conditional_prediction = conditional.forward(&latents, timestep)?;
             let prediction = if let Some(negative) = &mut negative {
                 progress.checkpoint()?;

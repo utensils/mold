@@ -448,7 +448,11 @@ fn official_cuda_mode_benchmark() -> Result<()> {
     device.synchronize()?;
     let denoise_started = Instant::now();
     for step in 0..executed_steps {
-        let timestep = scheduler.current_timestep() / 1000.0;
+        let timestep = crate::qwen_image21::scheduler::step_timestep(
+            &scheduler,
+            dtype,
+            mode.path.round_timestep_to_dtype,
+        );
         device.synchronize()?;
         let step_started = Instant::now();
         let conditional_prediction = conditional.forward(&latents, timestep)?;
