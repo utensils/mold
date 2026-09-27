@@ -41,6 +41,8 @@ import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
 } from "@studio/lib/generationProfile";
+import { referenceCanvasSize, stagedReferenceDimensions } from "@studio/lib/referenceCanvas";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -2305,6 +2307,38 @@ watch(
     }
   },
   { immediate: true },
+);
+
+/**
+ * `reference_images.canvas: last-reference` (Qwen Image 2.1): while the
+ * canvas intent is still the model default, the canvas follows the LAST
+ * reference's aspect at the recipe's default area, rounded half-to-even on
+ * its grid exactly like the CLI, the engine, web and desktop. A size the user
+ * picked never moves, and an emptied strip leaves the canvas where it is.
+ */
+watch(
+  [
+    () => caps.value.referenceImages?.canvas ?? null,
+    () => caps.value.sourceImageMode,
+    () => form.imageAttachments.map((image) => `${image.length}:${image.slice(-24)}`).join("|"),
+    () => canvasIntent.value,
+  ],
+  () => {
+    if (caps.value.sourceImageMode !== "references") return;
+    const recipe = effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline);
+    if (!recipe) return;
+    const next = referenceCanvasSize({
+      canvas: caps.value.referenceImages?.canvas ?? null,
+      references: stagedReferenceDimensions(form.imageAttachments.map((base64) => ({ base64 }))),
+      defaults: recipe.defaults,
+      alignment: recipe.resolution.alignment,
+      intent: canvasIntent.value,
+    });
+    if (next && (next.width !== form.width || next.height !== form.height)) {
+      form.width = next.width;
+      form.height = next.height;
+    }
+  },
 );
 
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
@@ -13135,7 +13169,16 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   <img
                     :src="print.thumbnailUrl"
                     :alt="print.metadata.prompt || print.filename"
-                    :class="{ 'is-thumbnail-pending': print.thumbnailPending }"
+                    :class="{
+                      'is-thumbnail-pending': print.thumbnailPending,
+                      'ms-alpha-bed':
+                        !print.thumbnailPending &&
+                        !isVideoItem(print) &&
+                        !isAudioItem(print) &&
+                        !isMeshItem(print) &&
+                        showsAlphaBed(print),
+                    }"
+                    :data-alpha="showsAlphaBed(print) ? 'true' : undefined"
                     loading="lazy"
                     @error="handleGalleryThumbnailError(print)"
                     @contextmenu="rememberNativeGalleryContext(print)"

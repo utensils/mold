@@ -6075,6 +6075,26 @@ describe("MobileApp generation queue", () => {
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });
 
+  it("marks a print that carries alpha for the checkerboard tile", async () => {
+    const prints = [
+      { ...print, filename: "cutout.png", metadata: { ...print.metadata, has_alpha: true } },
+      { ...print, filename: "opaque.png", timestamp: print.timestamp - 1 },
+    ];
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(prints);
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']").length).toBe(2));
+    const tiles = wrapper.findAll("[data-test='gallery-item'] img");
+    expect(tiles.map((tile) => tile.attributes("data-alpha"))).toEqual(["true", undefined]);
+  });
+
   it("keeps thumbnail failures local to the bounded visible window", async () => {
     const prints = Array.from({ length: 81 }, (_, index) => ({
       ...print,

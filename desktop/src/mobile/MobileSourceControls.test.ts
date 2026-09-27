@@ -1,7 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flux2KleinRecipe, hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  flux2KleinRecipe,
+  hunyuan3dRecipe,
+  qwenImage21Recipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
 import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
@@ -840,5 +844,49 @@ describe("MobileSourceControls - the References strip names its ceiling", () => 
       props: { form: formFor("qwen-image-edit") },
     });
     expect(wrapper.text()).not.toContain("Add up to");
+  });
+});
+
+describe("MobileSourceControls - Qwen Image 2.1 references", () => {
+  function qwen21Model(): ModelEntry {
+    return {
+      ...model("qwen-image-2.1:bf16", "qwen-image21"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [qwenImage21Recipe()],
+      },
+    } as ModelEntry;
+  }
+
+  it("takes WebP references the recipe advertises and draws them on the alpha bed", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "qwen-image21",
+      model: "qwen-image-2.1:bf16",
+    }) as GenerateForm;
+    const wrapper = mount(MobileSourceControls, { props: { form, model: qwen21Model() } });
+
+    const input = wrapper.get("[data-test='mobile-edit-input']");
+    expect(input.attributes("accept")).toBe("image/png,image/jpeg,image/webp");
+    await chooseFiles(wrapper, "[data-test='mobile-edit-input']", [
+      new File(["w"], "cutout.webp", { type: "image/webp" }),
+    ]);
+    // The bytes go out as picked: no re-encode, no flattening.
+    await vi.waitFor(() => expect(form.imageAttachments).toEqual(["dw=="]));
+    expect(wrapper.get("[data-test='mobile-edit-card-0'] img").classes()).toContain("ms-alpha-bed");
+  });
+
+  it("still refuses WebP where the recipe keeps PNG/JPEG", async () => {
+    const form = formFor("qwen-image-edit");
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+    await chooseFiles(wrapper, "[data-test='mobile-edit-input']", [
+      new File(["w"], "cutout.webp", { type: "image/webp" }),
+    ]);
+    await flushPromises();
+    expect(form.imageAttachments).toEqual([]);
+    expect(wrapper.text()).toContain("Only PNG or JPEG photos can be used here.");
   });
 });

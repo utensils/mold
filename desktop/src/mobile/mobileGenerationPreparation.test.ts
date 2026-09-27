@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
-import { flux2KleinRecipe, hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  flux2KleinRecipe,
+  hunyuan3dRecipe,
+  qwenImage21Recipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
 
@@ -341,5 +345,49 @@ describe("mobile generation request preparation", () => {
     );
 
     expect(dependencies.onStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("mobile preparation for Qwen Image 2.1", () => {
+  beforeEach(() => {
+    applyH3BoundaryFit.mockReset();
+    applySourceFitPreprocess.mockReset();
+  });
+
+  it("sends the transparent toggle and leaves every reference untouched", async () => {
+    const selected = model({
+      name: "qwen-image-2.1:bf16",
+      family: "qwen-image21",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [qwenImage21Recipe()],
+      },
+    } as Partial<ModelEntry>);
+    const draft = newGenerateForm();
+    applyModelDefaults(draft, selected);
+    Object.assign(draft, {
+      prompt: "a paper lantern",
+      transparentBackground: true,
+      outputFormat: "jpeg",
+      imageAttachments: ["RGBA-PNG", "WEBP"],
+    });
+
+    const request = await prepareMobileGenerationRequest(
+      {
+        target: { baseUrl: "http://studio.test:7680", apiKey: "secret" },
+        draft,
+        selectedModel: selected,
+      },
+      services(),
+    );
+
+    expect(request.transparent_background).toBe(true);
+    expect(request.output_format).toBe("png");
+    // References are never fitted, flattened or re-encoded.
+    expect(request.edit_images).toEqual(["RGBA-PNG", "WEBP"]);
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
   });
 });
