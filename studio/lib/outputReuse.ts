@@ -19,3 +19,16 @@ export function pipelineForSettingsReuse<T>(metadata: {
     ? (metadata.pipeline ?? null)
     : null;
 }
+
+/**
+ * The transparent-background toggle a Reuse restores. Only the REQUEST's own
+ * `transparent_background` answers: `has_alpha` is a fact about the file (an
+ * edit of a transparent reference keeps its alpha with the toggle off), not a
+ * setting anybody chose.
+ */
+export function transparentBackgroundForSettingsReuse(metadata: {
+  transparent_background?: boolean | null;
+  has_alpha?: boolean | null;
+}): boolean {
+  return metadata.transparent_background === true;
+}

@@ -98,8 +98,9 @@ pub use generation_profile::{
     GENERATION_PROFILE_SCHEMA_VERSION, REFERENCE_IMAGES_UNSUPPORTED_REASON,
 };
 pub use generation_profile::{
-    transparency_for_recipe, validate_transparency_against, ImageInputFormat, ReferenceCanvasRule,
-    TransparencyCapabilitiesProfile, TRANSPARENCY_UNSUPPORTED_REASON,
+    transparency_for_recipe, validate_transparency_against, validate_transparency_choice,
+    ImageInputFormat, ReferenceCanvasRule, TransparencyCapabilitiesProfile,
+    TRANSPARENCY_UNSUPPORTED_REASON,
 };
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};

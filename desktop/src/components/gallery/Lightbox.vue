@@ -6,6 +6,7 @@ import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
 import VideoSoundToggle from "./VideoSoundToggle.vue";
 import AuthedMedia from "./AuthedMedia.vue";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import CollectionPicker from "../library/CollectionPicker.vue";
 import TagEditor from "../library/TagEditor.vue";
 import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
@@ -299,6 +300,11 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 /** How long the render took, when the print knows (additive metadata). */
 const took = computed(() => formatGenerationTime(meta.value.generation_time_ms));
 const meta = computed(() => props.item.metadata);
+/** A still carrying alpha is drawn on the checkerboard, and its img is sized
+ * to the picture itself (never the stage), so letterbox bars stay plain. */
+const alphaBed = computed(
+  () => !props.video && !props.mesh && !props.audio && showsAlphaBed(props.item),
+);
 // An LTX-2 print's `strength` is source preservation, not denoise (#1055).
 // Family resolves through the live inventory (sequences record strength but
 // no `pipeline`), with the model-id name markers as the offline fallback.
@@ -708,7 +714,9 @@ async function performVideoExport(options: VideoExportOptions) {
             :poster-path="galleryMediaPath(item.filename, source, true, fromTrash)"
             :controls="video"
             :alt="meta.prompt"
-            class="!object-contain"
+            :alpha="alphaBed"
+            :class="alphaBed ? '!h-auto !w-auto max-h-full max-w-full' : '!object-contain'"
+            data-test="lightbox-still"
           />
           <span
             v-if="upscaled"

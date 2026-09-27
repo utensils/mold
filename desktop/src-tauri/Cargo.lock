@@ -4098,6 +4098,7 @@ dependencies = [
  "half",
  "image",
  "libc",
+ "libwebp-sys2 0.2.0",
  "mold-ai-candle",
  "mold-ai-catalog",
  "mold-ai-core",

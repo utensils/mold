@@ -23,6 +23,11 @@ import {
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { blobToBase64 } from "../../lib/base64";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+  type ImageInputFormat,
+} from "@studio/lib/referenceImagesProfile";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import {
   emptyMinimaxH3AuthoringState,
@@ -116,6 +121,13 @@ const referencesOnly = computed(
     plan.value.kind === "single-and-references",
 );
 const referenceMax = computed(() => caps.value.referenceImages?.max ?? null);
+/** The containers the reference strip takes — the recipe's advertised
+ * `reference_images.formats` (Qwen Image 2.1 adds WebP). */
+const referenceFormats = computed(
+  () =>
+    caps.value.referenceImages?.formats ??
+    LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
+);
 /**
  * The adapter's injection strength, straight from the recipe.
  * `null` — a recipe with no adapter, or an older host that never sent the
@@ -218,12 +230,17 @@ const uploadError = ref<string | null>(null);
 
 /** Decode the PNG/JPEG header for dimensions — the same facts a gallery pick
  * carries, and a format gate (the engine accepts nothing else) that also
- * covers drag-and-drop, which bypasses the file input's accept filter. */
-async function fileToSourceImage(file: File): Promise<SourceImageState | null> {
+ * covers drag-and-drop, which bypasses the file input's accept filter. A
+ * reference strip passes its recipe's own containers (WebP on Qwen Image
+ * 2.1); the bytes are kept exactly as picked either way. */
+async function fileToSourceImage(
+  file: File,
+  formats: readonly ImageInputFormat[] = LEGACY_REFERENCE_IMAGE_FORMATS,
+): Promise<SourceImageState | null> {
   const base64 = await blobToBase64(file);
-  const dimensions = imageDimensionsFromBase64(base64);
+  const dimensions = imageDimensionsFromBase64(base64, formats);
   if (!dimensions) {
-    uploadError.value = "Only PNG or JPEG images can be used here.";
+    uploadError.value = `Only ${imageInputFormatsSentence(formats)} images can be used here.`;
     return null;
   }
   uploadError.value = null;
@@ -290,7 +307,7 @@ async function onStripDrop(event: DragEvent) {
   if (files.length === 0) return;
   const images: SourceImageState[] = [];
   for (const file of files) {
-    const image = await fileToSourceImage(file);
+    const image = await fileToSourceImage(file, referenceFormats.value);
     if (!image) return;
     images.push(image);
   }

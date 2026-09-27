@@ -31,6 +31,7 @@ import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import {
   flux2KleinRecipe,
   hunyuan3dRecipe,
+  qwenImage21Recipe,
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
@@ -573,6 +574,54 @@ describe("CreatePage layout and behavior", () => {
    * that object's own badge and the pixels the form holds — it never computes
    * a size, and it is absent on a recipe that renders on no canvas at all.
    */
+  it("sizes a Qwen Image 2.1 canvas from the last reference until the user picks one", async () => {
+    const model = {
+      ...installedModelRow("qwen-image-2.1:bf16", "qwen-image21"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "qwen21-recipe",
+        default_recipe_id: "default",
+        recipes: [qwenImage21Recipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([model]);
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-2.1:bf16";
+    form.state.value.modelFamily = "qwen-image21";
+    form.state.value.width = 1024;
+    form.state.value.height = 1024;
+    await nextTick();
+
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "a.png",
+        base64: "AAAA",
+        width: 1024,
+        height: 1024,
+      },
+      {
+        kind: "upload",
+        filename: "b.png",
+        base64: "BBBB",
+        width: 1600,
+        height: 900,
+      },
+    ];
+    await nextTick();
+    await nextTick();
+    // The LAST reference's aspect at the recipe's 1 MP default, rounded
+    // half-to-even onto its 32 px grid — upstream's calculate_dimensions.
+    expect([form.state.value.width, form.state.value.height]).toEqual([
+      1376, 768,
+    ]);
+    // References are never canvas-fitted on the way out.
+    expect(form.toRequest(model).edit_images).toEqual(["AAAA", "BBBB"]);
+  });
+
   it("reads the shape chip from the same resolver the rail's pills read", async () => {
     const model = modelWithRecipe("sdxl:fp16", "sdxl");
     hostModelsMock.mockResolvedValue([model]);
@@ -3569,6 +3618,9 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
+    // Add-on looks renders only for a model that takes adapters.
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
     form.state.value.prompt = "a portrait";
     form.state.value.originalPrompt = "an earlier generated print";
     await nextTick();
@@ -3584,6 +3636,29 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.prompt).toBe("a portrait, cinematic light");
     expect(form.state.value.originalPrompt).toBeNull();
     expect(form.toRequest().original_prompt).toBeUndefined();
+  });
+
+  it("offers Add-on looks only for a model whose recipe takes LoRAs", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.loras = [{ path: "/loras/look.safetensors", scale: 1 }];
+    await nextTick();
+    expect(wrapper.find("[data-test='disclosure-loras']").exists()).toBe(true);
+    await wrapper.get("[data-test='disclosure-loras']").trigger("click");
+    expect(wrapper.findComponent({ name: "LoraPicker" }).exists()).toBe(true);
+
+    // A family with no adapter path: the row and its open sheet both go, and
+    // the request drops the stack rather than shipping what admission refuses.
+    form.state.value.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    form.state.value.modelFamily = "minimax-h3";
+    await nextTick();
+    await flushPromises();
+    expect(wrapper.find("[data-test='disclosure-loras']").exists()).toBe(false);
+    expect(wrapper.findComponent({ name: "LoraPicker" }).exists()).toBe(false);
+    expect(form.toRequest().loras).toBeUndefined();
   });
 
   it("preserves the source while an active quick expansion becomes stale", async () => {

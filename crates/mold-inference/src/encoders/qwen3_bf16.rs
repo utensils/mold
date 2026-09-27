@@ -621,7 +621,7 @@ impl Bf16Qwen3Encoder {
     /// `unmask_unattended` safety rule for SDPA: the query belongs to padding
     /// and is discarded by the consumer, but letting softmax see an all-`-inf`
     /// row creates NaNs which can poison later layers before that discard.
-    fn batch_attention_mask(
+    pub(crate) fn batch_attention_mask(
         rows: &[Vec<bool>],
         seq_len: usize,
         dtype: DType,
@@ -656,7 +656,10 @@ impl Bf16Qwen3Encoder {
     /// same text coordinates, the interleaving reduces to normal Qwen3 RoPE;
     /// what remains load-bearing is that each row's valid first token starts
     /// at zero rather than at a left-pad offset.
-    fn rope_positions_for_attention(rows: &[Vec<bool>], seq_len: usize) -> Result<Vec<Vec<usize>>> {
+    pub(crate) fn rope_positions_for_attention(
+        rows: &[Vec<bool>],
+        seq_len: usize,
+    ) -> Result<Vec<Vec<usize>>> {
         rows.iter()
             .enumerate()
             .map(|(row_index, flags)| {

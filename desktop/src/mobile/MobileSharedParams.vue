@@ -19,6 +19,12 @@ import { emptyMeshForm, meshTargetFacesPlaceholder } from "@studio/lib/meshContr
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import type { CanvasIntent } from "@studio/lib/outputShape";
+import {
+  coerceFormatForTransparency,
+  TRANSPARENCY_LABEL,
+  TRANSPARENCY_NOTE,
+  transparencyControl,
+} from "@studio/lib/transparency";
 
 const props = withDefaults(
   defineProps<{
@@ -77,6 +83,18 @@ const guidanceCaps = computed(() =>
   ),
 );
 const recipe = computed(() => effectiveGenerationRecipe(props.model, props.form.pipeline));
+/** Qwen Image 2.1's Transparent background — rendered only where the recipe
+ * advertises it adjustable. Turning it on moves a JPEG choice to the recipe's
+ * first alpha format, so the form never holds a pair admission refuses. */
+const transparency = computed(() => transparencyControl(guidanceCaps.value));
+function setTransparentBackground(on: boolean) {
+  props.form.transparentBackground = on;
+  props.form.outputFormat = coerceFormatForTransparency(
+    props.form.outputFormat,
+    transparency.value,
+    on,
+  ).format;
+}
 const stepsControl = computed(() => recipe.value?.steps);
 const guidanceControl = computed(() => recipe.value?.guidance);
 /* A fixed control explains itself with the host's own sentence, or with
@@ -243,6 +261,23 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
       @validity-change="emit('resolution-validity', $event)"
       @canvas-intent="emit('canvas-intent', $event)"
     />
+    <div
+      v-if="transparency"
+      class="mobile-generate-toggle-row"
+      data-test="mobile-transparent-background"
+    >
+      <span
+        ><strong>{{ TRANSPARENCY_LABEL }}</strong
+        ><small>{{ TRANSPARENCY_NOTE }}</small></span
+      >
+      <SwitchToggle
+        :model-value="form.transparentBackground === true"
+        :label="TRANSPARENCY_LABEL"
+        :disabled="disabled"
+        data-test="mobile-transparent-background-toggle"
+        @update:model-value="setTransparentBackground"
+      />
+    </div>
     <div
       v-if="canPredictDuration"
       class="field mobile-predict-duration"

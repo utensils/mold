@@ -208,3 +208,32 @@ describe("expansionContextForRequest", () => {
     ).toEqual([{ kind: "image", role: "source" }]);
   });
 });
+
+describe("expansionContextForRequest transparency", () => {
+  it("tells the expander about a transparent background, and only then", () => {
+    expect(
+      expansionContextForRequest("qwen-image21", {
+        model: "qwen-image-2.1:bf16",
+        transparent_background: true,
+      }).transparent_background,
+    ).toBe(true);
+    expect(
+      "transparent_background" in
+        expansionContextForRequest("qwen-image21", {
+          model: "qwen-image-2.1:bf16",
+          transparent_background: false,
+        }),
+    ).toBe(false);
+  });
+
+  it("names Qwen Image 2.1's ordered references as edit images", () => {
+    expect(
+      expansionContextForRequest("qwen-image21", {
+        edit_images: ["a", "b"],
+      }).references,
+    ).toEqual([
+      { kind: "image", role: "edit" },
+      { kind: "image", role: "edit" },
+    ]);
+  });
+});

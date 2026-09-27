@@ -20,6 +20,7 @@ import {
   watch,
 } from "vue";
 import MediaTile from "@ui/components/MediaTile.vue";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import Icon from "@ui/components/Icon.vue";
 import { printKey } from "../../lib/multiHostGallery";
 import { useThumbnailSources } from "../../composables/useThumbnailSources";
@@ -192,7 +193,7 @@ const skeletons = computed(() =>
 
 // ── Tile helpers ───────────────────────────────────────────────────────────
 function tileKind(entry: GalleryImage) {
-  return mediaKind(entry.format, entry.filename);
+  return mediaKind(entry.format, entry.filename, entry.metadata);
 }
 function isMotion(entry: GalleryImage): boolean {
   const k = tileKind(entry);
@@ -384,6 +385,7 @@ onBeforeUnmount(() => {
               :src="tileSrc(entry, tilePriority(offset))"
               :alt="entry.metadata.prompt || entry.filename"
               :fresh="fresh.has(keyOf(entry))"
+              :alpha="tileKind(entry) === 'image' && showsAlphaBed(entry)"
               @open="onTileOpen(entry)"
             >
               <template v-if="isMotion(entry)" #overlay>

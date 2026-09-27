@@ -174,6 +174,70 @@ describe("ImagePickerModal", () => {
     ).toBe("still.png");
   });
 
+  it("accepts WebP stills only where the recipe advertises them", async () => {
+    fetchMergedGallery.mockResolvedValue({
+      entries: [
+        {
+          filename: "cutout.webp",
+          metadata: {} as never,
+          timestamp: 3,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          // An animated WebP clip shares the extension, never the kind.
+          filename: "clip.webp",
+          metadata: { frames: 97 } as never,
+          timestamp: 2,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          filename: "still.png",
+          metadata: {} as never,
+          timestamp: 1,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+      ],
+      rawEntries: [],
+      reachableHostIds: ["origin"],
+      unreachableHostIds: [],
+      remoteHostCount: 0,
+    });
+    const w = mount(ImagePickerModal, {
+      props: { open: true, multiple: true, formats: ["png", "jpeg", "webp"] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const input = document.body.querySelector(
+      "input[type='file']",
+    ) as HTMLInputElement;
+    expect(input.accept).toBe("image/png,image/jpeg,image/webp");
+    Object.defineProperty(input, "files", {
+      value: [new File(["x"], "layer.webp", { type: "image/webp" })],
+    });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushPromises();
+    // The bytes go out as picked: no re-encode, no flattening.
+    expect(w.emitted("pick")?.[0]?.[0]).toEqual([
+      { kind: "upload", filename: "layer.webp", base64: "b64:layer.webp" },
+    ]);
+
+    await w.setProps({ open: false });
+    await w.setProps({ open: true });
+    await w
+      .get("[aria-label='Image source']")
+      .findAll("button")[1]!
+      .trigger("click");
+    await flushPromises();
+    const titles = Array.from(document.body.querySelectorAll(".ip__tile")).map(
+      (tile) => tile.getAttribute("title"),
+    );
+    expect(titles).toEqual(["cutout.webp", "still.png"]);
+  });
+
   it("explains when the gallery has no compatible still images", async () => {
     fetchMergedGallery.mockResolvedValue({
       entries: [

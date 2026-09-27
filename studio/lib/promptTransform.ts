@@ -179,6 +179,13 @@ export function conditioningFingerprint(request: ExpansionTaskRequest): string {
     // face behind a reviewed rewrite must stale it through this one rule, not
     // a second identity-only staleness check.
     id_image: request.id_image ?? null,
+    // The engine wraps the prompt in Qwen's RGBA recipe while the
+    // transparent-background toggle is on, so a flip stales reviewed work.
+    // Only `true` enters the value: off is the field's absence, which keeps
+    // every fingerprint recorded before the toggle existed valid.
+    ...(request.transparent_background === true
+      ? { transparent_background: true }
+      : {}),
   });
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {

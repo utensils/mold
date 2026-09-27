@@ -70,6 +70,11 @@ photography, low eye-level composition, finely detailed natural light.
 mold run qwen-image-2.1:bf16 \
   'Straight-on editorial photograph of a tiny artisan bakery named "MOLD & FLOUR" on a quiet European corner, deep teal facade, three arched windows, striped awning, sunny spring morning, crisp realistic detail, balanced composition' \
   --seed 210001
+mold run qwen-image-2.1:bf16 "Put the jacket from image 1 on the person in image 2" \
+  --image jacket.png --image person.jpg
+mold run qwen-image-2.1:bf16 "A red paper lantern with a gold tassel" \
+  --transparent --format webp --output lantern.webp
+mold run qwen-image-2.1-turbo "A lighthouse on a basalt cliff at dusk, oil painting" --seed 7
 ```
 
 ## Sources

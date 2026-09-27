@@ -11,6 +11,7 @@ import {
 } from "../lib/galleryMedia";
 import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import {
   formatRelativeTime,
   formatResolution,
@@ -134,7 +135,14 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", refreshVisibility);
 });
 
-const kind = computed(() => mediaKind(props.item.format, props.item.filename));
+const kind = computed(() =>
+  mediaKind(props.item.format, props.item.filename, props.item.metadata),
+);
+/** A print that carries alpha sits on the checkerboard. The frame is sized
+ * to the print's own aspect, so the board never shows as letterbox. */
+const alphaBed = computed(
+  () => kind.value === "image" && showsAlphaBed(props.item),
+);
 const aspectStyle = computed(() => {
   const w = props.item.metadata.width;
   const h = props.item.metadata.height;
@@ -279,7 +287,13 @@ function onRecreate(evt: Event) {
     @keydown.space.prevent="onCardActivate"
   >
     <!-- Media frame: aspect-ratio preserved, media absolutely positioned -->
-    <div class="relative w-full overflow-hidden" :style="aspectStyle">
+    <div
+      class="relative w-full overflow-hidden"
+      :class="{ 'ms-alpha-bed': alphaBed && loaded }"
+      :data-alpha="alphaBed ? 'true' : undefined"
+      data-test="card-media"
+      :style="aspectStyle"
+    >
       <!-- Placeholder / broken state -->
       <div
         v-if="!visible || stage === 'broken'"

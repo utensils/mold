@@ -621,6 +621,12 @@ export interface GenerateRequest {
    * field rather than refusing it, renders exactly what it always did.
    */
   reference_weight?: number;
+  /**
+   * Cut the subject out onto a transparent background
+   * (`capabilities.transparency`). Only `true` ever travels — off is the
+   * field's absence, so an ordinary render is byte-identical on the wire.
+   */
+  transparent_background?: boolean;
   /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
   references?: GenerationReference[];
   strength?: number;
@@ -833,6 +839,12 @@ export interface OutputMetadata {
    * (the server records what actually applied, not what the request asked). */
   id_weight?: number | null;
   id_start_step?: number | null;
+  /** The request asked for a transparent background (only ever `true`);
+   * Reuse restores the toggle from it. Additive. */
+  transparent_background?: boolean | null;
+  /** The STORED file carries alpha — also true for an edit of a transparent
+   * reference with the toggle off. Draws the checkerboard. Additive. */
+  has_alpha?: boolean | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */

@@ -43,8 +43,16 @@ const props = withDefaults(
      *  overscan rows `near`, prewarm `background`. Raising it promotes a
      *  queued request in place; the scheduler never demotes. */
     priority?: ThumbnailPriority;
+    /**
+     * The print carries alpha (`showsAlphaBed`): the still is drawn over the
+     * kit's `.ms-alpha-bed` checkerboard. The board sits on the IMG box, so
+     * a caller that contains the picture in a larger frame also sizes the
+     * img to the picture (the Lightbox does) — letterbox bars stay plain.
+     */
+    alpha?: boolean;
   }>(),
   {
+    alpha: false,
     video: false,
     mesh: false,
     audio: false,
@@ -257,6 +265,8 @@ onUnmounted(() => {
     :src="src"
     :alt="alt"
     class="h-full w-full object-cover"
+    :class="{ 'ms-alpha-bed': alpha }"
+    :data-alpha="alpha ? 'true' : undefined"
     decoding="async"
     draggable="false"
   />

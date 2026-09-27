@@ -6,6 +6,11 @@ import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { resolveDropTarget, type DropTarget } from "@studio/lib/imageDropRouting";
 import {
+  imageInputFormatOfBase64,
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+} from "@studio/lib/referenceImagesProfile";
+import {
   appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
   minimaxH3ReferenceBudget,
@@ -98,6 +103,22 @@ export async function applyDesktopImageDrop(
   });
   if (typeof routed !== "string") {
     return { attached: false, metadataApplied, refused: routed.refused };
+  }
+  // The native import reads WebP too; only a reference strip whose recipe
+  // advertises it (`reference_images.formats`) may hold one. Every other well
+  // is PNG/JPEG at admission, so it is refused here by name rather than at
+  // Generate.
+  const accepted =
+    routed === "references"
+      ? (caps.referenceImages?.formats ?? LEGACY_REFERENCE_IMAGE_FORMATS)
+      : LEGACY_REFERENCE_IMAGE_FORMATS;
+  const container = imageInputFormatOfBase64(image.base64);
+  if (container && !accepted.includes(container)) {
+    return {
+      attached: false,
+      metadataApplied,
+      refused: `Only ${imageInputFormatsSentence(accepted)} images can be used here.`,
+    };
   }
 
   const applied = await applyDropToForm(form, routed, image);

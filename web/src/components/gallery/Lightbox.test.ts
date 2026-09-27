@@ -663,3 +663,23 @@ describe("Lightbox identity provenance", () => {
     );
   });
 });
+
+describe("Lightbox alpha bed", () => {
+  it("draws the checkerboard on the image box of a print with alpha", () => {
+    const opaque = mountWide();
+    expect(opaque.get("[data-test='lightbox-image']").classes()).not.toContain(
+      "ms-alpha-bed",
+    );
+
+    const cutout = mountWide({
+      item: {
+        ...item,
+        filename: "cutout.png",
+        metadata: { ...item.metadata, transparent_background: true },
+      },
+    });
+    expect(cutout.get("[data-test='lightbox-image']").classes()).toContain(
+      "ms-alpha-bed",
+    );
+  });
+});

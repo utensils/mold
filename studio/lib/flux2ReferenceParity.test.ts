@@ -32,6 +32,8 @@ interface ParityRow {
   max_count: number | null;
   primary_is_target: boolean;
   source_relation: ReferenceImagesProfile["source_relation"];
+  canvas?: ReferenceImagesProfile["canvas"];
+  formats?: ReferenceImagesProfile["formats"];
 }
 
 function fixturePath(): string {
@@ -63,6 +65,8 @@ function recipeFor(row: ParityRow): GenerationRecipeProfile {
     max_count: row.max_count,
     primary_is_target: row.primary_is_target,
     source_relation: row.source_relation,
+    ...(row.canvas ? { canvas: row.canvas } : {}),
+    ...(row.formats ? { formats: row.formats } : {}),
   };
   return {
     ...recipe,
@@ -108,6 +112,11 @@ describe("flux2 reference parity fixture", () => {
         // No Flux.2 recipe has a reference adapter, so none carries a
         // strength; `null` is what hides the slider.
         weight: null,
+        // The canvas rule and the accepted containers travel verbatim; a
+        // row that names neither reads as an older server's block: no rule,
+        // and the legacy PNG/JPEG pair.
+        canvas: row.canvas ?? null,
+        formats: row.formats?.length ? row.formats : ["png", "jpeg"],
       });
     }
   });
@@ -212,5 +221,27 @@ describe("flux2 reference parity fixture", () => {
     };
     expect(capsFor(hiddenDev).referenceImages).toBeNull();
     expect(capsFor(hiddenDev).sourceImageMode).toBe("single");
+  });
+});
+
+describe("Qwen Image 2.1 reference contract additions", () => {
+  it("sizes the canvas from the last reference and accepts WebP on every tier", () => {
+    const rows = fixture.models.filter((r) => r.family === "qwen-image21");
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const refs = capsFor(row).referenceImages;
+      expect(refs?.canvas, row.model).toBe("last-reference");
+      expect(refs?.formats, row.model).toEqual(["png", "jpeg", "webp"]);
+    }
+  });
+
+  it("keeps every other family on the legacy PNG/JPEG pair with no canvas rule", () => {
+    for (const row of fixture.models.filter(
+      (r) => r.family !== "qwen-image21" && r.mode !== "hidden",
+    )) {
+      const refs = capsFor(row).referenceImages;
+      expect(refs?.canvas, row.model).toBeNull();
+      expect(refs?.formats, row.model).toEqual(["png", "jpeg"]);
+    }
   });
 });

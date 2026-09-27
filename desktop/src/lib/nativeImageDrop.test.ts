@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { dropTargetAtPosition, reduceNativeImageDrag } from "./nativeImageDrop";
+import {
+  dropTargetAtPosition,
+  isSupportedDroppedImage,
+  reduceNativeImageDrag,
+} from "./nativeImageDrop";
 
 describe("native image drop overlay", () => {
   it("does not arm for an internal filmstrip drag", () => {
@@ -72,5 +76,16 @@ describe("dropTargetAtPosition", () => {
       visible: false,
     });
     expect(payload.position).toEqual({ x: 4, y: 5 });
+  });
+});
+
+describe("isSupportedDroppedImage", () => {
+  it("reads PNG, JPEG and WebP stills and nothing else", () => {
+    for (const path of ["/a/b.png", "/a/b.JPG", "/a/b.jpeg", "/a/cutout.webp"]) {
+      expect(isSupportedDroppedImage(path), path).toBe(true);
+    }
+    for (const path of ["/a/b.gif", "/a/clip.mp4", "/a/notes.txt"]) {
+      expect(isSupportedDroppedImage(path), path).toBe(false);
+    }
   });
 });

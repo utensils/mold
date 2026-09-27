@@ -127,9 +127,28 @@ overlay register calls top acts on either.
   is an image prompt injected beside the text rather than a replacement for the
   denoise input, so the request carries `source_image` + `strength` (+ mask)
   AND `edit_images` together, with a **Reference strength** control gated on
-  the recipe advertising one. iPhone and Android have no OS drag,
-  so the picker sheet is the only acquisition path and the desktop
-  drop-routing bridge does not apply here.
+  the recipe advertising one. A `replaces` strip whose recipe advertises
+  more containers (`reference_images.formats` — Qwen Image 2.1 adds WebP)
+  accepts them in the picker, and every reference travels byte for byte:
+  never fitted, flattened or re-encoded, so a transparent PNG or WebP keeps
+  its alpha, and each strip thumbnail sits on the checkerboard alpha bed.
+  While the canvas is still the model default, a `canvas: last-reference`
+  recipe sizes it to the LAST reference's aspect at the recipe's default
+  area (`studio/lib/referenceCanvas.ts`, rounded half-to-even like the CLI
+  and the engine); a size the user picked never moves. iPhone and Android
+  have no OS drag, so the picker sheet is the only acquisition path and the
+  desktop drop-routing bridge does not apply here.
+  **Transparent background** is a switch row in the shared parameters
+  (`MobileSharedParams.vue`), rendered only when the recipe advertises
+  `capabilities.transparency` adjustable (Qwen Image 2.1). On, it sends
+  `transparent_background: true` and moves a JPEG choice to PNG (JPEG has no
+  alpha channel and admission refuses the pair); off is the field's absence.
+  The engine wraps the prompt in Qwen's RGBA recipe — the prompt bed keeps the
+  user's own words — and **Use as prompt** restores the switch from the
+  print's request (`transparent_background`), never from `has_alpha`. The
+  full-screen viewer draws a print that carries alpha on the same
+  checkerboard, sized to the contained picture so the letterbox stays the
+  plain stage, and Library tiles mark it too.
   A **Title** field above the prompt names the print: the trimmed value rides
   every mobile-built `GenerateRequest` as additive `title` (batch siblings and
   prepared Batch N inherit it), an over-long or control-character title is

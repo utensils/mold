@@ -417,6 +417,51 @@ impl QuantizedLinear {
         }
     }
 
+    /// This linear with its storage on `device`, keeping the arm it resolved
+    /// to: a byte-exact `QTensor` round trip for the quantized arms
+    /// (`wan::block_offload::qtensor_to_device`), a plain copy for Dense.
+    ///
+    /// Used to park a resident transformer in host RAM for a phase that needs
+    /// the card (Qwen Image 2.1's 2K VAE decode) and restore it afterwards
+    /// without a reload from disk. A `QMatMul` arm moves through its retained
+    /// dequant fallback, which every CUDA `QMatMul` arm carries — the only
+    /// device a park is ever asked of.
+    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        let move_bias =
+            |bias: &Option<Tensor>| bias.as_ref().map(|b| b.to_device(device)).transpose();
+        let arm = match &self.arm {
+            QuantizedLinearArm::Dequant { weight, bias } => QuantizedLinearArm::Dequant {
+                weight: crate::wan::block_offload::qtensor_to_device(weight, device)
+                    .map_err(|e| candle_core::Error::Msg(format!("{e:#}")))?,
+                bias: move_bias(bias)?,
+            },
+            QuantizedLinearArm::QMatMul { fallback, .. } => {
+                let Some(fallback) = fallback else {
+                    candle_core::bail!(
+                        "a QMatMul linear without a dequant fallback cannot change device"
+                    );
+                };
+                let weight = crate::wan::block_offload::qtensor_to_device(&fallback.weight, device)
+                    .map_err(|e| candle_core::Error::Msg(format!("{e:#}")))?;
+                let bias = move_bias(&fallback.bias)?;
+                QuantizedLinearArm::QMatMul {
+                    inner: QMatMulLinear::from_arc(weight.clone(), bias.clone())?,
+                    fallback: Some(DequantFallback { weight, bias }),
+                }
+            }
+            QuantizedLinearArm::Dense { inner } => QuantizedLinearArm::Dense {
+                inner: candle_nn::Linear::new(
+                    inner.weight().to_device(device)?,
+                    inner.bias().map(|b| b.to_device(device)).transpose()?,
+                ),
+            },
+        };
+        Ok(Self {
+            arm,
+            kernel_dtype: self.kernel_dtype,
+        })
+    }
+
     /// The arm this linear resolved to at construction.
     pub(crate) fn kind(&self) -> QuantizedLinearKind {
         match &self.arm {
