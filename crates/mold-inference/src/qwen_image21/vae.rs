@@ -12,6 +12,7 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::{conv2d, Conv2d, Conv2dConfig, VarBuilder};
 use std::path::Path;
 
+use super::banded_conv::{banded_conv2d, BandedConv2d};
 use super::QWEN_IMAGE_21_LATENT_CHANNELS;
 
 const DECODER_BASE_DIM: usize = 144;
@@ -131,9 +132,9 @@ impl AttentionBlock2d {
 
 struct ResidualBlock2d {
     norm1: RmsNorm2d,
-    conv1: Conv2d,
+    conv1: BandedConv2d,
     norm2: RmsNorm2d,
-    conv2: Conv2d,
+    conv2: BandedConv2d,
     shortcut: Option<Conv2d>,
 }
 
@@ -145,9 +146,9 @@ impl ResidualBlock2d {
         };
         Ok(Self {
             norm1: RmsNorm2d::feature(in_dim, vb.pp("norm1"))?,
-            conv1: conv2d(in_dim, out_dim, 3, conv_cfg, vb.pp("conv1"))?,
+            conv1: banded_conv2d(in_dim, out_dim, 3, conv_cfg, vb.pp("conv1"))?,
             norm2: RmsNorm2d::feature(out_dim, vb.pp("norm2"))?,
-            conv2: conv2d(out_dim, out_dim, 3, conv_cfg, vb.pp("conv2"))?,
+            conv2: banded_conv2d(out_dim, out_dim, 3, conv_cfg, vb.pp("conv2"))?,
             shortcut: (in_dim != out_dim)
                 .then(|| {
                     conv2d(
@@ -257,7 +258,7 @@ fn duplicate_upsample_shortcut(
 
 struct ResidualUpBlock2d {
     resnets: Vec<ResidualBlock2d>,
-    upsampler: Option<Conv2d>,
+    upsampler: Option<BandedConv2d>,
     out_dim: usize,
     temporal_upsample: bool,
 }
@@ -281,7 +282,7 @@ impl ResidualUpBlock2d {
             current_dim = out_dim;
         }
         let upsampler = if upsample {
-            Some(conv2d(
+            Some(banded_conv2d(
                 out_dim,
                 out_dim,
                 3,
@@ -324,11 +325,11 @@ impl ResidualUpBlock2d {
 }
 
 struct Decoder2d {
-    conv_in: Conv2d,
+    conv_in: BandedConv2d,
     mid_block: MidBlock2d,
     up_blocks: Vec<ResidualUpBlock2d>,
     norm_out: RmsNorm2d,
-    conv_out: Conv2d,
+    conv_out: BandedConv2d,
 }
 
 impl Decoder2d {
@@ -355,7 +356,7 @@ impl Decoder2d {
         }
         let final_dim = *dimensions.last().expect("decoder dimensions are non-empty");
         Ok(Self {
-            conv_in: conv2d(
+            conv_in: banded_conv2d(
                 QWEN_IMAGE_21_LATENT_CHANNELS,
                 dimensions[0],
                 3,
@@ -368,7 +369,7 @@ impl Decoder2d {
             mid_block: MidBlock2d::new(dimensions[0], vb.pp("mid_block"))?,
             up_blocks,
             norm_out: RmsNorm2d::feature(final_dim, vb.pp("norm_out"))?,
-            conv_out: conv2d(
+            conv_out: banded_conv2d(
                 final_dim,
                 4,
                 3,
@@ -480,6 +481,11 @@ impl QwenImage21Vae {
         let latents = latents
             .broadcast_mul(&self.latents_std)?
             .broadcast_add(&self.latents_mean)?;
+        // Every canvas v0.32 could render decodes unbanded (its exact bytes);
+        // a 2K canvas bands its im2col column buffers at 2 GiB.
+        let scale = super::QWEN_IMAGE_21_VAE_SCALE_FACTOR;
+        let pixels = (latent_height * scale * latent_width * scale) as u64;
+        let _band = super::banded_conv::BandScope::for_canvas(pixels);
         self.decoder
             .forward(&self.post_quant_conv.forward(&latents)?)?
             .clamp(-1.0f32, 1.0f32)
