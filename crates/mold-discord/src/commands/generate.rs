@@ -866,13 +866,15 @@ fn check_reference_bytes(
 }
 
 /// The default canvas a `last-reference` recipe (Qwen Image 2.1) takes when
-/// the user chose neither width nor height: the LAST reference's aspect at
-/// the model's default area on its grid, halves rounded to even exactly as
-/// upstream's `calculate_dimensions`. The same rule `mold run` and MCP apply.
+/// the user chose neither width nor height: `mold_core::last_reference_canvas`
+/// — the LAST reference's aspect at upstream's fixed 1024x1024 area (never a
+/// host's configured default, so the bot, the CLI, Studio and the server
+/// advisory derive the same canvas), clamped into the bounds the server's
+/// recipe advertises (the manifest recipe's while the cache is cold).
 pub(crate) fn last_reference_canvas(
     profile: &mold_core::ReferenceImagesProfile,
     references: &[Vec<u8>],
-    defaults: Option<&mold_core::ModelDefaults>,
+    model_entry: Option<&ModelInfoExtended>,
     family: Option<&str>,
     model: &str,
 ) -> Option<(u32, u32)> {
@@ -884,18 +886,12 @@ pub(crate) fn last_reference_canvas(
         .ok()?
         .into_dimensions()
         .ok()?;
-    let (default_w, default_h) = defaults
-        .map(|d| (d.default_width, d.default_height))
-        .unwrap_or((1024, 1024));
-    let align = defaults
-        .and_then(|d| d.dimension_alignment)
-        .unwrap_or_else(|| mold_core::dimension_alignment_for_model(model, family));
-    Some(mold_core::validation::fit_to_target_area_ties_even(
-        width,
-        height,
-        u64::from(default_w) * u64::from(default_h),
-        align,
-    ))
+    let limits = model_entry
+        .and_then(|entry| entry.generation_profile.as_ref())
+        .and_then(|profile| profile.default_recipe())
+        .map(|recipe| mold_core::CanvasLimits::from_resolution(&recipe.resolution))
+        .unwrap_or_else(|| mold_core::CanvasLimits::for_model(model, family));
+    Some(mold_core::last_reference_canvas(width, height, limits))
 }
 
 /// Resolve the default model name from the cached model list.
@@ -1601,7 +1597,7 @@ pub async fn generate(
     // landscape/portrait photos get `resize_exact`'d to 1024x1024.
     let reference_canvas = match &reference_route {
         Some(ReferenceRoute::EditImages(profile)) if width.is_none() && height.is_none() => {
-            last_reference_canvas(profile, &edit_images, model_defaults, family, &model_name)
+            last_reference_canvas(profile, &edit_images, model_entry, family, &model_name)
         }
         _ => None,
     };
@@ -2756,36 +2752,31 @@ mod tests {
             encoded(64, 64, image::ImageFormat::Png),
             encoded(1920, 1080, image::ImageFormat::WebP),
         ];
-        let defaults = mold_core::ModelDefaults {
-            default_width: 1024,
-            default_height: 1024,
-            dimension_alignment: Some(32),
-            ..defaults()
-        };
         assert_eq!(
             last_reference_canvas(
                 &qwen,
                 &references,
-                Some(&defaults),
+                None,
                 Some("qwen-image21"),
                 "qwen-image-2.1:bf16"
             ),
-            Some(mold_core::validation::fit_to_target_area_ties_even(
-                1920,
-                1080,
-                1024 * 1024,
-                32
-            ))
+            Some((1376, 768))
+        );
+        // A panorama past the 2752 px axis ceiling is clamped inside the
+        // recipe rather than refused at admission.
+        assert_eq!(
+            last_reference_canvas(
+                &qwen,
+                &[encoded(8000, 1000, image::ImageFormat::Png)],
+                None,
+                Some("qwen-image21"),
+                "qwen-image-2.1:bf16"
+            ),
+            Some((2752, 320))
         );
         let klein = reference_images_contract(None, Some("flux2"), "flux2-klein:q8").unwrap();
         assert_eq!(
-            last_reference_canvas(
-                &klein,
-                &references,
-                Some(&defaults),
-                Some("flux2"),
-                "flux2-klein:q8"
-            ),
+            last_reference_canvas(&klein, &references, None, Some("flux2"), "flux2-klein:q8"),
             None
         );
     }

@@ -997,7 +997,10 @@ decide what these fields may carry:
 - `capabilities.reference_images` gained two additive fields. `canvas:
 "last-reference"` (Qwen Image 2.1) is a **client** rule: when the user has
   not chosen a size, size the default canvas to the LAST reference's aspect
-  ratio at the recipe's default pixel area and alignment. The server cannot
+  ratio at a fixed 1024×1024 area (upstream's `output_resolution` default —
+  never a host's configured default size) on the recipe's alignment, then
+  clamp it inside the recipe's `resolution` ceilings (`max_axis_pixels`,
+  `max_pixels`, `min_width`/`min_height`) keeping the aspect on the grid. The server cannot
   tell a chosen size from a default one (`width`/`height` are required), so
   admission never rewrites the size. `formats` lists the containers accepted
   as references (`png`, `jpeg`, `webp`); an empty or absent list means PNG and

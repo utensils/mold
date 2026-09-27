@@ -290,7 +290,7 @@ pub async fn transparent(
     }
     let (width, height) = match (width, height, reference_profile.as_ref()) {
         (None, None, Some(profile)) => {
-            last_reference_canvas(profile, &edit_images, model_defaults, family, &model_name)
+            last_reference_canvas(profile, &edit_images, model_entry, family, &model_name)
                 .map_or((None, None), |(w, h)| (Some(w), Some(h)))
         }
         (width, height, _) => (width, height),
@@ -523,7 +523,7 @@ mod tests {
         let (width, height) = last_reference_canvas(
             &profile,
             &references,
-            Some(&entry.defaults),
+            Some(&entry),
             Some("qwen-image21"),
             "qwen-image-2.1:bf16",
         )

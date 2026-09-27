@@ -336,13 +336,7 @@ fn effective_dimensions(
         return Ok((0, 0));
     }
     if width.is_none() && height.is_none() {
-        if let Some(canvas) = last_reference_canvas(
-            family,
-            model,
-            edit_images,
-            model_cfg.effective_width(config),
-            model_cfg.effective_height(config),
-        )? {
+        if let Some(canvas) = last_reference_canvas(family, model, edit_images)? {
             return Ok(canvas);
         }
     }
@@ -405,17 +399,16 @@ fn refuse_unrenderable_transparency(
 
 /// The default canvas for a recipe whose references size it
 /// (`capabilities.reference_images.canvas == last-reference`, Qwen Image
-/// 2.1): the LAST reference's aspect ratio at the model's default pixel area,
-/// on its grid, rounded halves-to-even exactly as upstream's
-/// `calculate_dimensions` does (`pipeline_qwenimage21.py:149-156`). `None`
-/// when the recipe has no such rule or the request carries no reference,
-/// leaving the ordinary default in force.
+/// 2.1): `mold_core::last_reference_canvas` — the LAST reference's aspect at
+/// upstream's fixed 1024x1024 area (never this host's configured default, so
+/// the server derives the same canvas), rounded halves-to-even as upstream's
+/// `calculate_dimensions` (`pipeline_qwenimage21.py:149-156`) and clamped
+/// into the recipe's bounds. `None` when the recipe has no such rule or the
+/// request carries no reference, leaving the ordinary default in force.
 fn last_reference_canvas(
     family: Option<&str>,
     model: &str,
     edit_images: Option<&[Vec<u8>]>,
-    default_width: u32,
-    default_height: u32,
 ) -> Result<Option<(u32, u32)>> {
     let Some(family) = family else {
         return Ok(None);
@@ -434,12 +427,10 @@ fn last_reference_canvas(
         .map_err(|error| {
             anyhow::anyhow!("failed to read the last reference image's size: {error}")
         })?;
-    let align = mold_core::dimension_alignment_for_model(model, Some(family));
-    Ok(Some(mold_core::validation::fit_to_target_area_ties_even(
+    Ok(Some(mold_core::last_reference_canvas(
         width,
         height,
-        u64::from(default_width) * u64::from(default_height),
-        align,
+        mold_core::CanvasLimits::for_model(model, Some(family)),
     )))
 }
 
@@ -6530,6 +6521,35 @@ mod tests {
             .unwrap(),
             (1344, 768)
         );
+    }
+
+    /// The derived canvas is upstream's 1024x1024 area whatever this host's
+    /// configured default size is (the server advisory and every other
+    /// client derive it the same way), and a panorama past the recipe's axis
+    /// ceiling is clamped inside it rather than refused at admission.
+    #[test]
+    fn last_reference_canvas_ignores_the_local_default_and_clamps_panoramas() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1536),
+            default_height: Some(1536),
+            ..ModelConfig::default()
+        };
+        let dims = |images: &[Vec<u8>]| {
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "qwen-image-2.1:bf16",
+                Some("qwen-image21"),
+                None,
+                None,
+                None,
+                Some(images),
+            )
+            .unwrap()
+        };
+        assert_eq!(dims(&[png_with_dimensions(1920, 1080)]), (1376, 768));
+        assert_eq!(dims(&[png_with_dimensions(8000, 1000)]), (2752, 320));
     }
 
     /// Qwen Image 2.1 advertises `canvas: last-reference`: with neither

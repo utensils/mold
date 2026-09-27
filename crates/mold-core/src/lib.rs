@@ -131,20 +131,21 @@ pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
-    calculate_dimensions_ties_even, clamp_to_megapixel_limit, dimension_alignment_for_family,
-    dimension_alignment_for_model, dimension_warning, dimension_warning_composed,
-    family_supports_lora, fit_to_model_dimensions, fit_to_model_dimensions_aligned,
-    fit_to_target_area, fit_to_target_area_ties_even, fixed_fps_for_family,
-    frame_offset_for_family, largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition,
-    materialize_request_organization, min_frames_for_family, prompt_required_for,
-    prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
+    calculate_dimensions_ties_even, clamp_canvas_to_limits, clamp_to_megapixel_limit,
+    dimension_alignment_for_family, dimension_alignment_for_model, dimension_warning,
+    dimension_warning_composed, family_supports_lora, fit_to_model_dimensions,
+    fit_to_model_dimensions_aligned, fit_to_target_area, fit_to_target_area_ties_even,
+    fixed_fps_for_family, frame_offset_for_family, largest_ltx2_rung_within, last_reference_canvas,
+    ltx2_output_rung, ltx2_spatial_composition, materialize_request_organization,
+    min_frames_for_family, prompt_required_for, prompt_required_with_conditioning,
+    recommended_dimensions, recommended_dimensions_composed,
     require_generate_request_model_activation, sniff_image_input_format, validate_generate_request,
     validate_generate_request_fields, validate_generate_request_with_family,
     validate_generation_dimensions, validate_generation_dimensions_composed,
     validate_generation_dimensions_for_model, validate_request_organization,
     validate_resolved_generate_request_with_family, validate_upscale_request,
-    wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
-    RequestOrganization, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
+    wan_dimension_alignment, CanvasLimits, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
+    RequestOrganization, LAST_REFERENCE_CANVAS_AREA, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
 };
 pub use video_upscale::*;
 

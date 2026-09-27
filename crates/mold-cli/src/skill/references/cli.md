@@ -105,7 +105,8 @@ no image the prompt must name as "the" target: say what to take from each
 ("extract the lantern from image 1", "the jacket from image 1 on the person in
 image 2"). The block advertises `canvas: last-reference`, so with neither
 `--width` nor `--height` the output takes the LAST reference's aspect ratio at
-the model's default area on its 32 px grid; any explicit dimension wins.
+a fixed 1024x1024 area on its 32 px grid, clamped inside the recipe's size
+ceilings (a very wide panorama lands on 2752 px); any explicit dimension wins.
 
 ```bash
 mold run qwen-image-2.1:bf16 "Put the jacket from image 1 on the person in image 2" --image jacket.png --image person.jpg

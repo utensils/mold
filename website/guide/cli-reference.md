@@ -178,7 +178,8 @@ Qwen Image 2.1 takes the same repeated `--image` (or `--reference`, never both)
 as up to ten ordered references — PNG, JPEG or WebP, alpha kept — and none of
 them is a special target. Its block advertises `canvas: last-reference`, so with
 neither `--width` nor `--height` the output takes the **last** reference's
-aspect ratio at the default area on the 32 px grid; any explicit size wins.
+aspect ratio at a fixed 1024×1024 area on the 32 px grid, clamped inside the
+recipe's size ceilings; any explicit size wins.
 
 ```bash
 mold run qwen-image-2.1 "Put the jacket from image 1 on the person in image 2" \

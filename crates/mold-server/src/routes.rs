@@ -1082,19 +1082,19 @@ fn merge_render_warnings(mut warnings: RequestWarnings, from_render: &[String]) 
 
 /// The "not a recommended resolution" advisory for a single-pass family,
 /// except on the canvas a `canvas: last-reference` recipe (Qwen Image 2.1)
-/// tells every client to derive from its references: the LAST reference's
-/// aspect at the model's default area on its grid, rounded halves-to-even as
-/// upstream `calculate_dimensions` does (`pipeline_qwenimage21.py:149-156`,
-/// the same `fit_to_target_area_ties_even` the CLI and Studio use). That
-/// canvas is usually not a preset, and advising against the size the recipe
-/// itself chose tells the user they did something wrong when they did not.
+/// tells every client to derive from its references:
+/// `mold_core::last_reference_canvas`, the LAST reference's aspect at
+/// upstream's fixed 1024x1024 area clamped into the recipe's bounds — the
+/// same function the CLI, MCP, Discord and Studio call, and deliberately NOT
+/// this host's configured default size, which no client can see. That canvas
+/// is usually not a preset, and advising against the size the recipe itself
+/// chose tells the user they did something wrong when they did not.
 fn dimension_advisory(
     family: &str,
     model: &str,
     width: u32,
     height: u32,
     edit_images: Option<&[Vec<u8>]>,
-    (default_width, default_height): (u32, u32),
 ) -> Option<String> {
     let rule = mold_core::generation_profile::reference_images_for_recipe(family, model).canvas;
     let derived = (rule == Some(mold_core::ReferenceCanvasRule::LastReference))
@@ -1108,11 +1108,10 @@ fn dimension_advisory(
                 .ok()
         })
         .map(|(ref_width, ref_height)| {
-            mold_core::validation::fit_to_target_area_ties_even(
+            mold_core::last_reference_canvas(
                 ref_width,
                 ref_height,
-                u64::from(default_width) * u64::from(default_height),
-                mold_core::dimension_alignment_for_model(model, Some(family)),
+                mold_core::CanvasLimits::for_model(model, Some(family)),
             )
         });
     if derived == Some((width, height)) {
@@ -1783,17 +1782,12 @@ async fn prepare_generation_inner(
                     composition,
                 );
             }
-            let model_cfg = config.resolved_model_config(&request.model);
             dimension_advisory(
                 f,
                 &request.model,
                 request.width,
                 request.height,
                 request.edit_images.as_deref(),
-                (
-                    model_cfg.effective_width(&config),
-                    model_cfg.effective_height(&config),
-                ),
             )
         })
     };
@@ -12653,7 +12647,7 @@ mod tests {
         };
         let refs = vec![png(640, 640), png(1344, 768)];
         let advisory = |family: &str, model: &str, width: u32, height: u32, refs: &[Vec<u8>]| {
-            super::dimension_advisory(family, model, width, height, Some(refs), (1024, 1024))
+            super::dimension_advisory(family, model, width, height, Some(refs))
         };
         assert_eq!(
             advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, &refs),
@@ -12668,15 +12662,22 @@ mod tests {
             advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, &[]).is_some(),
             "no reference, no derived canvas"
         );
-        assert!(super::dimension_advisory(
-            "qwen-image21",
-            "qwen-image-2.1:bf16",
-            1344,
-            768,
+        assert!(
+            super::dimension_advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, None)
+                .is_some()
+        );
+        // A panorama's derived canvas is the CLAMPED one every client sends.
+        assert_eq!(
+            advisory(
+                "qwen-image21",
+                "qwen-image-2.1:bf16",
+                2752,
+                320,
+                &[png(8000, 1000)]
+            ),
             None,
-            (1024, 1024)
-        )
-        .is_some());
+            "the clamped canvas a panorama derives"
+        );
         assert!(
             advisory("flux2", "flux2-dev:q8", 1344, 768, &refs).is_some(),
             "FLUX.2 [dev] takes references but has no canvas rule"

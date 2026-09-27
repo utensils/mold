@@ -438,11 +438,12 @@ pub enum ReferenceSourceRelation {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum ReferenceCanvasRule {
-    /// Take the LAST reference's aspect ratio at the recipe's default pixel
-    /// area and alignment: `validation::fit_to_target_area(last_w, last_h,
-    /// default_w * default_h, alignment)`. Qwen Image 2.1's
+    /// Take the LAST reference's aspect ratio at upstream's fixed 1024x1024
+    /// area (`validation::LAST_REFERENCE_CANVAS_AREA`) on the recipe's grid,
+    /// clamped into the recipe's `resolution` bounds:
+    /// `validation::last_reference_canvas`. Qwen Image 2.1's
     /// `calculate_dimensions` sizes the output from the last condition image
-    /// (diffusers `pipeline_qwenimage21.py`).
+    /// (diffusers `pipeline_qwenimage21.py:621-623`); the clamp is mold's.
     LastReference,
 }
 
