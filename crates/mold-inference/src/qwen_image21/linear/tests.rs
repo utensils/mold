@@ -330,74 +330,26 @@ fn the_int8_arm_tracks_its_dequantized_weight() {
 
 #[test]
 fn a_finite_prediction_passes_and_a_nan_names_the_tier_and_switch() {
-    // One-step windows: every step is read.
-    let check = |prediction: &Tensor, step: usize, tier: &str, qmatmul: bool| {
-        FiniteGuard::new(1, tier, qmatmul).observe(prediction, step, step + 10)
-    };
     let finite = input(2, 4);
-    check(&finite, 0, "gguf (Q4K)", false).unwrap();
+    ensure_finite_prediction(&finite, 0, "gguf (Q4K)", false).unwrap();
     let nan = Tensor::from_vec(vec![1.0f32, f32::NAN, 0.0, 2.0], (1, 4), &cpu()).unwrap();
-    let error = check(&nan, 6, "gguf (Q4K)", true).unwrap_err().to_string();
+    let error = ensure_finite_prediction(&nan, 6, "gguf (Q4K)", true)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("gguf (Q4K)"), "{error}");
     assert!(error.contains("step 7"), "{error}");
     assert!(error.contains(QMATMUL_ENV), "{error}");
     let inf = Tensor::from_vec(vec![f32::INFINITY, 0.0], (1, 2), &cpu()).unwrap();
-    let error = check(&inf, 0, "fp8", false).unwrap_err().to_string();
+    let error = ensure_finite_prediction(&inf, 0, "fp8", false)
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("fp8") && !error.contains(QMATMUL_ENV),
         "{error}"
     );
-    // Large but finite values never false-positive, alone or accumulated.
+    // Large but finite values never false-positive.
     let large = Tensor::from_vec(vec![3.0e38f32, -3.0e38, 3.0e38], (1, 3), &cpu()).unwrap();
-    check(&large, 0, "bf16", false).unwrap();
-    let mut guard = FiniteGuard::new(4, "bf16", false);
-    for step in 0..4 {
-        guard.observe(&large, step, 4).unwrap();
-    }
-}
-
-/// The deferred guard reads its on-device flag only at window boundaries and
-/// on the last step — never letting a non-finite render reach the decode —
-/// and names the window the bad step fell in.
-#[test]
-fn the_deferred_finite_guard_checks_each_window_and_always_the_last_step() {
-    let finite = input(2, 4);
-    let nan = Tensor::from_vec(vec![1.0f32, f32::NAN, 0.0, 2.0], (1, 4), &cpu()).unwrap();
-
-    // Finite through 10 steps: two window reads (after 4, 8) plus the last.
-    let mut guard = FiniteGuard::new(4, "bf16", false);
-    for step in 0..10 {
-        guard.observe(&finite, step, 10).unwrap();
-    }
-    assert_eq!(guard.reads(), 3);
-
-    // A NaN at step 6 (0-based 5) is reported at the end of its window,
-    // naming steps 5-8 and the tier.
-    let mut guard = FiniteGuard::new(4, "gguf (Q4K)", true);
-    let mut failed_at = None;
-    for step in 0..10 {
-        let prediction = if step == 5 { &nan } else { &finite };
-        if let Err(error) = guard.observe(prediction, step, 10) {
-            failed_at = Some((step, error.to_string()));
-            break;
-        }
-    }
-    let (step, error) = failed_at.expect("the NaN must be reported");
-    assert_eq!(step, 7, "reported at the window's end");
-    assert!(error.contains("steps 5-8"), "{error}");
-    assert!(error.contains("gguf (Q4K)"), "{error}");
-    assert!(error.contains(QMATMUL_ENV), "{error}");
-
-    // A NaN on the last step of a short window is still caught before the
-    // decode, and a one-step window names its single step.
-    let mut guard = FiniteGuard::new(8, "fp8", false);
-    guard.observe(&finite, 0, 3).unwrap();
-    guard.observe(&finite, 1, 3).unwrap();
-    let error = guard.observe(&nan, 2, 3).unwrap_err().to_string();
-    assert!(error.contains("steps 1-3"), "{error}");
-    let mut guard = FiniteGuard::new(1, "fp8", false);
-    let error = guard.observe(&nan, 0, 3).unwrap_err().to_string();
-    assert!(error.contains("step 1;"), "{error}");
+    ensure_finite_prediction(&large, 0, "bf16", false).unwrap();
 }
 
 #[test]

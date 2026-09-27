@@ -938,7 +938,6 @@ impl QwenImage21Engine {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut finite_guard = transformer.finite_guard();
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
@@ -955,7 +954,7 @@ impl QwenImage21Engine {
             } else {
                 conditional_prediction
             };
-            finite_guard.observe(&prediction, step, total)?;
+            transformer.ensure_finite(&prediction, step)?;
             latents = scheduler.step(&prediction, &latents)?;
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,

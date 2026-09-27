@@ -1054,14 +1054,10 @@ impl QwenImage21Transformer {
         out.into_iter().flatten().collect()
     }
 
-    /// The denoise loop's non-finite guard, naming this checkpoint's tier and
-    /// whether the QMatMul switch shaped it.
-    pub(crate) fn finite_guard(&self) -> super::linear::FiniteGuard<'_> {
-        super::linear::FiniteGuard::new(
-            super::linear::FINITE_GUARD_INTERVAL,
-            &self.tier,
-            self.qmatmul_guard,
-        )
+    /// Fail a denoise step whose prediction is not finite, naming this
+    /// checkpoint's tier and whether the QMatMul switch shaped it.
+    pub(crate) fn ensure_finite(&self, prediction: &Tensor, step: usize) -> Result<()> {
+        super::linear::ensure_finite_prediction(prediction, step, &self.tier, self.qmatmul_guard)
     }
 
     /// Build from a dense `VarBuilder` (synthetic tests).
