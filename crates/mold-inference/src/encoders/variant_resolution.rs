@@ -591,12 +591,26 @@ pub(crate) fn resolve_qwen3_variant(
                     fmt_gb(free_vram),
                 ));
             } else {
-                progress.info(&format!("No GPU detected, loading {} on CPU", size_label));
+                let gpu_available = candle_core::utils::cuda_is_available()
+                    || candle_core::utils::metal_is_available();
+                progress.info(&cpu_encoder_line(size_label, gpu_available));
             }
             Ok((bf16_paths.to_vec(), false, false, "CPU".to_string()))
         }
     }
 }
+/// The progress line for a BF16 encoder resolved onto a CPU device. A CPU
+/// device on a machine that HAS a usable GPU is a placement (Qwen Image 2.1's
+/// sequential plan puts Qwen3-VL on the host for a small card), not a missing
+/// GPU, so only a machine with none says "No GPU detected".
+fn cpu_encoder_line(size_label: &str, gpu_available: bool) -> String {
+    if gpu_available {
+        format!("Loading BF16 {size_label} on CPU (the encoder is placed on the host)")
+    } else {
+        format!("No GPU detected, loading {size_label} on CPU")
+    }
+}
+
 /// Resolve the path for a quantized Qwen3 GGUF file: check cache, download if needed.
 fn resolve_qwen3_gguf_path_with_cache(
     progress: &ProgressReporter,
@@ -846,6 +860,22 @@ mod tests {
     use super::*;
 
     const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// An encoder handed a CPU device is not proof the machine has no GPU:
+    /// Qwen Image 2.1's sequential plan places Qwen3-VL on the host on a
+    /// 12 GB or 24 GB card, and the line used to say "No GPU detected" on an
+    /// L40S (UAT, 24 GB simulation). Only a machine with no usable GPU says so.
+    #[test]
+    fn a_cpu_placed_encoder_does_not_claim_there_is_no_gpu() {
+        assert_eq!(
+            cpu_encoder_line("Qwen3-VL-8B", true),
+            "Loading BF16 Qwen3-VL-8B on CPU (the encoder is placed on the host)"
+        );
+        assert_eq!(
+            cpu_encoder_line("Qwen3-VL-8B", false),
+            "No GPU detected, loading Qwen3-VL-8B on CPU"
+        );
+    }
 
     fn pinned(sha256: Option<&'static str>) -> mold_core::manifest::Qwen3Variant {
         mold_core::manifest::Qwen3Variant {
