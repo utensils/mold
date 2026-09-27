@@ -48,11 +48,11 @@ runs in the default `cargo test`.
 | P4         | `encode_packed` opaque 1248x832 / rgba 928x1152                        | max 4.93e-6 / 3.24e-5                                                                           | max 1e-4                                                 |
 | P5         | Joint layout (image ids, target mask, RoPE ids, segments), every case  | exact                                                                                           | exact                                                    |
 | P6 fp32    | one 2-reference forward: full_a / full_b / extract_a / cached_b        | max 1.18e-5 / 1.55e-6 / 1.18e-5 / 2.50e-6                                                       | max 1e-4                                                 |
-| P6 bf16    | mean vs fp32 truth                                                     | mold 1.60e-2 / 7.84e-3 / 1.60e-2 / 7.82e-3; upstream 2.28e-2 / 9.24e-3 / 2.28e-2 / 9.05e-3      | ≤ 1.5x upstream                                          |
+| P6 bf16    | mean vs fp32 truth                                                     | mold 1.67e-2 / 7.85e-3 / 1.67e-2 / 7.80e-3; upstream 2.28e-2 / 9.24e-3 / 2.28e-2 / 9.05e-3      | ≤ 1.5x upstream                                          |
 | P7 fp32    | Viggle r128 bypass forward                                             | max 2.59e-5                                                                                     | max 1e-4                                                 |
-| P7 bf16    | mean vs fp32 truth                                                     | mold 2.51e-2; upstream 2.85e-2                                                                  | ≤ 1.5x upstream                                          |
-| P8 base4   | engine end to end, PSNR vs upstream fp32 render                        | mold 38.69 dB; upstream bf16 37.59 dB (+1.10)                                                   | ≥ upstream + 0.5 dB                                      |
-| P8 turbo6  | engine end to end (Viggle r256, 6-step recipe)                         | mold 36.23 dB; upstream bf16 33.22 dB (+3.01)                                                   | ≥ upstream + 1.5 dB                                      |
+| P7 bf16    | mean vs fp32 truth                                                     | mold 2.37e-2; upstream 2.85e-2                                                                  | ≤ 1.5x upstream                                          |
+| P8 base4   | engine end to end, PSNR vs upstream fp32 render                        | mold 38.80 dB; upstream bf16 37.59 dB (+1.21)                                                   | ≥ upstream + 0.5 dB                                      |
+| P8 turbo6  | engine end to end (Viggle r256, 6-step recipe)                         | mold 34.67 dB; upstream bf16 33.22 dB (+1.45)                                                   | ≥ upstream + 1.0 dB                                      |
 
 P1/P2/P3/P4/P6/P7 fp32 gates are absolute. The bf16 rows compare both
 implementations to the fp32 truth, because a bf16-to-bf16 comparison measures
@@ -121,19 +121,38 @@ amplifies conditioning error; the 4-step base render does not discriminate (its
 BF16 variant happens to land closer to upstream fp32 on this one case).
 
 The engine itself was also run with both consts flipped to BF16 (a local,
-uncommitted edit): P8 base4 39.23 dB (passes), P8 turbo6 **33.17 dB, −0.04 dB
-against upstream bf16, failing the +1.5 dB gate** — against 36.23 dB shipped.
-The component study's BF16 turbo number is lower than the engine's; both fail.
+uncommitted edit), on the final arithmetic (upstream float32 rotary angles,
+rounded timestep): P8 base4 38.73 dB (passes), P8 turbo6 **33.48 dB, +0.26 dB
+over upstream bf16, failing the +1.0 dB gate by 0.74 dB** — against 34.67 dB
+shipped. The component study's BF16 turbo number is lower than the engine's;
+both fail.
 
 ### The P8 gate
 
-`P8_BASE_MARGIN_DB = 0.5` and `P8_TURBO_MARGIN_DB = 1.5`: mold's BF16 engine
+`P8_BASE_MARGIN_DB = 0.5` and `P8_TURBO_MARGIN_DB = 1.0`: mold's BF16 engine
 must BEAT upstream's bf16 render against the fp32 truth, not merely come
 within a dB of it (the old gate, `ours >= theirs - 1.0`, which the BF16-tower
-engine passes). The turbo margin is 1.5 dB below the shipped engine's +3.01 dB
-and above both BF16 measurements, so flipping either dtype const back to BF16
-fails P8 turbo and the study, and the choice is pinned by a measurement rather
-than by a `const fn`.
+engine passes). The turbo margin sits between the shipped engine's +1.45 dB
+and the BF16-tower engine's +0.26 dB, so flipping either dtype const back to
+BF16 fails P8 turbo and the study, and the choice is pinned by a measurement
+rather than by a `const fn`.
+
+### Rotary angles move P8 toward upstream bf16, away from fp32
+
+Before the rotary tables matched upstream's float32 `rope_params`
+(`transformer_qwenimage21.py:673-675`) bit for bit, mold evaluated the angles
+in f64. Measured on the same L40S, same run otherwise:
+
+| Rotary angles       | base4 vs fp32 | base4 vs upstream bf16 | turbo6 vs fp32 | turbo6 vs upstream bf16 |
+| ------------------- | ------------- | ---------------------- | -------------- | ----------------------- |
+| f64 (v0.32)         | 38.69 dB      | 34.26 dB               | 36.23 dB       | 37.88 dB                |
+| float32 (upstream)  | 38.80 dB      | 34.75 dB               | 34.67 dB       | 40.53 dB                |
+
+Matching upstream's arithmetic moves the turbo render 2.65 dB closer to
+upstream's own bf16 render and 1.56 dB further from the fp32 truth: the f64
+angles were accidentally more accurate than the reference being ported, and
+the 6-step turbo amplifies either. The port follows upstream; the turbo margin
+was re-derived on the float32 angles (it was +1.5 dB against the f64 +3.01).
 
 ## Cost
 
@@ -147,6 +166,7 @@ which runs once per reference. Admission charges both
 
 P6 and P8 sit on the CUDA fast path's arithmetic (FlashAttention segments,
 F32 RoPE tables, rounded timestep). A change to that arithmetic — the RoPE
-angle precision or the per-request timestep rounding — can move them by a few
-tenths of a dB; rerun the reproduction and update this record. The margins
-above were chosen with that headroom.
+angle precision or the per-request timestep rounding — moves them (the switch
+to upstream's float32 angles moved turbo6 by 1.56 dB, above); rerun the
+reproduction and update this record whenever it changes. Every number in this
+record was measured on the final arithmetic.

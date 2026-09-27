@@ -731,17 +731,17 @@ fn engine_paths(env: &Env) -> mold_core::ModelPaths {
 /// trajectories with both components in BF16 and asserts that variant FAILS
 /// the turbo gate, so flipping either const back is a parity failure.
 ///
-/// Measured on an L40S (CUDA fast path): the engine renders base4 at
-/// 38.69 dB and turbo6 at 36.23 dB against upstream bf16's 37.59 and 33.22,
-/// i.e. +1.10 and +3.01 dB. With both consts flipped to BF16 the ENGINE
-/// renders turbo6 at 33.17 dB (-0.04 dB, failing this gate by 1.54 dB), and
-/// the component-level study lands its BF16 variant at -6.43 dB, so the
-/// turbo margin sits 1.5 dB under the shipped path and above every BF16
-/// measurement. The 4-step
+/// Measured on an L40S (CUDA fast path, upstream float32 rotary angles,
+/// rounded timestep): the engine renders base4 at 38.80 dB and turbo6 at
+/// 34.67 dB against upstream bf16's 37.59 and 33.22, i.e. +1.21 and +1.45 dB.
+/// With both consts flipped to BF16 the ENGINE renders turbo6 at 33.48 dB
+/// (+0.26 dB, failing this gate by 0.74 dB), and the component-level study
+/// lands its BF16 variant at -6.43 dB, so the turbo margin sits between the
+/// shipped path and every BF16 measurement. The 4-step
 /// base render is not tower-sensitive (both variants clear it), and its
 /// margin guards against the render falling behind upstream at all.
 const P8_BASE_MARGIN_DB: f64 = 0.5;
-const P8_TURBO_MARGIN_DB: f64 = 1.5;
+const P8_TURBO_MARGIN_DB: f64 = 1.0;
 
 fn p8_margin_db(case: &str) -> f64 {
     match case {
