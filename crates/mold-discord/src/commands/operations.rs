@@ -490,6 +490,7 @@ pub async fn downloads_cancel(
         "video_upscale_create",
         "video_upscale_list",
         "video_upscale_status",
+        "video_upscale_pause",
         "video_upscale_cancel",
         "video_upscale_resume"
     ),
@@ -628,6 +629,20 @@ pub async fn video_upscale_cancel(
     #[description = "Exact video upscale job id"] job_id: String,
 ) -> Result<()> {
     video_transition(ctx, job_id, "cancel").await
+}
+
+#[poise::command(
+    slash_command,
+    rename = "pause",
+    guild_only,
+    required_permissions = "MANAGE_GUILD"
+)]
+/// Pause one framewise video upscale job.
+pub async fn video_upscale_pause(
+    ctx: Context<'_>,
+    #[description = "Exact video upscale job id"] job_id: String,
+) -> Result<()> {
+    video_transition(ctx, job_id, "pause").await
 }
 
 #[poise::command(

@@ -6,7 +6,40 @@ use poise::serenity_prelude as serenity;
 
 const MAX_INPUT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_DELIVERY_FILENAME_BYTES: usize = 100;
 const DEFAULT_MODEL: &str = "real-esrgan-x4plus:fp16";
+
+fn refund_on_error<T, E>(result: &std::result::Result<T, E>, refund: impl FnOnce()) {
+    if result.is_err() {
+        refund();
+    }
+}
+
+fn upscale_delivery_filename(source: &str) -> String {
+    const SUFFIX: &str = "-upscaled.png";
+    let basename = source.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = std::path::Path::new(basename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let stem_limit = MAX_DELIVERY_FILENAME_BYTES - SUFFIX.len();
+    let mut safe = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(stem_limit)
+        .collect::<String>();
+    if safe.trim_matches('_').is_empty() {
+        safe = "image".into();
+    }
+    safe.push_str(SUFFIX);
+    safe
+}
 
 pub fn validate_upscale_attachment(size: u64, content_type: Option<&str>) -> Result<(), String> {
     if size > MAX_INPUT_BYTES {
@@ -73,7 +106,9 @@ pub async fn upscale(
         .await?;
         return Ok(());
     }
-    ctx.defer_ephemeral().await?;
+    let deferred = ctx.defer_ephemeral().await;
+    refund_on_error(&deferred, || ctx.data().quotas.refund(user_id));
+    deferred?;
     let result: Result<(mold_core::UpscaleResponse, String), String> = async {
         let bytes = image
             .download()
@@ -101,11 +136,7 @@ pub async fn upscale(
     .await;
     match result {
         Ok((response, filename)) => {
-            let stem = std::path::Path::new(&filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("image");
-            let output_name = format!("{stem}-upscaled.png");
+            let output_name = upscale_delivery_filename(&filename);
             let delivery = ctx
                 .send(
                     poise::CreateReply::default()
@@ -172,5 +203,29 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         assert!(validate_upscale_bytes(&png).is_ok());
+    }
+
+    #[test]
+    fn delivery_filename_is_a_bounded_safe_basename() {
+        let name = upscale_delivery_filename(&format!(
+            "../../folder\\evil\0name-{}.jpeg",
+            "x".repeat(300)
+        ));
+        assert!(!name.contains(['/', '\\', '\0']));
+        assert!(name.is_ascii());
+        assert!(name.len() <= MAX_DELIVERY_FILENAME_BYTES);
+        assert!(name.ends_with("-upscaled.png"));
+    }
+
+    #[test]
+    fn quota_is_refunded_when_an_interaction_step_fails() {
+        let mut refunds = 0;
+        let failure: Result<(), ()> = Err(());
+        refund_on_error(&failure, || refunds += 1);
+        assert_eq!(refunds, 1);
+
+        let success: Result<(), ()> = Ok(());
+        refund_on_error(&success, || refunds += 1);
+        assert_eq!(refunds, 1);
     }
 }

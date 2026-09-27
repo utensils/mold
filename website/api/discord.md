@@ -144,7 +144,7 @@ does not expose destructive Library actions.
 | ---------------- | ------------------------------------------------------------------------------------------------------- |
 | `/queue`         | `list`, `show`, global `pause` / `resume`, per-item `pause-item` / `resume-item`, `cancel`, and `retry` |
 | `/downloads`     | `list` and `cancel`; starting an install is deliberately absent                                         |
-| `/video-upscale` | `create`, `list`, `status`, `cancel`, and `resume`, using an exact Library filename as the source       |
+| `/video-upscale` | `create`, `list`, `status`, `pause`, `resume`, and `cancel`, using an exact Library filename as source  |
 | `/gallery`       | Read-only `list` and `show`; `show` may attach a bounded thumbnail                                      |
 
 `/search` is a read-only user command. It applies the normal allowed-role

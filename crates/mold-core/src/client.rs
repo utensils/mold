@@ -2904,9 +2904,10 @@ impl MoldClient {
     }
 
     pub async fn get_video_upscale_job(&self, id: &str) -> Result<crate::VideoUpscaleJob> {
+        let id = encode_non_dot_path_segment(id, "framewise upscale job id")?;
         Ok(self
             .client
-            .get(format!("{}/api/video-upscale-jobs/{id}", self.base_url))
+            .get(format!("{}/api/video-upscale-jobs/{}", self.base_url, id))
             .send()
             .await?
             .error_for_status()?
@@ -2919,13 +2920,14 @@ impl MoldClient {
         id: &str,
         action: &str,
     ) -> Result<crate::VideoUpscaleJob> {
+        let id = encode_non_dot_path_segment(id, "framewise upscale job id")?;
         let request = match action {
             "cancel" => self
                 .client
-                .delete(format!("{}/api/video-upscale-jobs/{id}", self.base_url)),
+                .delete(format!("{}/api/video-upscale-jobs/{}", self.base_url, id)),
             "pause" | "resume" => self.client.post(format!(
-                "{}/api/video-upscale-jobs/{id}/{action}",
-                self.base_url
+                "{}/api/video-upscale-jobs/{}/{action}",
+                self.base_url, id
             )),
             _ => anyhow::bail!("unknown framewise upscale action {action:?}"),
         };
@@ -3635,6 +3637,13 @@ fn encode_path_segment(raw: &str) -> String {
         }
     }
     out
+}
+
+fn encode_non_dot_path_segment(raw: &str, label: &str) -> Result<String> {
+    if matches!(raw, "." | "..") {
+        anyhow::bail!("{label} must not be a dot path segment");
+    }
+    Ok(encode_path_segment(raw))
 }
 
 /// What `POST /api/downloads` answered.
@@ -6757,6 +6766,74 @@ mod tests {
             .unwrap_err();
         assert!(super::is_missing_endpoint_error(&error));
         assert!(error.to_string().contains("405 Method Not Allowed"));
+    }
+
+    #[tokio::test]
+    async fn video_upscale_job_ids_cannot_escape_their_path_segment() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let id = "../outside";
+        let encoded = "..%2Foutside";
+        let response = serde_json::json!({
+            "contract_version": 1,
+            "id": id,
+            "state": "paused",
+            "source": { "kind": "library", "filename": "clip.mp4" },
+            "model": "real-esrgan-x4plus:fp16",
+            "scale_factor": 4,
+            "tile_size": null,
+            "completed_frames": 0,
+            "total_frames": 1,
+            "source_facts": null,
+            "output_facts": null,
+            "output_filename": null,
+            "error": null,
+            "created_at_ms": 1,
+            "updated_at_ms": 1,
+            "disclosure": crate::VIDEO_UPSCALE_DISCLOSURE
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/api/video-upscale-jobs/{encoded}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (verb, action) in [("DELETE", "cancel"), ("POST", "pause"), ("POST", "resume")] {
+            let route = if action == "cancel" {
+                format!("/api/video-upscale-jobs/{encoded}")
+            } else {
+                format!("/api/video-upscale-jobs/{encoded}/{action}")
+            };
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let client = MoldClient::new(&server.uri());
+        client.get_video_upscale_job(id).await.unwrap();
+        for action in ["cancel", "pause", "resume"] {
+            client
+                .transition_video_upscale_job(id, action)
+                .await
+                .unwrap();
+        }
+
+        for dot_id in [".", ".."] {
+            let error = client.get_video_upscale_job(dot_id).await.unwrap_err();
+            assert!(error.to_string().contains("dot path segment"));
+            for action in ["cancel", "pause", "resume"] {
+                let error = client
+                    .transition_video_upscale_job(dot_id, action)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("dot path segment"));
+            }
+        }
     }
 
     // ── Durable mesh workflows ──────────────────────────────────────────
