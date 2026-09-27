@@ -1031,6 +1031,21 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
+    /// Re-point a resolved config at another family the way
+    /// `FrozenEngineConfig::resolve` would have frozen it: the attention
+    /// backend is a function of the family (`attention::policy_for_family`),
+    /// so overriding the family alone leaves a config production can never
+    /// produce. In a `flash-attn` build that is a real difference — an unknown
+    /// model resolves to `flux`, whose `FastStill` policy freezes `Flash` —
+    /// and the factory's own drift check then refuses it before the gate a
+    /// test is aimed at.
+    fn refreeze_for_family(frozen: &mut FrozenEngineConfig, family: &str) {
+        frozen.family = family.to_string();
+        frozen.attention_backend = crate::attention::AttentionBackend::resolve_for(
+            crate::attention::policy_for_family(family),
+        );
+    }
+
     fn h3_factory_authority(
         frozen: &FrozenEngineConfig,
         model: &str,
@@ -1119,7 +1134,7 @@ mod tests {
         for entry in crate::production_batch_capabilities() {
             for family in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
                 let mut frozen = FrozenEngineConfig::resolve(family, &Config::default());
-                frozen.family = family.to_string();
+                refreeze_for_family(&mut frozen, family);
                 let engine = create_engine_with_frozen_config(
                     family.to_string(),
                     dummy_paths(),
@@ -1368,7 +1383,10 @@ mod tests {
         let artifact_root = PathBuf::from("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
         let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
         frozen.artifact_root = artifact_root.clone();
-        frozen.attention_backend = match crate::attention::AttentionBackend::resolve() {
+        // Flip the FROZEN answer, never the image default: `flux` freezes its
+        // `FastStill` policy, which is `Flash` in a `flash-attn` build, so
+        // flipping `AttentionBackend::resolve()` there produced no mismatch.
+        frozen.attention_backend = match frozen.attention_backend {
             crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
             crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
         };
@@ -1442,7 +1460,7 @@ mod tests {
         let mut paths = dummy_paths();
         paths.text_encoder_files = vec![missing.clone()];
         let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
-        frozen.family = "z-image".into();
+        refreeze_for_family(&mut frozen, "z-image");
         frozen.qwen3_variant = Some("bf16".into());
         frozen.selected_qwen3_paths = vec![missing];
 
@@ -1475,7 +1493,7 @@ mod tests {
         };
         let missing_parser = root.path().join("parsing_bisenet.pth");
         let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
-        frozen.family = "z-image".into();
+        refreeze_for_family(&mut frozen, "z-image");
         frozen.identity_assets = Some(mold_core::pulid_assets::PulidPaths {
             family: mold_core::identity::IdentityFamily::Flux,
             adapter: present("pulid_flux_v0.9.1.safetensors"),
