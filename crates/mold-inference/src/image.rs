@@ -147,19 +147,6 @@ fn opaque_rgba_to_rgb(rgba_image: &image::RgbaImage) -> image::RgbImage {
     })
 }
 
-/// Composite an RGBA image over white, for a container with no alpha.
-///
-/// Straight (non-premultiplied) alpha, rounded to nearest — the "paste onto
-/// a white canvas" convention. A fully opaque pixel is returned unchanged.
-pub(crate) fn composite_over_white(rgba_image: &image::RgbaImage) -> image::RgbImage {
-    image::RgbImage::from_fn(rgba_image.width(), rgba_image.height(), |x, y| {
-        let [r, g, b, a] = rgba_image.get_pixel(x, y).0;
-        let a = u32::from(a);
-        let blend = |c: u8| -> u8 { ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8 };
-        image::Rgb([blend(r), blend(g), blend(b)])
-    })
-}
-
 /// Encode an RGBA still under an [`AlphaOutput`] decision.
 ///
 /// The decision is resolved BEFORE any container is written, because the
@@ -208,7 +195,11 @@ pub(crate) fn encode_rgba_image(
             // A JPEG carries no alpha, so the flattened pixels are what the
             // file holds and its provenance must not claim alpha.
             let metadata = metadata.map(|metadata| metadata_with_alpha(metadata, false));
-            encode_rgb_image(&composite_over_white(rgba_image), format, metadata.as_ref())
+            encode_rgb_image(
+                &crate::pillow_resize::composite_over_white(rgba_image),
+                format,
+                metadata.as_ref(),
+            )
         }
         OutputFormat::Gif
         | OutputFormat::Apng
@@ -915,7 +906,7 @@ mod tests {
             "a fully transparent pixel lands on the white canvas"
         );
         assert_eq!(
-            composite_over_white(&image::RgbaImage::from_pixel(
+            crate::pillow_resize::composite_over_white(&image::RgbaImage::from_pixel(
                 1,
                 1,
                 image::Rgba([0, 100, 200, 128])
