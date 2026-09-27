@@ -20,6 +20,8 @@ struct QkNormRope {
 }
 
 impl QkNormRope {
+    // One (storage, layout) pair per operand, candle's CustomOp convention.
+    #[allow(clippy::too_many_arguments)]
     fn launch<T: DeviceRepr + candle::cuda_backend::CudaDType + candle::WithDType>(
         &self,
         x: &CudaStorage,
