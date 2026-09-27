@@ -11382,11 +11382,19 @@ mod tests {
     #[cfg(feature = "h3")]
     #[test]
     fn public_progress_labels_describe_artifact_verification_without_private_claims() {
+        // Each label names the work that stage actually does (#1601): the
+        // installed-artifact pass RESOLVES trusted installed weights and
+        // hashes no model body, so it must never claim to verify them, while
+        // the VAE preparation stage still verifies what it opens.
+        assert!(H3_ARTIFACT_VERIFICATION_PROGRESS.starts_with("Resolving installed MiniMax H3"));
+        assert!(!H3_ARTIFACT_VERIFICATION_PROGRESS
+            .to_ascii_lowercase()
+            .contains("verif"));
+        assert!(H3_VAE_ARTIFACT_VERIFICATION_PROGRESS.starts_with("Verifying MiniMax H3"));
         for label in [
             H3_ARTIFACT_VERIFICATION_PROGRESS,
             H3_VAE_ARTIFACT_VERIFICATION_PROGRESS,
         ] {
-            assert!(label.starts_with("Verifying MiniMax H3"));
             assert!(!label.to_ascii_lowercase().contains("private"));
             assert!(!label.to_ascii_lowercase().contains("authenticat"));
         }
