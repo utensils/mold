@@ -2,14 +2,17 @@
 #
 #   default  everything -- what `cargo nextest run` does locally and what a
 #            push to `main` executes for the default-feature workspace.
-#   union    the DEFAULT-FEATURE ASSERTIONS excluded -- for a build with the
-#            optional-feature union (`scripts/ci/affected-packages.py`,
-#            FEATURE_UNION) on. The 6 tests below pin what a
-#            default-feature build advertises (the factory family registry, the
-#            checked-in capability matrix, a media-preprocessing path that the
-#            mesh/PuLID ONNX stack changes) and are false by construction once
-#            every feature is on; `main` still runs them in its default build.
-#   pr       `union` plus the HEAVY long tail excluded -- the pull-request
+#   union    everything, for a build with the optional-feature union
+#            (`scripts/ci/affected-packages.py`, FEATURE_UNION) on. It used to
+#            exclude six "default-feature assertions"; none survived a check
+#            under that exact feature set: two named tests #1744 had deleted,
+#            the registry/contract pair were fixed to list the mesh workers
+#            their features add, the Ref2VA phase trace had been stale since
+#            #1464 in every `mp4` build (not a union effect), and
+#            `durable_direct_raw_observer_preserves_the_legacy_media_response`
+#            passes there. A test that genuinely depends on the feature set
+#            should say so with `cfg`, not with an exclusion here.
+#   pr       every test minus the HEAVY long tail -- the pull-request
 #            tier. 116 tests that each took 3 s or more in a local run
 #            (2026-09-10, `cargo nextest run -p mold-ai-inference -p
 #            mold-ai-server --lib --status-level pass`) together held about
@@ -31,28 +34,12 @@ slow-timeout = { period = "120s" }
 [profile.union]
 fail-fast = false
 slow-timeout = { period = "120s" }
-default-filter = """
-not (
-  (binary_id(mold-ai-inference) & test(=batch::tests::production_family_batch_registry_is_explicit_valid_and_singleton_only)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=every_factory_family_has_one_complete_weight_free_capability_contract)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=qualification_references_and_checked_in_matrix_are_concrete)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=the_qualification_matrix_block_offload_column_matches_the_registry)) |
-  (binary_id(mold-ai-inference) & test(=minimax_h3::engine::tests::ref2va_runtime_executes_the_phase_sequence_over_production_media_preprocessing)) |
-  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_observer_preserves_the_legacy_media_response))
-)
-"""
 
 [profile.pr]
 fail-fast = false
 slow-timeout = { period = "120s" }
 default-filter = """
 not (
-  (binary_id(mold-ai-inference) & test(=batch::tests::production_family_batch_registry_is_explicit_valid_and_singleton_only)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=every_factory_family_has_one_complete_weight_free_capability_contract)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=qualification_references_and_checked_in_matrix_are_concrete)) |
-  (binary_id(mold-ai-inference::family_capability_contract) & test(=the_qualification_matrix_block_offload_column_matches_the_registry)) |
-  (binary_id(mold-ai-inference) & test(=minimax_h3::engine::tests::ref2va_runtime_executes_the_phase_sequence_over_production_media_preprocessing)) |
-  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_observer_preserves_the_legacy_media_response)) |
   (binary_id(mold-ai-inference) & test(=artifact_format::tests::json_probe_streams_large_values_without_materializing_a_dom)) |
   (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_fails_closed_mid_chain_discarding_accumulated_frames)) |
   (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_orchestrator_emits_full_per_stage_clips)) |
