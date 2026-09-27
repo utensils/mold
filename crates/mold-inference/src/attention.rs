@@ -1093,7 +1093,11 @@ mod tests {
         let mut causal = Vec::with_capacity(9 * 9);
         for query in 0..9 {
             for key in 0..9 {
-                causal.push(if key <= query { 0.0f32 } else { f32::NEG_INFINITY });
+                causal.push(if key <= query {
+                    0.0f32
+                } else {
+                    f32::NEG_INFINITY
+                });
             }
         }
         let bias = Tensor::from_vec(causal, (1, 1, 9, 9), &dev).unwrap();
@@ -1101,9 +1105,8 @@ mod tests {
         // `attention_with_bias`, which is what keeps every legacy caller
         // (and Metal's biased prefix) unmoved.
         let legacy = attention_with_bias(&q, &k, &v, scale, Some(&bias)).unwrap();
-        let image =
-            attention_with_bias_for(AttentionPolicy::Image, &q, &k, &v, scale, Some(&bias))
-                .unwrap();
+        let image = attention_with_bias_for(AttentionPolicy::Image, &q, &k, &v, scale, Some(&bias))
+            .unwrap();
         assert_eq!(max_abs_diff(&legacy, &image), 0.0);
         // FastStill's biased arm is the same attention with the scale folded
         // into K: equal within rounding, and exactly the Keys arithmetic.
@@ -1224,6 +1227,137 @@ mod tests {
             0.0,
             "a transposed view must give the kernel exactly what the copy did"
         );
+    }
+
+    /// The Qwen Image 2.1 segment-dispatch contract, pinned against the fork's
+    /// kernel: `flash_attn_windowed(q, k, v, scale, None, Some(0))` with
+    /// `q_len < kv_len` is BOTTOM-RIGHT causal — query row `i` sees keys
+    /// `0..=i + kv_len - q_len` (`kernels/mask.h`:
+    /// `row + max_seqlen_k - max_seqlen_q`) — which is "a text segment
+    /// `[s, e)` attends every key up to its own absolute position" when it is
+    /// called with `q[s..e]` against `k[0..e]`. Also pins `flash_attn_varlen`
+    /// (packed `[total, H, D]`, U32 cumulative lengths) against per-sample
+    /// dense calls, which is how padded CFG batches are dispatched. Skips
+    /// without a CUDA device (CI has none).
+    #[test]
+    #[cfg(feature = "flash-attn")]
+    fn flash_windowed_causal_is_bottom_right_and_varlen_matches_dense() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (heads, d) = (4usize, 128usize);
+        let scale = 1.0 / (d as f32).sqrt();
+        let bf16 = |shape: (usize, usize, usize, usize)| {
+            Tensor::randn(0f32, 1.0, shape, &device)
+                .and_then(|t| t.to_dtype(DType::BF16))
+                .unwrap()
+        };
+        // A text segment [s, e) = [37, 101) of a 101-key prefix.
+        let (start, end) = (37usize, 101usize);
+        let q_all = bf16((1, heads, end, d));
+        let k = bf16((1, heads, end, d));
+        let v = bf16((1, heads, end, d));
+        let q = q_all
+            .narrow(2, start, end - start)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+
+        let flash = candle_flash_attn::flash_attn_windowed(
+            &to_flash_layout(&q).unwrap(),
+            &to_flash_layout(&k).unwrap(),
+            &to_flash_layout(&v).unwrap(),
+            scale,
+            None,
+            Some(0),
+        )
+        .unwrap()
+        .transpose(1, 2)
+        .unwrap();
+
+        // Math reference in F32 with an explicit absolute-position mask.
+        let q_len = end - start;
+        let mut mask = Vec::with_capacity(q_len * end);
+        for row in 0..q_len {
+            for key in 0..end {
+                mask.push(if key <= start + row {
+                    0f32
+                } else {
+                    f32::NEG_INFINITY
+                });
+            }
+        }
+        let bias = Tensor::from_vec(mask, (1, 1, q_len, end), &device).unwrap();
+        let f32 = |t: &Tensor| t.to_dtype(DType::F32).unwrap();
+        let reference =
+            math_attention_biased_impl(&f32(&q), &f32(&k), &f32(&v), scale, &bias, None).unwrap();
+        let err = max_abs_diff(&f32(&flash), &reference);
+        assert!(err < 2e-2, "bottom-right causal flash diverged by {err}");
+        // And it is NOT top-left causal: the first query row sees 38 keys.
+        let top_left = candle_flash_attn::flash_attn_windowed(
+            &to_flash_layout(&q).unwrap(),
+            &to_flash_layout(&k.narrow(2, 0, q_len).unwrap().contiguous().unwrap()).unwrap(),
+            &to_flash_layout(&v.narrow(2, 0, q_len).unwrap().contiguous().unwrap()).unwrap(),
+            scale,
+            None,
+            Some(0),
+        )
+        .unwrap()
+        .transpose(1, 2)
+        .unwrap();
+        assert!(max_abs_diff(&f32(&top_left), &reference) > 1e-1);
+
+        // Varlen: two samples with different key lengths, packed.
+        let (q_lens, k_lens) = ([48usize, 64], [80usize, 112]);
+        let qs: Vec<Tensor> = q_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let ks: Vec<Tensor> = k_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let vs: Vec<Tensor> = k_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let pack = |ts: &[Tensor]| {
+            let rows: Vec<Tensor> = ts
+                .iter()
+                .map(|t| t.squeeze(0).unwrap().transpose(0, 1).unwrap())
+                .collect();
+            Tensor::cat(&rows, 0).unwrap().contiguous().unwrap()
+        };
+        let cu = |lens: &[usize]| {
+            let mut acc = vec![0u32];
+            for &n in lens {
+                acc.push(acc.last().unwrap() + n as u32);
+            }
+            Tensor::from_vec(acc, lens.len() + 1, &device).unwrap()
+        };
+        let packed = candle_flash_attn::flash_attn_varlen(
+            &pack(&qs),
+            &pack(&ks),
+            &pack(&vs),
+            &cu(&q_lens),
+            &cu(&k_lens),
+            64,
+            112,
+            scale,
+            false,
+        )
+        .unwrap();
+        let mut offset = 0;
+        for i in 0..2 {
+            let dense = candle_flash_attn::flash_attn(
+                &to_flash_layout(&qs[i]).unwrap(),
+                &to_flash_layout(&ks[i]).unwrap(),
+                &to_flash_layout(&vs[i]).unwrap(),
+                scale,
+                false,
+            )
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+            let slice = packed.narrow(0, offset, q_lens[i]).unwrap();
+            assert_eq!(
+                max_abs_diff(&f32(&slice), &f32(&dense)),
+                0.0,
+                "varlen sample {i} must equal its dense call"
+            );
+            offset += q_lens[i];
+        }
     }
 
     /// FA2 rejects a head dim that is not a multiple of 8, or above 512.

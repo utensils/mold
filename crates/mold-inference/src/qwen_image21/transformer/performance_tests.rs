@@ -271,3 +271,5 @@ fn official_metal_mode_benchmark() -> Result<()> {
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(feature = "cuda")]
+mod cuda_adaln;
