@@ -1725,13 +1725,14 @@ pub(crate) fn qwen_image21_eager_plan(
         available_bytes,
         host.total_bytes,
         host.spendable_bytes(),
-        0,
+        &[],
+        1,
     )
 }
 
-/// [`qwen_image21_eager_plan`] for a concrete request: a reference-conditioned
-/// render charges `device::qwen_image21_reference_extra_bytes` on top of the
-/// text-to-image denoise workspace, exactly as the engine's own residency
+/// [`qwen_image21_eager_plan`] for a concrete request: its references and
+/// CFG branches size every phase through the engine's own
+/// `text_encoder_residency::render_phases`, exactly as the engine's residency
 /// decision does.
 pub(crate) fn qwen_image21_eager_plan_for_request(
     paths: &ModelPaths,
@@ -1741,40 +1742,49 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     let host = crate::h3_admission::current_h3_host_memory();
-    let budget = qwen_image21_cache_budget(paths, hint, available_bytes, req, projection);
-    let extra = hint
-        .filter(|h| h.family == ActivationFamily::QwenImage21Dit)
-        .map_or(0, |hint| {
-            mold_inference::device::qwen_image21_reference_extra_bytes(
-                mold_inference::qwen_image21::text_encoder_residency::transformer_format(paths),
-                req.width,
-                req.height,
-                hint.batch,
-                2,
-                &qwen_image21_reference_dimensions(req, projection),
-                if cfg_active(req.guidance) && req.negative_prompt.is_some() {
-                    2
-                } else {
-                    1
-                },
-                budget,
-            )
-        });
     qwen_image21_eager_plan_with_host(
         paths,
         hint,
         available_bytes,
         host.total_bytes,
         host.spendable_bytes(),
-        extra,
+        &qwen_image21_reference_dimensions(req, projection),
+        qwen_image21_prefix_branches(req),
     )
 }
 
+/// CFG branches that carry a prefix: two with guidance and a negative prompt.
+fn qwen_image21_prefix_branches(req: &GenerateRequest) -> usize {
+    if cfg_active(req.guidance) && req.negative_prompt.is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+/// The request the engine's phase sizing reads.
+fn qwen_image21_render_request<'a>(
+    paths: &ModelPaths,
+    hint: ActivationHint,
+    references: &'a [(u32, u32)],
+    branches: usize,
+) -> mold_inference::qwen_image21::text_encoder_residency::Qwen21RenderRequest<'a> {
+    mold_inference::qwen_image21::text_encoder_residency::Qwen21RenderRequest {
+        format: mold_inference::qwen_image21::text_encoder_residency::transformer_format(paths),
+        width: hint.width,
+        height: hint.height,
+        batch: hint.batch,
+        references,
+        branches,
+        vae_dtype_bytes: if cfg!(feature = "metal") { 4 } else { 2 },
+    }
+}
+
 /// The prefix-cache budget admission plans a Qwen Image 2.1 request with —
-/// the engine's own rule (`device::qwen_image21_prefix_cache_budget`): on the
-/// CUDA fast path the cache is charged whenever it fits the card beside the
-/// transformer, the VAE and the request's denoise workspace (the text encoder
-/// can always be parked or dropped to make room), so a card that can hold the
+/// the engine's own rule (`text_encoder_residency::prefix_cache_budget`): on
+/// the CUDA fast path the cache is charged whenever it fits the card beside
+/// the transformer, the VAE and the request's denoise (the text encoder can
+/// always be parked or dropped to make room), so a card that can hold the
 /// cache plans for it and one that cannot plans the recompute the engine will
 /// then choose. Everywhere else, and for every other family, the request-only
 /// rule.
@@ -1785,22 +1795,28 @@ pub(crate) fn qwen_image21_cache_budget(
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> mold_inference::qwen_image21::PrefixCacheBudget {
-    use mold_inference::qwen_image21::text_encoder_residency as residency;
     let Some(hint) = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit) else {
         return mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly;
     };
+    let references = qwen_image21_reference_dimensions(req, projection);
+    qwen_image21_cache_budget_for(
+        paths,
+        &qwen_image21_render_request(paths, hint, &references, qwen_image21_prefix_branches(req)),
+        available_bytes,
+    )
+}
+
+fn qwen_image21_cache_budget_for(
+    paths: &ModelPaths,
+    request: &mold_inference::qwen_image21::text_encoder_residency::Qwen21RenderRequest<'_>,
+    available_bytes: Option<u64>,
+) -> mold_inference::qwen_image21::PrefixCacheBudget {
+    use mold_inference::qwen_image21::text_encoder_residency as residency;
     let vae_bytes = std::fs::metadata(&paths.vae).map_or(0, |metadata| metadata.len());
-    mold_inference::device::qwen_image21_prefix_cache_budget(
+    residency::prefix_cache_budget(
+        request,
         available_bytes.filter(|bytes| *bytes > 0),
         residency::transformer_device_bytes(paths).saturating_add(vae_bytes),
-        mold_inference::device::qwen_image21_planned_denoise_bytes(
-            residency::transformer_format(paths),
-            req.width,
-            req.height,
-            &qwen_image21_reference_dimensions(req, projection),
-            hint.batch,
-            2,
-        ),
     )
 }
 
@@ -1810,19 +1826,15 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     available_bytes: Option<u64>,
     host_total_bytes: u64,
     host_available_bytes: u64,
-    reference_extra_bytes: u64,
+    references: &[(u32, u32)],
+    branches: usize,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
     let available = available_bytes.filter(|bytes| *bytes > 0)?;
-    let vae_dtype_bytes = if cfg!(feature = "metal") { 4 } else { 2 };
-    let (denoise, decode) = residency::render_workspace_bytes(
-        residency::transformer_format(paths),
-        hint.width,
-        hint.height,
-        hint.batch,
-        vae_dtype_bytes,
-    );
+    let request = qwen_image21_render_request(paths, hint, references, branches);
+    let cache_budget = qwen_image21_cache_budget_for(paths, &request, Some(available));
+    let phases = residency::render_phases(&request, cache_budget);
     let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
     let plan = residency::plan(&residency::Qwen21PlanInputs {
         paths,
@@ -1835,8 +1847,7 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
             residency::TeDevice::Cuda
         },
         usable_free_bytes: available,
-        denoise_workspace_bytes: denoise.saturating_add(reference_extra_bytes),
-        decode_peak_bytes: decode,
+        phases,
         host_total_bytes,
         host_available_bytes,
         already_parked_bytes: 0,
@@ -2795,7 +2806,10 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             // own rule (`qwen21_cache_budget`), and runs the vision tower and a longer
             // multimodal prompt in the encode phase. All three are the
             // engine's own sizing functions, so admission prices exactly what
-            // the render holds.
+            // the render holds. The encode phase ends before the denoise
+            // allocates (the sequential engine even drops the reference
+            // encoders before the transformer loads), so the charge is the
+            // larger phase, never the sum.
             use mold_inference::device::{
                 qwen_image21_encode_phase_bytes, qwen_image21_prefix_cache_bytes,
                 qwen_image21_reference_workspace_bytes, QwenImage21SequenceShape,
@@ -2810,7 +2824,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
                 .saturating_mul(batch)
                 .saturating_mul(cfg_factor)
                 .saturating_add(cache)
-                .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype));
+                .max(qwen_image21_encode_phase_bytes(shape, dtype));
         }
     }
 
@@ -5602,11 +5616,12 @@ mod qwen_image21_reference_memory_tests {
         );
         let reference_pixels = 1024 * 1024 * 4;
         assert_eq!(text_only, base * 2);
+        // The encode phase (reference encoders and their working set) is over
+        // before the denoise allocates, so the charge is the larger of the
+        // two, never their sum.
         assert_eq!(
             with_one,
-            workspace * 2
-                + cache
-                + qwen_image21_encode_phase_bytes(shape, dtype)
+            (workspace * 2 + cache).max(qwen_image21_encode_phase_bytes(shape, dtype))
                 + reference_pixels
         );
         assert!(with_one > text_only);
@@ -5775,7 +5790,8 @@ mod qwen_image21_residency_tests {
             Some(22 * GIB),
             64 * GIB,
             48 * GIB,
-            0,
+            &[],
+            1,
         )
         .expect("a 24 GB card plans the int8 tier eager");
         assert!(matches!(
@@ -5806,7 +5822,8 @@ mod qwen_image21_residency_tests {
             Some(44 * GIB),
             64 * GIB,
             48 * GIB,
-            0,
+            &[],
+            1,
         )
         .expect("a 48 GB card plans bf16 eager");
         assert_eq!(
@@ -5867,10 +5884,45 @@ mod qwen_image21_residency_tests {
         );
     }
 
-    /// References enter the eager plan through the engine's own extra
-    /// (`qwen_image21_reference_extra_bytes`, added to the denoise
-    /// workspace): it never lowers the peak, and a 24 GB card cannot plan
-    /// ten references eager at all.
+    /// The encode phase's working set never coexists with the denoise, so a
+    /// one-reference render on a 46 GB card keeps the BF16 encoder resident
+    /// — admission asks the same phase-max question the engine does.
+    #[test]
+    fn a_46gb_card_plans_a_reference_render_with_the_encoder_resident() {
+        use mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let plan = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            256 * GIB,
+            200 * GIB,
+            &[(1024, 1024)],
+            1,
+        )
+        .expect("one reference plans eager");
+        // The 1024² decode is ~7 GB under cuDNN (the CUDA build); a build that
+        // resolves im2col prices it at twice that, which the resident vision
+        // tower then tips over this card — a property of that build's decode,
+        // not of the reference.
+        let conv = mold_inference::conv_policy::resolve_for(
+            mold_inference::conv_policy::policy_for_family("qwen-image21"),
+        );
+        if conv == mold_inference::conv_policy::ConvBackend::Cudnn {
+            assert_eq!(
+                plan.decision.residency,
+                Qwen21TeResidency::Resident,
+                "{:?}",
+                plan.decision
+            );
+        }
+        assert!(plan.decision.eager_peak_bytes <= 44 * GIB);
+    }
+
+    /// References enter the eager plan through the engine's own phase sizing
+    /// (`text_encoder_residency::render_phases`): they never lower the peak,
+    /// and a 24 GB card cannot plan ten references eager at all.
     #[test]
     fn references_charge_the_engines_extra_on_the_eager_plan() {
         let dir = tempfile::tempdir().unwrap();
@@ -5881,7 +5933,8 @@ mod qwen_image21_residency_tests {
             Some(44 * GIB),
             64 * GIB,
             48 * GIB,
-            0,
+            &[],
+            1,
         )
         .expect("text-to-image plans eager");
         let extra = mold_inference::device::qwen_image21_reference_extra_bytes(
@@ -5895,35 +5948,28 @@ mod qwen_image21_residency_tests {
             mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly,
         );
         assert!(extra > 4 * GIB);
-        // The reference workspace never lowers the plan's peak; with one
-        // reference the 1024² decode still dominates on this card.
+        // A reference never lowers a plan that keeps the same placement.
         if let Some(plan) = qwen_image21_eager_plan_with_host(
             &paths,
             hint(1024, 1024),
             Some(44 * GIB),
             64 * GIB,
             48 * GIB,
-            extra,
-        ) {
+            &[(1536, 1024)],
+            2,
+        )
+        .filter(|plan| plan.decision.residency == plain.decision.residency)
+        {
             assert!(plan.decision.eager_peak_bytes >= plain.decision.eager_peak_bytes);
         }
-        let ten = mold_inference::device::qwen_image21_reference_extra_bytes(
-            None,
-            1024,
-            1024,
-            1,
-            2,
-            &[(1536, 1024); 10],
-            2,
-            mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly,
-        );
         assert!(qwen_image21_eager_plan_with_host(
             &paths,
             hint(1024, 1024),
             Some(22 * GIB),
             64 * GIB,
             48 * GIB,
-            ten,
+            &[(1536, 1024); 10],
+            2,
         )
         .is_none());
         assert_eq!(

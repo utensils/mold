@@ -1251,42 +1251,66 @@ pub const QWEN_IMAGE21_VAE_ENCODER_F32_BYTES: u64 = 312_000_000;
 /// ~17.5 KiB per condition token; rounded up.
 pub const QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES: u64 = 18 * 1024;
 
-/// What a reference-conditioned request adds to the ENCODE phase: the vision
-/// tower and VAE encoder weights, the tower's per-image attention tile, the
-/// per-condition-token hidden rows, and one chunk of the multimodal language
-/// model's causal score tile. `dtype_bytes` is the encoder working dtype.
-pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_bytes: usize) -> u64 {
+/// Device bytes of the reference encoders a reference-conditioned request
+/// loads — the Qwen3-VL vision tower and the VAE encoder, both F32
+/// (`qwen_image21::reference::{vision_tower_dtype, vae_encoder_dtype}`). An
+/// eager engine keeps them loaded once a reference request has run
+/// (`LoadedQwenImage21::{vision, vae_encoder}`), so they are resident through
+/// EVERY phase of the render; zero without references.
+pub fn qwen_image21_reference_encoder_bytes(shape: QwenImage21SequenceShape) -> u64 {
+    if shape.references == 0 {
+        return 0;
+    }
+    const F32: u64 = 4;
+    QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * F32 / 2 + QWEN_IMAGE21_VAE_ENCODER_F32_BYTES
+}
+
+/// The ENCODE phase's working set above every resident weight: the vision
+/// tower's per-image attention tile, the per-condition-token hidden rows, and
+/// one chunk of the multimodal language model's causal score tile. It exists
+/// only while prompts and references encode — the engine drops the vision
+/// output and the encoder activations before the denoise starts — so it is
+/// charged to that phase alone, never beside the denoise workspace.
+/// `dtype_bytes` is the encoder working dtype.
+pub fn qwen_image21_encode_workspace_bytes(
+    shape: QwenImage21SequenceShape,
+    dtype_bytes: usize,
+) -> u64 {
     if shape.references == 0 {
         return 0;
     }
     let dtype = dtype_bytes as u64;
-    // The vision tower and VAE encoder always run in F32
-    // (`qwen_image21::reference::{vision_tower_dtype, vae_encoder_dtype}`);
-    // only the language model follows the encoder working dtype.
     const F32: u64 = 4;
-    let weights =
-        QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * F32 / 2 + QWEN_IMAGE21_VAE_ENCODER_F32_BYTES;
     // Vision: 16 heads over each image's patches, chunked at 2^28 elements;
     // a chunk holds its F32 scores, probabilities and softmax
     // (`vision.rs` `VisionAttention`). Calibrated on an L40S with a BF16
     // tower (4.2-4.8 GiB above the resident text encoder for 1-10
-    // references); the F32 tower doubles its rows and weights.
+    // references, weights included); the F32 tower doubles its rows.
     let patches = shape.largest_reference_patches as u64;
     let vision_scores = (16 * patches * patches).min(1 << 28) * (2 * F32 + 8);
     let rows = (shape.condition_tokens as u64) * QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES * F32 / 2;
     let tokens = shape.language_tokens() as u64;
     let language_scores = (32 * tokens * tokens).min(1 << 28) * dtype * 2;
-    weights + vision_scores + rows + language_scores
+    vision_scores + rows + language_scores
 }
 
-/// What a reference-conditioned request adds on top of the text-to-image
-/// denoise workspace the text-encoder residency plan charges
+/// What a reference-conditioned request adds to the ENCODE phase: the
+/// reference encoders' weights ([`qwen_image21_reference_encoder_bytes`]) and
+/// their working set ([`qwen_image21_encode_workspace_bytes`]).
+pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_bytes: usize) -> u64 {
+    qwen_image21_reference_encoder_bytes(shape)
+        .saturating_add(qwen_image21_encode_workspace_bytes(shape, dtype_bytes))
+}
+
+/// What a reference-conditioned request adds to the DENOISE phase on top of
+/// the text-to-image denoise workspace
 /// (`qwen_image21::text_encoder_residency::render_workspace_bytes`): the
 /// longer joint sequence's workspace and the prefix cache it retains beyond
-/// the text-to-image estimate, plus the encode phase (the vision tower and
-/// VAE encoder an eager engine then keeps resident, and their working set).
-/// Zero without references, so a text-to-image plan does not move. The engine
-/// (`settle_text_encoder_residency`) and the planner both add exactly this.
+/// the text-to-image estimate. The encode phase is NOT in here — its working
+/// set never coexists with the denoise, and the reference encoders' resident
+/// weights are charged to every phase on their own
+/// (`text_encoder_residency::render_phases`). Zero without references, so a
+/// text-to-image plan does not move.
 ///
 /// `format` is the transformer tier: the `int8-conv` tier's W8A8 workspace
 /// ([`qwen_image21_linear_workspace_bytes`]) scales with every joint token,
@@ -1322,7 +1346,6 @@ pub fn qwen_image21_reference_extra_bytes(
             shape.condition_tokens as u64,
             batch,
         ))
-        .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
 }
 
 /// The denoise workspace (no prefix cache) of a `width x height` render
@@ -1361,7 +1384,8 @@ pub fn qwen_image21_denoise_workspace_bytes(
 /// What a PLAN must keep beside the transformer and the VAE for a render's
 /// denoise, before any prefix cache: [`qwen_image21_denoise_workspace_bytes`]
 /// plus the reference encoders an eager engine keeps resident through the
-/// denoise ([`qwen_image21_encode_phase_bytes`], zero without references).
+/// denoise ([`qwen_image21_reference_encoder_bytes`], zero without
+/// references). The encode phase's working set is gone by then.
 /// Admission and the text-encoder residency plan hand this to
 /// [`qwen_image21_prefix_cache_budget`], so the cache they plan fits beside
 /// exactly what the residency decision then charges; the engine's own
@@ -1376,9 +1400,8 @@ pub fn qwen_image21_planned_denoise_bytes(
     dtype_bytes: usize,
 ) -> u64 {
     qwen_image21_denoise_workspace_bytes(format, width, height, references, batch, dtype_bytes)
-        .saturating_add(qwen_image21_encode_phase_bytes(
+        .saturating_add(qwen_image21_reference_encoder_bytes(
             QwenImage21SequenceShape::for_request(width, height, references),
-            dtype_bytes,
         ))
 }
 
@@ -8772,12 +8795,20 @@ mod qwen_image21_sequence_sizing_tests {
             qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[], 1, 2),
             base
         );
-        // A plan also keeps the reference encoders beside the denoise.
+        // A plan also keeps the reference encoders' WEIGHTS beside the
+        // denoise — never the encode phase's working set, which is freed
+        // before the denoise starts.
         let three = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 3]);
         assert_eq!(
             qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[(1024, 1024); 3], 1, 2),
-            workspace + qwen_image21_encode_phase_bytes(three, 2)
+            workspace + qwen_image21_reference_encoder_bytes(three)
         );
+        assert_eq!(
+            qwen_image21_encode_phase_bytes(three, 2),
+            qwen_image21_reference_encoder_bytes(three)
+                + qwen_image21_encode_workspace_bytes(three, 2)
+        );
+        assert!(qwen_image21_encode_workspace_bytes(three, 2) > 0);
         assert_eq!(
             qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[], 1, 2),
             base
