@@ -2925,9 +2925,13 @@ fn qwen_image21_reference_dimensions(
             })
             .collect();
     }
+    // The projection stores at most `PROJECTED_EDIT_DIMENSION_SLOTS` sizes but
+    // counts every reference; the rest are priced at the reference area every
+    // reference is resized to, so a queued job prices exactly as many
+    // references as its hydrated request does.
     projection
         .map(|projection| {
-            projection
+            let mut dimensions = projection
                 .edit_images
                 .iter()
                 .map(|dimensions| {
@@ -2937,7 +2941,13 @@ fn qwen_image21_reference_dimensions(
                         ProjectedImageDimensions::UnreadableHeader => FALLBACK,
                     }
                 })
-                .collect()
+                .take(projection.edit_image_count as usize)
+                .collect::<Vec<_>>();
+            dimensions.resize(
+                (projection.edit_image_count as usize).max(dimensions.len()),
+                FALLBACK,
+            );
+            dimensions
         })
         .unwrap_or_default()
 }
@@ -5773,6 +5783,46 @@ mod qwen_image21_residency_tests {
         let path = dir.join("qwen_image_2.1_int8_convrot.safetensors");
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    /// A queued job is priced from its stored projection, which keeps only
+    /// `PROJECTED_EDIT_DIMENSION_SLOTS` sizes. Qwen Image 2.1 takes ten
+    /// references, so the missing sizes are padded from `edit_image_count`
+    /// with the reference-area fallback every reference is resized to: the
+    /// queued and the hydrated request price the SAME ten references.
+    #[test]
+    fn a_queued_ten_reference_job_prices_every_reference_like_the_hydrated_one() {
+        let mut hydrated = qwen21_request(10);
+        hydrated.model = "qwen-image-2.1:bf16".into();
+        let mut sanitized = hydrated.clone();
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            edit_image_count: 10,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader;
+                crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+            ],
+            ..Default::default()
+        };
+        let queued = qwen_image21_reference_dimensions(&sanitized, Some(&projection));
+        assert_eq!(queued.len(), 10);
+        assert_eq!(queued, qwen_image21_reference_dimensions(&hydrated, None));
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let price = |req: &GenerateRequest, projection| {
+            estimate_generation_memory_for_request_with_projection(
+                req,
+                &paths,
+                hint(1024, 1024),
+                cuda_policy(),
+                Some(44 * GIB),
+                false,
+                false,
+                projection,
+            )
+            .peak_memory_bytes
+        };
+        assert_eq!(price(&sanitized, Some(&projection)), price(&hydrated, None));
     }
 
     fn qwen21_request(references: usize) -> GenerateRequest {

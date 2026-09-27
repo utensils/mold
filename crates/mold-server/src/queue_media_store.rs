@@ -54,6 +54,11 @@ const RUNTIME_STAGING_PREFIX: &str = "runtime-";
 const RUNTIME_STAGING_CLAIM: &str = ".claim.lock";
 const RUNTIME_STAGING_SWEEP: &str = ".sweep.lock";
 const JOB_CLEANUP_LOCK: &str = ".cleanup.lock";
+/// How many reference-image SIZES a stored projection keeps, for every family
+/// (it is sized to FLUX.2's reference cap, which it was introduced for). The
+/// projection also stores the true `edit_image_count`, so a family that takes
+/// more references (Qwen Image 2.1 takes ten) prices the rest from the count.
+/// Part of the on-disk projection format: changing it is a format change.
 pub(crate) const PROJECTED_EDIT_DIMENSION_SLOTS: usize =
     mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES;
 const PROJECTION_EDIT_SLOTS_END: usize = 20 + PROJECTED_EDIT_DIMENSION_SLOTS * 9;
