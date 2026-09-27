@@ -5975,11 +5975,15 @@ mod tests {
     // ── resolve_ltx2_gemma_device_override ───────────────────────────────
 
     /// All `MOLD_LTX2_GEMMA_DEVICE` / `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`
-    /// env-var behaviors live under one `#[test]` to serialize access to the
-    /// shared process-global env vars (cargo's parallel runner can't race
-    /// between `set_var`/`remove_var` of two adjacent tests).
+    /// env-var behaviors in THIS file live under one `#[test]` — but
+    /// `ltx2::pipeline` reads and mutates the same two process-global vars
+    /// in its own tests, so this alone cannot serialize against them; the
+    /// crate-shared `test_support::ENV_LOCK` does that.
     #[test]
     fn resolve_ltx2_gemma_device_override_env_behaviors() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Snapshot then clear both vars so we start from a known state.
         let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
         let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");

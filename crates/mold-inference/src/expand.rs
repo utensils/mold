@@ -1130,27 +1130,7 @@ mod exact_plan_tests {
     use crate::progress::{InferenceCancellationToken, InferenceCancelled, ProgressReporter};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    use crate::test_support::{EnvVarGuard, ENV_LOCK};
 
     fn write_fixture(path: &Path, size: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1221,8 +1201,7 @@ mod exact_plan_tests {
 
     #[test]
     fn exact_gpu_placement_ignores_mold_device_cpu_and_preserves_ordinal() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _restore = EnvVarGuard::set("MOLD_DEVICE", "cpu");
 
         let root = tempfile::tempdir().unwrap();
