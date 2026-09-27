@@ -996,8 +996,9 @@ decide what these fields may carry:
 
 - `capabilities.reference_images` gained two additive fields. `canvas:
 "last-reference"` (Qwen Image 2.1) is a **client** rule: when the user has
-  not chosen a size, size the default canvas to the LAST reference's aspect
-  ratio at a fixed 1024×1024 area (upstream's `output_resolution` default —
+  not chosen a size, size the default canvas to the LAST reference's upright
+  aspect ratio (EXIF orientation applied, as the engine decodes it) at a fixed
+  1024×1024 area (upstream's `output_resolution` default —
   never a host's configured default size) on the recipe's alignment, then
   clamp it inside the recipe's `resolution` ceilings (`max_axis_pixels`,
   `max_pixels`, `min_width`/`min_height`) keeping the aspect on the grid. The server cannot
@@ -1005,7 +1006,10 @@ decide what these fields may carry:
   admission never rewrites the size. `formats` lists the containers accepted
   as references (`png`, `jpeg`, `webp`); an empty or absent list means PNG and
   JPEG, which is also what an older server accepts. Clients must never flatten
-  a reference's alpha before sending it.
+  a reference's alpha before sending it. Every reference is bounded by its
+  header at admission: at most 16,384 px a side, 100,000,000 px in total and
+  a 200:1 aspect ratio, refused with a 422 naming its position before the
+  request is queued.
 - `capabilities.transparency` is `{ mode, default, formats, native_alpha,
 reason? }`. `mode: "adjustable"` offers the toggle; `formats` are the output
   containers that carry alpha (`png`, and `webp` on a build that can encode
@@ -2486,6 +2490,13 @@ Two additive fields describe transparency:
   an edit of a transparent reference with the toggle off. Clients draw such a
   print over a checkerboard. Absent means no alpha, or a print saved before the
   field existed.
+
+One additive field records how a Qwen Image 2.1 render treated its prompt
+prefix: `prefix_cache` is `"retained"` (every guidance branch reused its
+prefix K/V) or `"recomputed"` (at least one branch recomputed it every step).
+On the CUDA fast path that choice follows the card's free memory and the two
+are not bit-identical, so the print records which one made it. It is absent
+for every other family and for older prints.
 
 ```json
 {

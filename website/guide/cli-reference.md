@@ -195,9 +195,10 @@ mold run qwen-image-2.1 "Extract the lantern from image 1" --image street.webp \
 cut-out on a transparent background. Describe the subject alone; the engine
 wraps the prompt in the model's RGBA recipe and the stored prompt stays exactly
 what you typed. Alpha needs PNG (the default) or WebP; `--transparent --format
-jpeg`, and `--transparent` on a model without the block, are refused before any
-weight is read. Without the flag, an RGBA reference still keeps its alpha in a
-PNG or WebP output.
+jpeg`, and `--transparent` on a model without the block (or against an older
+server whose recipe predates it), are refused before any weight is read.
+Without the flag, a reference with transparent pixels still keeps its alpha in
+a PNG or WebP output; a fully opaque RGBA reference does not.
 
 `--format webp` (or `-o out.webp`) writes a single-frame WebP still for every
 image model whose build has the `webp` feature — not an animation.

@@ -121,8 +121,10 @@ a cut-out subject on a transparent background. Describe the subject alone —
 no scenery or backdrop; the engine wraps the prompt in the model's RGBA
 recipe and the stored prompt stays exactly what was typed. Alpha needs PNG
 (the default) or WebP; `--transparent --format jpeg` is refused before
-anything loads, as is `--transparent` on a model without the block. An
-RGBA reference keeps its alpha in a PNG or WebP output even without the flag.
+anything loads, as is `--transparent` on a model without the block or
+against an older server whose recipe predates it. A reference with
+transparent pixels keeps its alpha in a PNG or WebP output even without the
+flag; a fully opaque RGBA reference does not.
 
 ```bash
 mold run qwen-image-2.1:bf16 "A red paper lantern with a gold tassel" --transparent --format webp --output lantern.webp

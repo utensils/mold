@@ -123,7 +123,7 @@ are in `/storage/mold/uat-qwen21/uat/ui/`.
 - **Style picker.** Qwen Image 2.1 BF16 appears, along with the other eight tiers and three turbo tiers. The resolution presets are the advertised aspect groups, with 1024² and 2048² at 1:1.
 - **Transparent background.** The toggle is in More settings → Output & seed. With the toggle on, JPEG is disabled and the page shows "JPEG has no transparency, so a transparent background saves as PNG or WebP". The phone rail has the same toggle.
 - **References.** "Start from a photo" opens a _Reference images_ panel reading "Up to 10 ordered references". Uploading three files, including a WebP with alpha, was accepted ("src-cat.png +2 more").
-  - Observation, not changed: the web strip shows the first file name and a count, not ordered thumbnails. That is the pre-existing web design for every reference family. The desktop wells draw thumbnails.
+  - At the time of this UAT the web strip showed the first file name and a count, not ordered thumbnails. That was later replaced: every web, desktop and phone reference strip now draws one numbered thumbnail per picture (see "Resolved after this UAT").
 - **LoRA.** The _Add-on looks_ row is visible for Qwen Image 2.1 and hidden for `flux2-klein:fp8`, whose recipe has `lora.mode: hidden`.
 - **Checkerboard.** Transparent prints show a checkerboard (`ms-alpha-bed`):
   - in the gallery grid: the teapots, bottle, cat cut-out and beanie
@@ -164,9 +164,31 @@ Gates run for the fixes:
 
 ## Observed, not changed
 
+These are the observations as recorded during the UAT. Most were fixed
+afterwards; see the next section.
+
 - **Encoder parking on 46/48 GB cards.** Each reference request adds about 12 s, and each 2K request about 20 s, while the 17 GB Qwen3-VL encoder is parked and restored. The cause is the budget sum described above. I left it to the residency owners.
 - **Ten references are slow at bf16 1024².** The denoise took 350 s because the 20 GiB prefix cache did not fit and is recomputed every step. The client is told so, and `MOLD_QWEN_IMAGE21_KV_CACHE=on` is named.
 - **Single-request validation errors carry a `requests[1]:` prefix** on `/api/generate`, for example `requests[1]: steps must be >= 1`. v0.32 production does the same, so this predates the campaign.
 - **One shutdown hung.** The first two scratch servers were sent SIGTERM about 20 s after start, while the 107 s "warmed installed artifact facts" startup task was still running. Both hung in shutdown until I killed them with `kill -9`. Every later shutdown exited cleanly within seconds.
 - **Two ~32 s publication stalls hit both scratch servers at the same instant.** In one, `write_gallery_bytes_no_replace` returned at the same millisecond on both servers. The pattern points to shared-pool I/O on the ZFS home rather than mold, and it did not recur.
 - **The MCP server answers `initialize` with protocol `2025-06-18`** when the client asks for `2024-11-05`. The tool calls worked.
+
+## Resolved after this UAT
+
+Each item below was fixed on the branch after the UAT ran. The fixes are
+pinned by tests; unless stated, they were not re-measured on the scratch
+servers.
+
+| Observation                                                          | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Commits                                                    |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Encoder parking on 46/48 GB cards (about 12 s per reference request) | The residency decision budgets the largest phase (encode, denoise, decode) instead of their sum, no longer charges the finished encode after it has run, and releases the vision tower and VAE encoder before it parks the text encoder. On a 46/48 GB card at 1024² the encoder now stays resident for one to three references, and for one or two with guidance and a negative prompt. Three references with guidance and a negative prompt still park it so both branches keep their prefix cache. | `d17730ba`, `5617cfc1`                                     |
+| Web reference strip showed a file name and a count                   | One shared, ordered strip on web, desktop and phone: a numbered thumbnail per picture on the alpha checkerboard, per-picture remove, drag and keyboard reorder, and a "Sets canvas" mark on Qwen Image 2.1's last reference. The strip wraps so all ten references stay in view.                                                                                                                                                                                                                      | `f3eaa2d1`, `19938138`, `5ee47af0`, `b9708bee`, `a9d64b50` |
+| `requests[1]:` prefix on single-request validation errors            | A single request's refusal carries no prefix; a real batch still names its row.                                                                                                                                                                                                                                                                                                                                                                                                                       | `d53142e4`                                                 |
+| Shutdown hung during the startup artifact warm                       | Shutdown abandons the warm instead of waiting for it.                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `27c3b905`                                                 |
+| MCP `initialize` answered `2025-06-18` to a `2024-11-05` client      | `initialize` echoes the client's protocol version when mold supports it.                                                                                                                                                                                                                                                                                                                                                                                                                              | `92235e16`                                                 |
+
+Two observations stand. Ten references at bf16 1024² still recompute a
+prefix cache that does not fit a 46 GB card, and say so in a request warning.
+The publication stalls were not reproduced and point at the shared ZFS pool,
+not at mold.

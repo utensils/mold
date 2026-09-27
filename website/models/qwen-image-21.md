@@ -54,9 +54,11 @@ second tier downloads only its transformer.
 
 The shared runtime adds about 18.9 GB of downloads (text encoder 17.5 GB, VAE
 1.35 GB, tokenizer). The GGUF files come from stable-diffusion.cpp's author, so
-the same bytes also run under that reference implementation. Every GGUF tier
-checks each step's prediction for NaN or infinity and names the tier and
-`MOLD_QWEN_IMAGE21_QMATMUL` if one appears.
+the same bytes also run under that reference implementation. Every render, on
+every tier, checks each denoise step's prediction for NaN or infinity and fails
+naming the tier and the step. The error names `MOLD_QWEN_IMAGE21_QMATMUL` only
+when that switch is on and routed a GGUF tier through candle's quantized
+kernels.
 
 ### Text encoder
 
@@ -97,18 +99,28 @@ the transformer alone; INT8 ConvRot needs 7.8 GB.
 
 The peaks are whole-process device memory sampled with `nvidia-smi` on an
 NVIDIA L40S during a server render, with the smaller cards simulated by
-`MOLD_RESERVE_VRAM_MB`. Denoise time is 14–20 s at 1024² on every tier; the
-12 GB plan adds about 25 s of CPU text encoding.
+`MOLD_RESERVE_VRAM_MB`. Denoise time is 14–20 s at 1024² on every tier. The
+12 GB plan runs the text encoder on the CPU: on the UAT host, loading it took
+about 21 s and encoding the prompt 4–6 s.
 
 At the 2K presets the encoder is parked in host RAM for the denoise, and the
-transformer is released before the VAE decode when the card cannot hold both.
-Mold makes that decision itself from the free memory; you do not need a flag.
-It budgets each phase on its own — the prompt and reference encode, the
-denoise with its prefix cache, the decode — because they never overlap, so on
-a 46–48 GB card the encoder stays resident for a reference render whose
-denoise leaves room for it (one to three references at 1024² without a
-negative prompt). It still parks when both CFG branches retain a cache beside
-several references, because a retained cache is worth far more than the park.
+transformer is parked in host RAM for the VAE decode when the card cannot hold
+both (released instead, and reloaded next request, when the host cannot hold
+it either). Mold makes that decision itself from the free memory; you do not
+need a flag. It budgets each phase on its own — the prompt and reference
+encode, the denoise with its prefix cache, the decode — because they never
+overlap, and it charges any LoRA (the turbo adapter included) in every phase.
+On a 46–48 GB card at 1024² the encoder stays resident for one to three
+references, and for one or two references with guidance and a negative prompt.
+Three references with guidance and a negative prompt park it, because both
+branches then retain a prefix cache and a retained cache is worth far more than
+the park.
+
+A request that no card on the host could ever admit — whatever else is loaded
+— is refused at once with the memory it needs and the capacity it had, instead
+of waiting in the queue. The sequential plan is priced by its largest phase,
+VAE decode included, so a render the sequential engine can run is never
+refused for the eager plan's total.
 
 ## Canvas and 2K presets
 
@@ -305,7 +317,12 @@ cached-step operations; the text encoder and VAE stay F32.
 `MOLD_ATTN=math` restores the original Metal computation path. The 1024²
 default is qualified on Metal
 ([`docs/qualification/qwen-image-2.1-metal-performance.md`](https://github.com/utensils/mold/blob/main/docs/qualification/qwen-image-2.1-metal-performance.md)).
-The 2K presets, reference conditioning, transparency and turbo have been
+On Metal, a plain text-to-image render on `qwen-image-2.1:bf16` keeps v0.32's
+arithmetic, so an archived seed renders the same bytes. Every other render
+(references, transparency, LoRA, turbo and the quantized tiers, none of which
+v0.32 produced) rounds the timestep to the latent dtype and computes the
+rotary angles in float32, as upstream does. The `fp8` tier is CUDA only and is
+refused on Metal before anything downloads. The 2K presets, reference conditioning, transparency and turbo have been
 verified on CUDA; Metal verification of those paths is tracked separately.
 
 ### Prefix cache
