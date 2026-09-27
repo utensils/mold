@@ -12334,6 +12334,69 @@ mod tests {
     /// Both families run through it because the seam has to pass the resolved
     /// family through: a call that hardcoded either constant would satisfy one
     /// assertion and break the other.
+    /// Admission is where a negative prompt sent to a recipe that hides the
+    /// control becomes an advisory: drive `prepare_generation_inner` itself on
+    /// an installed (sparse) turbo tier, and read the warning off the route it
+    /// returns. The request is admitted — never refused — and a recipe that
+    /// reads the negative prompt says nothing.
+    #[tokio::test]
+    async fn admission_warns_when_a_hidden_negative_prompt_is_sent() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = temp.path().display().to_string();
+        for name in ["qwen-image-2.1-turbo:q8", "qwen-image-2.1:q8"] {
+            let manifest = mold_core::manifest::find_manifest(name).unwrap();
+            for file in &manifest.files {
+                let path = temp
+                    .path()
+                    .join(mold_core::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(file.size_bytes)
+                    .unwrap();
+            }
+        }
+        let request = |model: &str, steps: u32| -> mold_core::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "a paper lantern",
+                "negative_prompt": "blurry",
+                "model": model,
+                "width": 1024,
+                "height": 1024,
+                "steps": steps,
+                "guidance": 1.0,
+                "batch_size": 1,
+                "output_format": "png"
+            }))
+            .unwrap()
+        };
+
+        let mut turbo = request("qwen-image-2.1-turbo:q8", 6);
+        let route = prepare_generation_inner(&state, &mut turbo, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("the turbo tier is admitted: {error:?}"));
+        let warnings: Vec<&str> = route.warnings.all().collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.starts_with("negative prompt ignored by this recipe")),
+            "{warnings:?}"
+        );
+
+        let mut base = request("qwen-image-2.1:q8", 40);
+        let route = prepare_generation_inner(&state, &mut base, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("the base tier is admitted: {error:?}"));
+        assert!(
+            route
+                .warnings
+                .all()
+                .all(|warning| !warning.starts_with("negative prompt ignored")),
+            "a recipe that reads the negative prompt says nothing"
+        );
+    }
+
     #[tokio::test]
     async fn admission_materializes_the_resolved_familys_extend_carryover() {
         let temp = tempfile::tempdir().unwrap();
