@@ -43,16 +43,39 @@ extension GeneratePane {
             }
             return true
         case .unknown:
+            let pressed = LicenceSubmission(
+                draft: controller.draft, model: controller.modelName, host: host.id)
             Task {
                 let answered = await probe.settle(
-                    draft: controller.draft, model: controller.modelName, on: host, hosts: hosts)
+                    draft: pressed.draft, model: pressed.model, on: host, hosts: hosts)
+                // The press resumes only if nothing moved while the machine
+                // answered; otherwise the new selection waits for its own press
+                // and its own gate.
+                guard Self.resumes(pressed, now: currentSubmission) else { return }
                 // A machine that cannot answer (an older host, a dropped
-                // connection) is not a reason to refuse the render: the worker
+                // connection) is not a reason to refuse THIS render: the worker
                 // still fails closed on a gated fetch, exactly as before.
                 startRun(accepted: accepted, licenceSettled: !answered)
             }
             return true
         }
+    }
+
+    /// What a Generate press submits, for telling whether it is still the
+    /// render on screen after the licence probe's await.
+    struct LicenceSubmission: Equatable {
+        let draft: RenderDraft
+        let model: String?
+        let host: MoldHost.ID
+    }
+
+    private var currentSubmission: LicenceSubmission? {
+        host.map { LicenceSubmission(draft: controller.draft, model: controller.modelName, host: $0.id) }
+    }
+
+    /// Whether the continuation may run the press it was started for.
+    static func resumes(_ pressed: LicenceSubmission, now: LicenceSubmission?) -> Bool {
+        now == pressed
     }
 
     /// The gate for `submitting` on `host`. Pure, so a test holds the rule

@@ -64,4 +64,29 @@ struct GenerateLicenceTests {
     @Test func anAnswerFromAnotherHostIsUnknown() throws {
         #expect(try gate(#"{"outcome":"planned"}"#, answeredOn: laptop, on: workstation) == .unknown)
     }
+
+    /// Generate awaits a fresh answer only for the render that was pressed.
+    /// Anything that changes while it waits -- the draft, the model, the
+    /// machine -- discards the continuation, so an edit is never rendered
+    /// unpressed and a failed probe never waves through an unchecked selection.
+    @Test func onlyTheUnchangedSubmissionResumesAfterTheProbe() {
+        var draft = RenderDraft()
+        draft.prompt = "A green glass apple"
+        let pressed = GeneratePane.LicenceSubmission(
+            draft: draft, model: "qwen-image-2.1-turbo:q8", host: workstation)
+        #expect(GeneratePane.resumes(pressed, now: pressed))
+
+        var edited = draft
+        edited.prompt = "A red glass apple"
+        let editedPrompt = GeneratePane.LicenceSubmission(
+            draft: edited, model: "qwen-image-2.1-turbo:q8", host: workstation)
+        let otherModel = GeneratePane.LicenceSubmission(
+            draft: draft, model: "flux-dev:q4", host: workstation)
+        let otherMachine = GeneratePane.LicenceSubmission(
+            draft: draft, model: "qwen-image-2.1-turbo:q8", host: laptop)
+        #expect(GeneratePane.resumes(pressed, now: editedPrompt) == false)
+        #expect(GeneratePane.resumes(pressed, now: otherModel) == false)
+        #expect(GeneratePane.resumes(pressed, now: otherMachine) == false)
+        #expect(GeneratePane.resumes(pressed, now: nil) == false)
+    }
 }
