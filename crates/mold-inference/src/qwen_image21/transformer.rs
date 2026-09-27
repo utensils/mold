@@ -13,7 +13,8 @@ use candle_nn::VarBuilder;
 use std::path::PathBuf;
 
 use super::attention::SegmentDispatch;
-use super::exec_path::Qwen21ExecPath;
+use super::exec_path::{Qwen21ExecPath, Qwen21RequestShape};
+use super::layout::RopeAngles;
 use super::layout::{BlockCausalPlan, QwenImage21JointLayout};
 use super::linear::{Q21GateUp, Q21Linear, Q21Vb, Q21WeightSource};
 use super::{PrefixCacheDecision, QwenImage21TextConditioning};
@@ -695,6 +696,7 @@ pub(crate) struct QwenImage21Transformer {
 /// cached steps.
 struct BranchRope {
     dtype: DType,
+    angles: RopeAngles,
     full: (Tensor, Tensor),
     target: (Tensor, Tensor),
 }
@@ -709,11 +711,23 @@ pub(crate) struct PreparedBranch<'a> {
     layout: QwenImage21JointLayout,
     cond_latents: Option<Tensor>,
     cache_policy: PrefixCacheDecision,
+    /// The request this branch renders, for the rounding boundaries the exec
+    /// path decides per request ([`Qwen21ExecPath::rope_angles`]).
+    request: Qwen21RequestShape,
     rope: Option<BranchRope>,
     layers: Vec<PrefixKv>,
 }
 
 impl PreparedBranch<'_> {
+    /// Render this branch for `request` (the pipeline's
+    /// [`Qwen21RequestShape::of`]). Without it a branch assumes v0.32 bytes
+    /// exist exactly when it has no condition images.
+    pub(crate) fn for_request(mut self, request: Qwen21RequestShape) -> Self {
+        self.request = request;
+        self.rope = None;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn layout(&self) -> &QwenImage21JointLayout {
         &self.layout
@@ -726,7 +740,9 @@ impl PreparedBranch<'_> {
             &mut self.rope,
             &self.layout,
             self.transformer.cfg.axes_dims_rope,
-            self.transformer.rope_table_dtype(latents.dtype()),
+            self.transformer.exec.rope_angles(self.request),
+            self.transformer
+                .rope_table_dtype(latents.dtype(), &self.layout),
             latents.device(),
         )?;
         let rope = self.rope.as_ref().expect("rope tables were just built");
@@ -768,16 +784,18 @@ fn ensure_branch_rope(
     rope: &mut Option<BranchRope>,
     layout: &QwenImage21JointLayout,
     axes_dims: [usize; 3],
+    angles: RopeAngles,
     dtype: DType,
     device: &Device,
 ) -> Result<()> {
-    let stale = rope
-        .as_ref()
-        .is_none_or(|rope| rope.dtype != dtype || !rope.full.0.device().same_device(device));
+    let stale = rope.as_ref().is_none_or(|rope| {
+        rope.dtype != dtype || rope.angles != angles || !rope.full.0.device().same_device(device)
+    });
     if !stale {
         return Ok(());
     }
-    let (cos, sin) = QwenImage21JointLayout::rope_tables(layout.rope(), axes_dims, dtype, device)?;
+    let (cos, sin) =
+        QwenImage21JointLayout::rope_tables(layout.rope(), axes_dims, angles, dtype, device)?;
     let prefix = layout.prefix_len();
     let target = layout.target_tokens();
     let target_tables = (
@@ -786,6 +804,7 @@ fn ensure_branch_rope(
     );
     *rope = Some(BranchRope {
         dtype,
+        angles,
         full: (cos, sin),
         target: target_tables,
     });
@@ -828,12 +847,16 @@ impl QwenImage21Transformer {
                 "Qwen Image 2.1 layout has condition images but no condition latents"
             ),
         }
+        let layout_has_no_condition = layout.condition_tokens() == 0;
         Ok(PreparedBranch {
             transformer: self,
             conditioning,
             layout,
             cond_latents,
             cache_policy,
+            request: Qwen21RequestShape {
+                has_v032_bytes: layout_has_no_condition,
+            },
             rope: None,
             layers: Vec::new(),
         })
@@ -1050,9 +1073,12 @@ impl QwenImage21Transformer {
 
     /// The dtype of this transformer's rotary tables for `latent_dtype`
     /// working storage: F32 on the fast path (and always on Metal, which
-    /// `rope_tables` itself enforces), the working dtype on the v0.32 path.
-    fn rope_table_dtype(&self, latent_dtype: DType) -> DType {
-        if self.exec.f32_rope_tables {
+    /// `rope_tables` itself enforces), the working dtype on the v0.32 path —
+    /// except for a layout with condition images, which v0.32 never rendered
+    /// and so has no bytes to keep: upstream's tables are float32 there too
+    /// (`transformer_qwenimage21.py:673-675`).
+    fn rope_table_dtype(&self, latent_dtype: DType, layout: &QwenImage21JointLayout) -> DType {
+        if self.exec.f32_rope_tables || layout.condition_tokens() > 0 {
             DType::F32
         } else {
             latent_dtype
@@ -1267,11 +1293,17 @@ mod tests {
             layout: &QwenImage21JointLayout,
         ) -> Result<Tensor> {
             let mut rope = None;
+            // `prepare`'s default request: v0.32 bytes exist exactly when the
+            // layout has no condition images.
+            let request = Qwen21RequestShape {
+                has_v032_bytes: layout.condition_tokens() == 0,
+            };
             ensure_branch_rope(
                 &mut rope,
                 layout,
                 self.cfg.axes_dims_rope,
-                latents.dtype(),
+                self.exec.rope_angles(request),
+                self.rope_table_dtype(latents.dtype(), layout),
                 latents.device(),
             )?;
             self.forward_layout(
@@ -2046,6 +2078,44 @@ mod tests {
         Ok(())
     }
 
+    /// A layout with condition images has no v0.32 bytes, so even the legacy
+    /// path builds float32 tables for it (upstream's dtype); a text-to-image
+    /// layout keeps the working dtype there.
+    #[test]
+    fn condition_layouts_take_f32_rope_tables_on_every_path() {
+        let transformer = tiny_transformer();
+        assert!(transformer.exec_path().is_legacy());
+        let t2i = QwenImage21JointLayout::text_to_image(&[vec![true; 3]], (2, 2)).unwrap();
+        let slots = [false, false, false, true, true, false, false, false];
+        let referenced =
+            QwenImage21JointLayout::build(&slots, &[vec![true; 8]], &[(2, 4)], (4, 4)).unwrap();
+        assert_eq!(transformer.rope_table_dtype(DType::BF16, &t2i), DType::BF16);
+        assert_eq!(
+            transformer.rope_table_dtype(DType::BF16, &referenced),
+            DType::F32
+        );
+    }
+
+    /// The two angle arithmetics are genuinely different tables, so the
+    /// per-request choice is observable.
+    #[test]
+    fn upstream_and_v032_angles_differ() {
+        let layout = QwenImage21JointLayout::text_to_image(&[vec![true; 40]], (8, 8)).unwrap();
+        let axes = tiny_transformer().cfg.axes_dims_rope;
+        let build = |angles| {
+            let (cos, _) = QwenImage21JointLayout::rope_tables(
+                layout.rope(),
+                axes,
+                angles,
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+            flat(&cos)
+        };
+        assert_ne!(build(RopeAngles::Upstream), build(RopeAngles::V032));
+    }
+
     /// U3: the text-to-image layout's rotary tables equal v0.32's
     /// `t2i_rope`, bit for bit, at every working dtype.
     #[test]
@@ -2058,6 +2128,7 @@ mod tests {
                 let (cos, sin) = QwenImage21JointLayout::rope_tables(
                     layout.rope(),
                     transformer.cfg.axes_dims_rope,
+                    RopeAngles::V032,
                     dtype,
                     &Device::Cpu,
                 )
@@ -2086,11 +2157,22 @@ mod tests {
         let device = crate::device::metal_device(0).unwrap();
         let layout = QwenImage21JointLayout::text_to_image(&[vec![true; 3]], (2, 2)).unwrap();
         let axes = transformer.cfg.axes_dims_rope;
-        let (expected_cos, expected_sin) =
-            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::F32, &Device::Cpu)
-                .unwrap();
-        let (cos, sin) =
-            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::BF16, &device).unwrap();
+        let (expected_cos, expected_sin) = QwenImage21JointLayout::rope_tables(
+            layout.rope(),
+            axes,
+            RopeAngles::V032,
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let (cos, sin) = QwenImage21JointLayout::rope_tables(
+            layout.rope(),
+            axes,
+            RopeAngles::V032,
+            DType::BF16,
+            &device,
+        )
+        .unwrap();
         for (actual, expected) in [(cos, expected_cos), (sin, expected_sin)] {
             assert_eq!(actual.dtype(), DType::F32);
             assert_eq!(
@@ -2098,9 +2180,14 @@ mod tests {
                 flat(&expected)
             );
         }
-        let (cos, sin) =
-            QwenImage21JointLayout::rope_tables(layout.rope(), axes, DType::BF16, &Device::Cpu)
-                .unwrap();
+        let (cos, sin) = QwenImage21JointLayout::rope_tables(
+            layout.rope(),
+            axes,
+            RopeAngles::V032,
+            DType::BF16,
+            &Device::Cpu,
+        )
+        .unwrap();
         assert_eq!(cos.dtype(), DType::BF16);
         assert_eq!(sin.dtype(), DType::BF16);
     }
@@ -2411,9 +2498,12 @@ mod tests {
             coords[p][1] = image_h[index];
             coords[p][2] = image_w[index];
         }
+        // The CPU transformer under test takes the legacy path, whose angle
+        // arithmetic is v0.32's on every layout.
         let (cos, sin) = QwenImage21JointLayout::rope_tables(
             &coords,
             transformer.cfg.axes_dims_rope,
+            RopeAngles::V032,
             DType::F32,
             device,
         )

@@ -155,6 +155,7 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
     let (rope_cos, rope_sin) = crate::qwen_image21::layout::QwenImage21JointLayout::rope_tables(
         layout.rope(),
         transformer.cfg.axes_dims_rope,
+        crate::qwen_image21::layout::RopeAngles::Upstream,
         dtype,
         &device,
     )?;

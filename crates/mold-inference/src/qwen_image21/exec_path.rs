@@ -30,6 +30,7 @@
 
 use candle_core::Device;
 
+use super::layout::RopeAngles;
 use crate::attention::AttentionBackend;
 
 /// How the transformer attends its target (and cached-decode) queries.
@@ -66,24 +67,29 @@ pub(crate) struct Qwen21ExecPath {
     pub fused_adaln: bool,
     /// Build the rotary tables in F32 regardless of the working dtype.
     pub f32_rope_tables: bool,
-    /// Whether the scheduler timestep is rounded to the latent dtype before
-    /// dividing by 1000, as upstream does (`pipeline_qwenimage21.py:770,775`
-    /// casts `t` to the latents' dtype before `timestep / 1000`). A per-request
-    /// decision: resolve it with [`Self::rounds_timestep`].
-    pub timestep_rounding: TimestepRounding,
+    /// Whether the render follows upstream's rounding boundaries or v0.32's:
+    /// the scheduler timestep rounded to the latent dtype before dividing by
+    /// 1000 (`pipeline_qwenimage21.py:770,775` casts `t` to the latents' dtype
+    /// before `timestep / 1000`) and float32 rotary angles
+    /// (`transformer_qwenimage21.py:673-675`). A per-request decision: resolve
+    /// it with [`Self::rounds_timestep`] and [`Self::rope_angles`].
+    pub upstream_rounding: UpstreamRounding,
 }
 
-/// How a path decides whether to round the transformer timestep through the
-/// working dtype (upstream `pipeline_qwenimage21.py:770,775`).
+/// How a path decides between upstream's rounding boundaries and v0.32's:
+/// the transformer timestep rounded through the working dtype
+/// (`pipeline_qwenimage21.py:770,775`) and float32 rotary angles
+/// (`transformer_qwenimage21.py:673-675`).
 ///
-/// v0.32 passed the unrounded f64 `timestep / 1000`. Its bytes are archived
+/// v0.32 passed the unrounded f64 `timestep / 1000` and evaluated its rotary
+/// angles in f64. Its bytes are archived
 /// for exactly two cases — the legacy CUDA/CPU arithmetic and Metal's
 /// base-tier (bf16) plain text-to-image render — so only those keep it.
 /// Every render v0.32 could not make (a turbo tier, a quantized tier, a
 /// reference, a transparent background, a LoRA) has no bytes to preserve and
 /// follows upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TimestepRounding {
+pub(crate) enum UpstreamRounding {
     /// Never round: [`Qwen21ExecPath::legacy`], v0.32 byte for byte.
     Never,
     /// Always round: the CUDA fast path, which has no v0.32 bytes at all.
@@ -130,7 +136,7 @@ impl Qwen21ExecPath {
             compact_modulation: false,
             fused_adaln: false,
             f32_rope_tables: false,
-            timestep_rounding: TimestepRounding::Never,
+            upstream_rounding: UpstreamRounding::Never,
         }
     }
 
@@ -145,12 +151,12 @@ impl Qwen21ExecPath {
                 compact_modulation: true,
                 fused_adaln: false,
                 f32_rope_tables: true,
-                timestep_rounding: TimestepRounding::UnlessV032Request,
+                upstream_rounding: UpstreamRounding::UnlessV032Request,
             }
         } else {
             Self {
                 f32_rope_tables: true,
-                timestep_rounding: TimestepRounding::UnlessV032Request,
+                upstream_rounding: UpstreamRounding::UnlessV032Request,
                 ..Self::legacy()
             }
         }
@@ -164,17 +170,28 @@ impl Qwen21ExecPath {
             compact_modulation: true,
             fused_adaln: true,
             f32_rope_tables: true,
-            timestep_rounding: TimestepRounding::Always,
+            upstream_rounding: UpstreamRounding::Always,
         }
     }
 
     /// Whether `request`'s denoise rounds its timestep through the working
-    /// dtype on this path (see [`TimestepRounding`]).
+    /// dtype on this path (see [`UpstreamRounding`]).
     pub(crate) const fn rounds_timestep(&self, request: Qwen21RequestShape) -> bool {
-        match self.timestep_rounding {
-            TimestepRounding::Never => false,
-            TimestepRounding::Always => true,
-            TimestepRounding::UnlessV032Request => !request.has_v032_bytes,
+        match self.upstream_rounding {
+            UpstreamRounding::Never => false,
+            UpstreamRounding::Always => true,
+            UpstreamRounding::UnlessV032Request => !request.has_v032_bytes,
+        }
+    }
+
+    /// The rotary-angle arithmetic `request` takes on this path: upstream's
+    /// float32 exactly where the timestep rounds, v0.32's f64 where archived
+    /// bytes are preserved.
+    pub(crate) const fn rope_angles(&self, request: Qwen21RequestShape) -> RopeAngles {
+        if self.rounds_timestep(request) {
+            RopeAngles::Upstream
+        } else {
+            RopeAngles::V032
         }
     }
 
@@ -273,8 +290,8 @@ mod tests {
             assert_eq!(path.compact_modulation, fast, "compact_modulation default");
             assert!(!path.fused_adaln, "Metal never fused adaLN");
             assert_eq!(
-                path.timestep_rounding,
-                TimestepRounding::UnlessV032Request,
+                path.upstream_rounding,
+                UpstreamRounding::UnlessV032Request,
                 "Metal keeps its unrounded timestep only where v0.32 bytes exist"
             );
             assert!(path.f32_rope_tables, "Metal tables were always F32");
@@ -311,7 +328,7 @@ mod tests {
         assert!(!legacy.compact_modulation);
         assert!(!legacy.fused_adaln);
         assert!(!legacy.f32_rope_tables);
-        assert_eq!(legacy.timestep_rounding, TimestepRounding::Never);
+        assert_eq!(legacy.upstream_rounding, UpstreamRounding::Never);
     }
 
     #[test]
@@ -320,7 +337,7 @@ mod tests {
         assert_eq!(fast.attention, TargetAttention::FastStill);
         assert!(fast.fused_projection && fast.compact_modulation);
         assert!(fast.fused_adaln && fast.f32_rope_tables);
-        assert_eq!(fast.timestep_rounding, TimestepRounding::Always);
+        assert_eq!(fast.upstream_rounding, UpstreamRounding::Always);
     }
 
     fn request(model: &str) -> mold_core::GenerateRequest {
@@ -370,7 +387,7 @@ mod tests {
     /// Metal rounds wherever there are no v0.32 bytes to preserve, in both of
     /// its modes; the legacy path never rounds, the CUDA fast path always does.
     #[test]
-    fn timestep_rounding_is_decided_per_request() {
+    fn upstream_rounding_is_decided_per_request() {
         let v032 = Qwen21RequestShape {
             has_v032_bytes: true,
         };
@@ -386,6 +403,20 @@ mod tests {
         assert!(!Qwen21ExecPath::legacy().rounds_timestep(new));
         assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(v032));
         assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(new));
+        // The rotary angles take the same decision.
+        assert_eq!(Qwen21ExecPath::legacy().rope_angles(new), RopeAngles::V032);
+        assert_eq!(
+            Qwen21ExecPath::cuda_fast().rope_angles(v032),
+            RopeAngles::Upstream
+        );
+        assert_eq!(
+            Qwen21ExecPath::metal(true).rope_angles(v032),
+            RopeAngles::V032
+        );
+        assert_eq!(
+            Qwen21ExecPath::metal(true).rope_angles(new),
+            RopeAngles::Upstream
+        );
     }
 
     #[test]

@@ -879,11 +879,12 @@ impl QwenImage21Engine {
         };
 
         let exec_path = transformer.exec_path();
-        // Upstream rounds `t` through the latent dtype (`P:770,775`); only a
-        // request with archived v0.32 bytes on a path that shipped them keeps
-        // the unrounded value (`Qwen21ExecPath::rounds_timestep`).
-        let rounds_timestep =
-            exec_path.rounds_timestep(super::exec_path::Qwen21RequestShape::of(req));
+        // Upstream rounds `t` through the latent dtype (`P:770,775`) and
+        // evaluates its rotary angles in float32 (`T:673-675`); only a request
+        // with archived v0.32 bytes on a path that shipped them keeps v0.32's
+        // boundaries (`Qwen21ExecPath::rounds_timestep` / `rope_angles`).
+        let request_shape = super::exec_path::Qwen21RequestShape::of(req);
+        let rounds_timestep = exec_path.rounds_timestep(request_shape);
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
@@ -943,12 +944,14 @@ impl QwenImage21Engine {
             .zip(layouts)
             .zip(&decisions)
             .map(|((branch, layout), decision)| {
-                transformer.prepare(
-                    branch,
-                    layout,
-                    condition.as_ref().map(|c| c.latents.clone()),
-                    *decision,
-                )
+                transformer
+                    .prepare(
+                        branch,
+                        layout,
+                        condition.as_ref().map(|c| c.latents.clone()),
+                        *decision,
+                    )
+                    .map(|prepared| prepared.for_request(request_shape))
             })
             .collect::<Result<Vec<_>>>()?;
         for step in 0..total {
@@ -1554,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn timestep_rounding_belongs_to_the_exec_path() {
+    fn upstream_rounding_belongs_to_the_exec_path() {
         use crate::qwen_image21::exec_path::Qwen21ExecPath;
         use crate::qwen_image21::exec_path::Qwen21RequestShape;
         // The legacy path keeps the unrounded value; the CUDA fast path rounds

@@ -580,7 +580,7 @@ fn official_cuda_mode_benchmark() -> Result<()> {
             "compact_modulation": mode.path.compact_modulation,
             "fused_adaln": mode.path.fused_adaln,
             "f32_rope_tables": mode.path.f32_rope_tables,
-            "timestep_rounding": format!("{:?}", mode.path.timestep_rounding),
+            "upstream_rounding": format!("{:?}", mode.path.upstream_rounding),
         },
         "tier": tier,
         "width": width,
