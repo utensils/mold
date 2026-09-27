@@ -9,3 +9,8 @@
   and shows the Qwen Research licence before any Qwen Image 2.1 download —
   including one a render or a held Queue row would start
   ([#1768](https://github.com/utensils/mold/issues/1768)).
+- **Transparent prints reach Photos intact on iPhone and Android.** Photos
+  auto-save and multi-select save now include WebP stills, which they skipped
+  before, and iPhone hands Photos the original file instead of re-encoding it,
+  so a transparent PNG or WebP keeps its alpha. An animated WebP is still never
+  saved as a photo ([#1769](https://github.com/utensils/mold/issues/1769)).
