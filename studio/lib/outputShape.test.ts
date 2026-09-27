@@ -5,6 +5,7 @@ import {
   canonicalFamilyFor,
   outputFamilyLabel,
   resolveOutputShape,
+  restoredCanvasIntent,
   sizeForFamily,
   snapOutputSize,
   SOURCE_FAMILY_ID,
@@ -603,5 +604,39 @@ describe("a canvasless mesh recipe", () => {
       intent: "model-default",
     });
     expect(result.canvasless).toBe(false);
+  });
+});
+
+/*
+ * `canvasIntent` lives in each surface's own component (desktop's
+ * `GenerateView`, mobile's `MobileApp`), never in the persisted form, so a
+ * remount restarts it at "model-default" even though the store-backed form
+ * kept a size the user picked. `restoredCanvasIntent` is what a remounting
+ * view reads to initialize it without re-snapping a chosen size the moment a
+ * `canvas: last-reference` reference is added or reordered.
+ */
+describe("restoredCanvasIntent", () => {
+  it("reads a size matching the recipe default as untouched", () => {
+    expect(
+      restoredCanvasIntent(
+        { width: 1024, height: 1024 },
+        { width: 1024, height: 1024 },
+      ),
+    ).toBe("model-default");
+  });
+
+  it("reads a size the recipe would not have produced as chosen", () => {
+    expect(
+      restoredCanvasIntent(
+        { width: 832, height: 1216 },
+        { width: 1024, height: 1024 },
+      ),
+    ).toBe("manual");
+  });
+
+  it("falls back to model-default when no recipe is in hand yet", () => {
+    expect(restoredCanvasIntent({ width: 832, height: 1216 }, null)).toBe(
+      "model-default",
+    );
   });
 });

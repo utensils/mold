@@ -65,7 +65,7 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import type { CanvasIntent } from "@studio/lib/outputShape";
+import { restoredCanvasIntent, type CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
 import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
@@ -2096,7 +2096,36 @@ function generationProfileHashForHost(hostId: string, model: string): string | n
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
-const canvasIntent = ref<CanvasIntent>("model-default");
+// `restoreComposerDraft` (below) fills this in asynchronously from the saved
+// draft, but the synchronous initial value matters too: a draft saved before
+// `canvasIntent` was persisted carries none, and `restoredCanvasIntent` reads
+// the size already in `form` against the recipe's own default so a chosen
+// size never reads as "model-default" and gets re-snapped by the
+// `canvas: last-reference` watcher below the moment a reference changes.
+const canvasIntent = ref<CanvasIntent>(
+  restoredCanvasIntent(
+    { width: form.width, height: form.height },
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline)?.defaults ?? null,
+  ),
+);
+// True while the last `restoredCanvasIntent` fallback had no recipe to
+// compare against — `restoreComposerDraft` runs before the model inventory
+// loads, so the restored model's recipe (and therefore its default size) is
+// not resolvable yet. Corrected once below, the first time the restored
+// model's recipe resolves; cleared so it never overrides a model the user
+// deliberately picked afterward.
+let canvasIntentPendingRecipeDefault = false;
+watch(selectedGenerationModel, (entry) => {
+  if (!canvasIntentPendingRecipeDefault || !entry) return;
+  if (form.model !== restoredComposerModel.value) return;
+  const recipe = effectiveGenerationRecipe(entry, form.pipeline);
+  if (!recipe) return;
+  canvasIntent.value = restoredCanvasIntent(
+    { width: form.width, height: form.height },
+    recipe.defaults,
+  );
+  canvasIntentPendingRecipeDefault = false;
+});
 
 function flushComposerDraft(): Promise<void> {
   if (composerDraftTimer !== null) clearTimeout(composerDraftTimer);
@@ -2145,7 +2174,23 @@ async function restoreComposerDraft(): Promise<void> {
     restoredComposerModel.value = restored.form.model || null;
     Object.assign(form, restored.form);
     form.fileUnderAutoTag = mobileSettings.autoTagTitle;
-    canvasIntent.value = restored.canvasIntent ?? "model-default";
+    // A draft saved before `canvasIntent` was persisted carries none. Reading
+    // that absence as "model-default" is exactly what let the
+    // `canvas: last-reference` watcher re-snap a size the draft's own
+    // width/height show was chosen the moment a reference changed —
+    // `restoredCanvasIntent` compares against the recipe's own default
+    // instead of assuming nothing was picked. The model inventory has not
+    // loaded yet this early, so the watcher above corrects this once the
+    // restored model's recipe actually resolves.
+    if (restored.canvasIntent) {
+      canvasIntent.value = restored.canvasIntent;
+    } else {
+      canvasIntentPendingRecipeDefault = true;
+      canvasIntent.value = restoredCanvasIntent(
+        { width: form.width, height: form.height },
+        effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline)?.defaults ?? null,
+      );
+    }
   }
   composerDraftError.value = restored.error;
   composerDraftMissing.value = restored.missing;

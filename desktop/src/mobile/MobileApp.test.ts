@@ -23,7 +23,11 @@ import {
   storeCachedHostPresentation,
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
-import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  hunyuan3dRecipe,
+  qwenImage21Recipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
@@ -514,6 +518,54 @@ function serveProfiledRasterModel(): void {
     if (path === "/api/models") return Promise.resolve([profiledRasterModel]);
     return base(callTarget, path, init);
   });
+}
+
+/** Qwen Image 2.1: `reference_images.canvas: last-reference` sizes the
+ *  canvas from the last reference while the canvas intent is model-default. */
+const qwenImage21Model: ModelEntry = {
+  ...model,
+  name: "qwen-image-2.1:bf16",
+  family: "qwen-image21",
+  description: "Qwen Image 2.1",
+  generation_profile: {
+    schema_version: 1,
+    profile_id: "qwen-image21",
+    profile_hash: "qwen21-hash",
+    default_recipe_id: "default",
+    recipes: [qwenImage21Recipe()],
+  },
+};
+
+/** A PNG signature + IHDR declaring `width`×`height`, as raw base64 — the
+ *  minimum a header-reading reference-dimension probe needs. */
+function pngHeader(width: number, height: number): string {
+  const bytes = [
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    (width >>> 24) & 0xff,
+    (width >>> 16) & 0xff,
+    (width >>> 8) & 0xff,
+    width & 0xff,
+    (height >>> 24) & 0xff,
+    (height >>> 16) & 0xff,
+    (height >>> 8) & 0xff,
+    height & 0xff,
+  ];
+  return btoa(String.fromCharCode(...bytes));
 }
 
 function serveMeshModel(entry: ModelEntry = meshModel): void {
@@ -7915,6 +7967,48 @@ describe("MobileApp durable composer", () => {
       expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
         "page",
       );
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  /*
+   * `canvasIntent` lives in this component's own script setup, not in the
+   * persisted draft's `form` — so a draft saved before `canvasIntent` was
+   * persisted (or reconstructed by any other path that hands back a `form`
+   * with no `canvasIntent`) must not read as "model-default" and let the
+   * `canvas: last-reference` watcher re-snap the size the draft's own
+   * width/height already show was chosen the moment a reference changes.
+   */
+  it("keeps a manually chosen canvas when a restored draft carries no canvasIntent", async () => {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) =>
+      path === "/api/models" ? Promise.resolve([qwenImage21Model]) : base(callTarget, path, init),
+    );
+    const draft = newGenerateForm();
+    draft.model = qwenImage21Model.name;
+    draft.family = qwenImage21Model.family;
+    draft.width = 832;
+    draft.height = 1216;
+    const factory = vi.spyOn(mobileDraftModule, "createMobileComposerDraft").mockReturnValue({
+      restore: async () => ({ form: draft, error: "", missing: [] }),
+      save: async () => true,
+      clear: async () => {},
+    });
+    try {
+      wrapper = mountMobileApp();
+      await vi.waitFor(() =>
+        expect(wrapper!.getComponent(MobileLoraControls).props("form").model).toBe(
+          qwenImage21Model.name,
+        ),
+      );
+      const live = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+      expect([live.width, live.height]).toEqual([832, 1216]);
+
+      live.imageAttachments = [pngHeader(1600, 900)];
+      await flushPromises();
+
+      expect([live.width, live.height]).toEqual([832, 1216]);
     } finally {
       factory.mockRestore();
     }
