@@ -1647,9 +1647,11 @@ mod tests {
     #[test]
     fn t2i_forward_is_bitwise_the_frozen_legacy_forward_on_cuda() {
         let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("skipped: no CUDA device");
             return;
         };
         legacy_parity(&device, &[DType::F32, DType::BF16]);
+        eprintln!("CUDA F32 and BF16 legacy parity: bitwise");
     }
 
     #[cfg(feature = "metal")]

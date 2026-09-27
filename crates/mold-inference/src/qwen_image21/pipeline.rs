@@ -56,6 +56,37 @@ pub struct QwenImage21Engine {
     injected_latents: Option<Tensor>,
 }
 
+/// Whether the denoise loop rounds the transformer timestep through the
+/// working dtype as upstream does. It moves pixels (BF16: 900 -> 0.8984375),
+/// so it belongs to the execution path: `Qwen21ExecPath::legacy()` and Metal
+/// keep v0.32's unrounded value. Until the exec path supplies it, every render
+/// keeps v0.32's behaviour.
+const ROUND_TIMESTEP_TO_DTYPE: bool = false;
+
+/// How a denoise begins.
+pub(crate) struct DenoiseStart {
+    pub(crate) seed: u64,
+    /// Upstream's `latents=` (parity tests), else seeded noise.
+    pub(crate) initial_latents: Option<Tensor>,
+    pub(crate) round_timestep_to_dtype: bool,
+}
+
+/// The normalized timestep the transformer receives. Unrounded is v0.32's
+/// `scheduler_timestep / 1000` in f64; rounded is upstream's
+/// `t.to(latents.dtype) / 1000` ([`transformer_timestep`]).
+pub(crate) fn step_timestep(
+    scheduler_timestep: f64,
+    sigma: f64,
+    dtype: DType,
+    round_to_dtype: bool,
+) -> f64 {
+    if round_to_dtype {
+        transformer_timestep(sigma, dtype)
+    } else {
+        scheduler_timestep / 1000.0
+    }
+}
+
 impl QwenImage21Engine {
     pub fn new(
         model_name: String,
@@ -322,7 +353,6 @@ impl QwenImage21Engine {
         Ok((conditional, unconditional))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn denoise(
         progress: &ProgressReporter,
         req: &GenerateRequest,
@@ -330,10 +360,14 @@ impl QwenImage21Engine {
         conditioning: &QwenImage21TextConditioning,
         negative_conditioning: Option<&QwenImage21TextConditioning>,
         compute: (&Device, DType),
-        seed: u64,
-        initial_latents: Option<Tensor>,
+        start: DenoiseStart,
     ) -> Result<(Tensor, usize, usize)> {
         let (device, dtype) = compute;
+        let DenoiseStart {
+            seed,
+            initial_latents,
+            round_timestep_to_dtype,
+        } = start;
         let latent_height = req.height as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
         let latent_width = req.width as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
         let latent_tokens = latent_height * latent_width;
@@ -389,9 +423,12 @@ impl QwenImage21Engine {
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
-            // The diffusion transformer takes normalized `[0, 1]` time,
-            // rounded through the working dtype exactly as upstream divides it.
-            let timestep = transformer_timestep(scheduler.current_sigma(), dtype);
+            let timestep = step_timestep(
+                scheduler.current_timestep(),
+                scheduler.current_sigma(),
+                dtype,
+                round_timestep_to_dtype,
+            );
             let conditional_prediction = conditional.forward(&latents, timestep)?;
             let prediction = if let Some(negative) = &mut negative {
                 progress.checkpoint()?;
@@ -563,8 +600,11 @@ impl QwenImage21Engine {
             &conditioning,
             negative_conditioning.as_ref(),
             (&device, dtype),
-            seed,
-            initial_latents,
+            DenoiseStart {
+                seed,
+                initial_latents,
+                round_timestep_to_dtype: ROUND_TIMESTEP_TO_DTYPE,
+            },
         )?;
         drop(transformer);
         drop(conditioning);
@@ -617,8 +657,11 @@ impl QwenImage21Engine {
             &conditioning,
             negative_conditioning.as_ref(),
             (&loaded.device, loaded.dtype),
-            seed,
-            initial_latents,
+            DenoiseStart {
+                seed,
+                initial_latents,
+                round_timestep_to_dtype: ROUND_TIMESTEP_TO_DTYPE,
+            },
         )?;
         let image = Self::decode_rgba(
             progress,
@@ -788,6 +831,13 @@ mod tests {
             .as_raw()
             .as_slice()
         );
+    }
+
+    #[test]
+    fn timestep_rounding_is_opt_in_and_default_keeps_v032() {
+        assert!(!ROUND_TIMESTEP_TO_DTYPE);
+        assert_eq!(step_timestep(900.0, 0.9, DType::BF16, false), 0.9);
+        assert_eq!(step_timestep(900.0, 0.9, DType::BF16, true), 0.8984375);
     }
 
     #[test]
