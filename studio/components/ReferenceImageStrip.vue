@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   imageInputFormatOfBase64,
   referenceImageMimeTypes,
 } from "../lib/referenceImagesProfile";
 import {
+  pastReorderThreshold,
   REFERENCE_CANVAS_NOTE,
+  referenceDropSide,
+  referenceIndexAtPoint,
+  referenceMoveAnnouncement,
   referenceStripItems,
 } from "../lib/referenceStrip";
 
@@ -13,8 +17,8 @@ import {
  * The ordered reference strip shared by web, desktop and iPhone/Android: one
  * thumbnail per reference, in request order, numbered the way the prompt
  * addresses it ("image 1", "image 2" — `studio/lib/referenceStrip.ts`), with
- * per-picture remove and reorder (drag, or the keyboard-reachable earlier /
- * later buttons), and a "Sets canvas" mark on the picture a
+ * per-picture remove and reorder (a pointer drag, or the keyboard-reachable
+ * earlier / later buttons), and a "Sets canvas" mark on the picture a
  * `canvas: last-reference` recipe sizes the canvas from.
  *
  * Every thumbnail sits on the kit's `.ms-alpha-bed` checkerboard drawn on the
@@ -27,6 +31,11 @@ import {
  * `data-drop-target="references"` so a shell that hit-tests an OS drag can
  * name it (`imageDropRouting`), and an HTML5 file drop is marked handled and
  * handed over as `files` — the surface APPENDS them, never replaces.
+ *
+ * Reordering is Pointer Events only, never HTML5 drag-and-drop: Tauri's
+ * default `dragDropEnabled` can swallow HTML5 DnD inside the webview
+ * (WebView2 on Windows), and an HTML5 drag is how an OS FILE arrives — so the
+ * strip's only HTML5 drop is a file, and a reorder can never read as one.
  */
 export interface ReferenceStripImage {
   /** Raw base64 without a data-URI prefix; empty/null renders a placeholder. */
@@ -86,9 +95,6 @@ const emit = defineEmits<{
   /** Files dropped on the strip, in drop order, to APPEND. */
   files: [files: File[]];
 }>();
-
-/** The MIME a tile drag carries, so a reorder never reads as a file drop. */
-const REORDER_MIME = "application/x-mold-reference-index";
 
 const items = computed(() =>
   referenceStripItems({
@@ -179,40 +185,128 @@ watch(
   },
 );
 
-// ── Drag to reorder, drop to append ───────────────────────────────────────
-const dragFrom = ref<number | null>(null);
-const dragOver = ref<number | null>(null);
-
-function onTileDragStart(index: number, event: DragEvent): void {
-  if (props.touchFriendly || props.disabled) return;
-  dragFrom.value = index;
-  event.dataTransfer?.setData(REORDER_MIME, String(index));
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+// ── Pointer drag to reorder ───────────────────────────────────────────────
+// pointerdown arms; past the threshold the tile captures the pointer and the
+// tile under it is hit-tested on every move; pointerup commits one `move`.
+// Escape, pointercancel and unmount abort. A press that starts on a control
+// belongs to that control. Touch keeps the ‹ › buttons (a finger drag is a
+// scroll there), and so does the phone's `touchFriendly` strip.
+interface PointerDrag {
+  pointerId: number;
+  from: number;
+  startX: number;
+  startY: number;
+  tile: HTMLElement;
+  active: boolean;
 }
-function isReorder(event: DragEvent): boolean {
-  const types = event.dataTransfer?.types;
-  return (
-    dragFrom.value !== null ||
-    (types ? Array.from(types).includes(REORDER_MIME) : false)
+let drag: PointerDrag | null = null;
+/** The lifted picture while a drag is live. */
+const dragFrom = ref<number | null>(null);
+/** The tile the picture would land on. */
+const dragOver = ref<number | null>(null);
+/** The polite live region's sentence after a pointer reorder. */
+const announcement = ref("");
+
+const canDrag = computed(() => !props.touchFriendly && !props.disabled);
+
+function tileIndexAt(x: number, y: number): number | null {
+  const tiles = root.value?.querySelectorAll<HTMLElement>("[data-ris-tile]");
+  if (!tiles) return null;
+  return referenceIndexAtPoint(
+    Array.from(tiles, (tile) => tile.getBoundingClientRect()),
+    x,
+    y,
   );
 }
-function onTileDrop(index: number, event: DragEvent): void {
-  dragOver.value = null;
-  if (!isReorder(event)) return; // a file: let the strip take it
+
+function onTilePointerDown(index: number, event: PointerEvent): void {
+  if (!canDrag.value || drag) return;
+  if (event.pointerType === "touch" || event.button !== 0) return;
+  if ((event.target as Element | null)?.closest("button, a, input")) return;
+  drag = {
+    pointerId: event.pointerId,
+    from: index,
+    startX: event.clientX,
+    startY: event.clientY,
+    tile: event.currentTarget as HTMLElement,
+    active: false,
+  };
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerCancel);
+  window.addEventListener("keydown", onKeyDown);
+}
+
+function onPointerMove(event: PointerEvent): void {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  if (!drag.active) {
+    if (
+      !pastReorderThreshold(
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+      )
+    )
+      return;
+    drag.active = true;
+    dragFrom.value = drag.from;
+    try {
+      drag.tile.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Capture is a nicety; the window listeners still see every move.
+    }
+  }
   event.preventDefault();
-  event.stopPropagation();
-  const raw = event.dataTransfer?.getData(REORDER_MIME);
-  const from = raw && !Number.isNaN(Number(raw)) ? Number(raw) : dragFrom.value;
-  dragFrom.value = null;
-  if (from === null || from === index) return;
-  emit("move", from, index);
+  const over = tileIndexAt(event.clientX, event.clientY);
+  dragOver.value = over === drag.from ? null : over;
 }
-function onTileDragEnd(): void {
+
+function onPointerUp(event: PointerEvent): void {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const { from, active } = drag;
+  const to = dragOver.value;
+  endDrag();
+  if (!active || to === null || to === from) return;
+  announcement.value = referenceMoveAnnouncement(from, to, props.ordinalBase);
+  emit("move", from, to);
+}
+
+function onPointerCancel(event: PointerEvent): void {
+  if (drag && event.pointerId === drag.pointerId) endDrag();
+}
+
+function onKeyDown(event: KeyboardEvent): void {
+  if (event.key !== "Escape" || !drag) return;
+  if (drag.active) event.preventDefault();
+  endDrag();
+}
+
+function endDrag(): void {
+  if (drag) {
+    try {
+      if (drag.tile.hasPointerCapture?.(drag.pointerId))
+        drag.tile.releasePointerCapture(drag.pointerId);
+    } catch {
+      // Already released (the element left the DOM).
+    }
+  }
+  drag = null;
   dragFrom.value = null;
   dragOver.value = null;
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerCancel);
+  window.removeEventListener("keydown", onKeyDown);
 }
+
+onBeforeUnmount(endDrag);
+
+function dropSideClass(index: number): string | null {
+  if (dragOver.value !== index || dragFrom.value === null) return null;
+  return `ris__tile--over-${referenceDropSide(dragFrom.value, index)}`;
+}
+
+// ── Drop files to append ──────────────────────────────────────────────────
 function onStripDrop(event: DragEvent): void {
-  dragOver.value = null;
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length === 0) return;
   event.preventDefault();
@@ -236,18 +330,19 @@ function onStripDrop(event: DragEvent): void {
         v-for="item in items"
         :key="`${item.index}-${images[item.index]?.data?.slice(-16) ?? ''}`"
         class="ris__tile"
-        :class="{
-          'ris__tile--over': dragOver === item.index,
-          'ris__tile--canvas': item.setsCanvas,
-        }"
-        :draggable="touchFriendly || disabled ? 'false' : 'true'"
+        :class="[
+          {
+            'ris__tile--over': dragOver === item.index,
+            'ris__tile--lifted': dragFrom === item.index,
+            'ris__tile--canvas': item.setsCanvas,
+          },
+          dropSideClass(item.index),
+        ]"
+        data-ris-tile
+        :data-reorderable="canDrag || undefined"
         :data-test="tid(`reference-tile-${item.index}`)"
         :data-sets-canvas="item.setsCanvas || undefined"
-        @dragstart="onTileDragStart(item.index, $event)"
-        @dragend="onTileDragEnd"
-        @dragover.prevent="dragOver = item.index"
-        @dragleave="dragOver = null"
-        @drop="onTileDrop(item.index, $event)"
+        @pointerdown="onTilePointerDown(item.index, $event)"
       >
         <div class="ris__thumb">
           <img
@@ -350,6 +445,14 @@ function onStripDrop(event: DragEvent): void {
       </li>
     </ol>
     <p
+      class="ris__sr"
+      role="status"
+      aria-live="polite"
+      data-test="reference-announce"
+    >
+      {{ announcement }}
+    </p>
+    <p
       v-if="setsCanvas && images.length > 0"
       class="ris__note"
       data-test="reference-canvas-note"
@@ -393,8 +496,24 @@ function onStripDrop(event: DragEvent): void {
   border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep, transparent);
 }
+/* A mouse/pen press on the tile body (not its controls) drags it. */
+.ris__tile[data-reorderable] {
+  cursor: grab;
+  user-select: none;
+}
+.ris__tile--lifted {
+  cursor: grabbing;
+  opacity: 0.55;
+}
 .ris__tile--over {
   border-color: var(--mold-blue, #b45309);
+}
+/* The insertion mark sits in the 8px gap on the side the picture lands. */
+.ris__tile--over-before {
+  box-shadow: -4px 0 0 -1px var(--mold-blue, #b45309);
+}
+.ris__tile--over-after {
+  box-shadow: 4px 0 0 -1px var(--mold-blue, #b45309);
 }
 .ris__tile--canvas {
   border-color: color-mix(in srgb, var(--mold-blue, #b45309) 60%, transparent);
@@ -550,6 +669,14 @@ function onStripDrop(event: DragEvent): void {
 }
 .ris__add-glyph {
   font-size: var(--mold-fs-md, 1rem);
+}
+.ris__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .ris__note {
   margin: 0;
