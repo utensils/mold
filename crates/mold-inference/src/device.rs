@@ -7259,12 +7259,16 @@ mod tests {
     #[cfg(not(feature = "metal"))]
     #[test]
     fn vram_load_delta_is_saturating_sub() {
-        // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0
-        // for any N. This locks in the saturating semantic — a flaky reading
-        // (post < pre) must never panic or wrap.
-        assert_eq!(vram_load_delta(0, 0), 0);
-        assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
+        // A baseline above any possible reading saturates to zero on every
+        // build: a flaky reading (post < pre) must never panic or wrap.
         assert_eq!(vram_load_delta(0, u64::MAX), 0);
+        // Without CUDA, vram_in_use_bytes(0) == 0, so every baseline gives 0.
+        // A CUDA build run on a machine with a visible GPU reads real usage,
+        // so only the saturating half is portable there.
+        if !cfg!(feature = "cuda") {
+            assert_eq!(vram_load_delta(0, 0), 0);
+            assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
+        }
     }
 
     // --- estimate_peak_memory: single-file convention must not double-count ---
@@ -8505,18 +8509,34 @@ mod qwen_image21_sequence_sizing_tests {
                 >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2)
                     - qwen_image21_prefix_cache_bytes(one, 2, 2)
         );
-        // The L40S fit: denoise workspace for 3 and 10 references (recomputed
-        // prefix, BF16) covers the measured 2,865 and 7,985 MiB, within 25%.
+        // The L40S evidence, two samplers. The reference renders' phase
+        // samples (3 and 10 references, recomputed prefix, BF16 math) held
+        // 2,865 and 7,985 MiB of denoise workspace: the estimate must never
+        // admit below them. The CUDA harness's 250 us background sampler,
+        // which catches the in-forward peak a phase sample misses, measured
+        // the same joint-row forward at 3,690,987,520 B for 16,465 tokens
+        // under math and 3,154,116,608 B for 16,593 under FlashAttention
+        // (`docs/qualification/qwen-image-2.1-cuda-performance.json`); the
+        // estimate stays within 25% of that per-token rate at the reference
+        // sequence's own length, under whichever backend this build runs.
         let mib = |bytes: u64| bytes as f64 / (1u64 << 20) as f64;
-        for (count, measured) in [(3usize, 2_865.0), (10, 7_985.0)] {
+        let harness_rate = match crate::attention::AttentionBackend::resolve_effective_for(
+            crate::attention::AttentionPolicy::FastStill,
+        ) {
+            crate::attention::AttentionBackend::Math => 3_690_987_520.0 / 16_465.0,
+            crate::attention::AttentionBackend::Flash => 3_154_116_608.0 / 16_593.0,
+        };
+        for (count, phase_sampled) in [(3usize, 2_865.0), (10, 7_985.0)] {
             let shape =
                 QwenImage21SequenceShape::for_request(1024, 1024, &vec![(1536, 1024); count]);
             let estimate = mib(qwen_image21_reference_activation_bytes(
                 base, shape, 2, 1, 2,
             ));
+            let harness = mib((harness_rate * shape.joint_tokens() as f64) as u64);
             assert!(
-                estimate >= measured && estimate <= measured * 1.25,
-                "{count} references: {estimate:.0} MiB vs {measured} measured"
+                estimate >= phase_sampled && estimate >= harness && estimate <= harness * 1.25,
+                "{count} references: {estimate:.0} MiB vs {phase_sampled} phase-sampled, \
+                 {harness:.0} at the harness rate"
             );
         }
         // The encode phase grows with the references and stays bounded.

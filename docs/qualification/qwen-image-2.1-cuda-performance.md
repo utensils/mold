@@ -131,6 +131,25 @@ case and 3.1–3.2 GB at 2K (legacy: 0.91 / 0.94 / 3.7 GB).
   exact and the fox render keeps its composition and fur detail. Pixels move
   relative to v0.32, as FastStill accepts.
 
+#### Re-verified after merging reference conditioning, transparency and LoRA
+
+Branch `5a0a7675` (the M4+M6 merge), `mold run --local` on GPU 2, cold
+process, `nvidia-smi` sampled every 100 ms:
+
+| Render | Denoise | Peak (MiB, process) | Result |
+|---|---:|---:|---|
+| `MOLD_ATTN=math MOLD_CONV=im2col`, 1024² s210001 | 38.2 s | 41,975 | PNG `f1fa6bc2…` — identical to v0.32 |
+| same, s210002 | 38.4 s | 41,975 | PNG `0b0a1d9b…` — identical |
+| same, 1344x768 g4 + negative, s7 | 74.6 s | 41,751 | PNG `518bd8e7…` — identical |
+| fast, 1024² s210001 | **15.2 s** | 34,683 | gate ≤ 22 s met |
+| fast, 1 reference (fox), 1024² | 17.3 s | 35,323 | fox from the reference in front of a teal storefront |
+| fast, 3 references, g4 + negative | 167.4 s | 35,803 | fox, bakery and bicycle composed; lettering exact |
+| fast, `--transparent` teapot | 15.4 s | 34,523 | RGBA; background alpha 0, subject 255 |
+
+Every image was viewed. The three-reference guided render recomputes its
+16.8k-token prefix every step in both branches (the request-only cache rule
+retains nothing past the legacy bound), which is why it costs 4.2 s/step.
+
 ### Batched CFG (A8): not adopted
 
 `official_cuda_cfg_batch_probe` measures the upper bound of batching both
