@@ -3444,10 +3444,20 @@ fn should_auto_park_text_encoder(
     pending_pushes_eager_over_budget: bool,
     backend: GpuBackend,
     family: &str,
+    qwen21_encodes_on_device: bool,
 ) -> bool {
     let is_ltx2 = matches!(family, "ltx2" | "ltx-2" | "ltx2.3");
     supports_text_encoder_cpu
         && (under_memory_pressure || pending_pushes_eager_over_budget)
+        // Qwen Image 2.1's own eager plan (`text_encoder_residency::plan`)
+        // already answered the pressure: the encoder encodes on the card and
+        // is parked or dropped before the denoise workspace and the decode
+        // peak it would share the card with. Placing it on the CPU instead
+        // turns a 0.1 s GPU encode into a 25 s CPU load-and-encode, and
+        // changes the conditioning's arithmetic (an F32 CPU encode is not
+        // the BF16 GPU one), so `MOLD_ATTN=math MOLD_CONV=im2col` would no
+        // longer reproduce v0.32's bytes.
+        && !qwen21_encodes_on_device
         // CPU and Metal allocations consume the same unified-memory pool.
         // Parking LTX-2 Gemma on the CPU therefore saves no capacity, while
         // its packed ConvRot forward is substantially slower there. The
@@ -3546,12 +3556,20 @@ fn build_plan(
         .eager_peak_memory_bytes
         .saturating_add(pending_encoder_bytes)
         > device.available_vram_bytes.saturating_mul(9) / 10;
+    let qwen21_encodes_on_device = context.family == "qwen-image21"
+        && crate::memory_preflight::qwen_image21_eager_plan(
+            context.paths,
+            hint,
+            Some(device_budget),
+        )
+        .is_some_and(|plan| plan.choice.on_gpu());
     let auto_cpu_text = should_auto_park_text_encoder(
         context.capabilities.supports_text_encoder_cpu,
         initial_memory.under_memory_pressure,
         pending_pushes_eager_over_budget,
         device.backend,
         context.family,
+        qwen21_encodes_on_device,
     );
 
     let mut placements = context
@@ -6333,6 +6351,7 @@ mod tests {
             false,
             GpuBackend::Metal,
             "ltx2",
+            false,
         ));
         assert!(should_auto_park_text_encoder(
             true,
@@ -6340,6 +6359,7 @@ mod tests {
             false,
             GpuBackend::Cuda,
             "ltx2",
+            false,
         ));
         assert!(should_auto_park_text_encoder(
             true,
@@ -6347,6 +6367,30 @@ mod tests {
             false,
             GpuBackend::Metal,
             "flux2",
+            false,
+        ));
+    }
+
+    /// Under pressure a Qwen Image 2.1 encoder stays on the card whenever the
+    /// family's own eager plan encodes it there (and parks or drops it for
+    /// the denoise); without that plan the generic pressure rule applies.
+    #[test]
+    fn qwen21_encoder_follows_its_eager_plan_under_pressure() {
+        assert!(!should_auto_park_text_encoder(
+            true,
+            true,
+            false,
+            GpuBackend::Cuda,
+            "qwen-image21",
+            true,
+        ));
+        assert!(should_auto_park_text_encoder(
+            true,
+            true,
+            false,
+            GpuBackend::Cuda,
+            "qwen-image21",
+            false,
         ));
     }
 
