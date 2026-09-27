@@ -4537,6 +4537,16 @@ mod tests {
                 row["source_relation"],
                 "{model} source_relation"
             );
+            // Optional per-row keys: pinned exactly when a row names them,
+            // absent from the wire when it does not.
+            let wire = serde_json::to_value(&actual).unwrap();
+            for key in ["canvas", "formats"] {
+                assert_eq!(
+                    wire.get(key),
+                    row.get(key),
+                    "{model} {key} (absent in the row means absent on the wire)"
+                );
+            }
             // The recipe every client reads must carry that same block.
             let profile = resolve_generation_profile(input(model, family));
             assert_eq!(

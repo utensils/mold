@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use mold_core::generation_profile::{
     resolution_qualification_record, AdapterControlProfile, AspectGroup, ControlMode,
     FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
-    GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
-    MeshCapabilitiesProfile, MeshInputProfile, MeshMattingControlProfile, MeshWorkflowMode,
-    NamedViewsProfile, OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance,
-    PromptCapabilitiesProfile, PromptRequirement, ProvenanceKind, RecipeSelector,
-    ReferenceImagesProfile, ReferenceSourceRelation, ResolutionDomain, ResolutionPreset,
-    ResolutionProfile, TemporalProfile, WanRecipeCapabilitiesProfile,
+    GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, ImageInputFormat,
+    IntegerControl, MeshCapabilitiesProfile, MeshInputProfile, MeshMattingControlProfile,
+    MeshWorkflowMode, NamedViewsProfile, OffBucketPolicy, OutputCapabilitiesProfile,
+    ProfileProvenance, PromptCapabilitiesProfile, PromptRequirement, ProvenanceKind,
+    RecipeSelector, ReferenceCanvasRule, ReferenceImagesProfile, ReferenceSourceRelation,
+    ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
+    TransparencyCapabilitiesProfile, WanRecipeCapabilitiesProfile,
 };
 use mold_core::manifest::known_manifests;
 use mold_core::{
@@ -130,7 +131,10 @@ fn render_typescript_contract() -> String {
     declaration!(MeshCapabilitiesProfile);
     declaration!(SourceImageCapability);
     declaration!(ReferenceSourceRelation);
+    declaration!(ReferenceCanvasRule);
+    declaration!(ImageInputFormat);
     declaration!(ReferenceImagesProfile);
+    declaration!(TransparencyCapabilitiesProfile);
     declaration!(Scheduler);
     declaration!(GenerationCapabilitiesProfile);
     declaration!(GenerationRecipeProfile);
