@@ -23,6 +23,23 @@ fn main() {
             .write(output)
             .expect("write Comfy INT8 PTX bindings");
 
+        println!("cargo::rerun-if-changed=src/qk_norm_rope/qk_norm_rope.cu");
+        cudaforge::KernelBuilder::new()
+            .source_files(vec!["src/qk_norm_rope/qk_norm_rope.cu"])
+            .arg("-std=c++17")
+            .arg("-O3")
+            .arg("-U__CUDA_NO_HALF_OPERATORS__")
+            .arg("-U__CUDA_NO_HALF_CONVERSIONS__")
+            .arg("-U__CUDA_NO_BFLOAT16_OPERATORS__")
+            .arg("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
+            .build_ptx()
+            .expect("compile fused q/k norm + rope")
+            .write(
+                PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"))
+                    .join("qk_norm_rope_cuda.rs"),
+            )
+            .expect("write fused q/k norm + rope PTX bindings");
+
         println!("cargo::rerun-if-changed=src/stable_diffusion/vae/group_norm.cu");
         cudaforge::KernelBuilder::new()
             .source_files(vec!["src/stable_diffusion/vae/group_norm.cu"])

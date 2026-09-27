@@ -352,23 +352,32 @@ impl Attention {
             // the whole projection. RoPE still accumulates in F32 as upstream
             // (`apply_rotary_emb_qwen` rotates in float32). Metal's shipped
             // path and the CUDA fast path (`Qwen21ExecPath::fused_projection`).
+            // `mold_candle::qk_norm_rope` IS this composite (rms_norm, BHSD
+            // transpose, F32 rope_i, narrow) off CUDA, and one fused kernel,
+            // bitwise the composite, on CUDA.
+            let (cos, sin) = (
+                rope_cos.to_dtype(DType::F32)?,
+                rope_sin.to_dtype(DType::F32)?,
+            );
             let project = |linear: &Linear, weight: &Tensor| -> Result<Tensor> {
-                let xs = linear.forward(hidden_states)?;
-                let normalized = candle_nn::ops::rms_norm(
-                    &xs.reshape((batch * sequence * self.heads, self.head_dim))?,
-                    weight,
+                let xs = linear.forward(hidden_states)?.reshape((
+                    batch,
+                    sequence,
+                    self.heads,
+                    self.head_dim,
+                ))?;
+                let weight = if weight.dtype() == xs.dtype() {
+                    weight.clone()
+                } else {
+                    weight.to_dtype(xs.dtype())?
+                };
+                Ok(mold_candle::qk_norm_rope::rms_norm_rope_i(
+                    &xs,
+                    &weight,
+                    &cos,
+                    &sin,
                     self.eps as f32,
-                )?
-                .reshape((batch, sequence, self.heads, self.head_dim))?
-                .transpose(1, 2)?
-                .contiguous()?;
-                candle_nn::rotary_emb::rope_i(
-                    &normalized.to_dtype(DType::F32)?,
-                    &rope_cos.to_dtype(DType::F32)?.contiguous()?,
-                    &rope_sin.to_dtype(DType::F32)?.contiguous()?,
-                )?
-                .to_dtype(hidden_states.dtype())
-                .map_err(Into::into)
+                )?)
             };
             (
                 project(&self.to_q, &self.norm_q)?,
