@@ -495,9 +495,21 @@ fn model_specific_hold_message_at(
     ))
 }
 
+/// Clear only `model_name`'s hold state.
+///
+/// Scoped to one model rather than the whole map: `cargo test` runs this
+/// crate's tests on several threads at once, and every test that exercises
+/// this module already picks a model name nothing else in the crate uses, so
+/// clearing by name is enough to make each test hermetic without a shared
+/// lock (which a `#[tokio::test]` caller in `gpu_worker.rs` could not hold
+/// across its awaits without tripping `clippy::await_holding_lock`). A
+/// whole-map `.clear()` here used to wipe another thread's in-progress model
+/// out from under it — `three_model_specific_failures_hold_only_that_model_on_that_device`
+/// (this module) and `three_model_specific_failures_hold_the_model_and_leave_the_device_schedulable`
+/// (`gpu_worker.rs`) raced exactly this way.
 #[cfg(test)]
-pub(crate) fn clear_model_specific_failures_for_tests() {
-    MODEL_DEVICE_FAILURES.write().unwrap().clear();
+pub(crate) fn clear_model_specific_failures_for_tests(model_name: &str) {
+    MODEL_DEVICE_FAILURES.write().unwrap().remove(model_name);
 }
 
 #[cfg(test)]
@@ -2966,7 +2978,7 @@ mod tests {
     /// the device — and every other model on it — alone.
     #[test]
     fn three_model_specific_failures_hold_only_that_model_on_that_device() {
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-scope-a");
         let now = Instant::now();
 
         assert!(!record_model_specific_failure_at("hold-scope-a", 0, now));
@@ -2996,13 +3008,13 @@ mod tests {
             "an unheld model is not refused"
         );
 
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-scope-a");
     }
 
     /// A second GPU is somewhere to route to, not a second refusal.
     #[test]
     fn a_model_held_on_one_gpu_still_runs_on_the_other() {
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-routing-a");
         let now = Instant::now();
         for _ in 0..3 {
             record_model_specific_failure_at("hold-routing-a", 0, now);
@@ -3017,14 +3029,14 @@ mod tests {
             "GPU 1 is free of the hold, so the job routes there instead of being refused"
         );
 
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-routing-a");
     }
 
     /// The hold has the device breaker's own sixty-second shape, and it
     /// clears itself.
     #[test]
     fn a_model_hold_clears_when_its_cooldown_expires() {
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-cooldown-a");
         let failed_at = Instant::now() - MODEL_FAILURE_COOLDOWN - Duration::from_secs(1);
         for _ in 0..3 {
             record_model_specific_failure_at("hold-cooldown-a", 0, failed_at);
@@ -3042,13 +3054,13 @@ mod tests {
              worker breaker's does"
         );
 
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-cooldown-a");
     }
 
     /// Consecutive means consecutive: a render that worked clears the count.
     #[test]
     fn a_successful_render_clears_the_model_strikes() {
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-success-a");
         let now = Instant::now();
         record_model_specific_failure_at("hold-success-a", 0, now);
         record_model_specific_failure_at("hold-success-a", 0, now);
@@ -3060,14 +3072,20 @@ mod tests {
         );
         assert!(model_specific_hold_ordinals_at("hold-success-a", now).is_empty());
 
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-success-a");
     }
 
     /// A held pair is a routing fact for every caller that already filtered
     /// on the OOM cooldown.
     #[test]
     fn a_model_hold_joins_the_ordinals_a_plan_must_avoid() {
-        clear_model_specific_failures_for_tests();
+        // `clear_model_cuda_ooms_for_tests` below wipes the WHOLE CUDA-OOM
+        // map, so it must serialize against every other test that mutates
+        // that map through the same lock — without this guard it could land
+        // between a locked OOM test's `record_model_cuda_oom` and its own
+        // assertion.
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
+        clear_model_specific_failures_for_tests("hold-filter-a");
         clear_model_cuda_ooms_for_tests();
         for _ in 0..3 {
             record_model_specific_failure("hold-filter-a", 1);
@@ -3076,7 +3094,7 @@ mod tests {
         assert!(failed_ordinals_for_model("hold-filter-a").contains(&1));
         assert!(failed_ordinals_for_model("hold-filter-b").is_empty());
 
-        clear_model_specific_failures_for_tests();
+        clear_model_specific_failures_for_tests("hold-filter-a");
         clear_model_cuda_ooms_for_tests();
     }
 
