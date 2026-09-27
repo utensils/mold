@@ -339,10 +339,12 @@ impl QwenImage21JointLayout {
         coords
     }
 
+    #[cfg(test)]
     pub(crate) fn segments(&self) -> &[JointSegment] {
         &self.segments
     }
 
+    #[cfg(test)]
     pub(crate) fn total_len(&self) -> usize {
         self.total_len
     }
@@ -366,6 +368,7 @@ impl QwenImage21JointLayout {
         self.total_len - self.prefix_len
     }
 
+    #[cfg(test)]
     pub(crate) fn key_valid(&self) -> Option<&KeyValid> {
         self.key_valid.as_ref()
     }

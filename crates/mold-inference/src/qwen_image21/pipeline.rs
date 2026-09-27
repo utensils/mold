@@ -326,15 +326,24 @@ impl QwenImage21Engine {
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
         let denoise_start = Instant::now();
-        let mut conditional = transformer.prepare_t2i(conditioning, latent_height, latent_width);
+        let mut branch_prefixes = vec![conditioning.sequence_length()];
+        branch_prefixes.extend(negative_conditioning.map(|c| c.sequence_length()));
+        let decisions = super::PrefixCachePolicy::resolve_for_device(
+            &branch_prefixes,
+            conditioning.batch_size(),
+            dtype,
+            device,
+        );
+        let mut conditional =
+            transformer.prepare_t2i(conditioning, latent_height, latent_width, decisions[0])?;
         let mut negative = negative_conditioning
-            .map(|conditioning| transformer.prepare_t2i(conditioning, latent_height, latent_width));
-        if conditioning.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS
-            || negative_conditioning
-                .is_some_and(|c| c.sequence_length() > super::PREFIX_CACHE_MAX_TOKENS)
-        {
+            .map(|conditioning| {
+                transformer.prepare_t2i(conditioning, latent_height, latent_width, decisions[1])
+            })
+            .transpose()?;
+        if decisions.contains(&super::PrefixCacheDecision::Recompute) {
             progress.info(
-                "Long text prefixes render in full without KV caching (512-token retention limit).",
+                "Qwen Image 2.1 recomputes its prompt prefix every step (prefix KV cache off or over budget).",
             );
         }
         for step in 0..total {

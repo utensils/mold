@@ -396,6 +396,7 @@ pub enum RuntimeSemanticVariable {
     Qwen2Variant,
     Qwen3Variant,
     QwenImage21Dtype,
+    QwenImage21KvCache,
     QwenFp8Cache,
     QwenQMatMul,
     ReserveVramMb,
@@ -1092,6 +1093,9 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
         "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
         "MOLD_QWEN_IMAGE21_DTYPE" => RuntimeSemanticVariable::QwenImage21Dtype,
+        // Retaining the prefix K/V moves pixels (upstream: cached and uncached
+        // are not bit-identical in BF16), so each resolved mode is its own class.
+        "MOLD_QWEN_IMAGE21_KV_CACHE" => RuntimeSemanticVariable::QwenImage21KvCache,
         "MOLD_QWEN_FP8_CACHE" => RuntimeSemanticVariable::QwenFp8Cache,
         "MOLD_QWEN_QMATMUL" => RuntimeSemanticVariable::QwenQMatMul,
         "MOLD_RESERVE_VRAM_MB" => RuntimeSemanticVariable::ReserveVramMb,
@@ -1134,6 +1138,12 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             CanonicalRuntimeValue::Text(format!(
                 "{:?}",
                 mold_inference::qwen_image21::metal_transformer_dtype(value)
+            ))
+        }
+        value if variable == RuntimeSemanticVariable::QwenImage21KvCache => {
+            CanonicalRuntimeValue::Text(format!(
+                "{:?}",
+                mold_inference::qwen_image21::parse_prefix_cache_mode(value)
             ))
         }
         None => CanonicalRuntimeValue::Unset,
@@ -9098,6 +9108,22 @@ mod tests {
         let f32 = runtime_semantic_setting(name, Some("f32"));
         assert_ne!(f32, default);
         assert_eq!(f32, runtime_semantic_setting(name, Some(" FP32 ")));
+    }
+
+    #[test]
+    fn qwen_image21_kv_cache_identity_uses_the_engine_parser() {
+        let name = "MOLD_QWEN_IMAGE21_KV_CACHE";
+        let default = runtime_semantic_setting(name, None);
+        for value in ["auto", " AUTO ", "", "invalid"] {
+            assert_eq!(runtime_semantic_setting(name, Some(value)), default);
+        }
+        let on = runtime_semantic_setting(name, Some("on"));
+        let off = runtime_semantic_setting(name, Some("off"));
+        assert_ne!(on, default);
+        assert_ne!(off, default);
+        assert_ne!(on, off);
+        assert_eq!(on, runtime_semantic_setting(name, Some("1")));
+        assert_eq!(off, runtime_semantic_setting(name, Some(" OFF ")));
     }
 
     #[test]
