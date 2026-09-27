@@ -37,6 +37,9 @@ export interface AdvancedCountParams {
    * The identity photo itself is primary-form media and never counts, the
    * same way source images stopped counting when they moved there. */
   identity?: number;
+  /** The Transparent background toggle is on AND the recipe offers it.
+   * Counts once. */
+  transparentBackground?: boolean;
 }
 
 /** Count of active advanced fields for the "N on" / "N active" badge. */
@@ -54,6 +57,7 @@ export function advancedActiveCount(p: AdvancedCountParams): number {
     (p.videoNonDefault ? 1 : 0) +
     (p.videoSuite ? 1 : 0) +
     Math.max(0, p.wanRecipe ?? 0) +
-    Math.max(0, p.identity ?? 0)
+    Math.max(0, p.identity ?? 0) +
+    (p.transparentBackground ? 1 : 0)
   );
 }

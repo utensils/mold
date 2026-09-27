@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { pipelineForSettingsReuse } from "./outputReuse";
+import {
+  pipelineForSettingsReuse,
+  transparentBackgroundForSettingsReuse,
+} from "./outputReuse";
 
 describe("pipelineForSettingsReuse", () => {
   it("does not turn a runtime-resolved pipeline into an authored override", () => {
@@ -32,5 +35,25 @@ describe("pipelineForSettingsReuse", () => {
         pipeline_requested: null,
       }),
     ).toBeNull();
+  });
+});
+
+describe("transparentBackgroundForSettingsReuse", () => {
+  it("restores the toggle a transparent print was made with", () => {
+    expect(
+      transparentBackgroundForSettingsReuse({ transparent_background: true }),
+    ).toBe(true);
+  });
+
+  it("leaves it off for every other print, including an alpha reference edit", () => {
+    // `has_alpha` is a fact about the FILE (a transparent reference keeps its
+    // alpha with the toggle off), not a setting the user chose.
+    expect(transparentBackgroundForSettingsReuse({ has_alpha: true })).toBe(
+      false,
+    );
+    expect(transparentBackgroundForSettingsReuse({})).toBe(false);
+    expect(
+      transparentBackgroundForSettingsReuse({ transparent_background: null }),
+    ).toBe(false);
   });
 });

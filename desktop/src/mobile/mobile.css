@@ -3269,8 +3269,28 @@ button:disabled {
 }
 
 .gallery-viewer-image-transform {
+  position: relative;
   transform-origin: center;
   will-change: transform;
+  /* The alpha bed below sizes itself against this plane. */
+  container-type: size;
+}
+
+/* The checkerboard behind a transparent print (`showsAlphaBed`), sized to the
+   picture `object-fit: contain` draws — the smaller of the plane's width and
+   its height scaled by the print's own aspect — and centred, so the bars
+   beside a letterboxed picture stay the plain stage. */
+.gallery-viewer-alpha-bed {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(100cqw, calc(100cqh * var(--alpha-w) / var(--alpha-h)));
+  height: min(100cqh, calc(100cqw * var(--alpha-h) / var(--alpha-w)));
+  pointer-events: none;
+}
+
+.gallery-viewer-media--over-bed {
+  position: relative;
 }
 
 .gallery-viewer-stage.is-image-zoomed .gallery-viewer-nav {

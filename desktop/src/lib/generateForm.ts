@@ -52,7 +52,15 @@ import {
 } from "@studio/lib/fileUnder";
 import { defaultVideoFps } from "@studio/lib/videoDuration";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
-import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
+import {
+  pipelineForSettingsReuse,
+  transparentBackgroundForSettingsReuse,
+} from "@studio/lib/outputReuse";
+import {
+  coerceFormatForTransparency,
+  transparencyControl,
+  transparencyRequestFields,
+} from "@studio/lib/transparency";
 import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
 import { findInstalledModel } from "./generateModels";
 import {
@@ -338,6 +346,13 @@ export interface GenerateForm {
    * authority — the `identityWeight` rule, for the same reason.
    */
   referenceWeight: number | null;
+  /**
+   * The Transparent background toggle. Kept while a model that does not
+   * advertise it is selected (it parks) and sent only where the recipe
+   * snapshot carries an adjustable `capabilities.transparency`. Absent on a
+   * snapshot saved before the field existed, which reads as off.
+   */
+  transparentBackground?: boolean;
   /** How a source image that doesn't match width×height maps onto the canvas.
    * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
   sourceFit: SourceFitPolicy;
@@ -445,6 +460,7 @@ export function newGenerateForm(): GenerateForm {
     imageAttachments: [],
     exclusiveWell: null,
     referenceWeight: null,
+    transparentBackground: false,
     sourceFit: defaultSourceFitPolicy(),
     maskImage: null,
     controlImage: null,
@@ -1116,7 +1132,15 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       caps.forcesBatchSizeOne || referencesLockBatchSize(caps.sourceImageMode, wells)
         ? 1
         : form.batchSize,
-    output_format: form.outputFormat,
+    // JPEG has no alpha channel: while a transparent background is requested
+    // the format moves to the recipe's first alpha format.
+    output_format: coerceFormatForTransparency(
+      form.outputFormat,
+      transparencyControl(caps),
+      form.transparentBackground,
+    ).format,
+    // Only `true` travels, and only where the recipe advertises the toggle.
+    ...transparencyRequestFields(form.transparentBackground, transparencyControl(caps)),
   };
 
   const namedViews = serializeNamedViews(
@@ -1552,6 +1576,9 @@ export function applyMetadataToForm(
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
   form.videoOnly = metadata.video_only === true;
   form.pipeline = pipelineForSettingsReuse(metadata);
+  // The REQUEST's toggle, never `has_alpha`: an edit of a transparent
+  // reference keeps its alpha with the toggle off.
+  form.transparentBackground = transparentBackgroundForSettingsReuse(metadata);
   form.icLoraControl = metadata.ic_lora_control ?? null;
   form.retakeRange = metadata.retake_range ?? null;
   form.spatialUpscale = metadata.spatial_upscale ?? null;
@@ -1693,6 +1720,7 @@ export function applyRequestToForm(
     : null;
   form.identityWeight = request.id_weight ?? null;
   form.referenceWeight = request.reference_weight ?? null;
+  form.transparentBackground = request.transparent_background === true;
   form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.namedViews = deserializeNamedViews(request.references);

@@ -1,4 +1,6 @@
-/** Pixel dimensions decoded directly from a PNG/JPEG base64 header. */
+import type { ImageInputFormat } from "./generated/generationProfileV1";
+
+/** Pixel dimensions decoded directly from a PNG/JPEG/WebP base64 header. */
 export interface ImageDimensions {
   width: number;
   height: number;
@@ -108,16 +110,86 @@ function jpegDimensions(bytes: Uint8Array): ImageDimensions | null {
   return null;
 }
 
+function u16le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset]! + bytes[offset + 1]! * 0x100;
+}
+
+function u24le(bytes: Uint8Array, offset: number): number {
+  return u16le(bytes, offset) + bytes[offset + 2]! * 0x10000;
+}
+
+function fourcc(bytes: Uint8Array, offset: number): string {
+  return String.fromCharCode(...bytes.subarray(offset, offset + 4));
+}
+
 /**
- * Decode PNG/JPEG dimensions from raw base64 or a data URL.
+ * WebP (`RIFF....WEBP`, the container `mold_core::validation::
+ * sniff_image_input_format` accepts for a recipe advertising `webp`
+ * references). The first chunk carries the canvas: `VP8X` (extended — alpha,
+ * EXIF, ICC) stores it as 24-bit minus-one values; `VP8L` (lossless) packs
+ * 14-bit minus-one values after its 0x2f signature; `VP8 ` (lossy) stores
+ * 14-bit values after the 0x9d012a start code.
+ */
+function webpDimensions(bytes: Uint8Array): ImageDimensions | null {
+  if (
+    bytes.length < 30 ||
+    fourcc(bytes, 0) !== "RIFF" ||
+    fourcc(bytes, 8) !== "WEBP"
+  ) {
+    return null;
+  }
+  const chunk = fourcc(bytes, 12);
+  let width = 0;
+  let height = 0;
+  if (chunk === "VP8X") {
+    width = u24le(bytes, 24) + 1;
+    height = u24le(bytes, 27) + 1;
+  } else if (chunk === "VP8L") {
+    if (bytes[20] !== 0x2f) return null;
+    const bits =
+      bytes[21]! +
+      bytes[22]! * 0x100 +
+      bytes[23]! * 0x10000 +
+      bytes[24]! * 0x1000000;
+    width = (bits & 0x3fff) + 1;
+    height = ((bits >>> 14) & 0x3fff) + 1;
+  } else if (chunk === "VP8 ") {
+    if (bytes[23] !== 0x9d || bytes[24] !== 0x01 || bytes[25] !== 0x2a) {
+      return null;
+    }
+    width = u16le(bytes, 26) & 0x3fff;
+    height = u16le(bytes, 28) & 0x3fff;
+  } else {
+    return null;
+  }
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** The containers a caller that names none accepts: `source_image`, masks,
+ * keyframes and identity photos are PNG/JPEG at admission. */
+const DEFAULT_FORMATS: readonly ImageInputFormat[] = ["png", "jpeg"];
+
+/**
+ * Decode PNG/JPEG (and, where `formats` names it, WebP) dimensions from raw
+ * base64 or a data URL.
+ *
+ * The answer doubles as a FORMAT GATE for every well that calls it — a
+ * `null` is how a source well refuses a GIF — so WebP is opt-in: only a
+ * reference strip whose recipe advertises WebP (`reference_images.formats`)
+ * passes it, and every PNG/JPEG-only door stays exactly as strict as before.
  *
  * Returns `null` for malformed/unsupported media or a JPEG whose SOF marker
  * falls beyond the bounded metadata prefix.
  */
 export function imageDimensionsFromBase64(
   base64: string,
+  formats: readonly ImageInputFormat[] = DEFAULT_FORMATS,
 ): ImageDimensions | null {
   const bytes = decodedPrefix(base64);
   if (!bytes) return null;
-  return pngDimensions(bytes) ?? jpegDimensions(bytes);
+  return (
+    (formats.includes("png") ? pngDimensions(bytes) : null) ??
+    (formats.includes("jpeg") ? jpegDimensions(bytes) : null) ??
+    (formats.includes("webp") ? webpDimensions(bytes) : null)
+  );
 }

@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { formatGenerationTime } from "@studio/lib/generationTime";
 import { displayTitle } from "@studio/lib/libraryOrganization";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { galleryMediaPath } from "../../lib/gallery/media";
 import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
@@ -70,6 +71,7 @@ const rows = computed(() =>
           :target="row.target"
           :cache-key="row.entry.sourceKey"
           :media-version="row.mediaVersion"
+          :alpha="showsAlphaBed(row.entry.item)"
           :alt="row.title"
         />
       </span>

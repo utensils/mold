@@ -9,7 +9,9 @@
  *     otherwise. Plain `ltx-video` stays false — that engine has no img2vid
  *     path and would silently ignore the image.
  *   - `pruneRequestForFamily` — strips request fields the target family does
- *     not support, applied on model change so a leftover value never ships.
+ *     not support, applied on model change so a leftover value never ships
+ *     (including `transparent_background` wherever the recipe snapshot
+ *     carries no adjustable `capabilities.transparency`).
  *
  * Keep the shared LoRA-capable list in sync with the server-side authority,
  * `mold_core::validation::LORA_CAPABLE_FAMILIES` and its
@@ -40,6 +42,11 @@ import {
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { coerceOutputFormatForRecipe, type OutputFormatRecipe } from "@studio/lib/outputFormat";
+import {
+  coerceFormatForTransparency,
+  transparencyControl,
+  type TransparencyCapabilities,
+} from "@studio/lib/transparency";
 import type { GenerateRequest, ModelEntry, OutputFormat, Scheduler } from "./api/types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
@@ -146,6 +153,13 @@ export interface RecipeCapabilitiesSnapshot {
    * the user put in it.
    */
   referenceImages: ReferenceImagesCapabilities | null;
+  /**
+   * The recipe's transparent-background contract (`capabilities.transparency`),
+   * or `null`/absent — an older host, or a snapshot persisted before the field
+   * existed. The request builders read it after the model row is out of scope,
+   * so the toggle is sent (and JPEG coerced) only where it was advertised.
+   */
+  transparency?: TransparencyCapabilities | null;
 }
 
 export function recipeCapabilitiesSnapshot(
@@ -172,6 +186,7 @@ export function recipeCapabilitiesSnapshot(
     canvasless: recipeIsCanvasless(recipe),
     mesh: caps.mesh ?? null,
     referenceImages: caps.referenceImages,
+    transparency: caps.transparency,
   };
 }
 
@@ -208,6 +223,9 @@ export function generationCapabilitiesForForm(
   if (!snapshot || isMinimaxH3Family(family)) return caps;
   return {
     ...caps,
+    // Absent on a snapshot persisted before the field existed: no toggle,
+    // exactly what an older host's recipe says.
+    transparency: snapshot.transparency ?? null,
     referenceImages: snapshot.referenceImages,
     referenceImagesReason: snapshot.referenceImages ? null : caps.referenceImagesReason,
     sourceImageMode: sourceImageModeForReferences(snapshot.referenceImages),
@@ -445,11 +463,24 @@ export function pruneRequestForFamily(
     }
   }
 
+  // The transparent-background toggle rides only a recipe that advertises it
+  // adjustable; everywhere else it is dropped (off is the field's absence).
+  const transparency = transparencyControl(caps);
+  if (!transparency || next.transparent_background !== true) {
+    delete next.transparent_background;
+  }
+
   // Keep the output format valid for the recipe (png stays out of video, a
-  // mesh recipe is pinned to glb, a glb never rides a raster recipe).
+  // mesh recipe is pinned to glb, a glb never rides a raster recipe), and
+  // alpha-capable while a transparent background is requested.
   const format = coerceFormOutputFormat(next.output_format, family, recipe);
   if (format === undefined) delete next.output_format;
-  else next.output_format = format;
+  else
+    next.output_format = coerceFormatForTransparency(
+      format,
+      transparency,
+      next.transparent_background,
+    ).format;
 
   // The 3-D controls are refused at admission on a recipe with no mesh block,
   // and a canvasless recipe reads neither strength nor a repaint mask; a

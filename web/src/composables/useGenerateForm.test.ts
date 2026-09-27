@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import {
+  qwenImage21Recipe,
   sdxlIpAdapterRecipe,
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
@@ -3368,5 +3369,153 @@ describe("toRequest — an additive recipe carries both wells at once", () => {
     ];
     form.state.value.batchSize = 3;
     expect(form.toRequest(ipAdapterModel()).batch_size).toBe(3);
+  });
+});
+
+describe("toRequest — Qwen Image 2.1 transparency and references", () => {
+  // A 1x1 RGBA PNG whose one pixel is fully transparent: the reference must
+  // reach the server byte for byte — never flattened, fitted or re-encoded.
+  const RGBA_PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+  beforeEach(() => {
+    localStorage.clear();
+    __testing__.resetForTest();
+  });
+
+  function qwen21Model(): ModelInfoExtended {
+    return makeModel({
+      name: "qwen-image-2.1:bf16",
+      family: "qwen-image21",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [qwenImage21Recipe()],
+      },
+    } as Partial<ModelInfoExtended>);
+  }
+
+  function qwen21Form() {
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-2.1:bf16";
+    form.state.value.modelFamily = "qwen-image21";
+    form.state.value.prompt = "a paper lantern";
+    return form;
+  }
+
+  it("sends transparent_background only while the toggle is on", () => {
+    const form = qwen21Form();
+    expect("transparent_background" in form.toRequest(qwen21Model())).toBe(
+      false,
+    );
+    form.state.value.transparentBackground = true;
+    expect(form.toRequest(qwen21Model()).transparent_background).toBe(true);
+  });
+
+  it("parks the toggle on a model that does not advertise it", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lantern";
+    form.state.value.transparentBackground = true;
+    form.state.value.outputFormat = "jpeg";
+    const request = form.toRequest(
+      makeModel({
+        name: "sdxl-base:fp16",
+        family: "sdxl",
+        generation_profile: {
+          schema_version: 1,
+          profile_id: "sdxl",
+          profile_hash: "test",
+          default_recipe_id: "default",
+          recipes: [sdxlRecipe()],
+        },
+      } as Partial<ModelInfoExtended>),
+    );
+    expect("transparent_background" in request).toBe(false);
+    // …and it never moves a format a model without the toggle accepts.
+    expect(request.output_format).toBe("jpeg");
+    // The choice survives in the form for the next model that takes it.
+    expect(form.state.value.transparentBackground).toBe(true);
+  });
+
+  it("moves JPEG to PNG while the toggle is on", () => {
+    const form = qwen21Form();
+    form.state.value.outputFormat = "jpeg";
+    expect(form.toRequest(qwen21Model()).output_format).toBe("jpeg");
+    form.state.value.transparentBackground = true;
+    expect(form.toRequest(qwen21Model()).output_format).toBe("png");
+    form.state.value.outputFormat = "webp";
+    expect(form.toRequest(qwen21Model()).output_format).toBe("webp");
+  });
+
+  it("passes every reference through byte for byte, in order", () => {
+    const form = qwen21Form();
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "cutout.png", base64: RGBA_PNG },
+      { kind: "upload", filename: "layer.webp", base64: "UklGRgAAAABXRUJQ" },
+    ];
+    const request = form.toRequest(qwen21Model());
+    expect(request.edit_images).toEqual([RGBA_PNG, "UklGRgAAAABXRUJQ"]);
+    // A `replaces` recipe carries no source image, strength or mask.
+    expect(request.source_image ?? null).toBeNull();
+    expect(request.strength).toBeUndefined();
+  });
+
+  it("batches text-to-image freely and locks only while references ride", () => {
+    const form = qwen21Form();
+    form.state.value.batchSize = 3;
+    expect(form.toRequest(qwen21Model()).batch_size).toBe(3);
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "ref.png", base64: RGBA_PNG },
+    ];
+    expect(form.toRequest(qwen21Model()).batch_size).toBe(1);
+  });
+
+  it("drops LoRAs for a recipe that advertises none", () => {
+    const form = qwen21Form();
+    form.state.value.loras = [{ path: "/loras/look.safetensors", scale: 1 }];
+    expect(form.toRequest(qwen21Model()).loras).toEqual([
+      { path: "/loras/look.safetensors", scale: 1 },
+    ]);
+    const recipe = qwenImage21Recipe();
+    recipe.capabilities.lora = { mode: "hidden", max_count: 0 };
+    const noLora = makeModel({
+      name: "qwen-image-2.1:fp8",
+      family: "qwen-image21",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image21",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as Partial<ModelInfoExtended>);
+    form.state.value.model = "qwen-image-2.1:fp8";
+    expect(form.toRequest(noLora).loras).toBeUndefined();
+  });
+
+  it("restores the toggle from the print's request, never from has_alpha", () => {
+    const base = __testing__.defaultForm();
+    const metadata = {
+      prompt: "a paper lantern",
+      model: "qwen-image-2.1:bf16",
+      width: 1024,
+      height: 1024,
+      steps: 40,
+      guidance: 1,
+      seed: 7,
+      version: "0.33.0",
+    } as OutputMetadata;
+    expect(
+      applyMetadataToForm(base, { ...metadata, transparent_background: true })
+        .transparentBackground,
+    ).toBe(true);
+    expect(
+      applyMetadataToForm(base, { ...metadata, has_alpha: true })
+        .transparentBackground,
+    ).toBe(false);
   });
 });

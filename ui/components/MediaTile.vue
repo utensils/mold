@@ -9,6 +9,11 @@
  * take a moment per tile) the tile shows a quiet shimmer, never the browser's
  * broken-image glyph with the prompt spelled out as alt text — a grid of
  * loading tiles must read as a grid, not a wall of paragraphs.
+ *
+ * `alpha` draws the kit's `.ms-alpha-bed` checkerboard behind a print that
+ * carries transparency. The tile covers its square (`object-fit: cover`), so
+ * the picture IS the whole box — there is no letterbox for the board to leak
+ * into — and an opaque print never gets a pattern it does not need.
  */
 import { ref, useSlots, watch } from "vue";
 
@@ -18,8 +23,10 @@ const props = withDefaults(
     alt: string;
     /** Marks a just-developed print with a NEW badge. */
     fresh?: boolean;
+    /** The print carries alpha: draw the checkerboard behind it. */
+    alpha?: boolean;
   }>(),
-  { fresh: false },
+  { fresh: false, alpha: false },
 );
 
 const emit = defineEmits<{ open: [] }>();
@@ -39,8 +46,15 @@ watch(
     type="button"
     class="ms-tile"
     :data-loaded="loaded"
+    :data-alpha="alpha ? 'true' : undefined"
     @click="emit('open')"
   >
+    <span
+      v-if="alpha && loaded"
+      class="ms-tile__bed ms-alpha-bed"
+      data-test="alpha-bed"
+      aria-hidden="true"
+    />
     <span v-if="!loaded" class="ms-tile__ghost" aria-hidden="true" />
     <img
       v-if="src"
@@ -85,7 +99,14 @@ watch(
   outline-offset: 2px;
 }
 
+.ms-tile__bed {
+  position: absolute;
+  inset: 0;
+  --ms-alpha-cell: 12px;
+}
+
 .ms-tile__img {
+  position: relative;
   width: 100%;
   height: 100%;
   object-fit: cover;

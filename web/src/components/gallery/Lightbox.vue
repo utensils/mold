@@ -21,6 +21,7 @@ import {
   ref,
   watch,
 } from "vue";
+import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useRootFocusOnOpen } from "@ui/lib/useRootFocusOnOpen";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
@@ -161,8 +162,15 @@ const exportCapabilities = ref<VideoExportCapabilities>(
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
 );
 
+/** A print carrying alpha sits on the checkerboard, drawn on the IMG box
+ * itself (its own aspect, never the stage's letterbox). */
+const alphaBed = computed(
+  () => !!props.item && kind.value === "image" && showsAlphaBed(props.item),
+);
 const kind = computed(() =>
-  props.item ? mediaKind(props.item.format, props.item.filename) : "image",
+  props.item
+    ? mediaKind(props.item.format, props.item.filename, props.item.metadata)
+    : "image",
 );
 const isVideoFile = computed(() => kind.value === "video");
 const isAudioFile = computed(() => kind.value === "audio");
@@ -761,6 +769,8 @@ async function performVideoExport(options: VideoExportOptions) {
             :src="mediaSrc"
             :alt="prompt || item.filename"
             class="lb__media"
+            :class="{ 'ms-alpha-bed': alphaBed }"
+            data-test="lightbox-image"
           />
           <button
             class="lb__nav lb__nav--prev"
@@ -842,7 +852,8 @@ async function performVideoExport(options: VideoExportOptions) {
                       @click="onUpscale"
                     >
                       {{
-                        mediaKind(item.format, item.filename) === "video"
+                        mediaKind(item.format, item.filename, item.metadata) ===
+                        "video"
                           ? "Framewise upscale…"
                           : "Upscale…"
                       }}
@@ -1251,6 +1262,8 @@ async function performVideoExport(options: VideoExportOptions) {
             :src="mediaSrc"
             :alt="prompt || item.filename"
             class="lb__media"
+            :class="{ 'ms-alpha-bed': alphaBed }"
+            data-test="lightbox-image"
           />
           <button
             class="lb__nav lb__nav--prev"

@@ -281,6 +281,34 @@
     animation: ms-fade-up var(--mold-dur-slow) var(--mold-ease-out);
   }
 
+  /* Transparent-media bed: the checkerboard behind a print that carries
+   * alpha (`studio/lib/alphaMedia.ts` `showsAlphaBed`) and behind every
+   * reference thumbnail. Both squares are DERIVED from `--mold-media-bed`
+   * mixed toward `--mold-text`, so each of the ten themes gets a readable
+   * board — light on a dark bed, dark on a light one — without a per-theme
+   * token. Draw it on a box sized to the MEDIA (an aspect-ratio wrapper), never
+   * on a letterbox, so the bars around a contained picture stay plain. */
+  .ms-alpha-bed {
+    --ms-alpha-light: color-mix(
+      in srgb,
+      var(--mold-media-bed) 84%,
+      var(--mold-text, #fff) 16%
+    );
+    --ms-alpha-dark: color-mix(
+      in srgb,
+      var(--mold-media-bed) 94%,
+      var(--mold-text, #fff) 6%
+    );
+    background-color: var(--ms-alpha-dark);
+    background-image: conic-gradient(
+      var(--ms-alpha-light) 25%,
+      var(--ms-alpha-dark) 0 50%,
+      var(--ms-alpha-light) 0 75%,
+      var(--ms-alpha-dark) 0
+    );
+    background-size: var(--ms-alpha-cell, 16px) var(--ms-alpha-cell, 16px);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .ms-shimmer {
       animation: none;

@@ -36,8 +36,10 @@ export function dropTargetAtPosition(
   return well?.getAttribute("data-drop-target") ?? null;
 }
 
+/** The containers the native import reads (PNG, JPEG, WebP). Which well may
+ * hold a WebP is decided after routing, against the resolved recipe. */
 export function isSupportedDroppedImage(path: string): boolean {
-  return /\.(png|jpe?g)$/i.test(path);
+  return /\.(png|jpe?g|webp)$/i.test(path);
 }
 
 /**

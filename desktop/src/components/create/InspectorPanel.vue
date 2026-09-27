@@ -42,6 +42,12 @@ import { meshDetailLadder } from "../../lib/meshDetailLadder";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { type CanvasIntent } from "@studio/lib/outputShape";
 import { meshTargetFacesPlaceholder } from "@studio/lib/meshControls";
+import {
+  coerceFormatForTransparency,
+  TRANSPARENCY_LABEL,
+  TRANSPARENCY_NOTE,
+  transparencyControl,
+} from "@studio/lib/transparency";
 import { useOutputShape } from "../../composables/useOutputShape";
 import {
   meshTargetFacesError,
@@ -212,6 +218,19 @@ function onInspectorReset() {
 // Shared with the composer's Shape chip, which answers for the same form: two
 // readings of one checkpoint's contract is how the two controls diverged.
 const caps = computed(() => capabilitiesForCreateForm(props.form, contractModel.value));
+// Qwen Image 2.1's Transparent background: rendered only where the resolved
+// recipe advertises `capabilities.transparency` adjustable. Turning it on
+// moves a JPEG choice to the recipe's first alpha format, so the form never
+// holds a pair admission would refuse; off leaves the format alone.
+const transparency = computed(() => transparencyControl(caps.value));
+function setTransparentBackground(on: boolean) {
+  props.form.transparentBackground = on;
+  props.form.outputFormat = coerceFormatForTransparency(
+    props.form.outputFormat,
+    transparency.value,
+    on,
+  ).format;
+}
 /** The model's image-attachment shape — one shared policy, never a local
  * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
@@ -1012,6 +1031,24 @@ function resetSettings() {
             </button></template
           >
         </p>
+      </div>
+
+      <!-- Transparent background — the same field/hint/switch row the 3-D
+           card's PBR materials uses. The engine wraps the prompt in Qwen's
+           RGBA recipe; the composer keeps the user's own words. -->
+      <div v-if="transparency" class="ms-field" data-test="transparent-background-field">
+        <div class="ms-field--row">
+          <div>
+            <span class="ms-field__label ms-field__label--inline">{{ TRANSPARENCY_LABEL }}</span>
+            <p class="ms-field__hint">{{ TRANSPARENCY_NOTE }}</p>
+          </div>
+          <SwitchToggle
+            :model-value="form.transparentBackground === true"
+            :label="TRANSPARENCY_LABEL"
+            data-test="transparent-background"
+            @update:model-value="setTransparentBackground"
+          />
+        </div>
       </div>
 
       <!-- Save every result — off, the host publishes the print and moves it

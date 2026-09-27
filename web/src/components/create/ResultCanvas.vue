@@ -51,6 +51,9 @@ const props = withDefaults(
     resultAudioSrc?: string;
     /** result — the print's file name, said in mono on the action bar. */
     resultFilename?: string;
+    /** result — the print carries alpha (`showsAlphaBed`): the picture sits
+     * on the checkerboard, drawn on its own box and never the bed around it. */
+    resultAlpha?: boolean;
     resultCaption?: string;
     /** result — the host can address this print, so a link to it exists. */
     /** The page has the bytes, or a filename to fetch them by. */
@@ -258,6 +261,8 @@ watch(
       <img
         v-else-if="resultSrc"
         class="canvas__img"
+        :class="{ 'ms-alpha-bed': resultAlpha && !resultAudioSrc }"
+        data-test="canvas-image"
         :src="resultSrc"
         :alt="
           resultAudioSrc ? 'Waveform of the generated audio' : 'Generated print'

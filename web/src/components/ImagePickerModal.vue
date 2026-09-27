@@ -17,6 +17,14 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { blobToBase64 } from "../lib/base64";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  fileMatchesImageInputFormats,
+  imageInputFormatForName,
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+  referenceImageMimeTypes,
+  type ImageInputFormat,
+} from "@studio/lib/referenceImagesProfile";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
 import { useThumbnailSources } from "../composables/useThumbnailSources";
 import {
@@ -25,7 +33,7 @@ import {
 } from "../lib/multiHostGallery";
 import { getHost, HOSTS_CHANGED_EVENT, listHosts } from "../lib/hostRegistry";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
-import type { SourceImageState } from "../types";
+import { mediaKind, type SourceImageState } from "../types";
 
 const props = withDefaults(
   defineProps<{
@@ -35,10 +43,18 @@ const props = withDefaults(
     /** Wells own drop + file picking themselves; their gallery link opens
      * this picker straight on the gallery with no redundant upload tab. */
     galleryOnly?: boolean;
+    /**
+     * The still containers this pick may carry: the recipe's advertised
+     * `reference_images.formats` for a reference strip (Qwen Image 2.1 adds
+     * WebP), the legacy PNG/JPEG pair for a source or target. The bytes are
+     * handed on untouched either way — never re-encoded or flattened.
+     */
+    formats?: readonly ImageInputFormat[];
   }>(),
   {
     title: "Source image",
     multiple: true,
+    formats: () => LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
   },
 );
 const emit = defineEmits<{
@@ -48,10 +64,23 @@ const emit = defineEmits<{
 
 const tab = ref<"upload" | "gallery">(props.galleryOnly ? "gallery" : "upload");
 const entries = ref<HostGalleryImage[]>([]);
+/** A gallery print qualifies when it is a STILL in an accepted container —
+ * an animated WebP clip shares the extension but not the kind. */
 const stillEntries = computed(() =>
-  entries.value.filter((entry) =>
-    /\.(png|jpe?g)$/i.test(entry.filename.trim()),
-  ),
+  entries.value.filter((entry) => {
+    const format = imageInputFormatForName(entry.filename);
+    if (!format || !props.formats.includes(format)) return false;
+    return (
+      format !== "webp" ||
+      mediaKind(entry.format, entry.filename, entry.metadata) === "image"
+    );
+  }),
+);
+const acceptAttribute = computed(() =>
+  referenceImageMimeTypes(props.formats).join(","),
+);
+const formatsSentence = computed(() =>
+  imageInputFormatsSentence(props.formats),
 );
 const loading = ref(false);
 const error = ref<string | null>(null);
@@ -143,14 +172,11 @@ async function loadGallery() {
 
 async function emitFiles(files: File[]) {
   if (!files.length) return;
-  const images = files.filter(
-    (file) =>
-      file.type === "image/png" ||
-      file.type === "image/jpeg" ||
-      (!file.type && /\.(png|jpe?g)$/i.test(file.name.trim())),
+  const images = files.filter((file) =>
+    fileMatchesImageInputFormats(file, props.formats),
   );
   if (!images.length) {
-    uploadError.value = "Only PNG or JPEG images can be used here.";
+    uploadError.value = `Only ${formatsSentence.value} images can be used here.`;
     return;
   }
   uploadError.value = null;
@@ -158,7 +184,7 @@ async function emitFiles(files: File[]) {
   const picked = await Promise.all(
     selected.map(async (file) => {
       const base64 = await blobToBase64(file);
-      const dimensions = imageDimensionsFromBase64(base64);
+      const dimensions = imageDimensionsFromBase64(base64, props.formats);
       return {
         kind: "upload" as const,
         filename: file.name,
@@ -237,7 +263,7 @@ async function emitGallerySelection(items: HostGalleryImage[]) {
         if (!host) throw new Error(`${item.hostLabel} is no longer connected.`);
         const blob = await fetchGalleryBlob(host, item.filename);
         const b64 = await blobToBase64(blob);
-        const dimensions = imageDimensionsFromBase64(b64);
+        const dimensions = imageDimensionsFromBase64(b64, props.formats);
         return {
           kind: "gallery" as const,
           filename: item.filename,
@@ -329,7 +355,7 @@ async function emitGallerySelection(items: HostGalleryImage[]) {
             <input
               ref="fileInput"
               type="file"
-              accept="image/png,image/jpeg"
+              :accept="acceptAttribute"
               :multiple="multiple"
               class="ip__file"
               tabindex="-1"
@@ -348,7 +374,7 @@ async function emitGallerySelection(items: HostGalleryImage[]) {
             {{ error }}
           </p>
           <p v-else-if="!stillEntries.length" class="ip__status">
-            no PNG or JPEG images available
+            no {{ formatsSentence }} images available
           </p>
           <ul v-else class="ip__grid">
             <li v-for="item in stillEntries" :key="item.filename">

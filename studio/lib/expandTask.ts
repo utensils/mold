@@ -47,6 +47,10 @@ export interface ExpansionTaskRequest {
    * a face photo does not make a text-to-image print an img2img one — but it
    * IS conditioning media, so `conditioningFingerprint` reads it. */
   id_image?: unknown;
+  /** The transparent-background toggle. Like the identity photo it never
+   * changes the expansion TASK, but the engine wraps the prompt in the RGBA
+   * recipe while it is on, so `conditioningFingerprint` reads it. */
+  transparent_background?: boolean | null;
 }
 
 function presentPath(path: string | null | undefined): boolean {
@@ -159,6 +163,10 @@ export interface ExpandContext {
   /** The target's prompt contract from its generation profile; `ignored`
    * means the expander answers from the guide without a rewrite. */
   prompt_mode?: "required" | "optional" | "ignored";
+  /** The render asks for a transparent background: the expander describes
+   * the subject only. It never sees the engine's RGBA prompt wrapper, which
+   * is applied after expansion. Only `true` travels. */
+  transparent_background?: boolean;
 }
 
 function loraStem(lora: unknown): string | null {
@@ -272,6 +280,9 @@ export function expansionContextForRequest(
   }
   if (references.length > 0) context.references = references;
   if (loras.length > 0) context.loras = loras;
+  if (request.transparent_background === true) {
+    context.transparent_background = true;
+  }
   if (recipe) {
     // Desktop and mobile compile with `exactOptionalPropertyTypes`, so an
     // absent field is `null`, never `undefined`.

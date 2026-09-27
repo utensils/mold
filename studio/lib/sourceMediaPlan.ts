@@ -276,3 +276,26 @@ export function referencesLockBatchSize(
   if (mode === "single-and-references") return false;
   return requestCarriesReferences(conditioningForRequest(mode, state));
 }
+
+/**
+ * Which attachment the client-side canvas fit may rewrite before submit.
+ *
+ * Only a SOURCE well and an edit TARGET are composition inputs fitted to the
+ * canvas. Ordered references are never fitted, flattened or re-encoded — a
+ * transparent PNG or WebP reference must reach the engine with its alpha and
+ * its own size, because the engine resizes references itself (Qwen Image 2.1
+ * encodes each at its own aspect). `references` mode has no source well at
+ * all, so its first attachment is a reference like the rest.
+ */
+export function fittedAttachmentRole(
+  mode: SourceImageMode,
+): "source" | "target" | null {
+  switch (mode) {
+    case "references":
+      return null;
+    case "qwen-edit":
+      return "target";
+    default:
+      return "source";
+  }
+}

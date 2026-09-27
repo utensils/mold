@@ -118,6 +118,9 @@ export function legacyReferenceImages(
       // An older host advertises no block at all, so it can never have told
       // us about an adapter strength. `null` renders no slider.
       weight: null,
+      // …nor about a canvas rule or any container past PNG/JPEG.
+      canvas: null,
+      formats: ["png", "jpeg"],
     };
   }
   if (isFlux2DevModel(model)) {
@@ -132,6 +135,9 @@ export function legacyReferenceImages(
       // An older host advertises no block at all, so it can never have told
       // us about an adapter strength. `null` renders no slider.
       weight: null,
+      // …nor about a canvas rule or any container past PNG/JPEG.
+      canvas: null,
+      formats: ["png", "jpeg"],
     };
   }
   return null;

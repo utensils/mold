@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { newGenerateForm } from "./generateForm";
 import { applyDesktopImageDrop, type DesktopImageImport } from "./desktopImageDrop";
 import type { ModelEntry, OutputMetadata } from "./api/types";
-import { flux2KleinRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { flux2KleinRecipe, qwenImage21Recipe } from "@studio/lib/generationProfile.testFixtures";
 
 const sd15 = {
   name: "sd15:fp16",
@@ -252,5 +252,49 @@ describe("applyDesktopImageDrop on an exclusive (Klein) recipe", () => {
     expect(form.imageAttachments).toEqual(["REF_1"]);
     expect(form.sourceImage).toBe("IMAGE_BYTES");
     expect(form.exclusiveWell).toBe("source");
+  });
+});
+
+describe("applyDesktopImageDrop WebP", () => {
+  const WEBP = "UklGRjAHAABXRUJQVlA4ICQHAAA=";
+  const qwen21 = {
+    name: "qwen-image-2.1:bf16",
+    family: "qwen-image21",
+    downloaded: true,
+    default_width: 1024,
+    default_height: 1024,
+    default_steps: 40,
+    default_guidance: 1,
+    generation_profile: {
+      schema_version: 1,
+      profile_id: "qwen-image21",
+      profile_hash: "test",
+      default_recipe_id: "default",
+      recipes: [qwenImage21Recipe()],
+    },
+  } as unknown as ModelEntry;
+  const webp: DesktopImageImport = {
+    filename: "cutout.webp",
+    base64: WEBP,
+    width: 1170,
+    height: 833,
+    metadata: null,
+  };
+
+  it("appends a WebP to a strip whose recipe advertises it, bytes untouched", async () => {
+    const form = newGenerateForm();
+    Object.assign(form, { model: qwen21.name, family: "qwen-image21" });
+    const result = await applyDesktopImageDrop(form, webp, [qwen21]);
+    expect(result).toMatchObject({ attached: true, target: "references" });
+    expect(form.imageAttachments).toEqual([WEBP]);
+  });
+
+  it("refuses a WebP on a PNG/JPEG well by name", async () => {
+    const form = newGenerateForm();
+    Object.assign(form, { model: sd15.name, family: "sd15" });
+    const result = await applyDesktopImageDrop(form, webp, [sd15]);
+    expect(result.attached).toBe(false);
+    expect(result.refused).toBe("Only PNG or JPEG images can be used here.");
+    expect(form.sourceImage).toBeNull();
   });
 });

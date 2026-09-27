@@ -6,6 +6,8 @@ import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { qwenImage21Recipe } from "@studio/lib/generationProfile.testFixtures";
+import { TRANSPARENCY_UNAVAILABLE_FORMAT_REASON } from "@studio/lib/transparency";
 import type {
   Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
@@ -936,5 +938,42 @@ describe("AdvancedSettings — exact size", () => {
     await wrapper.get("[title='Swap width and height']").trigger("click");
     expect([form.width, form.height]).toEqual([1024, 896]);
     expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["manual"]);
+  });
+});
+
+describe("AdvancedSettings — file format while a transparent background is on", () => {
+  const qwen21 = {
+    name: "qwen-image-2.1:bf16",
+    family: "qwen-image21",
+    downloaded: true,
+    generation_profile: {
+      schema_version: 1,
+      profile_id: "qwen-image21",
+      profile_hash: "hash",
+      default_recipe_id: "default",
+      recipes: [qwenImage21Recipe()],
+    },
+  } as unknown as ModelEntry;
+
+  function jpegRadio(wrapper: VueWrapper) {
+    return wrapper
+      .findAll("[data-test='section-output'] [role=radio]")
+      .find((radio) => radio.text().toLowerCase() === "jpeg")!;
+  }
+
+  it("keeps JPEG visible but disabled, with its reason", async () => {
+    const form = formFor("qwen-image21");
+    form.model = qwen21.name;
+    const wrapper = mountSettings(form, { selectedModel: qwen21 });
+    expect(jpegRadio(wrapper).attributes("disabled")).toBeUndefined();
+    expect(wrapper.find("[data-test='format-note']").exists()).toBe(false);
+
+    form.transparentBackground = true;
+    await flushPromises();
+    expect(jpegRadio(wrapper).attributes("disabled")).toBeDefined();
+    expect(jpegRadio(wrapper).attributes("title")).toBe(TRANSPARENCY_UNAVAILABLE_FORMAT_REASON);
+    expect(wrapper.get("[data-test='format-note']").text()).toBe(
+      TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+    );
   });
 });
