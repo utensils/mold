@@ -1741,6 +1741,7 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     let host = crate::h3_admission::current_h3_host_memory();
+    let budget = qwen_image21_cache_budget(paths, hint, available_bytes, req, projection);
     let extra = hint
         .filter(|h| h.family == ActivationFamily::QwenImage21Dit)
         .map_or(0, |hint| {
@@ -1756,6 +1757,7 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
                 } else {
                     1
                 },
+                budget,
             )
         });
     qwen_image21_eager_plan_with_host(
@@ -1765,6 +1767,40 @@ pub(crate) fn qwen_image21_eager_plan_for_request(
         host.total_bytes,
         host.spendable_bytes(),
         extra,
+    )
+}
+
+/// The prefix-cache budget admission plans a Qwen Image 2.1 request with —
+/// the engine's own rule (`device::qwen_image21_prefix_cache_budget`): on the
+/// CUDA fast path the cache is charged whenever it fits the card beside the
+/// transformer, the VAE and the request's denoise workspace (the text encoder
+/// can always be parked or dropped to make room), so a card that can hold the
+/// cache plans for it and one that cannot plans the recompute the engine will
+/// then choose. Everywhere else, and for every other family, the request-only
+/// rule.
+pub(crate) fn qwen_image21_cache_budget(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> mold_inference::qwen_image21::PrefixCacheBudget {
+    use mold_inference::qwen_image21::text_encoder_residency as residency;
+    let Some(hint) = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit) else {
+        return mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly;
+    };
+    let vae_bytes = std::fs::metadata(&paths.vae).map_or(0, |metadata| metadata.len());
+    mold_inference::device::qwen_image21_prefix_cache_budget(
+        available_bytes.filter(|bytes| *bytes > 0),
+        residency::transformer_device_bytes(paths).saturating_add(vae_bytes),
+        mold_inference::device::qwen_image21_planned_denoise_bytes(
+            residency::transformer_format(paths),
+            req.width,
+            req.height,
+            &qwen_image21_reference_dimensions(req, projection),
+            hint.batch,
+            2,
+        ),
     )
 }
 
@@ -2166,6 +2202,10 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     let flux2_geometry = hint
         .filter(|h| h.family == ActivationFamily::Flux2Dit)
         .and_then(|_| flux2_activation_geometry(&req.model, paths));
+    // Qwen Image 2.1's prefix-cache decision reads the card on the CUDA fast
+    // path, so it is derived once here, where `paths` and the card are known.
+    let qwen21_cache_budget =
+        qwen_image21_cache_budget(paths, hint, available_memory_bytes, req, projection);
     let activation = request_sensitive_activation_memory_with_wan_geometry(
         req,
         hint,
@@ -2174,6 +2214,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         wan_distilled,
         flux2_geometry,
         projection,
+        qwen21_cache_budget,
     );
     // The SAME request without the FLUX.2 denoise model, and it answers a
     // different question: `eager_peak` below asks whether every component can
@@ -2193,6 +2234,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
             wan_distilled,
             None,
             projection,
+            qwen21_cache_budget,
         )
     } else {
         activation
@@ -2291,6 +2333,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 wan_distilled,
                 flux2_geometry,
                 projection,
+                qwen21_cache_budget,
             )
             .saturating_add(qwen_image21_tier_workspace_bytes(
                 paths,
@@ -2550,6 +2593,7 @@ fn request_sensitive_activation_memory(
         false,
         None,
         None,
+        mold_inference::device::qwen_image21_prefix_cache_budget(None, 0, 0),
     )
 }
 
@@ -2613,6 +2657,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     wan_distilled: bool,
     flux2_geometry: Option<mold_inference::device::Flux2ActivationGeometry>,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    qwen21_cache_budget: mold_inference::qwen_image21::PrefixCacheBudget,
 ) -> u64 {
     let batch = u64::from(req.batch_size.max(1));
     // Wan prices its own CFG: `wan::pipeline::needs_cfg_pass` keys on guidance
@@ -2747,21 +2792,20 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         if !dimensions.is_empty() {
             // Qwen Image 2.1 lays every reference into its joint sequence as
             // a condition block, retains the prefix K/V under the engine's
-            // own request-only rule, and runs the vision tower and a longer
+            // own rule (`qwen21_cache_budget`), and runs the vision tower and a longer
             // multimodal prompt in the encode phase. All three are the
             // engine's own sizing functions, so admission prices exactly what
             // the render holds.
             use mold_inference::device::{
                 qwen_image21_encode_phase_bytes, qwen_image21_prefix_cache_bytes,
-                qwen_image21_reference_activation_bytes, QwenImage21SequenceShape,
+                qwen_image21_reference_workspace_bytes, QwenImage21SequenceShape,
             };
             let shape = QwenImage21SequenceShape::for_request(req.width, req.height, &dimensions);
             let dtype = hint.dtype_bytes as usize;
             let branches = cfg_factor as usize;
-            let cache = qwen_image21_prefix_cache_bytes(shape, branches, dtype);
-            let workspace =
-                qwen_image21_reference_activation_bytes(base, shape, branches, hint.batch, dtype)
-                    .saturating_sub(cache);
+            let cache =
+                qwen_image21_prefix_cache_bytes(shape, branches, dtype, qwen21_cache_budget);
+            let workspace = qwen_image21_reference_workspace_bytes(base, shape, hint.batch, dtype);
             activation = workspace
                 .saturating_mul(batch)
                 .saturating_mul(cfg_factor)
@@ -2901,6 +2945,8 @@ mod fail_closed_tests {
             control_image: true,
             ..QueueMediaProjection::default()
         };
+        const RO: mold_inference::qwen_image21::PrefixCacheBudget =
+            mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly;
         let mut sanitized = hydrated.clone();
         sanitized.source_image = None;
         sanitized.id_image = None;
@@ -2911,7 +2957,7 @@ mod fail_closed_tests {
         let hint = Some(hint(ActivationFamily::Flux2Dit));
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, false, None, None,
+                &hydrated, hint, false, None, false, None, None, RO,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
@@ -2921,6 +2967,7 @@ mod fail_closed_tests {
                 false,
                 None,
                 Some(&projection),
+                RO,
             )
         );
         assert_eq!(
@@ -2939,7 +2986,7 @@ mod fail_closed_tests {
         unreadable.edit_images = vec![ProjectedImageDimensions::UnreadableHeader];
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, false, None, None,
+                &hydrated, hint, false, None, false, None, None, RO,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
@@ -2949,6 +2996,7 @@ mod fail_closed_tests {
                 false,
                 None,
                 Some(&unreadable),
+                RO,
             )
         );
     }
@@ -5541,10 +5589,17 @@ mod qwen_image21_reference_memory_tests {
         let shape = QwenImage21SequenceShape::for_request(1024, 1024, &[(1536, 1024)]);
         let dtype = hint.dtype_bytes as usize;
         let base = hint.budget_bytes();
-        let cache = qwen_image21_prefix_cache_bytes(shape, 2, dtype);
-        let workspace = mold_inference::device::qwen_image21_reference_activation_bytes(
-            base, shape, 2, hint.batch, dtype,
-        ) - cache;
+        // Without a card this is admission's "prefer retaining" answer: the
+        // whole cache on the CUDA fast path, the request-only rule elsewhere.
+        let cache = qwen_image21_prefix_cache_bytes(
+            shape,
+            2,
+            dtype,
+            mold_inference::device::qwen_image21_prefix_cache_budget(None, 0, 0),
+        );
+        let workspace = mold_inference::device::qwen_image21_reference_workspace_bytes(
+            base, shape, hint.batch, dtype,
+        );
         let reference_pixels = 1024 * 1024 * 4;
         assert_eq!(text_only, base * 2);
         assert_eq!(
@@ -5555,8 +5610,8 @@ mod qwen_image21_reference_memory_tests {
                 + reference_pixels
         );
         assert!(with_one > text_only);
-        // Ten references cost more workspace than one, even though they no
-        // longer retain a cache.
+        // Ten references cost more workspace than one, whether or not they
+        // retain a cache.
         let ten = request_sensitive_activation_memory(&request(10), Some(hint), false);
         assert!(ten > text_only);
         // A different family ignores the Qwen arm entirely.
@@ -5760,6 +5815,58 @@ mod qwen_image21_residency_tests {
         );
     }
 
+    /// On the CUDA fast path admission charges the prefix cache exactly
+    /// where the engine will retain it: three references with CFG (~16.8 GiB
+    /// of cache) fit a 46 GB card beside the BF16 transformer and VAE, so the
+    /// plan carries the cache; a 24 GB card cannot hold it, so the plan
+    /// carries the recompute the engine will then choose. Off the fast path
+    /// the request-only rule answers on every card.
+    #[test]
+    fn admission_retains_the_prefix_cache_where_it_fits() {
+        use mold_inference::qwen_image21::PrefixCacheBudget;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "put the apple on the sign",
+            "negative_prompt": "blurry",
+            "model": "qwen-image-2.1:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 4.0
+        }))
+        .unwrap();
+        // Unreadable headers price the reference area, 1024x1024 each.
+        req.edit_images = Some(vec![vec![0u8; 16]; 3]);
+        let shape = mold_inference::device::QwenImage21SequenceShape::for_request(
+            1024,
+            1024,
+            &[(1024, 1024); 3],
+        );
+        let cache =
+            |budget| mold_inference::device::qwen_image21_prefix_cache_bytes(shape, 2, 2, budget);
+        let big = qwen_image21_cache_budget(&paths, hint(1024, 1024), Some(44 * GIB), &req, None);
+        let small = qwen_image21_cache_budget(&paths, hint(1024, 1024), Some(22 * GIB), &req, None);
+        if mold_inference::qwen_image21::prefix_cache_follows_memory() {
+            assert!(matches!(big, PrefixCacheBudget::Headroom(_)));
+            assert!(cache(big) > 16 * GIB, "a 46 GB card plans the cache");
+            assert_eq!(cache(small), 0, "a 24 GB card plans the recompute");
+        } else {
+            assert_eq!(big, PrefixCacheBudget::RequestOnly);
+            assert_eq!(small, PrefixCacheBudget::RequestOnly);
+            assert_eq!(cache(big), 0);
+        }
+        // Another family never reads the card.
+        let flux = Some(ActivationHint {
+            family: ActivationFamily::FluxDit,
+            ..hint(1024, 1024).unwrap()
+        });
+        assert_eq!(
+            qwen_image21_cache_budget(&paths, flux, Some(44 * GIB), &req, None),
+            PrefixCacheBudget::RequestOnly
+        );
+    }
+
     /// References enter the eager plan through the engine's own extra
     /// (`qwen_image21_reference_extra_bytes`, added to the denoise
     /// workspace): it never lowers the peak, and a 24 GB card cannot plan
@@ -5785,6 +5892,7 @@ mod qwen_image21_residency_tests {
             2,
             &[(1536, 1024)],
             2,
+            mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly,
         );
         assert!(extra > 4 * GIB);
         // The reference workspace never lowers the plan's peak; with one
@@ -5807,6 +5915,7 @@ mod qwen_image21_residency_tests {
             2,
             &[(1536, 1024); 10],
             2,
+            mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly,
         );
         assert!(qwen_image21_eager_plan_with_host(
             &paths,
@@ -5825,7 +5934,8 @@ mod qwen_image21_residency_tests {
                 1,
                 2,
                 &[],
-                2
+                2,
+                mold_inference::qwen_image21::PrefixCacheBudget::RequestOnly,
             ),
             0
         );

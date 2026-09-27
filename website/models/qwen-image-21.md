@@ -240,6 +240,21 @@ transformer memory. Batching both classifier-free-guidance branches into one
 forward was measured and made every size slower on this card, so the engine
 keeps them sequential.
 
+Reference renders on the same card, 1024² output, 40 steps, each reference a
+1536x1024 image:
+
+| References, guidance  | Prefix cache                | Denoise |
+| --------------------- | --------------------------- | ------- |
+| 3, guidance 4 + neg.  | kept (12.0 GiB)             | 44.2 s  |
+| 10, guidance 1        | recomputed (needs 19.9 GiB) | 343.7 s |
+| 10, guidance 4 + neg. | recomputed (needs 39.8 GiB) | 696.5 s |
+
+The three-reference guided render took 167.4 s before the cache followed the
+card's memory. Ten references do not leave room for their cache beside the
+transformer on a 46 GB card, so they recompute their prefix every step and
+say so in a request warning; forcing `MOLD_QWEN_IMAGE21_KV_CACHE=on` there is
+refused by the planner (it would need about 61 GB).
+
 The fast path changes pixels relative to v0.32 for the same seed. To
 reproduce a v0.32 render byte for byte, start the generating server with
 `MOLD_ATTN=math MOLD_CONV=im2col`.
@@ -261,10 +276,23 @@ verified on CUDA; Metal verification of those paths is tracked separately.
 ### Prefix cache
 
 Each classifier-free-guidance branch can keep its text-and-reference prefix
-K/V across steps instead of recomputing it. `MOLD_QWEN_IMAGE21_KV_CACHE`
-(`auto`, `on`, `off`) controls it. `auto` keeps text-to-image exactly as v0.32
-did (a prompt of up to 512 tokens is cached) and caches a reference request
-only when all its branches fit in a fixed 6 GiB budget, so the same request
-renders the same bytes on any card. Cached and uncached renders are not
-bit-identical in BF16, which is why the setting is part of the execution
-identity.
+K/V across steps instead of recomputing it, as upstream always does.
+`MOLD_QWEN_IMAGE21_KV_CACHE` (`auto`, `on`, `off`) controls it.
+
+- On the CUDA fast path, `auto` keeps every branch's cache whenever it fits
+  in the memory the render has left beside the weights and the denoise
+  workspace; the plan parks the text encoder to make room when it has to. If
+  it does not fit, the render recomputes the prefix every step and says so in
+  a request warning. **This means that on the fast path, whether a render
+  retains its cache — and therefore the exact pixels of a very long prefix,
+  such as several reference images — can depend on the card's free memory**,
+  much as upstream simply runs out of memory where the cache does not fit.
+  Set `on` or `off` to pin it.
+- Under `MOLD_ATTN=math` (the v0.32 path), on Metal and on CPU, `auto` keeps
+  the request-only rule: a text-to-image prompt of up to 512 tokens is cached
+  exactly as v0.32 did, and a reference request is cached only when all its
+  branches fit in a fixed 6 GiB budget, so the same request renders the same
+  bytes on any card.
+
+Cached and uncached renders are not bit-identical in BF16, which is why the
+setting is part of the execution identity.
