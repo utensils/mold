@@ -11,10 +11,14 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::encoders::qwen3::{resolve_pad_token_id, Qwen3Encoder};
 
+pub(crate) mod attention;
+pub(crate) mod conditioning;
+pub(crate) mod layout;
 pub(crate) mod pipeline;
 pub(crate) mod scheduler;
 pub(crate) mod transformer;
 pub(crate) mod vae;
+pub(crate) mod vae_encoder;
 
 pub use pipeline::QwenImage21Engine;
 
@@ -43,19 +47,147 @@ pub fn metal_transformer_dtype(value: Option<&str>) -> DType {
     }
 }
 
-/// Bound request-local retention without truncating the authored prompt.
-pub(crate) const PREFIX_CACHE_MAX_TOKENS: usize = 512;
+/// v0.32's per-branch retention bound. It is still the rule wherever the
+/// card's total memory cannot be measured (Metal, CPU, an unqueryable CUDA
+/// device), so those renders keep exactly the cache behaviour they had.
+pub(crate) const LEGACY_PREFIX_CACHE_TOKENS: usize = 512;
 
-/// Both CFG branches at the maximum retained length, in the widest supported
+/// On a card whose total memory is known, the retained prefix of every
+/// branch together may take at most `total / PREFIX_CACHE_DEVICE_SHARE`.
+pub(crate) const PREFIX_CACHE_DEVICE_SHARE: u64 = 4;
+
+/// Both CFG branches at the legacy retained length, in the widest supported
 /// working dtype (F32 on Metal/CPU). Added outside the activation area estimate.
 pub(crate) fn prefix_cache_budget_bytes(batch: u32) -> u64 {
+    2 * prefix_cache_bytes(LEGACY_PREFIX_CACHE_TOKENS, batch as usize, 4)
+}
+
+/// Bytes one branch's retained prefix K/V takes: key and value, every layer,
+/// every head, per prefix token (`transformer_qwenimage21.py:56-85` stores
+/// post-RoPE `(B, prefix, heads, head_dim)` per layer).
+pub(crate) fn prefix_cache_bytes(prefix_tokens: usize, batch: usize, dtype_bytes: usize) -> u64 {
     let cfg = transformer::QwenImage21TransformerConfig::official();
-    2 * 2
-        * PREFIX_CACHE_MAX_TOKENS as u64
-        * cfg.num_layers as u64
+    2 * cfg.num_layers as u64
         * (cfg.num_attention_heads * cfg.attention_head_dim) as u64
-        * 4
-        * u64::from(batch.max(1))
+        * prefix_tokens as u64
+        * dtype_bytes as u64
+        * batch.max(1) as u64
+}
+
+/// `MOLD_QWEN_IMAGE21_KV_CACHE`: whether a request retains its prefix K/V.
+///
+/// Upstream always caches (`use_kv_cache=True`, `pipeline_qwenimage21.py:528`)
+/// and warns that cached and uncached renders are not bit-identical in BF16
+/// (`:585-589`), so the answer MOVES PIXELS and is engine-shaping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixCacheMode {
+    /// Retain while the prefix fits the card's budget (the default).
+    Auto,
+    /// Always retain.
+    On,
+    /// Always recompute the prefix every step.
+    Off,
+}
+
+/// The one parser for `MOLD_QWEN_IMAGE21_KV_CACHE`, shared by the engine and
+/// mold-server's execution-equivalence classifier. Unset, empty, `auto` and
+/// any unrecognized spelling are `Auto`.
+pub fn parse_prefix_cache_mode(value: Option<&str>) -> PrefixCacheMode {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("on" | "1" | "true" | "yes") => PrefixCacheMode::On,
+        Some("off" | "0" | "false" | "no") => PrefixCacheMode::Off,
+        None | Some("" | "auto") => PrefixCacheMode::Auto,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "MOLD_QWEN_IMAGE21_KV_CACHE must be auto/on/off; using auto"
+            );
+            PrefixCacheMode::Auto
+        }
+    }
+}
+
+/// What one conditioning branch does with its prefix K/V.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefixCacheDecision {
+    /// Prefill once, then run only the target block on later steps.
+    Retain,
+    /// Recompute the whole joint sequence every step.
+    Recompute,
+}
+
+/// The one decision for prefix K/V retention.
+pub(crate) struct PrefixCachePolicy;
+
+impl PrefixCachePolicy {
+    /// Decide for every branch of one request.
+    ///
+    /// `branch_prefix_tokens` holds each branch's prefix length (text plus
+    /// condition-image tokens). With a known device total, `Auto` retains
+    /// EVERY branch iff their summed cache fits `total /
+    /// PREFIX_CACHE_DEVICE_SHARE` — the card's TOTAL, never its free bytes at
+    /// this instant, so the server's plan and the engine agree on the same
+    /// request (the `flux2_cfg_batching` rule). Without one, each branch keeps
+    /// v0.32's 512-token rule.
+    pub(crate) fn resolve(
+        branch_prefix_tokens: &[usize],
+        batch: usize,
+        dtype_bytes: usize,
+        device_total_bytes: Option<u64>,
+        mode: PrefixCacheMode,
+    ) -> Vec<PrefixCacheDecision> {
+        let all = |decision| vec![decision; branch_prefix_tokens.len()];
+        match mode {
+            PrefixCacheMode::On => all(PrefixCacheDecision::Retain),
+            PrefixCacheMode::Off => all(PrefixCacheDecision::Recompute),
+            PrefixCacheMode::Auto => match device_total_bytes {
+                Some(total) => {
+                    let bytes: u64 = branch_prefix_tokens
+                        .iter()
+                        .map(|&tokens| prefix_cache_bytes(tokens, batch, dtype_bytes))
+                        .sum();
+                    all(if bytes <= total / PREFIX_CACHE_DEVICE_SHARE {
+                        PrefixCacheDecision::Retain
+                    } else {
+                        PrefixCacheDecision::Recompute
+                    })
+                }
+                None => branch_prefix_tokens
+                    .iter()
+                    .map(|&tokens| {
+                        if tokens <= LEGACY_PREFIX_CACHE_TOKENS {
+                            PrefixCacheDecision::Retain
+                        } else {
+                            PrefixCacheDecision::Recompute
+                        }
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// Resolve for a request running on `device`, reading the override and
+    /// the device's total memory.
+    pub(crate) fn resolve_for_device(
+        branch_prefix_tokens: &[usize],
+        batch: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Vec<PrefixCacheDecision> {
+        let total = match device.location() {
+            candle_core::DeviceLocation::Cuda { gpu_id } => crate::device::total_vram_bytes(gpu_id),
+            _ => None,
+        };
+        Self::resolve(
+            branch_prefix_tokens,
+            batch,
+            dtype.size_in_bytes(),
+            total,
+            parse_prefix_cache_mode(
+                crate::runtime_env::value("MOLD_QWEN_IMAGE21_KV_CACHE").as_deref(),
+            ),
+        )
+    }
 }
 
 /// The fixed system message from the upstream `QwenImage21Pipeline`.
@@ -289,6 +421,76 @@ mod tests {
         }
         assert_eq!(metal_transformer_dtype(Some("unsupported")), DType::BF16);
         assert_eq!(transformer_dtype(&Device::Cpu), DType::F32);
+    }
+
+    #[test]
+    fn prefix_cache_mode_parser_accepts_the_documented_spellings() {
+        for value in [None, Some(""), Some("auto"), Some(" AUTO "), Some("bogus")] {
+            assert_eq!(parse_prefix_cache_mode(value), PrefixCacheMode::Auto);
+        }
+        for value in ["on", "1", "true", " ON "] {
+            assert_eq!(parse_prefix_cache_mode(Some(value)), PrefixCacheMode::On);
+        }
+        for value in ["off", "0", "false", "Off"] {
+            assert_eq!(parse_prefix_cache_mode(Some(value)), PrefixCacheMode::Off);
+        }
+    }
+
+    #[test]
+    fn prefix_cache_policy_budgets_every_branch_against_total_memory() {
+        use PrefixCacheDecision::{Recompute, Retain};
+        const GIB: u64 = 1 << 30;
+        // 512 KiB per BF16 prefix token per branch.
+        assert_eq!(prefix_cache_bytes(1, 1, 2), 512 * 1024);
+        // One 1024² reference + prompt ≈ 4.2k prefix tokens ≈ 2.1 GiB/branch:
+        // both CFG branches fit a quarter of a 46 GB L40S.
+        let l40s = Some(46 * GIB);
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[4200, 4150], 1, 2, l40s, PrefixCacheMode::Auto),
+            vec![Retain, Retain]
+        );
+        // Ten references (~10.3k tokens) with CFG is 10.1 GiB, inside the
+        // 11.5 GiB share; 12k tokens per branch is over it. The decision is
+        // shared so both branches take the same path.
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[10_300, 10_250], 1, 2, l40s, PrefixCacheMode::Auto),
+            vec![Retain, Retain]
+        );
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[12_000, 12_000], 1, 2, l40s, PrefixCacheMode::Auto),
+            vec![Recompute, Recompute]
+        );
+        // A 24 GB card: one reference without CFG fits, with CFG it does not
+        // at F32 activations.
+        let rtx = Some(24 * GIB);
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[4200], 1, 2, rtx, PrefixCacheMode::Auto),
+            vec![Retain]
+        );
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[4200, 4200], 1, 4, rtx, PrefixCacheMode::Auto),
+            vec![Recompute, Recompute]
+        );
+        // Every text-to-image prompt v0.32 cached still caches on any card of
+        // 4 GiB or more.
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[512, 512], 1, 4, Some(4 * GIB), PrefixCacheMode::Auto),
+            vec![Retain, Retain]
+        );
+        // Without a measurable total, each branch keeps v0.32's own rule.
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[512, 513], 1, 4, None, PrefixCacheMode::Auto),
+            vec![Retain, Recompute]
+        );
+        // Overrides win in both directions.
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[10_300], 1, 2, None, PrefixCacheMode::On),
+            vec![Retain]
+        );
+        assert_eq!(
+            PrefixCachePolicy::resolve(&[3], 1, 2, l40s, PrefixCacheMode::Off),
+            vec![Recompute]
+        );
     }
 
     #[test]
