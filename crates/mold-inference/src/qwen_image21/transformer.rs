@@ -2409,7 +2409,7 @@ mod tests {
                         .map(|name| (name.to_string(), value.clone()))
                 })
                 .collect();
-            for dtype in [DType::F32, DType::F16] {
+            for dtype in golden_dtypes() {
                 let mut cfg = tiny_config();
                 cfg.num_layers = 3;
                 cfg.num_attention_heads = heads;
@@ -2456,7 +2456,21 @@ mod tests {
                 }
             }
         }
-        assert_eq!(compared, 2 * 2 * 2 * 3 * 2);
+        assert_eq!(compared, 2 * golden_dtypes().len() * 2 * 3 * 2);
+    }
+
+    /// The dtypes whose golden arithmetic this host reproduces. The golden was
+    /// captured on x86_64, where `gemm-f16` widens every product to F32; an
+    /// aarch64 CPU with FEAT_FP16 takes `gemm-f16`'s `neonfp16` kernel, which
+    /// accumulates in F16 itself, so an Apple Silicon F16 forward lands percents
+    /// away. F32 is portable everywhere, and in-process F16 identity is still
+    /// pinned by `t2i_forward_is_bitwise_the_frozen_legacy_forward`.
+    fn golden_dtypes() -> Vec<DType> {
+        if cfg!(target_arch = "aarch64") {
+            vec![DType::F32]
+        } else {
+            vec![DType::F32, DType::F16]
+        }
     }
 
     /// The layout-generalized text-to-image forward is BITWISE the frozen

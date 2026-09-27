@@ -35,7 +35,8 @@
         "id": "release-build",
         "check": "The Metal build compiles with the release feature set",
         "how": "non-inference",
-        "status": "pending"
+        "status": "pass",
+        "evidence": "2026-09-27, Apple M4 Max (48 GB): cargo check -p mold-ai --features metal,h3,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight finished clean"
       },
       {
         "id": "t2i-bf16-v032",
@@ -96,6 +97,20 @@
         "check": "MOLD_ATTN=math still selects the old path",
         "how": "capture-qwen21-metal-uat.sh t2i-bf16-attn-math",
         "status": "pending"
+      }
+    ],
+    "non_inference_checks": [
+      {
+        "check": "cargo test -p mold-ai-inference --features metal,webp --lib -- qwen_image21 webp_still exec_path",
+        "result": "159 passed, 29 ignored (weight-bearing benchmarks) on an Apple M4 Max; covers the Metal exec-path pins (MOLD_ATTN=math selects the legacy path), prefix-cache decisions and the still-WebP encoder"
+      },
+      {
+        "check": "cargo test -p mold-ai-core --lib fp8_tiers_are_refused_on_metal",
+        "result": "pass: qwen-image-2.1:fp8 is refused by name on Metal before any download"
+      },
+      {
+        "check": "legacy_forward_matches_the_c1dfa872_golden on aarch64",
+        "result": "fixed: the x86_64-captured F16 golden cannot hold on Apple Silicon, where gemm-f16 accumulates in native F16 (neonfp16); the golden now compares F16 only on non-aarch64 hosts and F32 everywhere"
       }
     ]
   }
