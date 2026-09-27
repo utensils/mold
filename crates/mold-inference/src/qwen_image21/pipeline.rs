@@ -97,6 +97,53 @@ pub(crate) struct DenoiseStart {
     pub(crate) initial_latents: Option<Tensor>,
     /// Condition-image blocks; `None` is text-to-image.
     pub(crate) condition: Option<ConditionBlocks>,
+    /// The transformer tier, for the denoise workspace the fast path's
+    /// prefix-cache budget subtracts (`None` = BF16 / unreadable header).
+    pub(crate) transformer_format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+}
+
+/// What a denoise hands back: the final latents and any request warnings it
+/// raised (a prefix cache that did not fit).
+pub(crate) struct Denoised {
+    pub(crate) latents: Tensor,
+    pub(crate) latent_height: usize,
+    pub(crate) latent_width: usize,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// The prefix-cache budget of the denoise about to run on `device` with
+/// `exec_path`: on the CUDA fast path the memory free on the card right now
+/// (every weight of this render is already resident) less the request's
+/// denoise workspace and the allocator margin; the request-only rule on the
+/// legacy path, Metal and CPU.
+fn denoise_cache_budget(
+    req: &GenerateRequest,
+    device: &Device,
+    exec_path: super::exec_path::Qwen21ExecPath,
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+) -> super::PrefixCacheBudget {
+    let candle_core::DeviceLocation::Cuda { gpu_id } = device.location() else {
+        return super::PrefixCacheBudget::RequestOnly;
+    };
+    if exec_path.is_legacy() {
+        return super::PrefixCacheBudget::RequestOnly;
+    }
+    // Settle the frees queued behind the encoder park before sampling, and
+    // count what this process's pool still holds idle: both read as "used"
+    // to the driver, and the cache is ours to place there.
+    let _ = device.synchronize();
+    let free = crate::device::usable_allocatable_vram_bytes(gpu_id).unwrap_or(0);
+    let workspace = crate::device::qwen_image21_denoise_workspace_bytes(
+        format,
+        req.width,
+        req.height,
+        &crate::device::qwen_image21_reference_dimensions(
+            req.edit_images.as_deref().unwrap_or_default(),
+        ),
+        1,
+        2,
+    );
+    super::PrefixCacheBudget::Headroom(super::prefix_cache_headroom(free, 0, workspace))
 }
 
 /// The positive prompt the encoder reads: the model card's RGBA recipe
@@ -339,7 +386,28 @@ impl QwenImage21Engine {
             crate::device::dtype_bytes(vae_dtype),
         );
         // References lengthen the joint sequence and add the encode phase;
-        // the planner adds exactly the same bytes.
+        // the planner adds exactly the same bytes. On the CUDA fast path the
+        // prefix cache is charged whenever it fits the card beside the
+        // transformer, the VAE and the workspace — so the plan parks the text
+        // encoder to make room for it rather than recomputing the prefix.
+        let references = crate::device::qwen_image21_reference_dimensions(
+            req.edit_images.as_deref().unwrap_or_default(),
+        );
+        let cache_budget = match device {
+            residency::TeDevice::Cuda => crate::device::qwen_image21_prefix_cache_budget(
+                Some(usable_free_bytes),
+                transformer_bytes.saturating_add(vae_bytes),
+                crate::device::qwen_image21_planned_denoise_bytes(
+                    residency::transformer_format(paths),
+                    req.width,
+                    req.height,
+                    &references,
+                    1,
+                    2,
+                ),
+            ),
+            _ => super::PrefixCacheBudget::RequestOnly,
+        };
         let denoise_workspace_bytes = denoise_workspace_bytes.saturating_add(
             crate::device::qwen_image21_reference_extra_bytes(
                 residency::transformer_format(paths),
@@ -347,10 +415,9 @@ impl QwenImage21Engine {
                 req.height,
                 1,
                 2,
-                &crate::device::qwen_image21_reference_dimensions(
-                    req.edit_images.as_deref().unwrap_or_default(),
-                ),
+                &references,
                 reference_branches(req),
+                cache_budget,
             ),
         );
         let decision = residency::decide(&residency::Qwen21TeBudget {
@@ -727,12 +794,13 @@ impl QwenImage21Engine {
         negative_conditioning: Option<&QwenImage21TextConditioning>,
         compute: (&Device, DType),
         start: DenoiseStart,
-    ) -> Result<(Tensor, usize, usize)> {
+    ) -> Result<Denoised> {
         let (device, dtype) = compute;
         let DenoiseStart {
             seed,
             initial_latents,
             condition,
+            transformer_format,
         } = start;
         let latent_height = req.height as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
         let latent_width = req.width as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
@@ -793,16 +861,34 @@ impl QwenImage21Engine {
             })
             .collect::<Result<Vec<_>>>()?;
         let prefixes: Vec<usize> = layouts.iter().map(|layout| layout.prefix_len()).collect();
+        let budget = denoise_cache_budget(req, device, exec_path, transformer_format);
         let decisions = super::PrefixCachePolicy::resolve_from_env(
             &prefixes,
             condition.is_some(),
             conditioning.batch_size(),
             dtype,
+            budget,
         );
-        if decisions.contains(&super::PrefixCacheDecision::Recompute) {
-            progress.info(
-                "Qwen Image 2.1 recomputes its prompt prefix every step (prefix KV cache off or over budget).",
-            );
+        // Only an automatic decision is worth a request warning: `off` is the
+        // operator's own choice, and a text-to-image prompt over v0.32's 512
+        // rows on the legacy path is v0.32's behaviour, not a regression.
+        let cache_warning = (decisions.contains(&super::PrefixCacheDecision::Recompute)
+            && super::prefix_cache_mode_from_env() == super::PrefixCacheMode::Auto
+            && (condition.is_some() || budget != super::PrefixCacheBudget::RequestOnly))
+            .then(|| {
+                super::prefix_cache_recompute_warning(
+                    super::prefix_cache_total_bytes(
+                        &prefixes,
+                        conditioning.batch_size(),
+                        dtype.size_in_bytes(),
+                    ),
+                    budget,
+                )
+            });
+        if let Some(warning) = &cache_warning {
+            progress.info(warning);
+        } else if decisions.contains(&super::PrefixCacheDecision::Recompute) {
+            progress.info("Qwen Image 2.1 recomputes its prompt prefix every step.");
         }
         let mut prepared = branches
             .into_iter()
@@ -843,7 +929,12 @@ impl QwenImage21Engine {
         }
         progress.checkpoint()?;
         progress.stage_done(&label, denoise_start.elapsed());
-        Ok((latents, latent_height, latent_width))
+        Ok(Denoised {
+            latents,
+            latent_height,
+            latent_width,
+            warnings: cache_warning.into_iter().collect(),
+        })
     }
 
     fn decode_rgba(
@@ -888,6 +979,7 @@ impl QwenImage21Engine {
         rgba: &Tensor,
         seed: u64,
         started: Instant,
+        warnings: Vec<String>,
     ) -> Result<GenerateResponse> {
         let format = req.resolved_output_format();
         let alpha = alpha_output_for_request(req);
@@ -902,9 +994,9 @@ impl QwenImage21Engine {
         )?;
         Ok(GenerateResponse {
             mesh: None,
-            request_warnings: alpha_warning(alpha, format)
-                .map(str::to_string)
+            request_warnings: warnings
                 .into_iter()
+                .chain(alpha_warning(alpha, format).map(str::to_string))
                 .collect(),
             audio: None,
             images: vec![ImageData {
@@ -1013,7 +1105,14 @@ impl QwenImage21Engine {
         progress.stage_done(&transformer_label, transformer_start.elapsed());
         let initial_latents = self.take_initial_latents();
         let progress = &self.base.progress;
-        let (latents, latent_height, latent_width) = Self::denoise(
+        let transformer_format =
+            super::text_encoder_residency::transformer_format(&self.base.paths);
+        let Denoised {
+            latents,
+            latent_height,
+            latent_width,
+            warnings,
+        } = Self::denoise(
             progress,
             req,
             &transformer,
@@ -1024,6 +1123,7 @@ impl QwenImage21Engine {
                 seed,
                 initial_latents,
                 condition,
+                transformer_format,
             },
         )?;
         drop(transformer);
@@ -1046,7 +1146,7 @@ impl QwenImage21Engine {
             &vae_device,
             vae_dtype,
         )?;
-        Self::response(req, &image, seed, started)
+        Self::response(req, &image, seed, started, warnings)
     }
 
     fn generate_eager(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
@@ -1135,7 +1235,14 @@ impl QwenImage21Engine {
             self.base.gpu_ordinal,
             loaded.vae_dtype,
         )?;
-        let (latents, latent_height, latent_width) = Self::denoise(
+        let transformer_format =
+            super::text_encoder_residency::transformer_format(&self.base.paths);
+        let Denoised {
+            latents,
+            latent_height,
+            latent_width,
+            warnings,
+        } = Self::denoise(
             progress,
             req,
             &loaded.transformer,
@@ -1146,6 +1253,7 @@ impl QwenImage21Engine {
                 seed,
                 initial_latents,
                 condition,
+                transformer_format,
             },
         )?;
         // The decode's peak may not fit beside the transformer (2K): park it
@@ -1196,7 +1304,7 @@ impl QwenImage21Engine {
                 &vae_device,
                 vae_dtype,
             )?;
-            return Self::response(req, &image, seed, started);
+            return Self::response(req, &image, seed, started, warnings);
         }
         let decoded = Self::decode_rgba(
             progress,
@@ -1212,7 +1320,7 @@ impl QwenImage21Engine {
             loaded.transformer.move_to_device(&loaded.device)?;
         }
         let image = decoded?;
-        Self::response(req, &image, seed, started)
+        Self::response(req, &image, seed, started, warnings)
     }
 }
 

@@ -701,9 +701,13 @@ fn calibration_reference_render() {
         2,
         crate::device::ActivationFamily::QwenImage21Dit,
     );
-    let cache = crate::device::qwen_image21_prefix_cache_bytes(shape, 2, 2);
-    let workspace =
-        crate::device::qwen_image21_reference_activation_bytes(base, shape, 2, 1, 2) - cache;
+    let cache = crate::device::qwen_image21_prefix_cache_bytes(
+        shape,
+        2,
+        2,
+        crate::device::qwen_image21_prefix_cache_budget(None, 0, 0),
+    );
+    let workspace = crate::device::qwen_image21_reference_workspace_bytes(base, shape, 1, 2);
     eprintln!(
         "CALIBRATION refs={count} prefix_tokens={} cache={:.2} GiB workspace={:.2} GiB encode={:.2} GiB",
         shape.prefix_tokens(),

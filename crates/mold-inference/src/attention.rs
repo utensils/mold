@@ -208,7 +208,7 @@ pub fn policy_for_family(family: &str) -> AttentionPolicy {
     // Keyed on the CANONICAL engine family, so every factory alias
     // (`flux.2`, `flux2-klein`, `ltx-2`, `ltx2.3`) takes the policy of the
     // engine it constructs.
-    match crate::canonical_engine_family(family) {
+    match crate::batch::canonical_production_family(family) {
         "wan" | "ltx2" => AttentionPolicy::Video,
         // FLUX.1, FLUX.2 and Qwen Image 2.1. See `AttentionPolicy::FastStill`;
         // the convolution side mirrors this list in
@@ -1766,7 +1766,10 @@ mod tests {
         let video = ["wan", "ltx2"];
         for entry in crate::production_family_capabilities() {
             for alias in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
-                assert_eq!(crate::canonical_engine_family(alias), entry.family);
+                assert_eq!(
+                    crate::batch::canonical_production_family(alias),
+                    entry.family
+                );
                 let expected = if fast_still.contains(&entry.family) {
                     AttentionPolicy::FastStill
                 } else if video.contains(&entry.family) {

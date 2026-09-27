@@ -708,7 +708,7 @@ pub fn production_family_capability_for_family(
 /// Every per-family policy table (attention, convolution, activation budget)
 /// keys on the answer, so an alias can never take a different policy from the
 /// engine it constructs. An unregistered family is returned unchanged.
-pub fn canonical_engine_family(family: &str) -> &str {
+pub fn canonical_production_family(family: &str) -> &str {
     production_family_capability_for_family(family).map_or(family, |entry| entry.family)
 }
 

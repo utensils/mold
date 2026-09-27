@@ -96,7 +96,7 @@ pub fn cudnn_compiled() -> bool {
 /// arithmetic.
 pub fn policy_for_family(family: &str) -> ConvPolicy {
     // Canonical engine family, exactly as `attention::policy_for_family`.
-    match crate::canonical_engine_family(family) {
+    match crate::batch::canonical_production_family(family) {
         "wan" | "ltx2" => ConvPolicy::Video,
         // Mirrors `attention::policy_for_family`. Qwen Image 2.1's
         // convolutions are all in its VAE, whose full-resolution 3x3 convs

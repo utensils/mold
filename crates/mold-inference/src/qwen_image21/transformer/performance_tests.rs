@@ -166,6 +166,7 @@ fn official_metal_mode_benchmark() -> Result<()> {
         false,
         1,
         dtype,
+        super::super::PrefixCacheBudget::RequestOnly,
     )[0];
     let mut prepared = transformer.prepare_t2i(&conditioning, 64, 64, decision)?;
     let mut predictions = Vec::new();

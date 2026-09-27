@@ -3119,7 +3119,7 @@ fn is_video_family(family_slug: &str) -> bool {
     // with image advice — lower the resolution, keep --batch 1 — and never
     // mentions the frame count that actually drives the peak.
     matches!(
-        mold_inference::canonical_engine_family(family_slug),
+        mold_inference::canonical_production_family(family_slug),
         "ltx-video" | "ltx2" | "wan"
     )
 }

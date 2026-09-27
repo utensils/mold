@@ -953,5 +953,55 @@
     "exec_path": "fast",
     "decision": "not adopted: the best case is 3-6% slower than two batch-1 forwards"
   },
-  "int8_linear_workspace_bytes_per_token": 95000
+  "int8_linear_workspace_bytes_per_token": 95000,
+  "prefix_cache_retention": {
+    "branch": "d249fa19",
+    "binary": "/storage/mold/uat-qwen21/bin/mold-c-kv2",
+    "gpu": "L40S (CUDA_VISIBLE_DEVICES=2)",
+    "rule": "fast path: retain every branch iff the summed cache fits prefix_cache_headroom (allocatable VRAM less weights, denoise workspace and a 1 GiB margin); legacy/Metal/CPU: request-only rule",
+    "evidence_dir": "/storage/mold/uat-qwen21/c-kv",
+    "cases": [
+      {
+        "case": "3 references 1536x1024, 1024x1024, g4 + negative, seed 42",
+        "cache": "retained",
+        "cache_gib": 12.0,
+        "denoise_s": 44.2,
+        "denoise_s_before": 167.4,
+        "peak_mib": 35801
+      },
+      {
+        "case": "10 references 1536x1024, 1024x1024, g1, seed 42",
+        "cache": "recomputed",
+        "cache_gib": 19.9,
+        "headroom_gib": 16.3,
+        "denoise_s": 343.7,
+        "peak_mib": 38201
+      },
+      {
+        "case": "10 references 1536x1024, 1024x1024, g4 + negative, seed 42",
+        "cache": "recomputed",
+        "cache_gib": 39.8,
+        "headroom_gib": 16.2,
+        "denoise_s": 696.5,
+        "peak_mib": 38169
+      },
+      {
+        "case": "10 references g1 with MOLD_QWEN_IMAGE21_KV_CACHE=on",
+        "result": "refused by the local planner",
+        "needed_gb": 61.3,
+        "usable_gb": 47.2
+      },
+      {
+        "case": "MOLD_ATTN=math MOLD_CONV=im2col 1024x1024 seed 210001",
+        "denoise_s": 38.2,
+        "png_sha256_prefix": "f1fa6bc2fd69296e",
+        "v032_identical": true
+      },
+      {
+        "case": "fast 1024x1024 g1 seed 210001",
+        "denoise_s": 14.9,
+        "gate_s": 22
+      }
+    ]
+  }
 }
