@@ -338,9 +338,9 @@ describe("MobileSourceControls", () => {
     expect(strip.classes()).toContain("ris--touch");
     expect(strip.element.contains(moveEarlier.element)).toBe(true);
     expect(strip.element.contains(remove.element)).toBe(true);
-    expect(wrapper.get("[data-test='mobile-reference-tile-0']").attributes("draggable")).toBe(
-      "false",
-    );
+    expect(
+      wrapper.get("[data-test='mobile-reference-tile-0']").attributes("data-reorderable"),
+    ).toBeUndefined();
 
     await moveEarlier.trigger("click");
     expect(form.imageAttachments).toEqual(["REFERENCE-1", "TARGET", "REFERENCE-2"]);

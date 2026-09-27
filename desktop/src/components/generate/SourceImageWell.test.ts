@@ -723,19 +723,30 @@ describe("SourceImageWell — ordered reference thumbnails", () => {
     ).toBe(true);
   });
 
-  it("reorders by dragging one tile onto another", async () => {
+  it("reorders by pointer-dragging one tile onto another (no HTML5 drag, which Tauri can swallow)", async () => {
     const { form, wrapper } = qwen21(["iVBORA", "iVBORB", "iVBORC"]);
-    const store = new Map<string, string>();
-    const dataTransfer = {
-      setData: (type: string, value: string) => store.set(type, value),
-      getData: (type: string) => store.get(type) ?? "",
-      types: [] as string[],
-      files: [] as File[],
-      effectAllowed: "",
-    };
-    await wrapper.get("[data-test='reference-tile-0']").trigger("dragstart", { dataTransfer });
-    dataTransfer.types = [...store.keys()];
-    await wrapper.get("[data-test='reference-tile-2']").trigger("drop", { dataTransfer });
+    // happy-dom lays nothing out: three 100px tiles, 10px apart.
+    wrapper.findAll("[data-test^='reference-tile-']").forEach((tile, index) => {
+      const left = index * 110;
+      tile.element.getBoundingClientRect = () =>
+        ({ left, top: 0, right: left + 100, bottom: 80 }) as DOMRect;
+    });
+    const from = wrapper.get("[data-test='reference-tile-0']").element;
+    const pointer = (type: string, clientX: number) =>
+      from.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          clientX,
+          clientY: 40,
+          button: 0,
+          pointerId: 1,
+          pointerType: "mouse",
+        }),
+      );
+    pointer("pointerdown", 50);
+    pointer("pointermove", 260);
+    pointer("pointerup", 260);
+    await wrapper.vm.$nextTick();
     expect(form.imageAttachments).toEqual(["iVBORB", "iVBORC", "iVBORA"]);
   });
 

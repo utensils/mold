@@ -52,7 +52,8 @@
 - **Transparent prints show a checkerboard** in the Library, lightbox, result
   canvas and recent prints on web, desktop and mobile. Every reference strip
   on web, desktop and phone now draws one numbered thumbnail per picture
-  ("Image 1", "Image 2", as the prompt addresses them) with remove, reorder and
+  ("Image 1", "Image 2", as the prompt addresses them) with remove, reorder
+  (drag with a mouse or pen, or the keyboard-reachable ‹ › buttons) and
   a "Sets canvas" mark on Qwen Image 2.1's last reference. MCP
   `generate_image` gains `reference_images`, `transparent_background` and
   `webp`, and Discord routes `reference_1`/`reference_2` by the model's

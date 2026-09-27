@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   moveReference,
+  pastReorderThreshold,
   REFERENCE_CANVAS_NOTE,
+  referenceDropSide,
+  referenceIndexAtPoint,
+  referenceMoveAnnouncement,
   referenceOrdinalBase,
   referenceStripItems,
   reorderReference,
@@ -117,5 +121,45 @@ describe("stripSetsCanvas", () => {
 
   it("explains the rule in one sentence", () => {
     expect(REFERENCE_CANVAS_NOTE).toMatch(/last image sets the canvas/i);
+  });
+});
+
+describe("pointer reorder helpers", () => {
+  const rect = (left: number, top: number, w = 100, h = 80) => ({
+    left,
+    top,
+    right: left + w,
+    bottom: top + h,
+  });
+
+  it("starts a drag only once the pointer has travelled past the threshold", () => {
+    expect(pastReorderThreshold(0, 0)).toBe(false);
+    expect(pastReorderThreshold(3, 3)).toBe(false);
+    expect(pastReorderThreshold(6, 0)).toBe(true);
+    expect(pastReorderThreshold(0, -6)).toBe(true);
+  });
+
+  it("hit-tests the tile under the pointer, across wrapped rows", () => {
+    const rects = [rect(0, 0), rect(110, 0), rect(0, 90)];
+    expect(referenceIndexAtPoint(rects, 50, 40)).toBe(0);
+    expect(referenceIndexAtPoint(rects, 150, 10)).toBe(1);
+    expect(referenceIndexAtPoint(rects, 20, 120)).toBe(2);
+    // The gap between tiles and the space past the strip hit nothing.
+    expect(referenceIndexAtPoint(rects, 105, 40)).toBeNull();
+    expect(referenceIndexAtPoint(rects, 500, 500)).toBeNull();
+  });
+
+  it("draws the insertion mark on the side the picture will land", () => {
+    expect(referenceDropSide(2, 0)).toBe("before");
+    expect(referenceDropSide(0, 2)).toBe("after");
+  });
+
+  it("announces a move by the numbers the prompt uses", () => {
+    expect(referenceMoveAnnouncement(2, 0, 0)).toBe(
+      "Moved image 3 to position 1.",
+    );
+    expect(referenceMoveAnnouncement(0, 1, 1)).toBe(
+      "Moved image 2 to position 3.",
+    );
   });
 });

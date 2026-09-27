@@ -108,3 +108,60 @@ export function stripSetsCanvas(
 /** The strip's canvas sentence, beside the "Sets canvas" badge. */
 export const REFERENCE_CANVAS_NOTE =
   "The last image sets the canvas shape unless you pick a size.";
+
+// ── Pointer drag-to-reorder ───────────────────────────────────────────────
+// The strip reorders with Pointer Events, never HTML5 drag-and-drop: under
+// Tauri's default `dragDropEnabled` the native layer can swallow HTML5 DnD
+// inside the webview (WebView2 on Windows), and an HTML5 drag is also what
+// an OS FILE drop arrives as — one mechanism for each keeps them apart.
+
+/** How far (CSS px, either axis) a press travels before it is a drag, so a
+ * click on a tile never reorders anything. */
+const REORDER_DRAG_THRESHOLD_PX = 5;
+
+export function pastReorderThreshold(dx: number, dy: number): boolean {
+  return (
+    Math.abs(dx) > REORDER_DRAG_THRESHOLD_PX ||
+    Math.abs(dy) > REORDER_DRAG_THRESHOLD_PX
+  );
+}
+
+interface TileRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The tile under the pointer, by index into `rects`; `null` over a gap or
+ * outside the strip. */
+export function referenceIndexAtPoint(
+  rects: readonly TileRect[],
+  x: number,
+  y: number,
+): number | null {
+  const index = rects.findIndex(
+    (r) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom,
+  );
+  return index < 0 ? null : index;
+}
+
+/** Which edge of the target tile the insertion mark sits on: a picture
+ * moved earlier lands before the target, one moved later lands after it
+ * (`reorderReference` semantics). */
+export function referenceDropSide(
+  from: number,
+  to: number,
+): "before" | "after" {
+  return from > to ? "before" : "after";
+}
+
+/** The live-region sentence after a pointer reorder, in the prompt's
+ * numbering. */
+export function referenceMoveAnnouncement(
+  from: number,
+  to: number,
+  ordinalBase: number,
+): string {
+  return `Moved image ${ordinalBase + from + 1} to position ${ordinalBase + to + 1}.`;
+}

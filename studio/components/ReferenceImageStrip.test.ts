@@ -38,6 +38,46 @@ function strip(props: Record<string, unknown> = {}) {
   });
 }
 
+/** Three 100x80 tiles in one row, 10px apart (a real browser's layout;
+ * happy-dom lays nothing out). */
+function layOut(wrapper: ReturnType<typeof strip>) {
+  wrapper.findAll("[data-test^='reference-tile-']").forEach((tile, index) => {
+    const left = index * 110;
+    tile.element.getBoundingClientRect = () =>
+      ({
+        left,
+        top: 0,
+        right: left + 100,
+        bottom: 80,
+        width: 100,
+        height: 80,
+        x: left,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  });
+}
+
+function pointer(
+  target: Element,
+  type: string,
+  clientX: number,
+  clientY: number,
+  pointerType = "mouse",
+) {
+  target.dispatchEvent(
+    new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      button: 0,
+      pointerId: 1,
+      pointerType,
+    }),
+  );
+}
+
 describe("ReferenceImageStrip", () => {
   it("draws every reference as its own numbered thumbnail, in order", () => {
     const wrapper = strip();
@@ -191,26 +231,113 @@ describe("ReferenceImageStrip", () => {
     wrapper.unmount();
   });
 
-  it("reorders by dragging one tile onto another", async () => {
+  it("reorders by dragging one tile onto another with the pointer", async () => {
     const wrapper = strip();
-    const store = new Map<string, string>();
-    const dataTransfer = {
-      setData: (type: string, value: string) => store.set(type, value),
-      getData: (type: string) => store.get(type) ?? "",
-      types: [] as string[],
-      files: [] as File[],
-      effectAllowed: "",
-    };
-    await wrapper
-      .get("[data-test='reference-tile-2']")
-      .trigger("dragstart", { dataTransfer });
-    dataTransfer.types = [...store.keys()];
-    await wrapper
-      .get("[data-test='reference-tile-0']")
-      .trigger("drop", { dataTransfer });
+    layOut(wrapper);
+    const from = wrapper.get("[data-test='reference-tile-2']").element;
+    pointer(from, "pointerdown", 250, 40);
+    pointer(from, "pointermove", 200, 40);
+    pointer(from, "pointermove", 30, 40);
+    await wrapper.vm.$nextTick();
+    // The target shows where the picture will land; the source is lifted.
+    const target = wrapper.get("[data-test='reference-tile-0']");
+    expect(target.classes()).toContain("ris__tile--over");
+    expect(target.classes()).toContain("ris__tile--over-before");
+    expect(wrapper.get("[data-test='reference-tile-2']").classes()).toContain(
+      "ris__tile--lifted",
+    );
+    pointer(from, "pointerup", 30, 40);
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("move")).toEqual([[2, 0]]);
     // An internal reorder is never mistaken for a file drop.
     expect(wrapper.emitted("files")).toBeUndefined();
+    expect(target.classes()).not.toContain("ris__tile--over");
+    // Announced by the numbers the prompt uses.
+    expect(wrapper.get("[data-test='reference-announce']").text()).toBe(
+      "Moved image 3 to position 1.",
+    );
+    wrapper.unmount();
+  });
+
+  it("never reorders on a click without movement, and a button click still works", async () => {
+    const wrapper = strip();
+    layOut(wrapper);
+    const tile = wrapper.get("[data-test='reference-tile-1']").element;
+    pointer(tile, "pointerdown", 150, 40);
+    pointer(tile, "pointermove", 152, 41);
+    pointer(tile, "pointerup", 152, 41);
+    expect(wrapper.emitted("move")).toBeUndefined();
+
+    const later = wrapper.get("[data-test='reference-later-1']");
+    pointer(later.element, "pointerdown", 150, 70);
+    pointer(later.element, "pointermove", 260, 70);
+    pointer(later.element, "pointerup", 260, 70);
+    // A press that starts on a button is that button's, never a drag.
+    expect(wrapper.emitted("move")).toBeUndefined();
+    await later.trigger("click");
+    expect(wrapper.emitted("move")).toEqual([[1, 2]]);
+    wrapper.unmount();
+  });
+
+  it("aborts a drag on Escape and on pointercancel", async () => {
+    const wrapper = strip();
+    layOut(wrapper);
+    const from = wrapper.get("[data-test='reference-tile-0']").element;
+    pointer(from, "pointerdown", 50, 40);
+    pointer(from, "pointermove", 260, 40);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-test='reference-tile-2']").classes()).toContain(
+      "ris__tile--over",
+    );
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.vm.$nextTick();
+    expect(
+      wrapper.get("[data-test='reference-tile-2']").classes(),
+    ).not.toContain("ris__tile--over");
+    pointer(from, "pointerup", 260, 40);
+
+    pointer(from, "pointerdown", 50, 40);
+    pointer(from, "pointermove", 260, 40);
+    pointer(from, "pointercancel", 260, 40);
+    pointer(from, "pointerup", 260, 40);
+    expect(wrapper.emitted("move")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("moves nothing when the pointer is released outside every tile", () => {
+    const wrapper = strip();
+    layOut(wrapper);
+    const from = wrapper.get("[data-test='reference-tile-0']").element;
+    pointer(from, "pointerdown", 50, 40);
+    pointer(from, "pointermove", 900, 900);
+    pointer(from, "pointerup", 900, 900);
+    expect(wrapper.emitted("move")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("does not pointer-drag while disabled, on the touch strip, or with a finger", () => {
+    for (const [props, pointerType] of [
+      [{ disabled: true }, "mouse"],
+      [{ touchFriendly: true }, "mouse"],
+      [{}, "touch"],
+    ] as const) {
+      const wrapper = strip(props);
+      layOut(wrapper);
+      const from = wrapper.get("[data-test='reference-tile-2']").element;
+      pointer(from, "pointerdown", 250, 40, pointerType);
+      pointer(from, "pointermove", 30, 40, pointerType);
+      pointer(from, "pointerup", 30, 40, pointerType);
+      expect(wrapper.emitted("move")).toBeUndefined();
+      wrapper.unmount();
+    }
+  });
+
+  it("uses no HTML5 drag for reordering, so the only drag the strip hears is a file", () => {
+    const wrapper = strip();
+    const tile = wrapper.get("[data-test='reference-tile-0']");
+    expect(tile.attributes("draggable")).toBeUndefined();
+    expect(tile.attributes("data-reorderable")).toBe("true");
+    wrapper.unmount();
   });
 
   it("is the references drop target and hands dropped files to the surface", async () => {
@@ -226,6 +353,19 @@ describe("ReferenceImageStrip", () => {
     // Handled, so a window-level drop listener leaves it alone.
     expect(event.defaultPrevented).toBe(true);
     expect(wrapper.emitted("files")).toEqual([[[file]]]);
+  });
+
+  it("hands a file dropped on a tile to the strip to append, never as a reorder", () => {
+    const wrapper = strip();
+    const file = new File(["x"], "new.png", { type: "image/png" });
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { files: [file], types: ["Files"], getData: () => "" },
+    });
+    wrapper.get("[data-test='reference-tile-1']").element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(wrapper.emitted("files")).toEqual([[[file]]]);
+    expect(wrapper.emitted("move")).toBeUndefined();
   });
 
   it("offers an add tile until the advertised ceiling is reached", async () => {
@@ -275,7 +415,9 @@ describe("ReferenceImageStrip", () => {
       "ris--touch",
     );
     expect(
-      wrapper.get("[data-test='reference-tile-0']").attributes("draggable"),
-    ).toBe("false");
+      wrapper
+        .get("[data-test='reference-tile-0']")
+        .attributes("data-reorderable"),
+    ).toBeUndefined();
   });
 });
