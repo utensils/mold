@@ -3066,9 +3066,7 @@ fn last_reference_canvas_for(
     {
         return Ok(None);
     }
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(last))
-        .with_guessed_format()
-        .and_then(|reader| reader.into_dimensions().map_err(std::io::Error::other))
+    let (width, height) = mold_core::reference_image::oriented_dimensions(last)
         .map_err(|error| format!("the last reference image's size could not be read: {error}"))?;
     Ok(Some(mold_core::validation::fit_to_target_area_ties_even(
         width,
@@ -6859,6 +6857,22 @@ mod tests {
         let req = build_generate_request(qwen21_args(json!({})), None).unwrap();
         assert_eq!(req.edit_images, None);
         assert_eq!((req.width, req.height), (1024, 1024));
+
+        // EXIF Orientation 6 on landscape-stored pixels: a portrait canvas,
+        // the way the engine decodes it.
+        let rotated = general_purpose::STANDARD.encode(
+            std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "../mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg",
+            ))
+            .unwrap(),
+        );
+        let req =
+            build_generate_request(qwen21_args(json!({ "reference_images": [rotated] })), None)
+                .unwrap();
+        assert_eq!(
+            (req.width, req.height),
+            mold_core::validation::fit_to_target_area_ties_even(48, 96, 1024 * 1024, 32)
+        );
     }
 
     #[test]

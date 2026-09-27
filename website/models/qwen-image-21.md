@@ -138,12 +138,25 @@ mold run qwen-image-2.1 "Put the jacket from image 1 on the person in image 2" \
 ```
 
 - **Formats**: PNG, JPEG or WebP. References are never flattened: an RGBA
-  reference is read with its alpha.
+  reference is read with its alpha. A 16-bit PNG is reduced to 8 bits the
+  way Pillow does (the high byte), so a reference that is opaque to the
+  upstream pipeline is opaque here too.
+- **Limits**: each side at most 16,384 pixels, at most 100,000,000 pixels in
+  total, and an aspect ratio of at most 200:1. A reference past any of them is
+  refused when the request is submitted, naming its position.
 - **Sizing**: each reference is resized to about 1024² pixels before encoding.
+- **Orientation**: the EXIF orientation is applied, so a portrait phone photo
+  (landscape pixels plus an orientation tag) conditions upright, and its
+  **portrait** shape is what sizes the canvas below. Upstream opens the file
+  with PIL and uses the stored pixels as they are; mold deliberately differs.
+- **Colour**: an embedded ICC profile (a Display-P3 phone photo, an Adobe RGB
+  export) is converted to sRGB before encoding. Upstream ignores the profile
+  and reads the stored values as sRGB; mold deliberately differs, so a wide-gamut
+  reference conditions on the colours it shows.
 - **Canvas**: the profile advertises `canvas: last-reference`. With neither
-  `--width` nor `--height`, the output takes the **last** reference's aspect
-  ratio at the default area, on the 32 px grid. Any explicit size wins. This
-  is a client rule; the server renders exactly the size in the request.
+  `--width` nor `--height`, the output takes the **last** reference's upright
+  aspect ratio at the default area, on the 32 px grid. Any explicit size wins.
+  This is a client rule; the server renders exactly the size in the request.
 - **No source image**: references replace img2img, so `--strength`, `--mask`
   and ControlNet are not offered, and a `source_image` is refused with
   "uses edit_images instead of source_image".

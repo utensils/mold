@@ -268,6 +268,97 @@ pub fn decode_oriented_srgb_rgba_with_limits(
     bytes: &[u8],
     limits: image::Limits,
 ) -> Result<image::RgbaImage> {
+    decode_oriented_srgb_rgba_inner(bytes, limits, |_, _| Ok(()), |decoded| decoded.to_rgba8())
+}
+
+/// Decode one ordered reference image (`GenerateRequest.edit_images`) the one
+/// way both of its readers need it: the Qwen Image 2.1 engine's conditioning
+/// (`qwen_image21::reference::prepare_reference`) and the output-alpha rule
+/// (`image::encoded_image_has_alpha`). One decoder and one limit policy, so
+/// the answer "does this reference carry alpha" is a fact about the very
+/// pixels the engine conditions on.
+///
+/// - Bounded: `mold_core::reference_image::reference_decode_limits` (the
+///   decoder refuses a side past the admitted maximum) and the admission
+///   area/aspect bounds, checked on the header BEFORE any pixel is decoded.
+///   Admission refuses the same bytes first; this is the engine's own floor
+///   for a caller that reached it some other way.
+/// - Upright: the EXIF orientation is applied. Upstream opens the reference
+///   with PIL (`pipeline_qwenimage21.py:653-660` at `e0abab83b`), which does
+///   NOT, so a phone photo would be conditioned sideways; mold deliberately
+///   differs, and every canvas authority reads the oriented size
+///   (`mold_core::reference_image::oriented_dimensions`).
+/// - sRGB: an embedded ICC profile is converted to sRGB (alpha untouched).
+///   PIL ignores ICC profiles entirely, so this too is a deliberate
+///   divergence: a Display-P3 phone photo conditions on the colours it shows,
+///   not on its raw P3 code values read as sRGB.
+/// - 8-bit exactly as Pillow converts: see [`pillow_rgba8`].
+pub fn decode_reference_rgba(bytes: &[u8]) -> Result<image::RgbaImage> {
+    decode_oriented_srgb_rgba_inner(
+        bytes,
+        mold_core::reference_image::reference_decode_limits(),
+        |width, height| {
+            mold_core::reference_image::validate_reference_image_dimensions(
+                "A reference image",
+                width,
+                height,
+            )
+            .map_err(anyhow::Error::msg)
+        },
+        pillow_rgba8,
+    )
+}
+
+/// PIL's `Image.open(...).convert("RGBA")` from a decoded image, which is what
+/// upstream hands the reference path (`pipeline_qwenimage21.py:653-654`).
+///
+/// The 8-bit cases are the `image` crate's own conversion. The 16-bit PNG
+/// cases are NOT: `image` rescales with `x / 257` (rounded), while Pillow's
+/// PNG plugin unpacks 16-bit RGB, RGBA and LA by taking the HIGH byte
+/// (`PngImagePlugin.py` `_MODES` `RGB;16B`/`RGBA;16B`/`LA;16B`, unpacked by
+/// `Unpack.c` `unpackRGB16B`/`unpackRGBA16B`, i.e. `x >> 8`), and opens 16-bit
+/// grayscale as `I;16`, whose `convert("RGBA")` clamps
+/// (`Convert.c` `I16_RGB`: `in[1] == 0 ? in[0] : 255`, i.e. `min(x, 255)`).
+/// Measured against Pillow 12.3.0: alpha `0xFF00` is 255 there and 254 under
+/// `x / 257`, which flips "has alpha below 255" for a reference that is
+/// opaque to upstream.
+pub fn pillow_rgba8(decoded: DynamicImage) -> image::RgbaImage {
+    let high = |value: u16| (value >> 8) as u8;
+    match decoded {
+        DynamicImage::ImageRgb16(image) => {
+            image::RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+                let [r, g, b] = image.get_pixel(x, y).0;
+                image::Rgba([high(r), high(g), high(b), 255])
+            })
+        }
+        DynamicImage::ImageRgba16(image) => {
+            image::RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+                image::Rgba(image.get_pixel(x, y).0.map(high))
+            })
+        }
+        DynamicImage::ImageLumaA16(image) => {
+            image::RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+                let [l, a] = image.get_pixel(x, y).0;
+                let l = high(l);
+                image::Rgba([l, l, l, high(a)])
+            })
+        }
+        DynamicImage::ImageLuma16(image) => {
+            image::RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+                let l = image.get_pixel(x, y).0[0].min(255) as u8;
+                image::Rgba([l, l, l, 255])
+            })
+        }
+        other => other.to_rgba8(),
+    }
+}
+
+fn decode_oriented_srgb_rgba_inner(
+    bytes: &[u8],
+    limits: image::Limits,
+    check_dimensions: impl FnOnce(u32, u32) -> Result<()>,
+    to_rgba8: impl FnOnce(DynamicImage) -> image::RgbaImage,
+) -> Result<image::RgbaImage> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .context("failed to sniff source image format")?;
@@ -275,12 +366,18 @@ pub fn decode_oriented_srgb_rgba_with_limits(
     let mut decoder = reader
         .into_decoder()
         .context("failed to decode source image")?;
+    let (width, height) = decoder.dimensions();
+    check_dimensions(width, height)?;
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let icc = decoder.icc_profile().unwrap_or_default();
     let mut decoded =
         DynamicImage::from_decoder(decoder).context("failed to decode source image")?;
+    // DELIBERATE DIVERGENCE: PIL's `open` leaves the EXIF orientation
+    // unapplied, so upstream conditions on a phone photo sideways. Every
+    // canvas authority reads this same oriented size
+    // (`mold_core::reference_image::oriented_dimensions`).
     decoded.apply_orientation(orientation);
     let is_grayscale = matches!(
         decoded.color(),
@@ -289,7 +386,13 @@ pub fn decode_oriented_srgb_rgba_with_limits(
             | image::ColorType::L16
             | image::ColorType::La16
     );
-    let mut rgba = decoded.to_rgba8();
+    let mut rgba = to_rgba8(decoded);
+    // DELIBERATE DIVERGENCE from the PIL-based upstreams this decoder serves
+    // (Qwen Image 2.1's `pipeline_qwenimage21.py:653-660`, Hunyuan3D's
+    // loaders): PIL's `open`/`convert` never applies an embedded ICC profile,
+    // so upstream reads a Display-P3 or Adobe RGB file's code values as if
+    // they were sRGB. mold converts them, like the EXIF orientation above,
+    // so a wide-gamut photo conditions on the colours it actually shows.
     if let Some(profile) = icc {
         if !profile.is_empty() {
             let layout = if is_grayscale {
@@ -614,5 +717,98 @@ mod tests {
             val > 0.1 && val < 0.5,
             "red -> grayscale should be ~0.3, got {val}"
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_decode_tests {
+    use super::*;
+    use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
+
+    /// The 16-bit samples measured against Pillow 12.3.0, and what
+    /// `Image.open(png).convert("RGBA")` made of each: the high byte for
+    /// RGB, RGBA and LA, a clamp for grayscale (`I;16`).
+    const SAMPLES: [u16; 10] = [
+        0x0000, 0x00ff, 0x0100, 0x7fff, 0x8000, 0xff00, 0xff7f, 0xff80, 0xfeff, 0xffff,
+    ];
+    const PIL_HIGH_BYTE: [u8; 10] = [0, 0, 1, 127, 128, 255, 255, 255, 254, 255];
+    const PIL_I16_CLAMP: [u8; 10] = [0, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+
+    fn png<P: image::PixelWithColorType>(image: &ImageBuffer<P, Vec<P::Subpixel>>) -> Vec<u8>
+    where
+        [P::Subpixel]: image::EncodableLayout,
+    {
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn sixteen_bit_pngs_convert_exactly_as_pillow_does() {
+        let rgba = ImageBuffer::from_fn(10, 1, |x, _| Rgba([SAMPLES[x as usize]; 4]));
+        let rgb = ImageBuffer::from_fn(10, 1, |x, _| Rgb([SAMPLES[x as usize]; 3]));
+        let la = ImageBuffer::from_fn(10, 1, |x, _| LumaA([SAMPLES[x as usize]; 2]));
+        let l = ImageBuffer::from_fn(10, 1, |x, _| Luma([SAMPLES[x as usize]]));
+        let channel = |bytes: Vec<u8>, index: usize| -> Vec<u8> {
+            decode_reference_rgba(&bytes)
+                .unwrap()
+                .pixels()
+                .map(|pixel| pixel.0[index])
+                .collect()
+        };
+        assert_eq!(channel(png(&rgba), 0), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgba), 3), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgb), 1), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgb), 3), [255; 10]);
+        assert_eq!(channel(png(&la), 2), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&la), 3), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&l), 0), PIL_I16_CLAMP);
+        assert_eq!(channel(png(&l), 3), [255; 10]);
+    }
+
+    #[test]
+    fn eight_bit_references_decode_unchanged() {
+        let image =
+            image::RgbaImage::from_fn(6, 4, |x, y| Rgba([x as u8 * 40, y as u8 * 60, 7, 200]));
+        assert_eq!(decode_reference_rgba(&png(&image)).unwrap(), image);
+    }
+
+    /// The decoder refuses a reference past the admitted bounds from its
+    /// header, before a single pixel is allocated.
+    #[test]
+    fn an_oversized_reference_is_refused_before_it_is_decoded() {
+        let mut bytes = png(&image::RgbaImage::new(1, 1));
+        // Rewrite IHDR to 60000x60000 and fix its CRC.
+        bytes[16..20].copy_from_slice(&60_000u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&60_000u32.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        let error = format!("{:#}", decode_reference_rgba(&bytes).unwrap_err());
+        assert!(
+            error.contains("decode") || error.contains("16384"),
+            "{error}"
+        );
+        // Inside the side bound but past the area bound.
+        bytes[16..20].copy_from_slice(&12_000u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&9_000u32.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        let error = format!("{:#}", decode_reference_rgba(&bytes).unwrap_err());
+        assert!(error.contains("100000000"), "{error}");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
     }
 }

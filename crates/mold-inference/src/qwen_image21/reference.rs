@@ -96,15 +96,19 @@ impl PreparedReference {
     }
 }
 
-/// Decode (EXIF orientation, ICC to sRGB) and resize one reference
-/// (`P:653-663`): a non-RGBA source becomes opaque RGBA, the canvas is the
-/// reference area at the source's own aspect, and the resize is Pillow's
-/// premultiplied LANCZOS.
+/// Decode and resize one reference (`P:653-663`): a non-RGBA source becomes
+/// opaque RGBA, the canvas is the reference area at the source's own aspect,
+/// and the resize is Pillow's premultiplied LANCZOS.
 ///
-/// Upstream's PIL `open` does not apply EXIF orientation; mold does for every
-/// source image, so a phone photo is conditioned the right way up.
+/// The decode is `img_utils::decode_reference_rgba` — bounded by the
+/// admission limits, Pillow's 16-bit conversion, and the one decoder the
+/// output-alpha rule also reads. Two deliberate divergences from upstream's
+/// PIL `open` live there, documented where they happen: EXIF orientation is
+/// applied (a phone photo conditions the right way up, and every canvas
+/// authority reads the same oriented size), and an embedded ICC profile is
+/// converted to sRGB.
 pub(crate) fn prepare_reference(bytes: &[u8]) -> Result<PreparedReference> {
-    let source = crate::img_utils::decode_oriented_srgb_rgba(bytes)
+    let source = crate::img_utils::decode_reference_rgba(bytes)
         .context("failed to decode a Qwen Image 2.1 reference image")?;
     prepare_decoded_reference(&source)
 }
@@ -392,6 +396,73 @@ mod tests {
             .collect();
         for (value, byte) in values.iter().zip(pixel) {
             assert_eq!(*value, 2.0 * (f32::from(byte) / 255.0) - 1.0);
+        }
+    }
+
+    /// P4's encoder parity feeds the CAPTURED `*_input` straight into the VAE
+    /// (`vae_encoder.rs`), so on its own it never checks that mold BUILDS
+    /// that input. This closes the gap end to end and needs no weights: the
+    /// committed reference files through `prepare_reference` (decode, Pillow
+    /// premultiplied LANCZOS, `VaeImageProcessor` normalization) must equal
+    /// the tensors upstream handed its encoder, bit for bit — including the
+    /// colour Pillow's premultiplied resize ZEROES under alpha 0, which the
+    /// transparent reference exercises.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_FIXTURES"]
+    fn prepared_vae_inputs_match_the_captured_upstream_inputs() {
+        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
+            return;
+        };
+        let captured = candle_core::safetensors::load(
+            std::path::Path::new(&fixtures).join("p4_vae_encode_fp32.safetensors"),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let testdata =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qwen_image21");
+        for (case, file) in [("opaque", "ref_opaque.png"), ("rgba", "ref_rgba.png")] {
+            let prepared = prepare_reference(&std::fs::read(testdata.join(file)).unwrap()).unwrap();
+            let actual = prepared.vae_input(&Device::Cpu, DType::F32).unwrap();
+            let expected = captured[&format!("{case}_input")].squeeze(2).unwrap();
+            assert_eq!(actual.dims(), expected.dims(), "{case} shape");
+            let worst = (&actual - &expected)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_eq!(worst, 0.0, "{case}: max |mold - upstream| = {worst}");
+
+            // Premultiplied zeroing: the transparent reference hides colour
+            // under EVERY one of its alpha-0 pixels, which a straight resize
+            // would smear into the result. Pillow's premultiplied LANCZOS
+            // (and mold's port) zero it instead — all but the few edge pixels
+            // whose resampled alpha rounds to 0 from a non-zero premultiplied
+            // colour, which the bit-exact comparison above already pins.
+            if case == "rgba" {
+                let source = crate::img_utils::decode_reference_rgba(
+                    &std::fs::read(testdata.join(file)).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    source
+                        .pixels()
+                        .any(|p| p.0[3] == 0 && p.0[..3] != [0, 0, 0]),
+                    "the fixture hides colour under alpha 0"
+                );
+                let clear: Vec<_> = prepared.rgba.pixels().filter(|p| p.0[3] == 0).collect();
+                let zeroed = clear.iter().filter(|p| p.0[..3] == [0, 0, 0]).count();
+                assert!(!clear.is_empty());
+                assert!(
+                    zeroed * 100 >= clear.len() * 99,
+                    "{zeroed} of {} clear pixels zeroed",
+                    clear.len()
+                );
+            }
         }
     }
 
