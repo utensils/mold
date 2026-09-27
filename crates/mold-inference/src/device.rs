@@ -7259,13 +7259,17 @@ mod tests {
     #[cfg(not(feature = "metal"))]
     #[test]
     fn vram_load_delta_is_saturating_sub() {
-        // A baseline above any possible reading saturates to zero on every
-        // build: a flaky reading (post < pre) must never panic or wrap.
+        // No live reading can exceed `u64::MAX`, so a baseline there must
+        // saturate to zero in every build — a flaky reading (post < pre)
+        // must never panic or wrap.
         assert_eq!(vram_load_delta(0, u64::MAX), 0);
-        // Without CUDA, vram_in_use_bytes(0) == 0, so every baseline gives 0.
-        // A CUDA build run on a machine with a visible GPU reads real usage,
-        // so only the saturating half is portable there.
-        if !cfg!(feature = "cuda") {
+        // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0
+        // for any N. A CUDA build reads the DEVICE-global used bytes
+        // (`total - free` from `cuMemGetInfo`), which include every other
+        // process and every concurrently running test on the card, so a zero
+        // baseline there is legitimately nonzero.
+        #[cfg(not(feature = "cuda"))]
+        {
             assert_eq!(vram_load_delta(0, 0), 0);
             assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
         }
@@ -7780,12 +7784,23 @@ mod tests {
         }
     }
 
+    /// The pool high-water mark these probes read and rearm is ONE counter
+    /// per device per process, so two live-CUDA probe tests running on
+    /// parallel test threads rearm each other's peak (`cargo test`; nextest
+    /// runs each test in its own process and never sees this). Production
+    /// has one job per device, so only the harness needs the serialization.
+    #[cfg(feature = "cuda")]
+    static CUDA_POOL_PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Live check that the pool attributes really describe Mold's own
     /// allocations. Skipped (not failed) when no CUDA device is present, the
     /// same pattern the LTX-2 CUDA handoff test uses.
     #[cfg(feature = "cuda")]
     #[test]
     fn a_cuda_probe_measures_the_allocation_made_inside_the_phase() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
@@ -7820,6 +7835,9 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn each_cuda_phase_measures_only_its_own_peak() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
@@ -7875,6 +7893,9 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn a_nested_cuda_probe_never_erases_its_parents_peak() {
+        let _serial = CUDA_POOL_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
