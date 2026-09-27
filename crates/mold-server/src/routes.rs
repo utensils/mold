@@ -1080,6 +1080,52 @@ fn merge_render_warnings(mut warnings: RequestWarnings, from_render: &[String]) 
     warnings
 }
 
+/// The "not a recommended resolution" advisory for a single-pass family,
+/// except on the canvas a `canvas: last-reference` recipe (Qwen Image 2.1)
+/// tells every client to derive from its references: the LAST reference's
+/// aspect at the model's default area on its grid, rounded halves-to-even as
+/// upstream `calculate_dimensions` does (`pipeline_qwenimage21.py:149-156`,
+/// the same `fit_to_target_area_ties_even` the CLI and Studio use). That
+/// canvas is usually not a preset, and advising against the size the recipe
+/// itself chose tells the user they did something wrong when they did not.
+fn dimension_advisory(
+    family: &str,
+    model: &str,
+    width: u32,
+    height: u32,
+    edit_images: Option<&[Vec<u8>]>,
+    (default_width, default_height): (u32, u32),
+) -> Option<String> {
+    let rule = mold_core::generation_profile::reference_images_for_recipe(family, model).canvas;
+    let derived = (rule == Some(mold_core::ReferenceCanvasRule::LastReference))
+        .then(|| edit_images?.last())
+        .flatten()
+        .and_then(|last| {
+            image::ImageReader::new(std::io::Cursor::new(last))
+                .with_guessed_format()
+                .ok()?
+                .into_dimensions()
+                .ok()
+        })
+        .map(|(ref_width, ref_height)| {
+            mold_core::validation::fit_to_target_area_ties_even(
+                ref_width,
+                ref_height,
+                u64::from(default_width) * u64::from(default_height),
+                mold_core::dimension_alignment_for_model(model, Some(family)),
+            )
+        });
+    if derived == Some((width, height)) {
+        return None;
+    }
+    mold_core::dimension_warning_composed(
+        width,
+        height,
+        family,
+        mold_core::validation::Ltx2SpatialComposition::SinglePass,
+    )
+}
+
 fn merge_request_warnings(
     mut admitted: RequestWarnings,
     deferred: RequestWarnings,
@@ -1725,12 +1771,30 @@ async fn prepare_generation_inner(
             // Per model: a composing LTX-2 checkpoint advertises the
             // composed rungs, so judging it against the single-pass list
             // would flag the very shapes it exists to render.
-            let composition = if f == "ltx2" {
-                mold_core::validation::ltx2_spatial_composition(&request.model, request.pipeline)
-            } else {
-                mold_core::validation::Ltx2SpatialComposition::SinglePass
-            };
-            mold_core::dimension_warning_composed(request.width, request.height, f, composition)
+            if f == "ltx2" {
+                let composition = mold_core::validation::ltx2_spatial_composition(
+                    &request.model,
+                    request.pipeline,
+                );
+                return mold_core::dimension_warning_composed(
+                    request.width,
+                    request.height,
+                    f,
+                    composition,
+                );
+            }
+            let model_cfg = config.resolved_model_config(&request.model);
+            dimension_advisory(
+                f,
+                &request.model,
+                request.width,
+                request.height,
+                request.edit_images.as_deref(),
+                (
+                    model_cfg.effective_width(&config),
+                    model_cfg.effective_height(&config),
+                ),
+            )
         })
     };
 
@@ -12564,6 +12628,63 @@ mod tests {
         assert_eq!(
             control_pending_download_bytes(adapter, &weights),
             adapter.total_size_bytes()
+        );
+    }
+
+    /// Qwen Image 2.1's `canvas: last-reference` rule sizes an unsized request
+    /// to the last reference's aspect at the default area, exactly as upstream
+    /// `calculate_dimensions` does — 1344x768 for a 1344x768 reference, which
+    /// is not one of the recipe's presets. Every client applies that rule, so
+    /// the "not a recommended resolution" advisory must not fire on the very
+    /// canvas the recipe asked the client to pick (UAT: `mold run` with three
+    /// references printed it for its own default). Any other size, and any
+    /// family without the rule, keeps the advisory.
+    #[test]
+    fn the_last_reference_canvas_is_not_an_unrecommended_resolution() {
+        let png = |width: u32, height: u32| {
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        let refs = vec![png(640, 640), png(1344, 768)];
+        let advisory = |family: &str, model: &str, width: u32, height: u32, refs: &[Vec<u8>]| {
+            super::dimension_advisory(family, model, width, height, Some(refs), (1024, 1024))
+        };
+        assert_eq!(
+            advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, &refs),
+            None,
+            "the canvas the last-reference rule derives"
+        );
+        assert!(
+            advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, &refs[..1]).is_some(),
+            "a square last reference derives 1024x1024, so 1344x768 was chosen by hand"
+        );
+        assert!(
+            advisory("qwen-image21", "qwen-image-2.1:bf16", 1344, 768, &[]).is_some(),
+            "no reference, no derived canvas"
+        );
+        assert!(super::dimension_advisory(
+            "qwen-image21",
+            "qwen-image-2.1:bf16",
+            1344,
+            768,
+            None,
+            (1024, 1024)
+        )
+        .is_some());
+        assert!(
+            advisory("flux2", "flux2-dev:q8", 1344, 768, &refs).is_some(),
+            "FLUX.2 [dev] takes references but has no canvas rule"
+        );
+        assert_eq!(
+            advisory("qwen-image21", "qwen-image-2.1:bf16", 1024, 1024, &[]),
+            None,
+            "a preset never warns"
         );
     }
 

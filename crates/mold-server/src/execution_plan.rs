@@ -4068,20 +4068,11 @@ fn build_plan(
         })
         .saturating_add(mesh_host)
         .saturating_add(texture_host);
-    let fingerprint = execution_fingerprint(
+    let (fingerprint, warm_reuse_fingerprint) = engine_fingerprints(
         context.model,
         device,
         context.effective,
         &components,
-        context.engine_config,
-        context.effective_loras,
-        memory.block_offload,
-    );
-    let warm_reuse_fingerprint = execution_fingerprint(
-        context.model,
-        device,
-        context.effective,
-        &load_plan_independent_components(&components),
         context.engine_config,
         context.effective_loras,
         memory.block_offload,
@@ -5851,6 +5842,88 @@ fn load_plan_independent_components(
             )
         })
         .collect()
+}
+
+/// Families whose engine settles its adapter stack AND its component
+/// residency per request, on an engine that is otherwise identical.
+///
+/// Qwen Image 2.1 carries every LoRA in bypass slots (`plan.md`: "LoRA is
+/// always bypass, never merged ... every tier takes adapters without
+/// rebuilds"); `qwen_image21::pipeline` compares the wanted stack with its
+/// `active_lora` and swaps the slots in place. Its encoder park/drop and the
+/// transformer's 2K decode park are likewise decided inside each render
+/// (`settle_text_encoder_residency`), so the planner's per-request component
+/// strategies — which a LoRA, a reference or the canvas moves — describe that
+/// render's cost, not the engine that is resident. Rebuilding for either
+/// would reload the whole transformer to arrive at a state the engine reaches
+/// in place. What the engine IS (checkpoint content, dtype, quantization,
+/// encoder variant, semantic config, authored placement) still moves both
+/// identities, and a load-strategy or block-offload change is still caught by
+/// the separate planned-mode comparison.
+fn engine_settles_per_request(family: &str) -> bool {
+    family == "qwen-image21"
+}
+
+/// The exact and warm-reuse engine identities of one plan
+/// ([`ResolvedExecutionPlan::execution_fingerprint`] and
+/// [`ResolvedExecutionPlan::warm_reuse_fingerprint`]).
+///
+/// For a family that settles adapters and residency per request
+/// ([`engine_settles_per_request`]) BOTH are blind to the adapter stack (its
+/// `Lora` components and `effective_loras`) and to the per-request load plan,
+/// because an eager engine — which retains no residency the cache could credit
+/// — is compared by the EXACT identity: leaving either in it rebuilt the engine
+/// on every LoRA toggle (UAT, 2026-09-27). The stack itself stays frozen on the
+/// plan (`effective_loras`), is re-validated at dispatch, and is still charged
+/// by the memory estimate. Every other family keeps both in the exact identity.
+fn engine_fingerprints(
+    model: &str,
+    device: &DeviceFact,
+    effective: &EffectivePlacement,
+    components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+    engine_config: &mold_inference::FrozenEngineConfig,
+    effective_loras: &[PlannedLora],
+    offload: bool,
+) -> (String, String) {
+    let load_plan_independent = load_plan_independent_components(components);
+    if engine_settles_per_request(&engine_config.family) {
+        let not_an_adapter = |role: &ComponentRole| !matches!(role, ComponentRole::Lora(_));
+        let mut engine = load_plan_independent;
+        engine.retain(|role, _| not_an_adapter(role));
+        // The authored constraints are derived from the same artifact set, so
+        // an adapter adds a `Lora` role there too.
+        let mut effective = effective.clone();
+        effective.components.retain(|role, _| not_an_adapter(role));
+        let identity = execution_fingerprint(
+            model,
+            device,
+            &effective,
+            &engine,
+            engine_config,
+            &[],
+            offload,
+        );
+        return (identity.clone(), identity);
+    }
+    let exact = execution_fingerprint(
+        model,
+        device,
+        effective,
+        components,
+        engine_config,
+        effective_loras,
+        offload,
+    );
+    let warm = execution_fingerprint(
+        model,
+        device,
+        effective,
+        &load_plan_independent,
+        engine_config,
+        effective_loras,
+        offload,
+    );
+    (exact, warm)
 }
 
 fn execution_fingerprint(
@@ -10007,6 +10080,171 @@ mod tests {
             warm_of(&cold, &engine_config, &adapter),
             "the adapter stack still invalidates a warm engine"
         );
+    }
+
+    /// Qwen Image 2.1 installs its adapter stack per request into bypass
+    /// slots on the resident transformer (`qwen_image21::pipeline`'s
+    /// `active_lora`) and settles its encoder and decode residency per
+    /// request (`settle_text_encoder_residency`), so one engine serves a
+    /// request whose LoRA stack — or whose per-request component plan, which
+    /// a LoRA or a reference moves — differs from the one it was built under.
+    /// An eager engine is compared by the EXACT identity, so both identities
+    /// must be blind to both; adding, removing or rescaling an adapter must
+    /// not tear down and reload 28 GB of weights. Every other family keeps
+    /// rebuilding on either.
+    #[test]
+    fn a_qwen_image21_warm_engine_serves_any_adapter_stack() {
+        let device = DeviceFact {
+            total_vram_bytes: None,
+            cuda_peak_baseline: None,
+            id: "cuda:stable-device".into(),
+            ordinal: 0,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 9)),
+            available_vram_bytes: 46 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Auto,
+            )]),
+        };
+        let transformer = ComponentExecutionPlan {
+            role: ComponentRole::Transformer,
+            artifact_path: PathBuf::from("/models/qwen-image-2.1-bf16/transformer"),
+            content_fingerprint: ContentFingerprint("qwen21-transformer".into()),
+            dtype: Some(PlannedDType::Bf16),
+            quantization: None,
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::Resident,
+            predicted_vram_bytes: 15 * GIB,
+            predicted_host_bytes: 0,
+        };
+        let lora_component = |path: &str, content: &str| ComponentExecutionPlan {
+            role: ComponentRole::Lora(0),
+            artifact_path: PathBuf::from(path),
+            content_fingerprint: ContentFingerprint(content.into()),
+            dtype: None,
+            quantization: None,
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::Resident,
+            predicted_vram_bytes: GIB,
+            predicted_host_bytes: 0,
+        };
+        let adapter = |path: &str, content: &str, scale: f64| PlannedLora {
+            path: PathBuf::from(path),
+            scale_bits: scale.to_bits(),
+            content_fingerprint: ContentFingerprint(content.into()),
+        };
+        let bare = BTreeMap::from([(ComponentRole::Transformer, transformer.clone())]);
+        let with_style = BTreeMap::from([
+            (ComponentRole::Transformer, transformer.clone()),
+            (
+                ComponentRole::Lora(0),
+                lora_component("/loras/style.safetensors", "style"),
+            ),
+        ]);
+        let style_half = [adapter("/loras/style.safetensors", "style", 0.5)];
+        let style_full = [adapter("/loras/style.safetensors", "style", 0.8)];
+
+        for (model, family, request_scoped) in [
+            ("qwen-image-2.1:bf16", "qwen-image21", true),
+            ("flux2-dev:q8", "flux2", false),
+            ("qwen-image:q8", "qwen-image", false),
+        ] {
+            let config = frozen_config_for_family(family);
+            // The planner derives the authored constraints from the SAME
+            // artifact set (`effective_constraints`), so an adapter also adds
+            // a `Lora` role there.
+            let both = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+                        loras: &[PlannedLora]| {
+                let mut effective = effective.clone();
+                for role in components.keys() {
+                    effective
+                        .components
+                        .entry(role.clone())
+                        .or_insert(ResolvedComponentConstraint::Auto);
+                }
+                engine_fingerprints(
+                    model, &device, &effective, components, &config, loras, false,
+                )
+            };
+            let warm = |c: &BTreeMap<ComponentRole, ComponentExecutionPlan>, l: &[PlannedLora]| {
+                both(c, l).1
+            };
+            let exact = |c: &BTreeMap<ComponentRole, ComponentExecutionPlan>, l: &[PlannedLora]| {
+                both(c, l).0
+            };
+            let same = |a: String, b: String| a == b;
+            // An EAGER engine (no retained residency) is compared by the exact
+            // identity, so it has to be exactly as blind to the stack.
+            assert_eq!(
+                same(exact(&bare, &[]), exact(&with_style, &style_half)),
+                request_scoped,
+                "{family}: an eager engine asked for an adapter"
+            );
+            assert_eq!(
+                same(
+                    exact(&with_style, &style_half),
+                    exact(&with_style, &style_full)
+                ),
+                request_scoped,
+                "{family}: an eager engine asked to rescale an adapter"
+            );
+            assert_eq!(
+                same(warm(&bare, &[]), warm(&with_style, &style_half)),
+                request_scoped,
+                "{family}: adding an adapter to a warm engine"
+            );
+            assert_eq!(
+                same(
+                    warm(&with_style, &style_half),
+                    warm(&with_style, &style_full)
+                ),
+                request_scoped,
+                "{family}: rescaling an adapter on a warm engine"
+            );
+            assert_eq!(
+                same(warm(&with_style, &style_full), warm(&bare, &[])),
+                request_scoped,
+                "{family}: removing an adapter from a warm engine"
+            );
+            // The exemption is exactly the adapter stack: the checkpoint
+            // under it still invalidates the warm engine for every family.
+            let replaced = BTreeMap::from([(
+                ComponentRole::Transformer,
+                ComponentExecutionPlan {
+                    content_fingerprint: ContentFingerprint("replaced".into()),
+                    ..transformer.clone()
+                },
+            )]);
+            assert_ne!(
+                warm(&bare, &[]),
+                warm(&replaced, &[]),
+                "{family}: a replaced checkpoint still rebuilds"
+            );
+            assert_ne!(
+                exact(&bare, &[]),
+                exact(&replaced, &[]),
+                "{family}: a replaced checkpoint still rebuilds an eager engine"
+            );
+            // The per-request component plan: the same transformer, planned
+            // parked for a 2K decode, with the adapter's bytes charged.
+            let replanned = BTreeMap::from([(
+                ComponentRole::Transformer,
+                ComponentExecutionPlan {
+                    load_strategy: ComponentLoadStrategy::ParkedCpu,
+                    predicted_vram_bytes: 16 * GIB,
+                    predicted_host_bytes: 15 * GIB,
+                    ..transformer.clone()
+                },
+            )]);
+            assert_eq!(
+                same(exact(&bare, &[]), exact(&replanned, &[])),
+                request_scoped,
+                "{family}: an eager engine asked for a different per-request plan"
+            );
+        }
     }
 
     #[test]

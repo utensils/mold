@@ -368,3 +368,30 @@ calibration.
 `scripts/bench-qwen21.sh --host http://127.0.0.1:7681 --gates` runs the
 server end-to-end matrix and applies the M5 gates to the median denoise time.
 `--dry-run` prints the plan.
+
+## Server end-to-end (UAT, `scripts/bench-qwen21.sh`)
+
+Live run of `scripts/bench-qwen21.sh --host http://127.0.0.1:7684 --tiers
+bf16,int8-conv --gates` against a scratch `mold serve` (release sm_89 build
+`0cdacc23`, which includes the fast-path prefix-cache change `a9acc386`) on
+GPU 0 of plato, an NVIDIA L40S, with nothing else on that card. It used the
+shared `/storage/mold` home, 40 steps, and a seed of 210001. Each case had one
+warm-up request, then three timed requests. Medians are over the timed rows.
+Every repeat within a case was byte-identical.
+
+| Case                                   | Denoise (median) | Total (median) | s/step | VAE   |
+| -------------------------------------- | ---------------- | -------------- | ------ | ----- |
+| `bf16` 1024², guidance 1               | 15.0 s           | 15.6 s         | 0.375  | 0.6 s |
+| `bf16` 1344x768, guidance 4 + negative | 30.3 s           | 30.9 s         | 0.758  | 0.6 s |
+| `bf16` 2048², guidance 1               | 83.4 s           | 104.7 s        | 2.085  | 2.4 s |
+| `bf16` 2752x1536, guidance 1           | 84.7 s           | 104.3 s        | 2.118  | 2.4 s |
+| `int8-conv` 1024², guidance 1          | 14.3 s           | 15.0 s         | 0.358  | 0.6 s |
+
+All four M5 gates passed: 15.0 ≤ 22, 30.3 ≤ 42, 83.4 ≤ 85, and 84.7 ≤ 90.
+
+At the 2K presets, a request takes about 20 s longer end to end than its
+denoise. Most of that time goes to the Qwen3-VL text encoder, which is parked
+to host RAM for the denoise and restored before the next encode.
+
+The rows and transcripts are in `/storage/mold/uat-qwen21/uat/bench/`. The UAT
+report is `docs/qualification/qwen-image-2.1-uat.md`.

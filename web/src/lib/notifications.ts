@@ -69,6 +69,13 @@ export function installNotifications(deps: NotificationDeps): () => void {
   for (const j of deps.jobs.value) if (j.state === "done") seenDone.add(j.id);
   const seenHistory = new Set<string>();
   for (const job of deps.downloads.history.value) seenHistory.add(job.id);
+  // App.vue installs this before the downloads singleton has read
+  // `/api/downloads`, so "at install" the history is usually still empty and
+  // the real listing lands a tick later. That first loaded listing is past
+  // history too: absorb it as the baseline instead of toasting every pull the
+  // server remembers on every page load. A fake without `loaded` (or one
+  // already loaded) is baselined above.
+  let historyBaselined = deps.downloads.loaded?.value ?? true;
 
   // (a) A generation finished.
   const stopJobs = watch(
@@ -95,8 +102,15 @@ export function installNotifications(deps: NotificationDeps): () => void {
   // (b) A model pull finished or failed.
   const stopDownloads = watch(
     () =>
+      `${deps.downloads.loaded?.value ?? true}|` +
       deps.downloads.history.value.map((j) => `${j.id}:${j.status}`).join(","),
     () => {
+      if (!historyBaselined) {
+        if (!(deps.downloads.loaded?.value ?? true)) return;
+        for (const job of deps.downloads.history.value) seenHistory.add(job.id);
+        historyBaselined = true;
+        return;
+      }
       for (const job of deps.downloads.history.value) {
         if (seenHistory.has(job.id)) continue;
         seenHistory.add(job.id);
