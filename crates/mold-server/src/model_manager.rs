@@ -2525,7 +2525,11 @@ mod tests {
     #[test]
     fn the_config_fingerprint_is_independent_of_hash_map_order() {
         let mut left = mold_core::Config::default();
-        let mut right = mold_core::Config::default();
+        // `right` shares `left`'s scalars rather than taking a second
+        // `Config::default()`: that resolves `models_dir` from the
+        // environment, which a concurrently running test may be changing, and
+        // this test is about map order alone.
+        let mut right = left.clone();
         for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
             left.models.insert(
                 name.to_string(),

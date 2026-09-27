@@ -371,6 +371,11 @@ const ignoredEnvVars = new Set([
   'MOLD_QWEN_IMAGE21_TIER_RENDER_STEPS',
   'MOLD_QWEN_IMAGE21_TIER_RENDER_SUFFIX',
   'MOLD_TEST_QWEN3_FORCE_DMMV',
+  // The H3 vision-tower oracle test (mold-candle minimax_h3/vision.rs) reads
+  // these to find the fp32 transformers capture and the installed conditioner;
+  // it is an ignored, weight-gated test, never runtime configuration.
+  'MOLD_TEST_H3_SHARED_DIR',
+  'MOLD_TEST_H3_VISION_CAPTURE',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))
