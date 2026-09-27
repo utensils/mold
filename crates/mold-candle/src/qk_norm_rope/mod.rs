@@ -127,13 +127,12 @@ mod tests {
     }
 
     /// The CUDA kernel is the composite, bit for bit, in every dtype it
-    /// takes. Skips without a CUDA device (CI has none).
+    /// takes. Ignored by default: it needs a CUDA device and panics without one.
     #[cfg(feature = "cuda")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn cuda_kernel_is_bitwise_the_composite() {
-        let Ok(device) = Device::new_cuda(0) else {
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         for dtype in [DType::BF16, DType::F16, DType::F32] {
             let (x, w, c, s) = inputs(&device, dtype);
             let fused = cuda::forward(&x, &w, &c, &s, 1e-6).unwrap();

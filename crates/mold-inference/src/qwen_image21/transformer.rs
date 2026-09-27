@@ -1573,15 +1573,14 @@ mod tests {
 
     /// Every CUDA fast-path knob, alone and together, against the v0.32
     /// forward evaluated in F32 on the same weights: BF16 rounding apart,
-    /// the same prediction, prefill and cached, on a padded batch. Skips
-    /// without a CUDA device (CI has none).
+    /// the same prediction, prefill and cached, on a padded batch. Ignored
+    /// by default: it needs a CUDA device and panics without one.
     #[cfg(feature = "cuda")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn every_cuda_fast_path_knob_matches_the_legacy_forward() {
         use super::super::exec_path::TargetAttention;
-        let Ok(device) = Device::new_cuda(0) else {
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         let cfg = QwenImage21TransformerConfig {
             in_channels: 4,
             out_channels: 4,
@@ -2330,11 +2329,9 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn t2i_forward_is_bitwise_the_frozen_legacy_forward_on_cuda() {
-        let Ok(device) = Device::new_cuda(0) else {
-            eprintln!("skipped: no CUDA device");
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         legacy_parity(&device, &[DType::F32, DType::BF16]);
         eprintln!("CUDA F32 and BF16 legacy parity: bitwise");
     }

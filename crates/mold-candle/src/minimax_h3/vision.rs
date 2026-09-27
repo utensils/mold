@@ -904,14 +904,17 @@ mod tests {
     /// It also runs the tower with the old tanh mergers and requires erf
     /// to be strictly closer, so the evidence for the activation choice is
     /// re-derived on every run rather than recorded once.
+    ///
+    /// Ignored by default; run with `--ignored` it PANICS naming whichever
+    /// variable is missing rather than passing without comparing anything.
     #[test]
+    #[ignore = "requires MOLD_TEST_H3_VISION_CAPTURE and MOLD_TEST_H3_SHARED_DIR"]
     fn released_h3_tower_matches_the_fp32_transformers_capture() {
-        let (Ok(capture), Ok(shared)) = (
-            std::env::var("MOLD_TEST_H3_VISION_CAPTURE"),
-            std::env::var("MOLD_TEST_H3_SHARED_DIR"),
-        ) else {
-            return;
+        let var = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set to run this test"))
         };
+        let capture = var("MOLD_TEST_H3_VISION_CAPTURE");
+        let shared = var("MOLD_TEST_H3_SHARED_DIR");
         let shared = std::path::Path::new(&shared);
         let config = super::super::config::H3ConditionerConfig::from_json(
             &std::fs::read(shared.join("text_encoder/config.json")).unwrap(),

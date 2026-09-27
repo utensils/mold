@@ -1264,9 +1264,8 @@ mod viggle_file_tests {
     #[test]
     #[ignore = "requires QWEN_IMAGE21_FIXTURES (the Viggle files under ../viggle)"]
     fn published_viggle_adapters_map_and_scale_to_one() {
-        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
-            return;
-        };
+        let fixtures = std::env::var_os("QWEN_IMAGE21_FIXTURES")
+            .expect("QWEN_IMAGE21_FIXTURES must be set to run this test");
         let dir = std::path::Path::new(&fixtures).join("../viggle");
         for rank in [128usize, 256] {
             let path = dir.join(format!(

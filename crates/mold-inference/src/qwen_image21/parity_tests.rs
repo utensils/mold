@@ -35,11 +35,20 @@ pub(super) struct Env {
     pub fixtures: PathBuf,
 }
 
-pub(super) fn env() -> Option<Env> {
-    Some(Env {
-        models: PathBuf::from(std::env::var_os("QWEN_IMAGE21_MODEL_ROOT")?),
-        fixtures: PathBuf::from(std::env::var_os("QWEN_IMAGE21_FIXTURES")?),
-    })
+/// The two directories every parity test needs. A test that is run
+/// (`--ignored`) without them PANICS naming the missing variable: returning
+/// early would report a parity gate as passed that never ran.
+pub(super) fn env() -> Env {
+    let dir = |name: &str| {
+        PathBuf::from(
+            std::env::var_os(name)
+                .unwrap_or_else(|| panic!("{name} must be set to run this parity test")),
+        )
+    };
+    Env {
+        models: dir("QWEN_IMAGE21_MODEL_ROOT"),
+        fixtures: dir("QWEN_IMAGE21_FIXTURES"),
+    }
 }
 
 impl Env {
@@ -188,7 +197,7 @@ fn bools(tensor: &Tensor) -> Vec<bool> {
 #[test]
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p1_processor_matches_the_upstream_capture() {
-    let Some(env) = env() else { return };
+    let env = env();
     let refs = references(&["ref_opaque.png", "ref_rgba.png"]);
     let tokenizer = tokenizers::Tokenizer::from_file(env.tokenizer()).unwrap();
     let counts: Vec<usize> = refs.iter().map(|r| r.pad_count().unwrap()).collect();
@@ -229,7 +238,7 @@ fn p1_processor_matches_the_upstream_capture() {
 #[test]
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p2_vision_tower_matches_the_upstream_capture() {
-    let Some(env) = env() else { return };
+    let env = env();
     let device = device();
     let refs = references(&["ref_opaque.png", "ref_rgba.png"]);
     let tower = load_vision_tower(
@@ -266,7 +275,7 @@ fn p3_cases() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
 }
 
 fn p3(dtype: DType, suffix: &str, tolerance: f32) {
-    let Some(env) = env() else { return };
+    let env = env();
     let device = device();
     let progress = ProgressReporter::default();
     let mut encoder = Qwen3Encoder::load_bf16(
@@ -340,7 +349,7 @@ fn p3_bf16_conditioning_matches_the_upstream_capture() {
 }
 
 fn p6(dtype: DType, suffix: &str, tolerance: f32) {
-    let Some(env) = env() else { return };
+    let env = env();
     let device = device();
     let inputs = env.capture("p6_inputs.safetensors");
     let outputs = env.capture(&format!("p6_outputs_{suffix}.safetensors"));
@@ -471,7 +480,7 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
     use crate::encoders::qwen3::Qwen3Model;
     use crate::encoders::qwen3_vl_inject::VisualInjection;
     use mold_candle::qwen3_vl::{create_mm_token_type_ids, qwen_mrope_positions};
-    let Some(env) = env() else { return };
+    let env = env();
     let device = device();
     let progress = ProgressReporter::default();
     let refs = references(&["ref_opaque.png"]);
@@ -580,7 +589,7 @@ fn psnr(a: &Tensor, b: &Tensor) -> f64 {
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p8_base_end_to_end_matches_the_upstream_capture() {
     use crate::engine::{InferenceEngine, LoadStrategy};
-    let Some(env) = env() else { return };
+    let env = env();
     let mut engine = super::QwenImage21Engine::new(
         "qwen-image-2.1:bf16".to_string(),
         engine_paths(&env),
@@ -653,7 +662,7 @@ fn p8_base_end_to_end_matches_the_upstream_capture() {
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn calibration_reference_render() {
     use crate::engine::{InferenceEngine, LoadStrategy};
-    let Some(env) = env() else { return };
+    let env = env();
     let count: usize = std::env::var("QWEN_IMAGE21_CALIBRATION_REFS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -738,7 +747,7 @@ fn viggle(env: &Env, rank: usize) -> PathBuf {
 
 fn p7(dtype: DType, suffix: &str, tolerance: f32) {
     use super::lora::{build_registry, Qwen21LoraEntry};
-    let Some(env) = env() else { return };
+    let env = env();
     let device = device();
     let inputs = env.capture("p6_inputs.safetensors");
     let outputs = env.capture(&format!("p7_lora_r128_{suffix}.safetensors"));
@@ -859,7 +868,7 @@ fn p7_bf16_lora_matches_the_upstream_capture() {
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p8_turbo_end_to_end_matches_the_upstream_capture() {
     use crate::engine::{InferenceEngine, LoadStrategy};
-    let Some(env) = env() else { return };
+    let env = env();
     let mut paths = engine_paths(&env);
     paths.distilled_lora = Some(viggle(&env, 256));
     let mut engine = super::QwenImage21Engine::new(
@@ -933,7 +942,7 @@ fn p8_turbo_end_to_end_matches_the_upstream_capture() {
 fn p8_denoise_diagnostics() {
     use super::lora::{build_registry, Qwen21LoraEntry};
     use super::scheduler::{scheduler_for, ScheduleKind};
-    let Some(env) = env() else { return };
+    let env = env();
     let turbo = std::env::var_os("QWEN_IMAGE21_DIAG_TURBO").is_some();
     let round = std::env::var_os("QWEN_IMAGE21_DIAG_ROUND").is_some();
     let dtype = DType::BF16;

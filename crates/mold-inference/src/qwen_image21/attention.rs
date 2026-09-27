@@ -368,13 +368,12 @@ mod tests {
     /// and without padded keys. Flash accumulates in F32 over BF16 inputs,
     /// so it matches a math reference evaluated in F32 on the same BF16
     /// values to BF16 rounding, and it must actually be the flash kernels
-    /// that ran. Skips without a CUDA device (CI has none).
+    /// that ran. Ignored by default: it needs a CUDA device and panics without one.
     #[cfg(feature = "flash-attn")]
     #[test]
+    #[ignore = "needs a CUDA device"]
     fn fast_still_flash_segments_match_the_math_prefill_on_cuda() {
-        let Ok(device) = Device::new_cuda(0) else {
-            return;
-        };
+        let device = Device::new_cuda(0).expect("this test needs a CUDA device");
         let slots = [
             false, false, false, false, true, true, false, false, false, false,
         ];
