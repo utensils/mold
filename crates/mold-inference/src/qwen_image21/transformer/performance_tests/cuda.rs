@@ -435,6 +435,13 @@ fn official_cuda_mode_benchmark() -> Result<()> {
         false,
         conditioning.batch_size(),
         dtype,
+        // The engine's rule for this mode: legacy keeps v0.32's request-only
+        // rule; the fast path retains whatever fits (a text prefix always does).
+        if mode.path.is_legacy() {
+            crate::qwen_image21::PrefixCacheBudget::RequestOnly
+        } else {
+            crate::qwen_image21::PrefixCacheBudget::Headroom(u64::MAX)
+        },
     );
     let mut conditional =
         transformer.prepare_t2i(&conditioning, latent_height, latent_width, decisions[0])?;

@@ -1134,12 +1134,14 @@ impl QwenImage21SequenceShape {
 
 /// Bytes the prefix K/V cache of `branches` CFG branches holds for `shape`,
 /// under the engine's own retention rule (`qwen_image21::PrefixCachePolicy`)
-/// and the process's `MOLD_QWEN_IMAGE21_KV_CACHE`, so admission prices
-/// exactly what the engine retains. A branch that recomputes holds nothing.
+/// with `budget` and the process's `MOLD_QWEN_IMAGE21_KV_CACHE`, so admission
+/// prices exactly what the engine retains. A branch that recomputes holds
+/// nothing.
 pub fn qwen_image21_prefix_cache_bytes(
     shape: QwenImage21SequenceShape,
     branches: usize,
     dtype_bytes: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
 ) -> u64 {
     let prefixes = vec![shape.prefix_tokens(); branches.max(1)];
     crate::qwen_image21::PrefixCachePolicy::resolve(
@@ -1148,12 +1150,35 @@ pub fn qwen_image21_prefix_cache_bytes(
         1,
         dtype_bytes,
         crate::qwen_image21::prefix_cache_mode_from_env(),
+        budget,
     )
     .into_iter()
     .zip(&prefixes)
     .filter(|(decision, _)| *decision == crate::qwen_image21::PrefixCacheDecision::Retain)
     .map(|(_, &tokens)| crate::qwen_image21::prefix_cache_bytes(tokens, 1, dtype_bytes))
     .sum()
+}
+
+/// The prefix-cache budget a reference-conditioned render gets on a card with
+/// `usable_bytes` usable device memory (as if nothing of this render were
+/// resident), holding `resident_bytes` of transformer and VAE and running a
+/// `workspace_bytes` denoise workspace — [`crate::qwen_image21::prefix_cache_headroom`]
+/// on the CUDA fast path, the request-only rule everywhere else. The text
+/// encoder is deliberately not charged: the residency plan parks or drops it
+/// when the cache needs its room, which is how admission prefers retaining.
+/// `usable_bytes = None` (no card known) prefers retaining outright.
+pub fn qwen_image21_prefix_cache_budget(
+    usable_bytes: Option<u64>,
+    resident_bytes: u64,
+    workspace_bytes: u64,
+) -> crate::qwen_image21::PrefixCacheBudget {
+    use crate::qwen_image21::PrefixCacheBudget;
+    if !crate::qwen_image21::prefix_cache_follows_memory() {
+        return PrefixCacheBudget::RequestOnly;
+    }
+    PrefixCacheBudget::Headroom(usable_bytes.map_or(u64::MAX, |usable| {
+        crate::qwen_image21::prefix_cache_headroom(usable, resident_bytes, workspace_bytes)
+    }))
 }
 
 /// Denoise workspace per joint token at BF16, fitted on an L40S (1024²
@@ -1166,7 +1191,7 @@ pub fn qwen_image21_prefix_cache_bytes(
 pub const QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES: u64 = 192 * 1024;
 
 /// The denoise workspace of a reference-conditioned Qwen Image 2.1 render,
-/// plus the prefix cache it retains.
+/// WITHOUT its prefix cache.
 ///
 /// The workspace is the larger of the text-to-image estimate scaled by the
 /// joint sequence over the text-to-image one (attention scales with KEY
@@ -1176,10 +1201,9 @@ pub const QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES: u64 = 192 * 1024;
 /// Q/K/V, SwiGLU and per-token modulation rows are all joint-length.
 /// `base_activation` is `activation_bytes(.., QwenImage21Dit)`, whose legacy
 /// text-only prefix term the reference request's own cache replaces.
-pub fn qwen_image21_reference_activation_bytes(
+pub fn qwen_image21_reference_workspace_bytes(
     base_activation: u64,
     shape: QwenImage21SequenceShape,
-    branches: usize,
     batch: u32,
     dtype_bytes: usize,
 ) -> u64 {
@@ -1193,12 +1217,25 @@ pub fn qwen_image21_reference_activation_bytes(
     let per_token = (shape.joint_tokens() as u64)
         .saturating_mul(QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES * dtype_bytes as u64 / 2)
         .saturating_mul(u64::from(batch.max(1)));
-    scaled
-        .max(per_token)
+    scaled.max(per_token)
+}
+
+/// [`qwen_image21_reference_workspace_bytes`] plus the prefix cache the render
+/// retains under `budget` ([`qwen_image21_prefix_cache_bytes`]).
+pub fn qwen_image21_reference_activation_bytes(
+    base_activation: u64,
+    shape: QwenImage21SequenceShape,
+    branches: usize,
+    batch: u32,
+    dtype_bytes: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
+) -> u64 {
+    qwen_image21_reference_workspace_bytes(base_activation, shape, batch, dtype_bytes)
         .saturating_add(qwen_image21_prefix_cache_bytes(
             shape,
             branches,
             dtype_bytes,
+            budget,
         ))
 }
 
@@ -1264,6 +1301,7 @@ pub fn qwen_image21_reference_extra_bytes(
     dtype_bytes: usize,
     references: &[(u32, u32)],
     branches: usize,
+    budget: crate::qwen_image21::PrefixCacheBudget,
 ) -> u64 {
     if references.is_empty() {
         return 0;
@@ -1276,7 +1314,7 @@ pub fn qwen_image21_reference_extra_bytes(
         dtype_bytes as u32,
         ActivationFamily::QwenImage21Dit,
     );
-    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes)
+    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes, budget)
         .saturating_sub(base)
         .saturating_add(qwen_image21_linear_workspace_bytes(
             format,
@@ -1284,6 +1322,39 @@ pub fn qwen_image21_reference_extra_bytes(
             batch,
         ))
         .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
+}
+
+/// The denoise workspace (no prefix cache) of a `width x height` render
+/// conditioned on `references`: the text-to-image activation for a plain
+/// render, [`qwen_image21_reference_workspace_bytes`] for a conditioned one,
+/// plus the tier's linear workspace over the whole joint sequence. This is the
+/// `workspace_bytes` every [`qwen_image21_prefix_cache_budget`] caller passes.
+pub fn qwen_image21_denoise_workspace_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    width: u32,
+    height: u32,
+    references: &[(u32, u32)],
+    batch: u32,
+    dtype_bytes: usize,
+) -> u64 {
+    let shape = QwenImage21SequenceShape::for_request(width, height, references);
+    let base = activation_bytes(
+        width,
+        height,
+        batch,
+        dtype_bytes as u32,
+        ActivationFamily::QwenImage21Dit,
+    );
+    let workspace = if references.is_empty() {
+        base
+    } else {
+        qwen_image21_reference_workspace_bytes(base, shape, batch, dtype_bytes)
+    };
+    workspace.saturating_add(qwen_image21_linear_workspace_bytes(
+        format,
+        shape.joint_tokens() as u64,
+        batch,
+    ))
 }
 
 /// Header dimensions of encoded reference images; an unreadable header is
@@ -8106,11 +8177,28 @@ mod qwen_image21_activation_tests {
         };
         use crate::artifact_format::QwenImage21TransformerFormat as Format;
         let refs = [(1536, 1024), (1024, 1024)];
-        let bf16 =
-            qwen_image21_reference_extra_bytes(Some(Format::Bf16), 1024, 1024, 1, 2, &refs, 2);
+        let bf16 = qwen_image21_reference_extra_bytes(
+            Some(Format::Bf16),
+            1024,
+            1024,
+            1,
+            2,
+            &refs,
+            2,
+            crate::qwen_image21::PrefixCacheBudget::RequestOnly,
+        );
         assert_eq!(
             bf16,
-            qwen_image21_reference_extra_bytes(None, 1024, 1024, 1, 2, &refs, 2)
+            qwen_image21_reference_extra_bytes(
+                None,
+                1024,
+                1024,
+                1,
+                2,
+                &refs,
+                2,
+                crate::qwen_image21::PrefixCacheBudget::RequestOnly
+            )
         );
         let int8 = qwen_image21_reference_extra_bytes(
             Some(Format::ComfyInt8ConvRot),
@@ -8120,6 +8208,7 @@ mod qwen_image21_activation_tests {
             2,
             &refs,
             2,
+            crate::qwen_image21::PrefixCacheBudget::RequestOnly,
         );
         let shape = QwenImage21SequenceShape::for_request(1024, 1024, &refs);
         let text_to_image = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
@@ -8151,7 +8240,8 @@ mod qwen_image21_activation_tests {
                 1,
                 2,
                 &[],
-                2
+                2,
+                crate::qwen_image21::PrefixCacheBudget::RequestOnly
             ),
             0
         );
@@ -8441,6 +8531,9 @@ mod flux2_denoise_budget_tests {
 mod qwen_image21_sequence_sizing_tests {
     use super::*;
 
+    const RO: crate::qwen_image21::PrefixCacheBudget =
+        crate::qwen_image21::PrefixCacheBudget::RequestOnly;
+
     const GIB: u64 = 1 << 30;
 
     #[test]
@@ -8463,7 +8556,7 @@ mod qwen_image21_sequence_sizing_tests {
     fn prefix_cache_charge_mirrors_the_engine_decision() {
         let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
         // One reference, both CFG branches, BF16: retained (~4.3 GiB).
-        let retained = qwen_image21_prefix_cache_bytes(one, 2, 2);
+        let retained = qwen_image21_prefix_cache_bytes(one, 2, 2, RO);
         assert_eq!(
             retained,
             2 * crate::qwen_image21::prefix_cache_bytes(one.prefix_tokens(), 1, 2)
@@ -8476,12 +8569,71 @@ mod qwen_image21_sequence_sizing_tests {
             1024,
             &[(1024, 1024), (1024, 1024), (1024, 1024)],
         );
-        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2), 0);
+        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2, RO), 0);
         // Text-to-image: the legacy term exactly.
         let t2i = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
         assert_eq!(
-            qwen_image21_prefix_cache_bytes(t2i, 2, 4),
+            qwen_image21_prefix_cache_bytes(t2i, 2, 4, RO),
             crate::qwen_image21::prefix_cache_budget_bytes(1)
+        );
+    }
+
+    /// On the CUDA fast path the cache is charged exactly when it fits the
+    /// card's headroom: three references with CFG (~16.8k prefix tokens)
+    /// retain on a card with room for them and recompute — charging nothing —
+    /// on one without.
+    #[test]
+    fn fast_path_cache_charge_follows_the_headroom() {
+        use crate::qwen_image21::PrefixCacheBudget::Headroom;
+        let three = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 3]);
+        let full = 2 * crate::qwen_image21::prefix_cache_bytes(three.prefix_tokens(), 1, 2);
+        assert_eq!(
+            qwen_image21_prefix_cache_bytes(three, 2, 2, Headroom(full)),
+            full
+        );
+        assert_eq!(
+            qwen_image21_prefix_cache_bytes(three, 2, 2, Headroom(full - 1)),
+            0
+        );
+        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2, RO), 0);
+        // The budget is the card less weights, workspace and the margin, and
+        // only the fast path reads the card at all.
+        let workspace =
+            qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[(1024, 1024); 3], 1, 2);
+        let budget = qwen_image21_prefix_cache_budget(Some(46 * GIB), 16 * GIB, workspace);
+        if crate::qwen_image21::prefix_cache_follows_memory() {
+            assert_eq!(
+                budget,
+                Headroom(
+                    46 * GIB
+                        - 16 * GIB
+                        - workspace
+                        - crate::qwen_image21::PREFIX_CACHE_MARGIN_BYTES
+                )
+            );
+            assert_eq!(
+                qwen_image21_prefix_cache_budget(None, 0, 0),
+                Headroom(u64::MAX)
+            );
+        } else {
+            assert_eq!(budget, RO);
+        }
+        // The workspace never includes a cache, and grows with the prefix.
+        let one = qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[(1024, 1024)], 1, 2);
+        let base = activation_bytes(1024, 1024, 1, 2, ActivationFamily::QwenImage21Dit);
+        assert_eq!(
+            one,
+            qwen_image21_reference_workspace_bytes(
+                base,
+                QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]),
+                1,
+                2
+            )
+        );
+        assert!(workspace > one);
+        assert_eq!(
+            qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[], 1, 2),
+            base
         );
     }
 
@@ -8489,7 +8641,7 @@ mod qwen_image21_sequence_sizing_tests {
     fn reference_activation_scales_with_keys_and_swaps_the_prefix_term() {
         let base = activation_bytes(1024, 1024, 1, 2, ActivationFamily::QwenImage21Dit);
         let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
-        let with_reference = qwen_image21_reference_activation_bytes(base, one, 2, 1, 2);
+        let with_reference = qwen_image21_reference_activation_bytes(base, one, 2, 1, 2, RO);
         assert!(with_reference > base);
         let legacy = crate::qwen_image21::prefix_cache_budget_bytes(1);
         let scaled = flux2_reference_scaled_activation_bytes(
@@ -8500,14 +8652,14 @@ mod qwen_image21_sequence_sizing_tests {
         let per_token = one.joint_tokens() as u64 * QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES;
         assert_eq!(
             with_reference,
-            scaled.max(per_token) + qwen_image21_prefix_cache_bytes(one, 2, 2)
+            scaled.max(per_token) + qwen_image21_prefix_cache_bytes(one, 2, 2, RO)
         );
         // More references never cost less workspace.
         let ten = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 10]);
         assert!(
-            qwen_image21_reference_activation_bytes(base, ten, 2, 1, 2)
-                >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2)
-                    - qwen_image21_prefix_cache_bytes(one, 2, 2)
+            qwen_image21_reference_activation_bytes(base, ten, 2, 1, 2, RO)
+                >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2, RO)
+                    - qwen_image21_prefix_cache_bytes(one, 2, 2, RO)
         );
         // The L40S evidence, two samplers. The reference renders' phase
         // samples (3 and 10 references, recomputed prefix, BF16 math) held
@@ -8530,7 +8682,7 @@ mod qwen_image21_sequence_sizing_tests {
             let shape =
                 QwenImage21SequenceShape::for_request(1024, 1024, &vec![(1536, 1024); count]);
             let estimate = mib(qwen_image21_reference_activation_bytes(
-                base, shape, 2, 1, 2,
+                base, shape, 2, 1, 2, RO,
             ));
             let harness = mib((harness_rate * shape.joint_tokens() as f64) as u64);
             assert!(
