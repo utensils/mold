@@ -177,21 +177,12 @@ pub(super) fn install_mode(
     transformer: &mut QwenImage21Transformer,
     mode: &BenchMode,
 ) -> Result<()> {
-    let attention_only = super::super::super::exec_path::Qwen21ExecPath {
-        attention: mode.path.attention,
-        round_timestep_to_dtype: mode.path.round_timestep_to_dtype,
-        ..super::super::super::exec_path::Qwen21ExecPath::legacy()
-    };
     anyhow::ensure!(
-        mode.path == attention_only && !mode.cfg_batch,
-        "mode {} needs the transformer's elementwise Qwen21ExecPath wiring; this build runs `legacy` and `flash` on CUDA",
+        !mode.cfg_batch,
+        "mode {} needs batched CFG, which this harness drives only through the engine",
         mode.name
     );
-    transformer.compact_modulation = false;
-    for block in &mut transformer.blocks {
-        block.attn.dispatch.attention = mode.path.attention;
-        block.attn.fused_ops = false;
-    }
+    transformer.set_exec_path(mode.path);
     Ok(())
 }
 

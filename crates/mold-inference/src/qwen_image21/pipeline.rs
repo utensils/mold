@@ -362,7 +362,7 @@ impl QwenImage21Engine {
             }
         };
 
-        let exec_path = super::exec_path::Qwen21ExecPath::resolve(device);
+        let exec_path = transformer.exec_path();
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);

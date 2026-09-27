@@ -13,6 +13,7 @@ use candle_nn::{Linear, VarBuilder};
 use std::path::PathBuf;
 
 use super::attention::SegmentDispatch;
+use super::exec_path::Qwen21ExecPath;
 use super::layout::{BlockCausalPlan, QwenImage21JointLayout};
 use super::{PrefixCacheDecision, QwenImage21TextConditioning};
 
@@ -346,9 +347,11 @@ impl Attention {
             "Qwen Image 2.1 attention inner width mismatch"
         );
 
-        let (q, k, v) = if self.fused_ops && hidden_states.device().is_metal() {
+        let (q, k, v) = if self.fused_ops {
             // Normalize while BSHD is contiguous; flattening BHSD first copies
-            // the whole projection. RoPE still accumulates in F32 as upstream.
+            // the whole projection. RoPE still accumulates in F32 as upstream
+            // (`apply_rotary_emb_qwen` rotates in float32). Metal's shipped
+            // path and the CUDA fast path (`Qwen21ExecPath::fused_projection`).
             let project = |linear: &Linear, weight: &Tensor| -> Result<Tensor> {
                 let xs = linear.forward(hidden_states)?;
                 let normalized = candle_nn::ops::rms_norm(
@@ -432,6 +435,46 @@ struct TransformerBlock {
     attn: Attention,
     norm2: LayerNormNoParams,
     mlp: SwiGlu,
+    /// `Qwen21ExecPath::fused_adaln`: fold each LayerNorm and its `1 + scale`
+    /// into `candle_nn::ops::layer_norm(x, 1 + scale, 0)` on compact rows.
+    fused_adaln: bool,
+    eps: f64,
+}
+
+/// One timestep's modulation, precomputed ONCE per forward for all blocks
+/// (every block reads the same `modulation` output): `1 + scale` and
+/// `tanh(gate)` for both halves, each `[B, 1, D]`. Upstream's
+/// `_modulated_norm` / `_gated_residual` apply the same arithmetic per
+/// block; hoisting it is value-identical.
+struct ModRow {
+    scale1: Tensor,
+    gate1: Tensor,
+    scale2: Tensor,
+    gate2: Tensor,
+}
+
+impl ModRow {
+    /// `row` is `[B, 1, 4D]` in checkpoint order `(scale1, gate1, scale2,
+    /// gate2)`.
+    fn new(row: &Tensor, dim: usize) -> Result<Self> {
+        Ok(Self {
+            scale1: (row.narrow(D::Minus1, 0, dim)? + 1.0)?,
+            gate1: row.narrow(D::Minus1, dim, dim)?.tanh()?,
+            scale2: (row.narrow(D::Minus1, 2 * dim, dim)? + 1.0)?,
+            gate2: row.narrow(D::Minus1, 3 * dim, dim)?.tanh()?,
+        })
+    }
+}
+
+/// How a block reads its modulation.
+enum BlockModulation {
+    /// `[B, N, 4D]` (or a broadcastable `[B, 1, 4D]`): scale and tanh are
+    /// evaluated per block. v0.32's arithmetic, and Metal's shipped path.
+    PerToken(Tensor),
+    /// Compact rows, one per contiguous run of the block's hidden rows:
+    /// `[(prefix_len, t=0 row), (target, real row)]` on a prefill, one real
+    /// row on a cached step.
+    Rows(Vec<(usize, ModRow)>),
 }
 
 impl TransformerBlock {
@@ -442,7 +485,62 @@ impl TransformerBlock {
             attn: Attention::new(cfg, vb.pp("attn"))?,
             norm2: LayerNormNoParams::new(cfg.eps),
             mlp: SwiGlu::new(inner, inner * cfg.mlp_ratio, vb.pp("img_mlp"))?,
+            fused_adaln: false,
+            eps: cfg.eps,
         })
+    }
+
+    /// `norm(x) * (1 + scale)` over compact rows. With `fused_adaln` each run
+    /// is one fused LayerNorm whose affine weight is the row: every batch row
+    /// of a forward shares its timestep, so row 0 is the row of all of them.
+    /// Without it, the hand-written F32 LayerNorm then a broadcast multiply.
+    fn modulated_norm(
+        &self,
+        norm: &LayerNormNoParams,
+        xs: &Tensor,
+        rows: &[(usize, ModRow)],
+        scale: fn(&ModRow) -> &Tensor,
+    ) -> Result<Tensor> {
+        let mut parts = Vec::with_capacity(rows.len());
+        let mut start = 0;
+        for (len, row) in rows {
+            let x = if rows.len() == 1 {
+                xs.clone()
+            } else {
+                xs.narrow(1, start, *len)?
+            };
+            start += len;
+            let scale = scale(row);
+            parts.push(if self.fused_adaln {
+                let alpha = scale.get(0)?.flatten_all()?.contiguous()?;
+                let beta = alpha.zeros_like()?;
+                candle_nn::ops::layer_norm(&x.contiguous()?, &alpha, &beta, self.eps as f32)?
+            } else {
+                norm.forward(&x)?.broadcast_mul(scale)?
+            });
+        }
+        concat_rows(parts)
+    }
+
+    /// `xs + tanh(gate) * ys` over compact rows.
+    fn gated_residual(
+        xs: &Tensor,
+        ys: &Tensor,
+        rows: &[(usize, ModRow)],
+        gate: fn(&ModRow) -> &Tensor,
+    ) -> Result<Tensor> {
+        let mut parts = Vec::with_capacity(rows.len());
+        let mut start = 0;
+        for (len, row) in rows {
+            let y = if rows.len() == 1 {
+                ys.clone()
+            } else {
+                ys.narrow(1, start, *len)?
+            };
+            start += len;
+            parts.push(gate(row).broadcast_mul(&y)?);
+        }
+        Ok((xs + concat_rows(parts)?)?)
     }
 
     fn modulate(normalized: Tensor, parameters: &Tensor) -> Result<(Tensor, Tensor)> {
@@ -461,13 +559,41 @@ impl TransformerBlock {
     fn forward_block_causal(
         &self,
         hidden_states: &Tensor,
-        modulation: &Tensor,
+        modulation: &BlockModulation,
         rope_cos: &Tensor,
         rope_sin: &Tensor,
         plan: &BlockCausalPlan,
         prefix_len: usize,
         cache: LayerCache<'_>,
     ) -> Result<Tensor> {
+        let modulation = match modulation {
+            BlockModulation::PerToken(modulation) => modulation,
+            BlockModulation::Rows(rows) => {
+                let normalized =
+                    self.modulated_norm(&self.norm1, hidden_states, rows, |row| &row.scale1)?;
+                let attn = self.attn.forward_block_causal(
+                    &normalized,
+                    rope_cos,
+                    rope_sin,
+                    plan,
+                    prefix_len,
+                    cache,
+                )?;
+                let hidden_states =
+                    Self::gated_residual(hidden_states, &attn, rows, |row| &row.gate1)?;
+                let normalized =
+                    self.modulated_norm(&self.norm2, &hidden_states, rows, |row| &row.scale2)?;
+                let mlp = self.mlp.forward(&normalized)?;
+                let hidden_states =
+                    Self::gated_residual(&hidden_states, &mlp, rows, |row| &row.gate2)?;
+                if hidden_states.dtype() == DType::F16 {
+                    return hidden_states
+                        .clamp(-65_504.0f32, 65_504.0f32)
+                        .map_err(Into::into);
+                }
+                return Ok(hidden_states);
+            }
+        };
         let dim = hidden_states.dim(D::Minus1)?;
         anyhow::ensure!(
             modulation.dim(D::Minus1)? == 4 * dim,
@@ -501,6 +627,16 @@ impl TransformerBlock {
     }
 }
 
+/// Concatenate per-run results along the sequence axis (a single run passes
+/// through untouched).
+fn concat_rows(mut parts: Vec<Tensor>) -> Result<Tensor> {
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("one part"));
+    }
+    let refs: Vec<&Tensor> = parts.iter().collect();
+    Ok(Tensor::cat(&refs, 1)?)
+}
+
 struct AdaFinalNorm {
     norm: LayerNormNoParams,
     linear: Linear,
@@ -530,7 +666,7 @@ impl AdaFinalNorm {
 /// with no condition images, and a reference-conditioned request lays its
 /// condition latents into the text stream where the Qwen3-VL image slots were.
 pub(crate) struct QwenImage21Transformer {
-    compact_modulation: bool,
+    exec: Qwen21ExecPath,
     cfg: QwenImage21TransformerConfig,
     img_in: Linear,
     time_text_embed: TimestepEmbedder,
@@ -577,7 +713,7 @@ impl PreparedBranch<'_> {
             &mut self.rope,
             &self.layout,
             self.transformer.cfg.axes_dims_rope,
-            latents.dtype(),
+            self.transformer.rope_table_dtype(latents.dtype()),
             latents.device(),
         )?;
         let rope = self.rope.as_ref().expect("rope tables were just built");
@@ -748,8 +884,9 @@ impl QwenImage21Transformer {
         }
         let norm_out = AdaFinalNorm::new(inner, cfg.eps, vb.pp("norm_out"))?;
         let proj_out = linear(inner, cfg.out_channels, vb.pp("proj_out"))?;
-        Ok(Self {
-            compact_modulation: crate::attention::metal_fast_path_enabled(),
+        let exec = Qwen21ExecPath::resolve(vb.device());
+        let mut transformer = Self {
+            exec,
             cfg,
             img_in,
             time_text_embed,
@@ -758,7 +895,36 @@ impl QwenImage21Transformer {
             blocks,
             norm_out,
             proj_out,
-        })
+        };
+        transformer.set_exec_path(exec);
+        Ok(transformer)
+    }
+
+    /// The execution path this transformer runs.
+    pub(crate) fn exec_path(&self) -> Qwen21ExecPath {
+        self.exec
+    }
+
+    /// Put an execution path into effect on every block. The engine resolves
+    /// it once at load; tests and the CUDA harness build any combination.
+    pub(crate) fn set_exec_path(&mut self, exec: Qwen21ExecPath) {
+        self.exec = exec;
+        for block in &mut self.blocks {
+            block.attn.fused_ops = exec.fused_projection;
+            block.attn.dispatch.attention = exec.attention;
+            block.fused_adaln = exec.fused_adaln;
+        }
+    }
+
+    /// The dtype of this transformer's rotary tables for `latent_dtype`
+    /// working storage: F32 on the fast path (and always on Metal, which
+    /// `rope_tables` itself enforces), the working dtype on the v0.32 path.
+    fn rope_table_dtype(&self, latent_dtype: DType) -> DType {
+        if self.exec.f32_rope_tables {
+            DType::F32
+        } else {
+            latent_dtype
+        }
     }
 
     /// Assemble the joint hidden states (`transformer_qwenimage21.py:905-923`):
@@ -874,22 +1040,42 @@ impl QwenImage21Transformer {
             .forward(&candle_nn::Activation::Silu.forward(&temb)?)?;
         let inner = self.cfg.inner_dim();
         let real_row = modulation.narrow(0, 0, batch)?.unsqueeze(1)?;
-        let real = real_row.broadcast_as((batch, target_tokens, 4 * inner))?;
-        let zero = modulation
+        let zero_row = modulation
             .narrow(0, batch, 1)?
             .unsqueeze(1)?
-            .broadcast_as((batch, prefix_len, 4 * inner))?;
-        let per_token_modulation = if cached {
-            // Every target position shares a timestep. Keep the row compact
-            // so each block's scale and tanh execute once per feature, rather
-            // than once per image token. Broadcast only at the residual ops.
-            if latents.device().is_metal() && self.compact_modulation {
+            .broadcast_as((batch, 1, 4 * inner))?;
+        let per_token_modulation = if self.exec.fused_adaln
+            || (self.exec.compact_modulation && !latents.device().is_metal())
+        {
+            // The CUDA fast path: scale and tanh once per forward, compact
+            // `[B, 1, D]` rows applied per run (ComfyUI's `_modulated_norm` /
+            // `_gated_residual` on narrowed views).
+            let real = ModRow::new(&real_row, inner)?;
+            BlockModulation::Rows(if cached {
+                vec![(target_tokens, real)]
+            } else {
+                vec![
+                    (prefix_len, ModRow::new(&zero_row.contiguous()?, inner)?),
+                    (target_tokens, real),
+                ]
+            })
+        } else if cached {
+            // Every target position shares a timestep. Metal keeps the row
+            // compact so each block's scale and tanh execute once per
+            // feature rather than once per image token; v0.32 broadcasts.
+            BlockModulation::PerToken(if self.exec.compact_modulation {
                 real_row
             } else {
-                real
-            }
+                real_row.broadcast_as((batch, target_tokens, 4 * inner))?
+            })
         } else {
-            Tensor::cat(&[&zero, &real], 1)?
+            BlockModulation::PerToken(Tensor::cat(
+                &[
+                    &zero_row.broadcast_as((batch, prefix_len, 4 * inner))?,
+                    &real_row.broadcast_as((batch, target_tokens, 4 * inner))?,
+                ],
+                1,
+            )?)
         };
 
         for (index, block) in self.blocks.iter().enumerate() {
@@ -1123,6 +1309,207 @@ mod tests {
         );
     }
 
+    fn max_relative_error(actual: &Tensor, expected: &Tensor) -> f32 {
+        let actual = actual.to_dtype(DType::F32).unwrap();
+        let expected = expected.to_dtype(DType::F32).unwrap();
+        let error = (&actual - &expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let peak = expected
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        error / peak.max(f32::MIN_POSITIVE)
+    }
+
+    /// Run `candidate` and `reference` through the same prefill and cached
+    /// steps (a padded CFG-shaped batch) and hand every prediction pair to
+    /// `check`.
+    fn compare_paths(
+        reference: &QwenImage21Transformer,
+        candidate: &QwenImage21Transformer,
+        device: &Device,
+        dtype: DType,
+        check: impl Fn(&Tensor, &Tensor, f64),
+    ) {
+        let conditioning = QwenImage21TextConditioning {
+            embeddings: crate::engine::seeded_randn(41, &[2, 5, 8], device, dtype).unwrap(),
+            valid_tokens: vec![vec![true, true, true, true, false], vec![true; 5]],
+            image_slots: vec![vec![false; 5]; 2],
+        };
+        let mut expected = reference
+            .prepare_t2i(&conditioning, 2, 4, PrefixCacheDecision::Retain)
+            .unwrap();
+        let mut actual = candidate
+            .prepare_t2i(&conditioning, 2, 4, PrefixCacheDecision::Retain)
+            .unwrap();
+        for (step, time) in [1.0, 0.7, 0.3].into_iter().enumerate() {
+            let latents =
+                crate::engine::seeded_randn(42 + step as u64, &[2, 8, 4], device, dtype).unwrap();
+            check(
+                &actual.forward(&latents, time).unwrap(),
+                &expected.forward(&latents, time).unwrap(),
+                time,
+            );
+        }
+    }
+
+    /// A5: hoisting `1 + scale` / `tanh(gate)` out of the blocks and applying
+    /// compact per-run rows is the SAME arithmetic as v0.32's per-token
+    /// broadcast, prefill and cached steps alike, bit for bit.
+    #[test]
+    fn compact_rows_are_bitwise_the_legacy_modulation() {
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        let mut reference = tiny_transformer_on(cfg.clone(), &Device::Cpu);
+        reference.set_exec_path(Qwen21ExecPath::legacy());
+        let mut compact = tiny_transformer_on(cfg, &Device::Cpu);
+        compact.set_exec_path(Qwen21ExecPath {
+            compact_modulation: true,
+            ..Qwen21ExecPath::legacy()
+        });
+        compare_paths(&reference, &compact, &Device::Cpu, DType::F32, |a, e, t| {
+            let diff = (a - e).unwrap().abs().unwrap().max_all().unwrap();
+            assert_eq!(diff.to_scalar::<f32>().unwrap(), 0.0, "t={t}");
+        });
+    }
+
+    /// A6: the fused `layer_norm(x, 1 + scale, 0)` (CPU reference kernel)
+    /// agrees with the hand-written F32 LayerNorm and multiply.
+    #[test]
+    fn fused_adaln_matches_the_hand_layer_norm() {
+        let mut cfg = tiny_config();
+        cfg.num_layers = 3;
+        let mut reference = tiny_transformer_on(cfg.clone(), &Device::Cpu);
+        reference.set_exec_path(Qwen21ExecPath::legacy());
+        let mut fused = tiny_transformer_on(cfg, &Device::Cpu);
+        fused.set_exec_path(Qwen21ExecPath {
+            compact_modulation: true,
+            fused_adaln: true,
+            ..Qwen21ExecPath::legacy()
+        });
+        compare_paths(&reference, &fused, &Device::Cpu, DType::F32, |a, e, t| {
+            let error = max_relative_error(a, e);
+            assert!(error < 1e-5, "t={t}: {error}");
+        });
+    }
+
+    /// The engine resolves its path at construction: CPU is legacy.
+    #[test]
+    fn a_cpu_transformer_resolves_the_legacy_path() {
+        assert!(tiny_transformer().exec_path().is_legacy());
+    }
+
+    /// Every CUDA fast-path knob, alone and together, against the v0.32
+    /// forward evaluated in F32 on the same weights: BF16 rounding apart,
+    /// the same prediction, prefill and cached, on a padded batch. Skips
+    /// without a CUDA device (CI has none).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn every_cuda_fast_path_knob_matches_the_legacy_forward() {
+        use super::super::exec_path::TargetAttention;
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let cfg = QwenImage21TransformerConfig {
+            in_channels: 4,
+            out_channels: 4,
+            context_in_dim: 8,
+            num_attention_heads: 2,
+            attention_head_dim: 64,
+            num_layers: 2,
+            mlp_ratio: 2,
+            axes_dims_rope: [16, 24, 24],
+            eps: 1e-6,
+        };
+        let mut reference = tiny_transformer_dtype(cfg.clone(), &device, DType::F32);
+        reference.set_exec_path(Qwen21ExecPath::legacy());
+        let legacy = Qwen21ExecPath::legacy();
+        // BF16 itself moves this toy model by a few percent; each knob may
+        // add no more than that rounding again. `baseline` holds the v0.32
+        // BF16 path's own error against F32, per step.
+        let mut baseline = Vec::new();
+        for (name, path) in [
+            ("legacy-bf16", legacy),
+            (
+                "flash",
+                Qwen21ExecPath {
+                    attention: TargetAttention::FastStill,
+                    ..legacy
+                },
+            ),
+            (
+                "projection",
+                Qwen21ExecPath {
+                    fused_projection: true,
+                    f32_rope_tables: true,
+                    ..legacy
+                },
+            ),
+            (
+                "compact",
+                Qwen21ExecPath {
+                    compact_modulation: true,
+                    ..legacy
+                },
+            ),
+            (
+                "adaln",
+                Qwen21ExecPath {
+                    compact_modulation: true,
+                    fused_adaln: true,
+                    ..legacy
+                },
+            ),
+            ("fast", Qwen21ExecPath::cuda_fast()),
+        ] {
+            let mut candidate = tiny_transformer_dtype(cfg.clone(), &device, DType::BF16);
+            candidate.set_exec_path(path);
+            // Same inputs for both: BF16 values, the reference widened to F32.
+            let conditioning = QwenImage21TextConditioning {
+                embeddings: crate::engine::seeded_randn(41, &[2, 5, 8], &device, DType::BF16)
+                    .unwrap(),
+                valid_tokens: vec![vec![true, true, true, true, false], vec![true; 5]],
+                image_slots: vec![vec![false; 5]; 2],
+            };
+            let reference_conditioning = QwenImage21TextConditioning {
+                embeddings: conditioning.embeddings.to_dtype(DType::F32).unwrap(),
+                valid_tokens: conditioning.valid_tokens.clone(),
+                image_slots: conditioning.image_slots.clone(),
+            };
+            let mut expected = reference
+                .prepare_t2i(&reference_conditioning, 2, 4, PrefixCacheDecision::Retain)
+                .unwrap();
+            let mut actual = candidate
+                .prepare_t2i(&conditioning, 2, 4, PrefixCacheDecision::Retain)
+                .unwrap();
+            for (step, time) in [1.0, 0.7, 0.3].into_iter().enumerate() {
+                let latents =
+                    crate::engine::seeded_randn(42 + step as u64, &[2, 8, 4], &device, DType::BF16)
+                        .unwrap();
+                let got = actual.forward(&latents, time).unwrap();
+                assert_eq!(got.dtype(), DType::BF16);
+                let want = expected
+                    .forward(&latents.to_dtype(DType::F32).unwrap(), time)
+                    .unwrap();
+                let error = max_relative_error(&got, &want);
+                if name == "legacy-bf16" {
+                    baseline.push(error);
+                }
+                let bound = 2.0 * baseline[step] + 5e-3;
+                assert!(error <= bound, "{name} t={time}: {error} > {bound}");
+            }
+        }
+    }
+
     fn cache_parity(device: &Device, heads: usize) {
         let mut cfg = tiny_config();
         cfg.num_layers = 3;
@@ -1292,9 +1679,12 @@ mod tests {
     fn compact_modulation_is_exact_across_cached_steps() {
         let device = crate::device::metal_device(0).unwrap();
         let mut reference = tiny_transformer_on(tiny_config(), &device);
-        reference.compact_modulation = false;
+        reference.set_exec_path(Qwen21ExecPath::metal(false));
         let mut compact = tiny_transformer_on(tiny_config(), &device);
-        compact.compact_modulation = true;
+        compact.set_exec_path(Qwen21ExecPath {
+            compact_modulation: true,
+            ..Qwen21ExecPath::metal(false)
+        });
         let conditioning = QwenImage21TextConditioning {
             embeddings: crate::engine::seeded_randn(31, &[2, 3, 8], &device, DType::F32).unwrap(),
             valid_tokens: vec![vec![true, true, false], vec![true; 3]],
@@ -1330,13 +1720,12 @@ mod tests {
         let mut cfg = tiny_config();
         cfg.num_layers = 3;
         let mut reference = tiny_transformer_on(cfg.clone(), &device);
-        for block in &mut reference.blocks {
-            block.attn.fused_ops = false;
-        }
+        reference.set_exec_path(Qwen21ExecPath::metal(false));
         let mut optimized = tiny_transformer_on(cfg, &device);
-        for block in &mut optimized.blocks {
-            block.attn.fused_ops = true;
-        }
+        optimized.set_exec_path(Qwen21ExecPath {
+            fused_projection: true,
+            ..Qwen21ExecPath::metal(false)
+        });
         let conditioning = QwenImage21TextConditioning {
             embeddings: crate::engine::seeded_randn(25, &[2, 3, 8], &device, DType::F32).unwrap(),
             valid_tokens: vec![vec![true, true, false], vec![true; 3]],
@@ -1670,7 +2059,12 @@ mod tests {
                 let mut cfg = tiny_config();
                 cfg.num_layers = 3;
                 cfg.num_attention_heads = heads;
-                let transformer = tiny_transformer_dtype(cfg, &device, dtype);
+                let mut transformer = tiny_transformer_dtype(cfg, &device, dtype);
+                // The oracle is v0.32's forward; off Metal that is the legacy
+                // path, which CUDA now reaches only through MOLD_ATTN=math.
+                if !device.is_metal() {
+                    transformer.set_exec_path(Qwen21ExecPath::legacy());
+                }
                 for conditioning in padded_and_unpadded(5, &device) {
                     let conditioning = conditioning.to_device_dtype(&device, dtype).unwrap();
                     let batch = conditioning.batch_size();

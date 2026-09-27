@@ -238,7 +238,7 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
             }
             hidden = block.forward_block_causal(
                 &hidden,
-                &per_token,
+                &BlockModulation::PerToken(per_token.clone()),
                 &rope_cos,
                 &rope_sin,
                 &plan,

@@ -345,7 +345,7 @@ pub(super) fn forward_with_cache(
         .unsqueeze(1)?
         .broadcast_as((batch, text_len, 4 * inner))?;
     let per_token_modulation = if cached {
-        if latents.device().is_metal() && transformer.compact_modulation {
+        if latents.device().is_metal() && transformer.exec.compact_modulation {
             real_row
         } else {
             real
