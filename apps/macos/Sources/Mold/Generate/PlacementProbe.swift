@@ -18,6 +18,9 @@ final class PlacementProbe {
     /// The model `placement` answers for. A licence gate must not act on an
     /// answer about the model someone just switched away from.
     private(set) var placementModel: String?
+    /// The machine `placement` answers for. Licence requirements belong to
+    /// a machine, so an answer from another host gates nothing here.
+    private(set) var placementHost: MoldHost.ID?
     private(set) var error: String?
 
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -48,16 +51,45 @@ final class PlacementProbe {
                 // buffered response for a cancelled request, and writing it
                 // here would revert the hint to a superseded answer.
                 guard !Task.isCancelled else { return }
-                self?.placement = answer
-                self?.placementModel = model
-                self?.error = nil
+                self?.adopt(answer, model: model, host: host.id)
             } catch is CancellationError {
                 // Superseded by a later control change, not a failed request.
             } catch {
-                self?.placement = nil
-                self?.placementModel = nil
-                self?.error = error.sentence
+                self?.fail(error)
             }
         }
+    }
+
+    /// Asks now, with no debounce, and answers whether the machine answered.
+    /// Generate awaits this when a press beats the debounced probe, so the
+    /// licence gate reads an answer about THIS model on THIS machine.
+    func settle(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) async -> Bool {
+        task?.cancel()
+        guard let model else { return false }
+        let request = RenderRequest.placement(
+            draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
+        )
+        do {
+            let answer = try await hosts.backend(for: host).placementPreview(request, copies: draft.batchSize)
+            adopt(answer, model: model, host: host.id)
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    private func adopt(_ answer: PlacementPreview, model: String, host: MoldHost.ID) {
+        placement = answer
+        placementModel = model
+        placementHost = host
+        error = nil
+    }
+
+    private func fail(_ failure: Error) {
+        placement = nil
+        placementModel = nil
+        placementHost = nil
+        error = failure.sentence
     }
 }

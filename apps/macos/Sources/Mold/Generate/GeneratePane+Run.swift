@@ -12,13 +12,15 @@ extension GeneratePane {
 
     /// `accepted` is the licence ids accepted since the placement answer
     /// was read, so a retry after the sheet does not ask for them again.
-    func startRun(accepted: Set<String>) {
+    /// `licenceSettled` skips the licence gate once the machine could not
+    /// answer the fresh probe it asked for (`GeneratePane+Licence.swift`).
+    func startRun(accepted: Set<String>, licenceSettled: Bool = false) {
         guard let host else { return }
         // A render that would FETCH a gated model -- Qwen Image 2.1 and its
         // turbo tiers, Qwen Research -- asks for the terms before anything is
         // queued, the way the web does (`licenseRequirements`); accepting
         // runs this press again (`GeneratePane+Licence.swift`).
-        if holdsForLicence(on: host, accepted: accepted) { return }
+        if !licenceSettled, holdsForLicence(on: host, accepted: accepted) { return }
         let routing = recipe.flatMap {
             ClipRouting.resolve(recipe: $0, model: selectedModel, draft: controller.draft,
                                 limits: advertisedChainLimits)
