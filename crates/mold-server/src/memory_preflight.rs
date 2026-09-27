@@ -1693,6 +1693,45 @@ pub(crate) fn qwen_image21_eager_plan(
         available_bytes,
         host.total_bytes,
         host.spendable_bytes(),
+        0,
+    )
+}
+
+/// [`qwen_image21_eager_plan`] for a concrete request: a reference-conditioned
+/// render charges `device::qwen_image21_reference_extra_bytes` on top of the
+/// text-to-image denoise workspace, exactly as the engine's own residency
+/// decision does.
+pub(crate) fn qwen_image21_eager_plan_for_request(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
+    let host = crate::h3_admission::current_h3_host_memory();
+    let extra = hint
+        .filter(|h| h.family == ActivationFamily::QwenImage21Dit)
+        .map_or(0, |hint| {
+            mold_inference::device::qwen_image21_reference_extra_bytes(
+                req.width,
+                req.height,
+                hint.batch,
+                2,
+                &qwen_image21_reference_dimensions(req, projection),
+                if cfg_active(req.guidance) && req.negative_prompt.is_some() {
+                    2
+                } else {
+                    1
+                },
+            )
+        });
+    qwen_image21_eager_plan_with_host(
+        paths,
+        hint,
+        available_bytes,
+        host.total_bytes,
+        host.spendable_bytes(),
+        extra,
     )
 }
 
@@ -1702,6 +1741,7 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     available_bytes: Option<u64>,
     host_total_bytes: u64,
     host_available_bytes: u64,
+    reference_extra_bytes: u64,
 ) -> Option<mold_inference::qwen_image21::text_encoder_residency::Qwen21TePlan> {
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
@@ -1721,7 +1761,7 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
             residency::TeDevice::Cuda
         },
         usable_free_bytes: available,
-        denoise_workspace_bytes: denoise,
+        denoise_workspace_bytes: denoise.saturating_add(reference_extra_bytes),
         decode_peak_bytes: decode,
         host_total_bytes,
         host_available_bytes,
@@ -2153,7 +2193,8 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // the workspace inside that decision is the whole render's, so it replaces
     // the generic `peak + activation` rather than adding to it. `None` is a
     // Sequential plan (or another family), which keeps the generic estimate.
-    let qwen21_plan = qwen_image21_eager_plan(paths, hint, available_memory_bytes);
+    let qwen21_plan =
+        qwen_image21_eager_plan_for_request(paths, hint, available_memory_bytes, req, projection);
     // Weight bytes the wan arm below discounted because parking can free them.
     // Kept so the plan can re-add them and ask the engine's own question — will
     // this render park? — rather than inferring it from the discounted peak.
@@ -2303,8 +2344,23 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     } else {
         peak
     };
+    // Qwen Image 2.1 decides Eager from the SAME request-aware plan it
+    // prices, so references that do not fit beside every resident component
+    // take the sequential phases. Identical to the budget answer for
+    // text-to-image, whose reference extra is zero.
+    let budget_strategy = if hint.is_some_and(|h| h.family == ActivationFamily::QwenImage21Dit)
+        && available_memory_bytes.is_some_and(|bytes| bytes > 0)
+    {
+        if qwen21_plan.is_some() {
+            mold_inference::LoadStrategy::Eager
+        } else {
+            mold_inference::LoadStrategy::Sequential
+        }
+    } else {
+        select_server_load_strategy_for_budget(paths, available_memory_bytes, hint)
+    };
     let load_strategy = request_aware_load_strategy(
-        select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
+        budget_strategy,
         paths,
         hint,
         request_has_lora,
@@ -2643,6 +2699,34 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         }
     }
 
+    if let Some(hint) = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit) {
+        let dimensions = qwen_image21_reference_dimensions(req, projection);
+        if !dimensions.is_empty() {
+            // Qwen Image 2.1 lays every reference into its joint sequence as
+            // a condition block, retains the prefix K/V under the engine's
+            // own request-only rule, and runs the vision tower and a longer
+            // multimodal prompt in the encode phase. All three are the
+            // engine's own sizing functions, so admission prices exactly what
+            // the render holds.
+            use mold_inference::device::{
+                qwen_image21_encode_phase_bytes, qwen_image21_prefix_cache_bytes,
+                qwen_image21_reference_activation_bytes, QwenImage21SequenceShape,
+            };
+            let shape = QwenImage21SequenceShape::for_request(req.width, req.height, &dimensions);
+            let dtype = hint.dtype_bytes as usize;
+            let branches = cfg_factor as usize;
+            let cache = qwen_image21_prefix_cache_bytes(shape, branches, dtype);
+            let workspace =
+                qwen_image21_reference_activation_bytes(base, shape, branches, hint.batch, dtype)
+                    .saturating_sub(cache);
+            activation = workspace
+                .saturating_mul(batch)
+                .saturating_mul(cfg_factor)
+                .saturating_add(cache)
+                .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype));
+        }
+    }
+
     let pixel_bytes = u64::from(req.width)
         .saturating_mul(u64::from(req.height))
         .saturating_mul(4);
@@ -2674,6 +2758,44 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         .map(|loras| loras.len())
         .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
     activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
+
+/// Source dimensions of a Qwen Image 2.1 request's references, from the
+/// request bytes' headers or the authenticated projection. An unreadable
+/// header is priced at the reference area itself (a 1024x1024 square), which
+/// is what every reference is resized to.
+fn qwen_image21_reference_dimensions(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Vec<(u32, u32)> {
+    const FALLBACK: (u32, u32) = (1024, 1024);
+    if let Some(images) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
+        return images
+            .iter()
+            .map(|bytes| {
+                image::ImageReader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+                    .unwrap_or(FALLBACK)
+            })
+            .collect();
+    }
+    projection
+        .map(|projection| {
+            projection
+                .edit_images
+                .iter()
+                .map(|dimensions| {
+                    use crate::queue_media_store::ProjectedImageDimensions;
+                    match dimensions {
+                        ProjectedImageDimensions::Known { width, height } => (*width, *height),
+                        ProjectedImageDimensions::UnreadableHeader => FALLBACK,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -5335,6 +5457,91 @@ mod streamed_text_encoder_tests {
     }
 }
 #[cfg(test)]
+mod qwen_image21_reference_memory_tests {
+    use super::*;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([1, 2, 3]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    fn request(references: usize) -> GenerateRequest {
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "put the apple on the sign",
+            "negative_prompt": "blurry",
+            "model": "qwen-image-2.1:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 4.0
+        }))
+        .unwrap();
+        if references > 0 {
+            req.edit_images = Some(vec![png(1536, 1024); references]);
+        }
+        req
+    }
+
+    #[test]
+    fn references_are_priced_by_the_engines_own_sizing() {
+        use mold_inference::device::{
+            qwen_image21_encode_phase_bytes, qwen_image21_prefix_cache_bytes,
+            QwenImage21SequenceShape,
+        };
+        let t2i = request(0);
+        let hint = ActivationHint::from_request(&t2i, "qwen-image21");
+        let text_only = request_sensitive_activation_memory(&t2i, Some(hint), false);
+        let one = request(1);
+        let with_one = request_sensitive_activation_memory(&one, Some(hint), false);
+        let shape = QwenImage21SequenceShape::for_request(1024, 1024, &[(1536, 1024)]);
+        let dtype = hint.dtype_bytes as usize;
+        let base = hint.budget_bytes();
+        let cache = qwen_image21_prefix_cache_bytes(shape, 2, dtype);
+        let workspace = mold_inference::device::qwen_image21_reference_activation_bytes(
+            base, shape, 2, hint.batch, dtype,
+        ) - cache;
+        let reference_pixels = 1024 * 1024 * 4;
+        assert_eq!(text_only, base * 2);
+        assert_eq!(
+            with_one,
+            workspace * 2
+                + cache
+                + qwen_image21_encode_phase_bytes(shape, dtype)
+                + reference_pixels
+        );
+        assert!(with_one > text_only);
+        // Ten references cost more workspace than one, even though they no
+        // longer retain a cache.
+        let ten = request_sensitive_activation_memory(&request(10), Some(hint), false);
+        assert!(ten > text_only);
+        // A different family ignores the Qwen arm entirely.
+        let flux_hint = ActivationHint::from_request(&one, "flux");
+        assert_eq!(
+            request_sensitive_activation_memory(&one, Some(flux_hint), false),
+            request_sensitive_activation_memory(&one, Some(flux_hint), false)
+        );
+    }
+
+    #[test]
+    fn unreadable_reference_headers_price_the_reference_area() {
+        let mut req = request(0);
+        req.edit_images = Some(vec![vec![0u8; 16]]);
+        assert_eq!(
+            qwen_image21_reference_dimensions(&req, None),
+            vec![(1024, 1024)]
+        );
+        req.edit_images = Some(vec![png(640, 800)]);
+        assert_eq!(
+            qwen_image21_reference_dimensions(&req, None),
+            vec![(640, 800)]
+        );
+        assert!(qwen_image21_reference_dimensions(&request(0), None).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod qwen_image21_residency_tests {
     use super::*;
     use std::path::Path;
@@ -5404,6 +5611,7 @@ mod qwen_image21_residency_tests {
             Some(22 * GIB),
             64 * GIB,
             48 * GIB,
+            0,
         )
         .expect("a 24 GB card plans the int8 tier eager");
         assert!(matches!(
@@ -5434,11 +5642,73 @@ mod qwen_image21_residency_tests {
             Some(44 * GIB),
             64 * GIB,
             48 * GIB,
+            0,
         )
         .expect("a 48 GB card plans bf16 eager");
         assert_eq!(
             plan.decision.residency,
             mold_inference::qwen_image21::text_encoder_residency::Qwen21TeResidency::Resident
+        );
+    }
+
+    /// References enter the eager plan through the engine's own extra
+    /// (`qwen_image21_reference_extra_bytes`, added to the denoise
+    /// workspace): it never lowers the peak, and a 24 GB card cannot plan
+    /// ten references eager at all.
+    #[test]
+    fn references_charge_the_engines_extra_on_the_eager_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = qwen21_paths(dir.path(), 14_230_280_616);
+        let plain = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            64 * GIB,
+            48 * GIB,
+            0,
+        )
+        .expect("text-to-image plans eager");
+        let extra = mold_inference::device::qwen_image21_reference_extra_bytes(
+            1024,
+            1024,
+            1,
+            2,
+            &[(1536, 1024)],
+            2,
+        );
+        assert!(extra > 4 * GIB);
+        // The reference workspace never lowers the plan's peak; with one
+        // reference the 1024² decode still dominates on this card.
+        if let Some(plan) = qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(44 * GIB),
+            64 * GIB,
+            48 * GIB,
+            extra,
+        ) {
+            assert!(plan.decision.eager_peak_bytes >= plain.decision.eager_peak_bytes);
+        }
+        let ten = mold_inference::device::qwen_image21_reference_extra_bytes(
+            1024,
+            1024,
+            1,
+            2,
+            &[(1536, 1024); 10],
+            2,
+        );
+        assert!(qwen_image21_eager_plan_with_host(
+            &paths,
+            hint(1024, 1024),
+            Some(22 * GIB),
+            64 * GIB,
+            48 * GIB,
+            ten,
+        )
+        .is_none());
+        assert_eq!(
+            mold_inference::device::qwen_image21_reference_extra_bytes(1024, 1024, 1, 2, &[], 2),
+            0
         );
     }
 

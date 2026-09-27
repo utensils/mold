@@ -975,6 +975,222 @@ pub fn activation_bytes(
     raw.max(ACTIVATION_FLOOR_BYTES).saturating_add(prefix_cache)
 }
 
+/// The token shape of one Qwen Image 2.1 request: what its joint sequence,
+/// its retained prefix and its Qwen3-VL prompt encode are made of.
+///
+/// Admission and the engine size from the same shape. The prompt's text
+/// length is not known before tokenization, so admission charges the v0.32
+/// retention bound as its allowance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QwenImage21SequenceShape {
+    /// Retained prompt rows that are not image slots.
+    pub text_tokens: usize,
+    /// Condition-image tokens, `Σ (h/16)(w/16)` over the reference canvases.
+    pub condition_tokens: usize,
+    /// Target (denoised) tokens.
+    pub target_tokens: usize,
+    /// Reference images.
+    pub references: usize,
+    /// Largest single reference's vision patches (`(h/16)(w/16)`).
+    pub largest_reference_patches: usize,
+}
+
+impl QwenImage21SequenceShape {
+    /// The shape of a `width x height` render conditioned on references whose
+    /// SOURCE dimensions are `references` — each is resized to the reference
+    /// canvas (`qwen_image21::conditioning::reference_canvas`) before either
+    /// the vision tower or the VAE sees it.
+    pub fn for_request(width: u32, height: u32, references: &[(u32, u32)]) -> Self {
+        let cell = crate::qwen_image21::QWEN_IMAGE_21_VAE_SCALE_FACTOR;
+        let patches: Vec<usize> = references
+            .iter()
+            .map(|&(w, h)| {
+                let (w, h) = crate::qwen_image21::conditioning::reference_canvas(w, h);
+                (h as usize / cell) * (w as usize / cell)
+            })
+            .collect();
+        Self {
+            text_tokens: crate::qwen_image21::LEGACY_PREFIX_CACHE_TOKENS,
+            condition_tokens: patches.iter().sum(),
+            target_tokens: (height as usize / cell) * (width as usize / cell),
+            references: references.len(),
+            largest_reference_patches: patches.iter().copied().max().unwrap_or(0),
+        }
+    }
+
+    /// Tokens every step attends to but only the prefill computes.
+    pub fn prefix_tokens(&self) -> usize {
+        self.text_tokens + self.condition_tokens
+    }
+
+    /// The transformer's whole joint sequence.
+    pub fn joint_tokens(&self) -> usize {
+        self.prefix_tokens() + self.target_tokens
+    }
+
+    /// The Qwen3-VL prompt: the text plus one `<|image_pad|>` per 2x2 patch
+    /// group of every reference.
+    pub fn language_tokens(&self) -> usize {
+        self.text_tokens + self.condition_tokens / 4
+    }
+}
+
+/// Bytes the prefix K/V cache of `branches` CFG branches holds for `shape`,
+/// under the engine's own retention rule (`qwen_image21::PrefixCachePolicy`)
+/// and the process's `MOLD_QWEN_IMAGE21_KV_CACHE`, so admission prices
+/// exactly what the engine retains. A branch that recomputes holds nothing.
+pub fn qwen_image21_prefix_cache_bytes(
+    shape: QwenImage21SequenceShape,
+    branches: usize,
+    dtype_bytes: usize,
+) -> u64 {
+    let prefixes = vec![shape.prefix_tokens(); branches.max(1)];
+    crate::qwen_image21::PrefixCachePolicy::resolve(
+        &prefixes,
+        shape.references > 0,
+        1,
+        dtype_bytes,
+        crate::qwen_image21::prefix_cache_mode_from_env(),
+    )
+    .into_iter()
+    .zip(&prefixes)
+    .filter(|(decision, _)| *decision == crate::qwen_image21::PrefixCacheDecision::Retain)
+    .map(|(_, &tokens)| crate::qwen_image21::prefix_cache_bytes(tokens, 1, dtype_bytes))
+    .sum()
+}
+
+/// Denoise workspace per joint token at BF16, fitted on an L40S (1024²
+/// target, CFG, sequential, BF16, `MOLD_ATTN` default): with 3 references
+/// (16.3k joint tokens, recomputed prefix) the denoise phase held 17,639 MiB
+/// and with 10 (44.7k) 22,759 MiB — 180 KiB per token over a 14,774 MiB
+/// transformer-plus-context floor, which also reproduces the one-reference
+/// render (cache retained, 19,783 MiB measured) within 3%. Rounded up to
+/// 192 KiB. It scales with the working dtype.
+pub const QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES: u64 = 192 * 1024;
+
+/// The denoise workspace of a reference-conditioned Qwen Image 2.1 render,
+/// plus the prefix cache it retains.
+///
+/// The workspace is the larger of the text-to-image estimate scaled by the
+/// joint sequence over the text-to-image one (attention scales with KEY
+/// length, the `flux2_reference_scaled_activation_bytes` reasoning) and the
+/// measured per-joint-token workspace — the prefill (or every recomputed
+/// step) runs the whole joint sequence through a block, and its hidden,
+/// Q/K/V, SwiGLU and per-token modulation rows are all joint-length.
+/// `base_activation` is `activation_bytes(.., QwenImage21Dit)`, whose legacy
+/// text-only prefix term the reference request's own cache replaces.
+pub fn qwen_image21_reference_activation_bytes(
+    base_activation: u64,
+    shape: QwenImage21SequenceShape,
+    branches: usize,
+    batch: u32,
+    dtype_bytes: usize,
+) -> u64 {
+    let text_only = shape.text_tokens + shape.target_tokens;
+    let legacy_prefix = crate::qwen_image21::prefix_cache_budget_bytes(batch);
+    let scaled = flux2_reference_scaled_activation_bytes(
+        base_activation.saturating_sub(legacy_prefix),
+        text_only as u64,
+        shape.condition_tokens as u64,
+    );
+    let per_token = (shape.joint_tokens() as u64)
+        .saturating_mul(QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES * dtype_bytes as u64 / 2)
+        .saturating_mul(u64::from(batch.max(1)));
+    scaled
+        .max(per_token)
+        .saturating_add(qwen_image21_prefix_cache_bytes(
+            shape,
+            branches,
+            dtype_bytes,
+        ))
+}
+
+/// The Qwen3-VL vision tower's weights in BF16 (`model.visual.*`,
+/// 1.074 GiB, measured from the checkpoint header).
+pub const QWEN_IMAGE21_VISION_TOWER_BF16_BYTES: u64 = 1_153_000_000;
+/// The VAE encoder's weights in F32 (`encoder.*` + `quant_conv.*`).
+pub const QWEN_IMAGE21_VAE_ENCODER_F32_BYTES: u64 = 312_000_000;
+/// Encode-phase bytes per condition token at BF16 beyond the vision
+/// attention tile: the tower's hidden rows and the longer multimodal prompt.
+/// Fitted on an L40S: 1, 3 and 10 references (1248x832 each) raised the
+/// encode phase 4,296 / 4,456 / 4,936 MiB above the resident text encoder,
+/// ~17.5 KiB per condition token; rounded up.
+pub const QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES: u64 = 18 * 1024;
+
+/// What a reference-conditioned request adds to the ENCODE phase: the vision
+/// tower and VAE encoder weights, the tower's per-image attention tile, the
+/// per-condition-token hidden rows, and one chunk of the multimodal language
+/// model's causal score tile. `dtype_bytes` is the encoder working dtype.
+pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_bytes: usize) -> u64 {
+    if shape.references == 0 {
+        return 0;
+    }
+    let dtype = dtype_bytes as u64;
+    // The vision tower and VAE encoder always run in F32
+    // (`qwen_image21::reference::{vision_tower_dtype, vae_encoder_dtype}`);
+    // only the language model follows the encoder working dtype.
+    const F32: u64 = 4;
+    let weights =
+        QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * F32 / 2 + QWEN_IMAGE21_VAE_ENCODER_F32_BYTES;
+    // Vision: 16 heads over each image's patches, chunked at 2^28 elements;
+    // a chunk holds its F32 scores, probabilities and softmax
+    // (`vision.rs` `VisionAttention`). Calibrated on an L40S with a BF16
+    // tower (4.2-4.8 GiB above the resident text encoder for 1-10
+    // references); the F32 tower doubles its rows and weights.
+    let patches = shape.largest_reference_patches as u64;
+    let vision_scores = (16 * patches * patches).min(1 << 28) * (2 * F32 + 8);
+    let rows = (shape.condition_tokens as u64) * QWEN_IMAGE21_ENCODE_TOKEN_BF16_BYTES * F32 / 2;
+    let tokens = shape.language_tokens() as u64;
+    let language_scores = (32 * tokens * tokens).min(1 << 28) * dtype * 2;
+    weights + vision_scores + rows + language_scores
+}
+
+/// What a reference-conditioned request adds on top of the text-to-image
+/// denoise workspace the text-encoder residency plan charges
+/// (`qwen_image21::text_encoder_residency::render_workspace_bytes`): the
+/// longer joint sequence's workspace and the prefix cache it retains beyond
+/// the text-to-image estimate, plus the encode phase (the vision tower and
+/// VAE encoder an eager engine then keeps resident, and their working set).
+/// Zero without references, so a text-to-image plan does not move. The engine
+/// (`settle_text_encoder_residency`) and the planner both add exactly this.
+pub fn qwen_image21_reference_extra_bytes(
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: usize,
+    references: &[(u32, u32)],
+    branches: usize,
+) -> u64 {
+    if references.is_empty() {
+        return 0;
+    }
+    let shape = QwenImage21SequenceShape::for_request(width, height, references);
+    let base = activation_bytes(
+        width,
+        height,
+        batch,
+        dtype_bytes as u32,
+        ActivationFamily::QwenImage21Dit,
+    );
+    qwen_image21_reference_activation_bytes(base, shape, branches, batch, dtype_bytes)
+        .saturating_sub(base)
+        .saturating_add(qwen_image21_encode_phase_bytes(shape, dtype_bytes))
+}
+
+/// Header dimensions of encoded reference images; an unreadable header is
+/// the reference area itself (1024x1024), which every reference is resized to.
+pub fn qwen_image21_reference_dimensions(images: &[Vec<u8>]) -> Vec<(u32, u32)> {
+    images
+        .iter()
+        .map(|bytes| {
+            image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok())
+                .unwrap_or((1024, 1024))
+        })
+        .collect()
+}
 /// Scale a FLUX.2 activation budget by how much longer the sequence becomes
 /// once reference tokens are appended.
 ///
@@ -7949,5 +8165,97 @@ mod flux2_denoise_budget_tests {
                 AttentionBackend::Math
             )
         );
+    }
+}
+#[cfg(test)]
+mod qwen_image21_sequence_sizing_tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn the_shape_follows_the_reference_canvases_and_the_target() {
+        let shape = QwenImage21SequenceShape::for_request(512, 512, &[(1536, 1024), (640, 800)]);
+        // 1248x832 and 928x1152 canvases (the M1 captures' P6 case).
+        assert_eq!(shape.condition_tokens, 78 * 52 + 58 * 72);
+        assert_eq!(shape.target_tokens, 1024);
+        assert_eq!(shape.references, 2);
+        assert_eq!(shape.largest_reference_patches, 58 * 72);
+        assert_eq!(shape.prefix_tokens(), 512 + 8232);
+        assert_eq!(shape.joint_tokens(), 512 + 8232 + 1024);
+        assert_eq!(shape.language_tokens(), 512 + 8232 / 4);
+        let t2i = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
+        assert_eq!(t2i.condition_tokens, 0);
+        assert_eq!(qwen_image21_encode_phase_bytes(t2i, 2), 0);
+    }
+
+    #[test]
+    fn prefix_cache_charge_mirrors_the_engine_decision() {
+        let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
+        // One reference, both CFG branches, BF16: retained (~4.3 GiB).
+        let retained = qwen_image21_prefix_cache_bytes(one, 2, 2);
+        assert_eq!(
+            retained,
+            2 * crate::qwen_image21::prefix_cache_bytes(one.prefix_tokens(), 1, 2)
+        );
+        assert!(retained > 4 * GIB && retained < 5 * GIB);
+        // Three references overflow the budget: nothing is retained, so
+        // nothing is charged.
+        let three = QwenImage21SequenceShape::for_request(
+            1024,
+            1024,
+            &[(1024, 1024), (1024, 1024), (1024, 1024)],
+        );
+        assert_eq!(qwen_image21_prefix_cache_bytes(three, 2, 2), 0);
+        // Text-to-image: the legacy term exactly.
+        let t2i = QwenImage21SequenceShape::for_request(1024, 1024, &[]);
+        assert_eq!(
+            qwen_image21_prefix_cache_bytes(t2i, 2, 4),
+            crate::qwen_image21::prefix_cache_budget_bytes(1)
+        );
+    }
+
+    #[test]
+    fn reference_activation_scales_with_keys_and_swaps_the_prefix_term() {
+        let base = activation_bytes(1024, 1024, 1, 2, ActivationFamily::QwenImage21Dit);
+        let one = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024)]);
+        let with_reference = qwen_image21_reference_activation_bytes(base, one, 2, 1, 2);
+        assert!(with_reference > base);
+        let legacy = crate::qwen_image21::prefix_cache_budget_bytes(1);
+        let scaled = flux2_reference_scaled_activation_bytes(
+            base - legacy,
+            (one.text_tokens + one.target_tokens) as u64,
+            one.condition_tokens as u64,
+        );
+        let per_token = one.joint_tokens() as u64 * QWEN_IMAGE21_JOINT_TOKEN_WORKSPACE_BF16_BYTES;
+        assert_eq!(
+            with_reference,
+            scaled.max(per_token) + qwen_image21_prefix_cache_bytes(one, 2, 2)
+        );
+        // More references never cost less workspace.
+        let ten = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 10]);
+        assert!(
+            qwen_image21_reference_activation_bytes(base, ten, 2, 1, 2)
+                >= qwen_image21_reference_activation_bytes(base, one, 2, 1, 2)
+                    - qwen_image21_prefix_cache_bytes(one, 2, 2)
+        );
+        // The L40S fit: denoise workspace for 3 and 10 references (recomputed
+        // prefix, BF16) covers the measured 2,865 and 7,985 MiB, within 25%.
+        let mib = |bytes: u64| bytes as f64 / (1u64 << 20) as f64;
+        for (count, measured) in [(3usize, 2_865.0), (10, 7_985.0)] {
+            let shape =
+                QwenImage21SequenceShape::for_request(1024, 1024, &vec![(1536, 1024); count]);
+            let estimate = mib(qwen_image21_reference_activation_bytes(
+                base, shape, 2, 1, 2,
+            ));
+            assert!(
+                estimate >= measured && estimate <= measured * 1.25,
+                "{count} references: {estimate:.0} MiB vs {measured} measured"
+            );
+        }
+        // The encode phase grows with the references and stays bounded.
+        let one_encode = qwen_image21_encode_phase_bytes(one, 2);
+        let ten_encode = qwen_image21_encode_phase_bytes(ten, 2);
+        assert!(one_encode > GIB && ten_encode > one_encode && ten_encode < 12 * GIB);
     }
 }

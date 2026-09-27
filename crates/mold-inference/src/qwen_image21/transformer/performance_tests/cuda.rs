@@ -184,7 +184,7 @@ pub(super) fn install_mode(
     );
     transformer.compact_modulation = false;
     for block in &mut transformer.blocks {
-        block.attn.fused_target = false;
+        block.attn.dispatch.fused_target = false;
         block.attn.fused_ops = false;
     }
     Ok(())
@@ -432,10 +432,20 @@ fn official_cuda_mode_benchmark() -> Result<()> {
     let mut latents = (noise * scheduler.initial_sigma())?;
     let total_steps = scheduler.num_steps();
     let executed_steps = limit.min(total_steps);
-    let mut conditional = transformer.prepare_t2i(&conditioning, latent_height, latent_width);
+    let mut prefixes = vec![conditioning.sequence_length()];
+    prefixes.extend(negative_conditioning.as_ref().map(|c| c.sequence_length()));
+    let decisions = crate::qwen_image21::PrefixCachePolicy::resolve_from_env(
+        &prefixes,
+        false,
+        conditioning.batch_size(),
+        dtype,
+    );
+    let mut conditional =
+        transformer.prepare_t2i(&conditioning, latent_height, latent_width, decisions[0])?;
     let mut negative_branch = negative_conditioning
         .as_ref()
-        .map(|c| transformer.prepare_t2i(c, latent_height, latent_width));
+        .map(|c| transformer.prepare_t2i(c, latent_height, latent_width, decisions[1]))
+        .transpose()?;
 
     let mut step_receipts = Vec::with_capacity(executed_steps);
     let mut steady = Vec::new();

@@ -6,10 +6,6 @@
 //! the clients must agree on these answers, so none of them may re-derive a
 //! canvas or a template on its own.
 //!
-//! The reference-image engine path (reference preparation and Qwen3-VL
-//! encoding) is the consumer of the canvas/template half; until it lands in
-//! this module's caller, only the tests exercise those functions.
-#![allow(dead_code)]
 
 use anyhow::{ensure, Result};
 
@@ -52,6 +48,11 @@ pub(crate) fn reference_canvas(width: u32, height: u32) -> (u32, u32) {
 /// the LAST reference's aspect at the reference area; otherwise
 /// `output_resolution` square. Either way the result is floored to the 32 px
 /// grid (`width // multiple_of * multiple_of`).
+///
+/// Admission sizes the request (the CLI and server share
+/// `mold_core`'s rounding); the engine only asserts the grid, so this port is
+/// pinned by its own tests.
+#[cfg(test)]
 pub(crate) fn derive_output_dimensions(
     last_reference: Option<(u32, u32)>,
     explicit: Option<(u32, u32)>,
@@ -140,58 +141,6 @@ pub(crate) fn expand_image_pad_tokens(text: &str, pad_counts: &[usize]) -> Resul
     Ok(expanded)
 }
 
-/// Whether an RGBA plane carries transparency: any alpha byte below 255.
-pub(crate) fn carries_alpha(alpha: impl IntoIterator<Item = u8>) -> bool {
-    alpha.into_iter().any(|value| value < 255)
-}
-
-/// What the decoded alpha plane becomes in the published artifact.
-///
-/// The checkpoint always decodes RGBA, and an opaque text-to-image render is
-/// NOT all-255: the M1 capture measured edge alpha as low as 204 on every one
-/// of six 40-step 1024² renders (`testdata/qwen_image21/alpha_histograms.json`).
-/// So the choice is made from what the REQUEST asked for, never from the
-/// decoded plane and never with a threshold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputAlpha {
-    /// Drop the alpha plane: the RGB channels are published unchanged, so a
-    /// text-to-image PNG/JPEG is byte-for-byte what v0.32 produced.
-    Rgb,
-    /// Publish RGBA (PNG / WebP).
-    Rgba,
-    /// JPEG cannot carry alpha: composite over white — the convention the
-    /// checkpoint itself uses for its vision input
-    /// (`pipeline_qwenimage21.py:266-270`) — and say so in a request warning.
-    CompositeOverWhite,
-}
-
-impl OutputAlpha {
-    /// RGBA iff transparency was requested OR at least one reference image
-    /// carries alpha; otherwise RGB. `format_carries_alpha` is true for PNG
-    /// and WebP. JPEG with transparency requested is refused at admission and
-    /// in the engine; JPEG with an alpha-carrying reference composites.
-    pub(crate) fn decide(
-        transparent_requested: bool,
-        reference_carries_alpha: bool,
-        format_carries_alpha: bool,
-    ) -> Self {
-        match (
-            transparent_requested || reference_carries_alpha,
-            format_carries_alpha,
-        ) {
-            (false, _) => Self::Rgb,
-            (true, true) => Self::Rgba,
-            (true, false) => Self::CompositeOverWhite,
-        }
-    }
-
-    /// The request warning attached when alpha had to be flattened.
-    pub(crate) fn warning(self) -> Option<&'static str> {
-        (self == Self::CompositeOverWhite).then_some(
-            "Qwen Image 2.1 kept a reference image's transparency, which JPEG cannot store; it was composited over white. Choose PNG or WebP to keep the alpha channel.",
-        )
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,22 +219,6 @@ mod tests {
         ));
         assert!(expand_image_pad_tokens(&template, &[2]).is_err());
         assert!(expand_image_pad_tokens(&template, &[2, 0]).is_err());
-    }
-
-    #[test]
-    fn alpha_rule_follows_the_request_never_the_decoded_plane() {
-        use OutputAlpha::{CompositeOverWhite, Rgb, Rgba};
-        // Plain text-to-image drops alpha whatever the model painted.
-        assert_eq!(OutputAlpha::decide(false, false, true), Rgb);
-        assert_eq!(OutputAlpha::decide(false, false, false), Rgb);
-        assert_eq!(OutputAlpha::decide(true, false, true), Rgba);
-        assert_eq!(OutputAlpha::decide(false, true, true), Rgba);
-        assert_eq!(OutputAlpha::decide(false, true, false), CompositeOverWhite);
-        assert_eq!(OutputAlpha::decide(true, true, false), CompositeOverWhite);
-        assert!(CompositeOverWhite.warning().is_some());
-        assert!(Rgba.warning().is_none() && Rgb.warning().is_none());
-        assert!(!carries_alpha([255u8; 8]));
-        assert!(carries_alpha([255, 255, 254]));
     }
 
     #[derive(serde::Deserialize)]

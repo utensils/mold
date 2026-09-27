@@ -17,7 +17,6 @@
 //! It is a separate struct from the decoder so an encode phase maps only
 //! `encoder.*` and `quant_conv.*` (~0.29 GiB) out of the VAE file. Its
 //! caller is the reference-conditioned encode phase of the pipeline.
-#![allow(dead_code)]
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};

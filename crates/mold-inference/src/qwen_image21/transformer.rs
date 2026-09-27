@@ -692,6 +692,7 @@ impl QwenImage21Transformer {
     }
 
     /// Prepare a text-to-image branch.
+    #[cfg(test)]
     pub(crate) fn prepare_t2i<'a>(
         &'a self,
         conditioning: &'a QwenImage21TextConditioning,
@@ -742,6 +743,67 @@ impl QwenImage21Transformer {
     /// host RAM for a 2K VAE decode and its restore afterwards
     /// (`text_encoder_residency::TransformerDecode::ParkHost`). No reload
     /// from disk: quantized storage makes a byte-exact round trip.
+    /// Install one bypass stack per linear from `registry`, keyed by the
+    /// checkpoint's own `<module>.weight` names (`qwen_image21::lora` maps a
+    /// LoRA onto them); every linear the registry does not name is cleared.
+    /// `None` clears every adapter. Base weights are never touched, so a new
+    /// request's LoRA set is an adapter swap, never a rebuild.
+    pub(crate) fn install_lora(
+        &mut self,
+        registry: Option<&crate::flux::lora_bypass::LoraRegistry>,
+    ) -> Result<()> {
+        let stack = |module: &str| -> Vec<crate::flux::lora_bypass::LinearLoraAdapter> {
+            registry
+                .map(|registry| registry.adapters_for(&format!("{module}.weight")).to_vec())
+                .unwrap_or_default()
+        };
+        self.img_in.set_adapters(stack("img_in"))?;
+        self.txt_in
+            .in_layer
+            .set_adapters(stack("txt_in.in_layer"))?;
+        self.txt_in
+            .out_layer
+            .set_adapters(stack("txt_in.out_layer"))?;
+        self.time_text_embed
+            .linear_1
+            .set_adapters(stack("time_text_embed.timestep_embedder.linear_1"))?;
+        self.time_text_embed
+            .linear_2
+            .set_adapters(stack("time_text_embed.timestep_embedder.linear_2"))?;
+        self.modulation.set_adapters(stack("modulation.1"))?;
+        self.norm_out
+            .linear
+            .set_adapters(stack("norm_out.linear"))?;
+        self.proj_out.set_adapters(stack("proj_out"))?;
+        for (index, block) in self.blocks.iter_mut().enumerate() {
+            let prefix = format!("transformer_blocks.{index}");
+            block
+                .attn
+                .to_q
+                .set_adapters(stack(&format!("{prefix}.attn.to_q")))?;
+            block
+                .attn
+                .to_k
+                .set_adapters(stack(&format!("{prefix}.attn.to_k")))?;
+            block
+                .attn
+                .to_v
+                .set_adapters(stack(&format!("{prefix}.attn.to_v")))?;
+            block
+                .attn
+                .to_out
+                .set_adapters(stack(&format!("{prefix}.attn.to_out.0")))?;
+            block.mlp.gate_up.set_adapters(
+                stack(&format!("{prefix}.img_mlp.gate_layer")),
+                stack(&format!("{prefix}.img_mlp.proj")),
+            )?;
+            block
+                .mlp
+                .out
+                .set_adapters(stack(&format!("{prefix}.img_mlp.out")))?;
+        }
+        Ok(())
+    }
     pub(crate) fn move_to_device(&mut self, device: &Device) -> Result<()> {
         self.img_in = self.img_in.to_device(device)?;
         self.time_text_embed.linear_1 = self.time_text_embed.linear_1.to_device(device)?;
@@ -1705,9 +1767,11 @@ mod tests {
     #[test]
     fn t2i_forward_is_bitwise_the_frozen_legacy_forward_on_cuda() {
         let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("skipped: no CUDA device");
             return;
         };
         legacy_parity(&device, &[DType::F32, DType::BF16]);
+        eprintln!("CUDA F32 and BF16 legacy parity: bitwise");
     }
 
     #[cfg(feature = "metal")]
