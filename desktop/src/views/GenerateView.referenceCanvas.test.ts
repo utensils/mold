@@ -108,4 +108,36 @@ describe("GenerateView last-reference canvas (Qwen Image 2.1)", () => {
     await flushPromises();
     expect([form.width, form.height]).toEqual([1024, 1024]);
   });
+
+  /*
+   * `canvasIntent` lives in the view's own component state, never in the
+   * store-backed form — so navigating away (unmount) and back (remount) must
+   * not forget that the user already picked a size. A component-local ref
+   * that restarts at "model-default" reads as untouched and lets this exact
+   * watcher re-snap the picked size the moment a reference changes (#1166
+   * follow-up).
+   */
+  it("keeps a manually chosen canvas across remount when a reference changes", async () => {
+    const first = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.model = qwen21.name;
+    form.family = "qwen-image21";
+    await flushPromises();
+
+    // The user picks a size the last-reference rule would not compute.
+    form.width = 832;
+    form.height = 1216;
+    await flushPromises();
+    first.unmount();
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([832, 1216]);
+
+    form.imageAttachments = [pngHeader(1600, 900)];
+    await flushPromises();
+
+    expect([form.width, form.height]).toEqual([832, 1216]);
+  });
 });

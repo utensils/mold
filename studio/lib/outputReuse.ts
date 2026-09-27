@@ -28,7 +28,6 @@ export function pipelineForSettingsReuse<T>(metadata: {
  */
 export function transparentBackgroundForSettingsReuse(metadata: {
   transparent_background?: boolean | null;
-  has_alpha?: boolean | null;
 }): boolean {
   return metadata.transparent_background === true;
 }

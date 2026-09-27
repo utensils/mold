@@ -881,11 +881,10 @@ pub(crate) fn last_reference_canvas(
     if profile.canvas != Some(mold_core::ReferenceCanvasRule::LastReference) {
         return None;
     }
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(references.last()?))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()?;
+    // EXIF-oriented, as the engine decodes it: a portrait photo stored
+    // landscape with Orientation 6 sizes a portrait canvas.
+    let (width, height) =
+        mold_core::reference_image::oriented_dimensions(references.last()?).ok()?;
     let limits = model_entry
         .and_then(|entry| entry.generation_profile.as_ref())
         .and_then(|profile| profile.default_recipe())
@@ -2773,6 +2772,29 @@ mod tests {
                 "qwen-image-2.1:bf16"
             ),
             Some((2752, 320))
+        );
+        // EXIF Orientation 6 on landscape-stored pixels: portrait, as the
+        // engine decodes it.
+        let rotated =
+            vec![
+                std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg",
+                ))
+                .unwrap(),
+            ];
+        assert_eq!(
+            last_reference_canvas(
+                &qwen,
+                &rotated,
+                None,
+                Some("qwen-image21"),
+                "qwen-image-2.1:bf16"
+            ),
+            Some(mold_core::last_reference_canvas(
+                48,
+                96,
+                mold_core::CanvasLimits::for_model("qwen-image-2.1:bf16", Some("qwen-image21"))
+            ))
         );
         let klein = reference_images_contract(None, Some("flux2"), "flux2-klein:q8").unwrap();
         assert_eq!(

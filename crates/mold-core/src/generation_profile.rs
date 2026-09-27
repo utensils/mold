@@ -1290,6 +1290,18 @@ pub fn validate_edit_images_against(
                 image_input_format_list(accepted)
             ));
         }
+        // Bound every reference by its header before anything decodes it.
+        // A header that cannot be read is not a size: the engine's decoder
+        // refuses those bytes itself, with the decoder's own reason.
+        for (index, image) in images.iter().enumerate() {
+            if let Ok((width, height)) = crate::reference_image::oriented_dimensions(image) {
+                crate::reference_image::validate_reference_image_dimensions(
+                    &format!("Reference {}", index + 1),
+                    width,
+                    height,
+                )?;
+            }
+        }
     }
     // `Replaces` never reads `source_image`, so the img2img fields are refused
     // whether or not references are attached. `Exclusive` renders from ONE of
@@ -3289,6 +3301,76 @@ mod tests {
             validate_edit_images_against(&flux, "flux2-dev", &flux_req).unwrap_err(),
             "edit_images must contain only PNG or JPEG images"
         );
+    }
+
+    /// A PNG whose header DECLARES `width`x`height` and carries one empty
+    /// IDAT: a few dozen bytes that would decode to width*height*4 bytes.
+    fn png_declaring(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let chunk = |kind: &[u8; 4], data: &[u8]| {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+            out
+        };
+        let mut ihdr = width.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(chunk(b"IHDR", &ihdr));
+        png.extend(chunk(
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
+        png.extend(chunk(b"IEND", &[]));
+        png
+    }
+
+    /// Reference size is bounded at the door, for every family, before a
+    /// queue row exists: a tiny PNG declaring 60000x60000 would otherwise
+    /// reach an engine decode of ~14 GB on the host. The bounds are
+    /// `reference_image`'s; an unreadable header is left to the engine's
+    /// decoder, which refuses it, rather than being guessed at here.
+    #[test]
+    fn oversized_references_are_refused_at_admission() {
+        let qwen = reference_images_for_recipe("qwen-image21", "qwen-image-2.1:bf16");
+        let mut req = qwen21_request("qwen-image-2.1:bf16");
+        req.edit_images = Some(vec![
+            png_declaring(1024, 768),
+            png_declaring(60_000, 60_000),
+        ]);
+        let error = validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap_err();
+        assert!(error.starts_with("Reference 2 is 60000x60000"), "{error}");
+        req.edit_images = Some(vec![png_declaring(9_000, 12_000)]);
+        let error = validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap_err();
+        assert!(error.contains("100000000 pixels"), "{error}");
+        req.edit_images = Some(vec![png_declaring(4, 1_000)]);
+        let error = validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap_err();
+        assert!(error.contains("200:1"), "{error}");
+        req.edit_images = Some(vec![png_declaring(16_384, 4_096), PNG.to_vec()]);
+        validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap();
+
+        let flux = reference_images_for_recipe("flux2", "flux2-dev:q8");
+        let mut flux_req = qwen21_request("flux2-dev:q8");
+        flux_req.edit_images = Some(vec![png_declaring(20_000, 1_000)]);
+        assert!(validate_edit_images_against(&flux, "flux2-dev", &flux_req)
+            .unwrap_err()
+            .contains("16384"));
     }
 
     #[test]

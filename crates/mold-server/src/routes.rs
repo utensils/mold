@@ -1100,13 +1100,7 @@ fn dimension_advisory(
     let derived = (rule == Some(mold_core::ReferenceCanvasRule::LastReference))
         .then(|| edit_images?.last())
         .flatten()
-        .and_then(|last| {
-            image::ImageReader::new(std::io::Cursor::new(last))
-                .with_guessed_format()
-                .ok()?
-                .into_dimensions()
-                .ok()
-        })
+        .and_then(|last| mold_core::reference_image::oriented_dimensions(last).ok())
         .map(|(ref_width, ref_height)| {
             mold_core::last_reference_canvas(
                 ref_width,
@@ -12695,6 +12689,41 @@ mod tests {
             advisory("qwen-image21", "qwen-image-2.1:bf16", 1024, 1024, &[]),
             None,
             "a preset never warns"
+        );
+    }
+
+    /// A phone photo stored as 96x48 landscape pixels with EXIF
+    /// `Orientation = 6` is a PORTRAIT reference: the engine decodes it
+    /// upright, so the canvas every client derives is portrait, and that
+    /// canvas must not draw the advisory (the raw header would have called it
+    /// hand-picked and blessed the landscape one instead).
+    #[test]
+    fn the_last_reference_canvas_follows_the_exif_orientation() {
+        let portrait =
+            std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "../mold-core/testdata/reference_orientation/landscape_96x48_orientation6.jpg",
+            ))
+            .unwrap();
+        let refs = vec![portrait];
+        let (width, height) = mold_core::last_reference_canvas(
+            48,
+            96,
+            mold_core::CanvasLimits::for_model("qwen-image-2.1:bf16", Some("qwen-image21")),
+        );
+        assert!(height > width);
+        let advisory = |width: u32, height: u32| {
+            super::dimension_advisory(
+                "qwen-image21",
+                "qwen-image-2.1:bf16",
+                width,
+                height,
+                Some(&refs),
+            )
+        };
+        assert_eq!(advisory(width, height), None, "the upright canvas");
+        assert!(
+            advisory(height, width).is_some(),
+            "the raw header's landscape canvas is not what the recipe derives"
         );
     }
 

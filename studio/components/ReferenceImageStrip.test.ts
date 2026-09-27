@@ -148,6 +148,49 @@ describe("ReferenceImageStrip", () => {
     wrapper.unmount();
   });
 
+  it("moves keyboard focus to the next tile's remove button after Remove", async () => {
+    const wrapper = strip();
+    const button = wrapper.get("[data-test='reference-remove-1']");
+    (button.element as HTMLButtonElement).focus();
+    await button.trigger("click");
+    // The parent applies the removal and hands back the new order — index 1
+    // now holds what used to be image 3.
+    const [a, , c] = images(3);
+    await wrapper.setProps({ images: [a!, c!] });
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(
+      wrapper.get("[data-test='reference-remove-1']").element,
+    );
+    wrapper.unmount();
+  });
+
+  it("moves keyboard focus to the previous tile's remove button when the last picture is removed", async () => {
+    const wrapper = strip();
+    const button = wrapper.get("[data-test='reference-remove-2']");
+    (button.element as HTMLButtonElement).focus();
+    await button.trigger("click");
+    const [a, b] = images(3);
+    await wrapper.setProps({ images: [a!, b!] });
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(
+      wrapper.get("[data-test='reference-remove-1']").element,
+    );
+    wrapper.unmount();
+  });
+
+  it("moves keyboard focus to the add tile when the only picture is removed", async () => {
+    const wrapper = strip({ images: images(1) });
+    const button = wrapper.get("[data-test='reference-remove-0']");
+    (button.element as HTMLButtonElement).focus();
+    await button.trigger("click");
+    await wrapper.setProps({ images: [] });
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(
+      wrapper.get("[data-test='reference-add']").element,
+    );
+    wrapper.unmount();
+  });
+
   it("reorders by dragging one tile onto another", async () => {
     const wrapper = strip();
     const store = new Map<string, string>();

@@ -611,6 +611,34 @@ export function intentForCanvas(
 }
 
 /**
+ * The canvas intent a REMOUNTED view should assume for the size the persisted
+ * form already holds.
+ *
+ * `CanvasIntent` lives in each surface's own component — desktop's
+ * `GenerateView`, mobile's `MobileApp` — never in the persisted form, because
+ * it is presentation state, not a request field. A component-local `ref`
+ * restarts at `"model-default"` on every remount even though the store-backed
+ * form kept the size the user picked, which is exactly what lets the
+ * `canvas: last-reference` watcher (Qwen Image 2.1) re-snap a chosen size the
+ * moment a reference is added or reordered, because it treats
+ * `"model-default"` as license to recompute. When the stored size still
+ * matches the recipe's own default, nothing has been picked yet and
+ * `"model-default"` is exact; any other size was chosen, so it reads as
+ * `"manual"` until something more specific (a source watcher, an explicit
+ * pick) says otherwise.
+ */
+export function restoredCanvasIntent(
+  stored: SourceDimensions,
+  recipeDefault: SourceDimensions | null,
+): CanvasIntent {
+  if (!recipeDefault) return "model-default";
+  return stored.width === recipeDefault.width &&
+    stored.height === recipeDefault.height
+    ? "model-default"
+    : "manual";
+}
+
+/**
  * Snap an exact width/height entry onto the recipe's grid and inside its
  * ceilings. The Advanced size field and mobile's proportional inputs route
  * through this, so a typed size is admissible by the same authority that

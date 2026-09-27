@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::Tensor;
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata, Scheduler};
 
@@ -55,30 +55,39 @@ pub enum AlphaOutput {
 /// transparent background, or at least one reference image carries a pixel
 /// below full opacity (`capabilities.transparency.native_alpha` — an
 /// alpha-carrying reference keeps alpha in the output). Otherwise drop it.
-pub fn alpha_output_for_request(req: &mold_core::GenerateRequest) -> AlphaOutput {
-    let references_carry_alpha = req
-        .edit_images
-        .as_deref()
-        .is_some_and(|images| images.iter().any(|bytes| encoded_image_has_alpha(bytes)));
-    if req.transparent_background == Some(true) || references_carry_alpha {
-        AlphaOutput::Keep
-    } else {
-        AlphaOutput::Drop
+///
+/// A reference that cannot be decoded is an error, never "no alpha": the
+/// engine could not have conditioned on it either.
+pub fn alpha_output_for_request(req: &mold_core::GenerateRequest) -> Result<AlphaOutput> {
+    let mut references_carry_alpha = false;
+    for bytes in req.edit_images.as_deref().unwrap_or_default() {
+        if encoded_image_has_alpha(bytes)? {
+            references_carry_alpha = true;
+            break;
+        }
     }
+    Ok(
+        if req.transparent_background == Some(true) || references_carry_alpha {
+            AlphaOutput::Keep
+        } else {
+            AlphaOutput::Drop
+        },
+    )
 }
 
-/// Whether an encoded still (PNG, JPEG, WebP) has any pixel below full
+/// Whether an encoded reference (PNG, JPEG, WebP) has any pixel below full
 /// opacity. The container header is asked first, so an RGB file is never
-/// decoded; an alpha-capable one is decoded and scanned, because an RGBA
-/// container whose alpha is all 255 carries no transparency.
-pub fn encoded_image_has_alpha(bytes: &[u8]) -> bool {
+/// decoded; an alpha-capable one is decoded by the SAME bounded decoder the
+/// engine conditions on (`img_utils::decode_reference_rgba`), with Pillow's
+/// 16-bit conversion, and scanned — an RGBA container whose alpha is all 255
+/// carries no transparency.
+pub fn encoded_image_has_alpha(bytes: &[u8]) -> Result<bool> {
     if !mold_core::still_image::encoded_still_has_alpha(bytes) {
-        return false;
+        return Ok(false);
     }
-    match image::load_from_memory(bytes) {
-        Ok(decoded) if decoded.color().has_alpha() => rgba_has_alpha(&decoded.to_rgba8()),
-        _ => false,
-    }
+    let decoded = crate::img_utils::decode_reference_rgba(bytes)
+        .context("failed to decode a reference image to read its alpha")?;
+    Ok(rgba_has_alpha(&decoded))
 }
 
 /// Encode a candle tensor of u8 values into still image bytes.
@@ -138,19 +147,6 @@ fn opaque_rgba_to_rgb(rgba_image: &image::RgbaImage) -> image::RgbImage {
     })
 }
 
-/// Composite an RGBA image over white, for a container with no alpha.
-///
-/// Straight (non-premultiplied) alpha, rounded to nearest — the "paste onto
-/// a white canvas" convention. A fully opaque pixel is returned unchanged.
-pub(crate) fn composite_over_white(rgba_image: &image::RgbaImage) -> image::RgbImage {
-    image::RgbImage::from_fn(rgba_image.width(), rgba_image.height(), |x, y| {
-        let [r, g, b, a] = rgba_image.get_pixel(x, y).0;
-        let a = u32::from(a);
-        let blend = |c: u8| -> u8 { ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8 };
-        image::Rgb([blend(r), blend(g), blend(b)])
-    })
-}
-
 /// Encode an RGBA still under an [`AlphaOutput`] decision.
 ///
 /// The decision is resolved BEFORE any container is written, because the
@@ -199,7 +195,11 @@ pub(crate) fn encode_rgba_image(
             // A JPEG carries no alpha, so the flattened pixels are what the
             // file holds and its provenance must not claim alpha.
             let metadata = metadata.map(|metadata| metadata_with_alpha(metadata, false));
-            encode_rgb_image(&composite_over_white(rgba_image), format, metadata.as_ref())
+            encode_rgb_image(
+                &crate::pillow_resize::composite_over_white(rgba_image),
+                format,
+                metadata.as_ref(),
+            )
         }
         OutputFormat::Gif
         | OutputFormat::Apng
@@ -842,21 +842,56 @@ mod tests {
             "height": 64, "steps": 4, "guidance": 1.0, "batch_size": 1
         }))
         .unwrap();
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Drop);
         req.transparent_background = Some(true);
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Keep);
         req.transparent_background = None;
 
         // An RGBA container whose alpha is all 255 carries no transparency.
         let opaque = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
         req.edit_images = Some(vec![png_bytes(&opaque), vec![0xFF, 0xD8, 0xFF]]);
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Drop);
         // One reference with real transparency keeps alpha in the output.
         req.edit_images
             .as_mut()
             .unwrap()
             .push(png_bytes(&cutout(8, 8)));
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Keep);
+    }
+
+    /// Alpha is read the way upstream's PIL reads it, through the decoder the
+    /// engine conditions on: a 16-bit alpha of `0xFF00` is 255 to Pillow (the
+    /// high byte), so that reference is OPAQUE and the output drops alpha —
+    /// the `image` crate's `x / 257` would have read 254 and kept it.
+    #[test]
+    fn sixteen_bit_alpha_is_read_as_pillow_reads_it() {
+        let rgba16 = |alpha: u16| {
+            let image: image::ImageBuffer<image::Rgba<u16>, Vec<u16>> =
+                image::ImageBuffer::from_pixel(4, 4, image::Rgba([0x1234, 0x5678, 0x9abc, alpha]));
+            let mut buf = Cursor::new(Vec::new());
+            image.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+            buf.into_inner()
+        };
+        assert!(!encoded_image_has_alpha(&rgba16(0xff00)).unwrap());
+        assert!(!encoded_image_has_alpha(&rgba16(0xffff)).unwrap());
+        assert!(encoded_image_has_alpha(&rgba16(0xfeff)).unwrap());
+    }
+
+    /// An alpha-capable reference that cannot be decoded is an ERROR: the
+    /// engine could not condition on it, and "no alpha" would silently
+    /// flatten an output the reference may have asked to keep transparent.
+    #[test]
+    fn an_undecodable_alpha_reference_is_an_error_not_opaque() {
+        let mut truncated = png_bytes(&cutout(8, 8));
+        truncated.truncate(40);
+        assert!(encoded_image_has_alpha(&truncated).is_err());
+        let mut req: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lantern", "model": "qwen-image-2.1:bf16", "width": 64,
+            "height": 64, "steps": 4, "guidance": 1.0, "batch_size": 1
+        }))
+        .unwrap();
+        req.edit_images = Some(vec![truncated]);
+        assert!(alpha_output_for_request(&req).is_err());
     }
 
     #[test]
@@ -871,7 +906,7 @@ mod tests {
             "a fully transparent pixel lands on the white canvas"
         );
         assert_eq!(
-            composite_over_white(&image::RgbaImage::from_pixel(
+            crate::pillow_resize::composite_over_white(&image::RgbaImage::from_pixel(
                 1,
                 1,
                 image::Rgba([0, 100, 200, 128])

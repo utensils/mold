@@ -1017,7 +1017,7 @@ impl QwenImage21Engine {
         warnings: Vec<String>,
     ) -> Result<GenerateResponse> {
         let format = req.resolved_output_format();
-        let alpha = alpha_output_for_request(req);
+        let alpha = alpha_output_for_request(req)?;
         let output_metadata = build_output_metadata(req, seed, None);
         let data = encode_image_with_alpha(
             rgba,
@@ -1469,7 +1469,7 @@ mod tests {
         for format in [OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp] {
             let mut req = request();
             req.output_format = Some(format);
-            assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+            assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Drop);
             assert!(alpha_warning(AlphaOutput::Drop, format).is_none());
         }
         // v0.32 wrote the decoded batch's first three channels as RGB.
@@ -1497,15 +1497,15 @@ mod tests {
     fn transparency_and_alpha_references_keep_alpha() {
         let mut req = request();
         req.transparent_background = Some(true);
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Keep);
         let mut req = request();
         req.edit_images = Some(vec![png(255), png(128)]);
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Keep);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Keep);
         assert!(alpha_warning(AlphaOutput::Keep, OutputFormat::Jpeg).is_some());
         assert!(alpha_warning(AlphaOutput::Keep, OutputFormat::Png).is_none());
         let mut req = request();
         req.edit_images = Some(vec![png(255)]);
-        assert_eq!(alpha_output_for_request(&req), AlphaOutput::Drop);
+        assert_eq!(alpha_output_for_request(&req).unwrap(), AlphaOutput::Drop);
     }
 
     #[test]

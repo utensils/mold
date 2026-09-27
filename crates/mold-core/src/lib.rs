@@ -47,6 +47,7 @@ pub mod prompting;
 pub mod pulid_assets;
 pub mod queue_progress;
 pub mod queue_wait;
+pub mod reference_image;
 pub mod reference_upload;
 pub mod removal;
 pub mod request_media;
