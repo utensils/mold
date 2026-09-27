@@ -52,8 +52,8 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-distill` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 513 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 594 |
-| `qwen-image-2.1` | `qwen-image21` | `shared.md`, `families/qwen-image21.md` | 180 | 548 |
-| `qwen-image-2.1-turbo` | `qwen-image21` | `shared.md`, `families/qwen-image21.md`, `models/qwen-image-2.1-turbo.md` | 180 | 652 |
+| `qwen-image-2.1` | `qwen-image21` | `shared.md`, `families/qwen-image21.md` | 180 | 528 |
+| `qwen-image-2.1-turbo` | `qwen-image21` | `shared.md`, `families/qwen-image21.md`, `models/qwen-image-2.1-turbo.md` | 180 | 632 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
@@ -1065,10 +1065,8 @@ default and the native 2K sizes are 2048x2048, 2400x1792, 2528x1696 and
 2752x1536 (and their portrait turns). The standard recipe uses forty steps.
 
 For a transparent background, describe only the subject: no scenery,
-backdrop or floor. Mold then wraps the prompt in the model card's RGBA
-recipe, so never write these two sentences yourself:
-"This is an RGBA image with transparency." before it and
-"The image has alpha channel and the background is transparent." after it.
+backdrop or floor. Mold adds the model card's transparency wording itself,
+so the prompt never needs to mention transparency, alpha or a background.
 
 #### Examples
 
@@ -1101,6 +1099,13 @@ photography, low eye-level composition, finely detailed natural light.
   spatial priority.
 
 #### CLI
+
+With `--transparent`, the engine wraps the positive prompt in the model card's
+RGBA recipe, putting
+"This is an RGBA image with transparency." before it and
+"The image has alpha channel and the background is transparent." after it.
+The stored prompt, Reuse and Expand keep the unwrapped words, so never write
+either sentence into a prompt yourself: it would be wrapped twice.
 
 ```bash
 mold run qwen-image-2.1:bf16 \

@@ -29,10 +29,8 @@ default and the native 2K sizes are 2048x2048, 2400x1792, 2528x1696 and
 2752x1536 (and their portrait turns). The standard recipe uses forty steps.
 
 For a transparent background, describe only the subject: no scenery,
-backdrop or floor. Mold then wraps the prompt in the model card's RGBA
-recipe, so never write these two sentences yourself:
-"This is an RGBA image with transparency." before it and
-"The image has alpha channel and the background is transparent." after it.
+backdrop or floor. Mold adds the model card's transparency wording itself,
+so the prompt never needs to mention transparency, alpha or a background.
 
 ## Examples
 
@@ -65,6 +63,13 @@ photography, low eye-level composition, finely detailed natural light.
   spatial priority.
 
 ## CLI
+
+With `--transparent`, the engine wraps the positive prompt in the model card's
+RGBA recipe, putting
+"This is an RGBA image with transparency." before it and
+"The image has alpha channel and the background is transparent." after it.
+The stored prompt, Reuse and Expand keep the unwrapped words, so never write
+either sentence into a prompt yourself: it would be wrapped twice.
 
 ```bash
 mold run qwen-image-2.1:bf16 \

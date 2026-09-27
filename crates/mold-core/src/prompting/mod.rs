@@ -943,12 +943,37 @@ mod tests {
     }
 
     /// The corpus quotes the RGBA recipe the engine applies; this keeps the
-    /// guide from drifting away from `crate::transparency`.
+    /// guide from drifting away from `crate::transparency`. The quote lives in
+    /// the agent-only `CLI` section: an expansion LLM that saw the sentences
+    /// could echo them into its output, and the engine would wrap them again.
     #[test]
     fn the_qwen_image21_guide_quotes_the_rgba_recipe_verbatim() {
-        let guide = family_guide("qwen-image21").unwrap().contents;
-        assert!(guide.contains(crate::transparency::RGBA_PROMPT_PREFIX));
-        assert!(guide.contains(crate::transparency::RGBA_PROMPT_SUFFIX));
+        let guide = family_guide("qwen-image21").unwrap();
+        let cli = section_excerpt(guide.contents, "CLI", guide.word_limit).unwrap();
+        assert!(
+            cli.contains(crate::transparency::RGBA_PROMPT_PREFIX),
+            "{cli}"
+        );
+        assert!(
+            cli.contains(crate::transparency::RGBA_PROMPT_SUFFIX),
+            "{cli}"
+        );
+        let context =
+            section_excerpt(guide.contents, "Generation context", guide.word_limit).unwrap();
+        assert!(context.contains("describe only the subject"), "{context}");
+        for model in ["qwen-image-2.1", "qwen-image-2.1-turbo"] {
+            let excerpt = route("qwen-image21", Some(model), None)
+                .unwrap()
+                .expansion_excerpt();
+            assert!(
+                !excerpt.contains(crate::transparency::RGBA_PROMPT_PREFIX),
+                "{model}: {excerpt}"
+            );
+            assert!(
+                !excerpt.contains(crate::transparency::RGBA_PROMPT_SUFFIX),
+                "{model}: {excerpt}"
+            );
+        }
     }
 
     #[test]
