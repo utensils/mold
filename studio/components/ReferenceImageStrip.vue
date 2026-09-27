@@ -356,7 +356,7 @@ function onStripDrop(event: DragEvent): void {
   width: var(--ris-tile);
   padding: 4px;
   border: 1px solid var(--mold-border, #ddd);
-  border-radius: 10px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep, transparent);
   scroll-snap-align: start;
 }
@@ -370,7 +370,7 @@ function onStripDrop(event: DragEvent): void {
   position: relative;
   aspect-ratio: 4 / 3;
   overflow: hidden;
-  border-radius: 7px;
+  border-radius: var(--mold-radius-2);
   background: var(--mold-media-bed, #111);
 }
 .ris__img {
@@ -384,7 +384,7 @@ function onStripDrop(event: DragEvent): void {
   display: grid;
   place-items: center;
   color: var(--mold-text-dim, #737373);
-  font-size: 0.6875rem;
+  font-size: var(--mold-fs-micro, 0.6875rem);
 }
 .ris__ordinal {
   position: absolute;
@@ -395,11 +395,11 @@ function onStripDrop(event: DragEvent): void {
   min-width: 20px;
   height: 20px;
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: 999px; /* literal: a pill is round in every theme */
   background: color-mix(in srgb, var(--mold-media-bed, #111) 80%, transparent);
   color: var(--mold-text, #fff);
   font-family: var(--mold-font-mono, ui-monospace, monospace);
-  font-size: 0.6875rem;
+  font-size: var(--mold-fs-micro, 0.6875rem);
   font-weight: 700;
 }
 /* Textual, never colour alone: the canvas mark must survive monochrome. */
@@ -408,11 +408,11 @@ function onStripDrop(event: DragEvent): void {
   right: 4px;
   bottom: 4px;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--mold-radius-1);
   background: var(--mold-blue, #b45309);
   color: var(--mold-on-accent, #fff);
   font-family: var(--mold-font-mono, ui-monospace, monospace);
-  font-size: 0.5625rem;
+  font-size: var(--mold-fs-micro, 0.6875rem);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -427,7 +427,7 @@ function onStripDrop(event: DragEvent): void {
 }
 .ris__label {
   color: var(--mold-text, inherit);
-  font-size: 0.75rem;
+  font-size: var(--mold-fs-xs, 0.75rem);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -435,7 +435,7 @@ function onStripDrop(event: DragEvent): void {
   overflow: hidden;
   color: var(--mold-text-dim, #737373);
   font-family: var(--mold-font-mono, ui-monospace, monospace);
-  font-size: 0.5625rem;
+  font-size: var(--mold-fs-micro, 0.6875rem);
   letter-spacing: 0.06em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -444,7 +444,7 @@ function onStripDrop(event: DragEvent): void {
 .ris__filename {
   overflow: hidden;
   color: var(--mold-text-dim, #737373);
-  font-size: 0.6875rem;
+  font-size: var(--mold-fs-micro, 0.6875rem);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -457,10 +457,10 @@ function onStripDrop(event: DragEvent): void {
   min-height: var(--ris-control);
   padding: 0;
   border: 1px solid var(--mold-border, #ddd);
-  border-radius: 6px;
+  border-radius: var(--mold-radius-2);
   background: transparent;
   color: var(--mold-text-2, var(--mold-text-dim, #737373));
-  font-size: 0.8125rem;
+  font-size: var(--mold-fs-sm, 0.8125rem);
   line-height: 1;
   cursor: pointer;
 }
@@ -497,10 +497,10 @@ function onStripDrop(event: DragEvent): void {
   height: 100%;
   min-height: calc(var(--ris-tile) * 0.75 + var(--ris-control) + 40px);
   border: 1px dashed var(--mold-border, #bbb);
-  border-radius: 10px;
+  border-radius: var(--mold-radius-3);
   background: transparent;
   color: var(--mold-text-dim, #737373);
-  font-size: 0.75rem;
+  font-size: var(--mold-fs-xs, 0.75rem);
   cursor: pointer;
 }
 .ris__add:hover:not(:disabled) {
@@ -512,12 +512,12 @@ function onStripDrop(event: DragEvent): void {
   opacity: 0.6;
 }
 .ris__add-glyph {
-  font-size: 1rem;
+  font-size: var(--mold-fs-md, 1rem);
 }
 .ris__note {
   margin: 0;
   color: var(--mold-text-dim, #737373);
-  font-size: 0.75rem;
+  font-size: var(--mold-fs-xs, 0.75rem);
   line-height: 1.45;
 }
 </style>

@@ -1,6 +1,25 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import ReferenceImageStrip from "./ReferenceImageStrip.vue";
+
+/** The touch strip's control height is a layout constant the phone relies
+ * on (44pt, the iPhone interaction invariant), so it is read from the SFC. */
+describe("ReferenceImageStrip touch sizing", () => {
+  it("gives every touch control at least 44px", () => {
+    const source = readFileSync(
+      join(import.meta.dirname, "ReferenceImageStrip.vue"),
+      "utf8",
+    );
+    const touch = source.match(/\.ris--touch\s*\{([^}]*)\}/)?.[1] ?? "";
+    const control = Number(touch.match(/--ris-control:\s*(\d+)px/)?.[1]);
+    expect(control).toBeGreaterThanOrEqual(44);
+    // Every button reads the variable, so the constant is the whole story.
+    const action = source.match(/\.ris__action\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(action).toMatch(/min-height:\s*var\(--ris-control\)/);
+  });
+});
 
 const PNG = "iVBORw0KGgo=";
 const WEBP = "UklGRgAAAABXRUJQ";
@@ -121,7 +140,7 @@ describe("ReferenceImageStrip", () => {
     await button.trigger("click");
     // The parent applies the move and hands back the new order.
     const [a, b, c] = images(3);
-    await wrapper.setProps({ images: [b, a, c] });
+    await wrapper.setProps({ images: [b!, a!, c!] });
     await wrapper.vm.$nextTick();
     expect(document.activeElement).toBe(
       wrapper.get("[data-test='reference-later-1']").element,
