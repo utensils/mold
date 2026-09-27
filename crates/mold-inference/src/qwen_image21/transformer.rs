@@ -289,7 +289,10 @@ impl Attention {
         let inner = cfg.inner_dim();
         Ok(Self {
             dispatch: SegmentDispatch {
-                fused_target: crate::attention::metal_fast_path_enabled(),
+                attention: super::exec_path::Qwen21ExecPath::metal(
+                    crate::attention::metal_fast_path_enabled(),
+                )
+                .attention,
                 head_dim: cfg.attention_head_dim,
             },
             fused_ops: crate::attention::metal_fast_path_enabled(),
@@ -1361,17 +1364,18 @@ mod tests {
     fn fused_target_attention_matches_math_with_rectangular_keys() {
         use super::super::layout::{AttentionSegment, SegmentMask};
         let device = crate::device::metal_device(0).unwrap();
+        use super::super::exec_path::TargetAttention;
         let mut dispatch = SegmentDispatch {
-            fused_target: true,
+            attention: TargetAttention::MetalSdpa,
             head_dim: 128,
         };
         for dtype in [DType::F32, DType::BF16] {
             let q = crate::engine::seeded_randn(21, &[2, 2, 17, 128], &device, dtype).unwrap();
             let k = crate::engine::seeded_randn(22, &[2, 2, 29, 128], &device, dtype).unwrap();
             let v = crate::engine::seeded_randn(23, &[2, 2, 29, 128], &device, dtype).unwrap();
-            dispatch.fused_target = true;
+            dispatch.attention = TargetAttention::MetalSdpa;
             let actual = dispatch.full_unbiased(&q, &k, &v).unwrap();
-            dispatch.fused_target = false;
+            dispatch.attention = TargetAttention::Legacy;
             let expected = dispatch.full_unbiased(&q, &k, &v).unwrap();
             let error = (actual.to_dtype(DType::F32).unwrap()
                 - expected.to_dtype(DType::F32).unwrap())
@@ -1388,7 +1392,7 @@ mod tests {
             );
             // A real padded batch must preserve the math mask semantics even
             // with the fused path enabled.
-            dispatch.fused_target = true;
+            dispatch.attention = TargetAttention::MetalSdpa;
             let key_valid: Vec<Vec<bool>> =
                 (0..2).map(|_| (0..29).map(|i| i != 28).collect()).collect();
             let plan = BlockCausalPlan {

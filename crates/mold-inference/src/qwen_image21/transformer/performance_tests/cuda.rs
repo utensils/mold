@@ -184,7 +184,7 @@ pub(super) fn install_mode(
     );
     transformer.compact_modulation = false;
     for block in &mut transformer.blocks {
-        block.attn.dispatch.fused_target = false;
+        block.attn.dispatch.attention = mode.path.attention;
         block.attn.fused_ops = false;
     }
     Ok(())

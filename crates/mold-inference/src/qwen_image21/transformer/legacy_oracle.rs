@@ -34,7 +34,7 @@ fn target_attention(
     bias: Option<&Tensor>,
 ) -> Result<Tensor> {
     let scale = (1.0 / (attn.head_dim as f64).sqrt()) as f32;
-    if attn.dispatch.fused_target
+    if attn.dispatch.attention == crate::qwen_image21::exec_path::TargetAttention::MetalSdpa
         && q.device().is_metal()
         && bias.is_none()
         && matches!(attn.head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256)

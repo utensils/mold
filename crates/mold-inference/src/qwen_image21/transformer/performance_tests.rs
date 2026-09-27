@@ -138,7 +138,11 @@ fn official_metal_mode_benchmark() -> Result<()> {
         QwenImage21Transformer::load(&transformer_paths, &device, dtype, &progress)?;
     transformer.compact_modulation = fused_ops;
     for block in &mut transformer.blocks {
-        block.attn.dispatch.fused_target = fused_target;
+        block.attn.dispatch.attention = if fused_target {
+            crate::qwen_image21::exec_path::TargetAttention::MetalSdpa
+        } else {
+            crate::qwen_image21::exec_path::TargetAttention::Legacy
+        };
         block.attn.fused_ops = fused_ops;
     }
     device.synchronize()?;
