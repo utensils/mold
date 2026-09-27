@@ -376,6 +376,9 @@ const ignoredEnvVars = new Set([
   // it is an ignored, weight-gated test, never runtime configuration.
   'MOLD_TEST_H3_SHARED_DIR',
   'MOLD_TEST_H3_VISION_CAPTURE',
+  // Set by the live CUDA probe tests (mold-inference device.rs) on the
+  // single-test child process they re-run themselves in; never configuration.
+  'MOLD_TEST_CUDA_PROBE_CHILD',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))
