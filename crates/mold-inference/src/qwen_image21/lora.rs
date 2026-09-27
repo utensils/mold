@@ -84,14 +84,22 @@ const QWEN_IMAGE_2512_MARKERS: [&str; 7] = [
     "txt_mod",
 ];
 
-/// Prefixes a trainer may put in front of the module path.
-const PREFIXES: [&str; 5] = [
+/// Prefixes a trainer may put in front of the DOTTED module path.
+const PREFIXES: [&str; 4] = [
     "base_model.model.",
     "model.diffusion_model.",
     "diffusion_model.",
     "transformer.",
-    "lycoris_",
 ];
+
+/// Prefixes in front of a FLATTENED module path (every `.` replaced by `_`):
+/// Kohya's `lora_unet_` and SimpleTuner's lycoris export, which ComfyUI maps
+/// as `"lycoris_{}".format(key_lora.replace(".", "_"))`
+/// (`comfy/lora.py:338`, the Qwen Image arm that also addresses the 2.1
+/// `gate_up` halves). A flattened stem only resolves through the
+/// flattened table: stripping `lycoris_` and then looking the remainder up
+/// among dotted module names can never match.
+const FLATTENED_PREFIXES: [&str; 2] = ["lora_unet_", "lycoris_"];
 
 /// Every adaptable module, dotted.
 fn module_table(layers: usize) -> Vec<String> {
@@ -138,8 +146,11 @@ fn map_key_with(stem: &str, layers: usize) -> Result<Vec<Qwen21LoraTarget>> {
     while let Some(rest) = PREFIXES.iter().find_map(|prefix| key.strip_prefix(prefix)) {
         key = rest;
     }
-    // Kohya: `lora_unet_<flattened>`.
-    if let Some(flat) = key.strip_prefix("lora_unet_") {
+    // Kohya `lora_unet_<flattened>` and lycoris `lycoris_<flattened>`.
+    if let Some(flat) = FLATTENED_PREFIXES
+        .iter()
+        .find_map(|prefix| key.strip_prefix(prefix))
+    {
         if let Some(fused) = flat.strip_suffix("_img_mlp_gate_up") {
             let block = match fused.strip_prefix("transformer_blocks_") {
                 Some(index) => format!("transformer_blocks.{index}"),
@@ -472,6 +483,60 @@ mod tests {
                 "{stem}"
             );
         }
+    }
+
+    /// SimpleTuner's lycoris spelling is `lycoris_` + the module path with
+    /// every `.` flattened to `_` (ComfyUI `comfy/lora.py:338`, the Qwen
+    /// Image arm that also maps the 2.1 `gate_up` halves), so the stripped
+    /// key resolves through the flattened table, never the dotted one.
+    #[test]
+    fn lycoris_stems_resolve_through_the_flattened_table() {
+        for (stem, key) in [
+            (
+                "lycoris_transformer_blocks_3_attn_to_q",
+                "transformer_blocks.3.attn.to_q.weight",
+            ),
+            (
+                "lycoris_transformer_blocks_31_attn_to_out_0",
+                "transformer_blocks.31.attn.to_out.0.weight",
+            ),
+            (
+                "lycoris_transformer_blocks_0_img_mlp_gate_layer",
+                "transformer_blocks.0.img_mlp.gate_layer.weight",
+            ),
+            (
+                "lycoris_transformer_blocks_0_img_mlp_proj",
+                "transformer_blocks.0.img_mlp.proj.weight",
+            ),
+            ("lycoris_modulation_1", "modulation.1.weight"),
+            ("lycoris_txt_in_in_layer", "txt_in.in_layer.weight"),
+            ("lycoris_img_in", "img_in.weight"),
+        ] {
+            assert_eq!(
+                keys(map_key(stem).unwrap()),
+                vec![(key.to_string(), None)],
+                "{stem}"
+            );
+        }
+        let mlp = mlp_hidden_dim();
+        assert_eq!(
+            keys(map_key("lycoris_transformer_blocks_7_img_mlp_gate_up").unwrap()),
+            vec![
+                (
+                    "transformer_blocks.7.img_mlp.gate_layer.weight".to_string(),
+                    Some((0, mlp)),
+                ),
+                (
+                    "transformer_blocks.7.img_mlp.proj.weight".to_string(),
+                    Some((mlp, mlp)),
+                ),
+            ]
+        );
+        assert!(map_key("lycoris_transformer_blocks_0_attn_norm_q")
+            .unwrap()
+            .is_empty());
+        assert!(map_key("lycoris_transformer_blocks_32_attn_to_q").is_err());
+        assert!(map_key("lycoris_transformer_blocks_0_attn_add_q_proj").is_err());
     }
 
     #[test]
