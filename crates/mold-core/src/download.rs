@@ -612,9 +612,23 @@ pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<b
 // ── Pull marker file (.pulling) ──────────────────────────────────────────────
 
 /// Relative path to a model's `.pulling` marker: `<sanitized-name>/.pulling`.
+///
+/// A manifest whose model-specific files are stored under ANOTHER identity's
+/// directory (`manifest::storage_directory_name` — the H3 and Qwen Image 2.1
+/// turbo tags, which stack an adapter on their base tier) keeps its marker in
+/// that directory as `.pulling-<sanitized-name>`: the marker is still its own,
+/// but pulling it no longer creates a `<sanitized-name>/` directory that
+/// nothing is ever stored in.
 pub fn pulling_marker_rel_path(model_name: &str) -> PathBuf {
     let canonical = crate::manifest::resolve_model_name(model_name);
-    PathBuf::from(canonical.replace(':', "-")).join(".pulling")
+    let own = canonical.replace(':', "-");
+    match crate::manifest::find_manifest(&canonical)
+        .map(crate::manifest::storage_directory_name)
+        .filter(|storage| *storage != own)
+    {
+        Some(storage) => PathBuf::from(storage).join(format!(".pulling-{own}")),
+        None => PathBuf::from(own).join(".pulling"),
+    }
 }
 
 /// Path to the `.pulling` marker for a model under an explicit models dir.
@@ -647,9 +661,22 @@ fn write_pulling_marker(model_name: &str) -> Result<(), DownloadError> {
 }
 
 /// Remove the `.pulling` marker (best-effort, ignores errors).
+///
+/// The directory the marker was written into is removed with it when that
+/// leaves it EMPTY (`remove_dir` refuses a non-empty one): a manifest whose
+/// files all route to `shared/` (a companion encoder) had its directory
+/// created for the marker alone, and would otherwise leave it behind.
 pub fn remove_pulling_marker(model_name: &str) {
-    let path = pulling_marker_path(model_name);
-    let _ = std::fs::remove_file(path);
+    remove_pulling_marker_in(&models_dir(), model_name);
+}
+
+/// [`remove_pulling_marker`] under an explicit models dir.
+pub fn remove_pulling_marker_in(models_dir: &Path, model_name: &str) {
+    let path = pulling_marker_path_in(models_dir, model_name);
+    let _ = std::fs::remove_file(&path);
+    if let Some(parent) = path.parent().filter(|parent| *parent != models_dir) {
+        let _ = std::fs::remove_dir(parent);
+    }
 }
 
 /// Check whether a model has an active `.pulling` marker (incomplete download).
@@ -3972,6 +3999,69 @@ mod tests {
             required_download_bytes_in(&manifest, temp.path(), false).unwrap(),
             0
         );
+    }
+
+    /// A turbo tag's files live in its base tier's directory, so its pull
+    /// marker does too: pulling `qwen-image-2.1-turbo:q8` (or an H3 Turbo
+    /// tag) must never create `qwen-image-2.1-turbo-q8/`, which nothing is
+    /// ever stored in. The marker is still the turbo tag's own, so the base
+    /// tier never reads as mid-pull, and an ordinary model keeps
+    /// `<name>/.pulling`.
+    #[test]
+    fn a_turbo_tags_pull_marker_follows_its_storage_route() {
+        let turbo = crate::manifest::find_manifest("qwen-image-2.1-turbo:q8").unwrap();
+        let transformer_dir = turbo
+            .files
+            .iter()
+            .map(|file| crate::manifest::storage_path(turbo, file))
+            .find(|path| !path.starts_with("shared"))
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .expect("the turbo tag stores a model-specific file");
+        assert_eq!(transformer_dir, PathBuf::from("qwen-image-2.1-q8"));
+        assert_eq!(
+            pulling_marker_rel_path("qwen-image-2.1-turbo:q8"),
+            PathBuf::from("qwen-image-2.1-q8").join(".pulling-qwen-image-2.1-turbo-q8")
+        );
+        assert_ne!(
+            pulling_marker_rel_path("qwen-image-2.1-turbo:q8"),
+            pulling_marker_rel_path("qwen-image-2.1:q8"),
+            "the base tier never reads as mid-pull because a turbo tag is"
+        );
+        assert_eq!(
+            pulling_marker_rel_path("qwen-image-2.1:q8"),
+            PathBuf::from("qwen-image-2.1-q8").join(".pulling")
+        );
+
+        // Every H3 Turbo tag likewise lands in its base checkpoint's dir.
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.family == crate::minimax_h3::FAMILY)
+        {
+            let marker = pulling_marker_rel_path(&manifest.name);
+            let dir = marker.parent().unwrap().to_string_lossy().into_owned();
+            assert_eq!(
+                dir,
+                crate::manifest::storage_directory_name(manifest),
+                "{}",
+                manifest.name
+            );
+        }
+
+        // Removing a marker drops the directory it leaves empty, never one
+        // that still holds a file.
+        let temp = tempfile::tempdir().unwrap();
+        let marker = pulling_marker_path_in(temp.path(), "clip-l");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "clip-l").unwrap();
+        remove_pulling_marker_in(temp.path(), "clip-l");
+        assert!(!marker.parent().unwrap().exists());
+        let marker = pulling_marker_path_in(temp.path(), "qwen-image-2.1-turbo:q8");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "turbo").unwrap();
+        std::fs::write(marker.parent().unwrap().join("weights.safetensors"), "w").unwrap();
+        remove_pulling_marker_in(temp.path(), "qwen-image-2.1-turbo:q8");
+        assert!(!marker.exists());
+        assert!(marker.parent().unwrap().exists());
     }
 
     #[test]
