@@ -7,3 +7,4 @@ pub mod models;
 pub mod quota;
 pub mod remix;
 pub mod status;
+pub mod transparent;
