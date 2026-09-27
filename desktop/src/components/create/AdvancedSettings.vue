@@ -30,6 +30,11 @@ import {
   defaultOutputFormat,
 } from "../../lib/capabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import { outputFormatOptions } from "@studio/lib/outputFormat";
+import {
+  TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+  transparencyControl,
+} from "@studio/lib/transparency";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 import {
@@ -194,8 +199,24 @@ function addNegative(word: string) {
 }
 
 // ── Output & seed ────────────────────────────────────────────────────────────
+// While the Transparent background toggle (the inspector's) is on, JPEG
+// stays visible but disabled with its reason — it has no alpha channel.
 const formatOptions = computed<SegmentOption<OutputFormat>[]>(() =>
-  formats.value.map((f) => ({ value: f, label: f })),
+  outputFormatOptions(
+    formats.value,
+    props.form.transparentBackground,
+    transparencyControl(caps.value),
+  ).map((option) => ({
+    value: option.value,
+    label: option.value,
+    disabled: option.disabled,
+    title: option.reason ?? undefined,
+  })),
+);
+const formatNote = computed(() =>
+  formatOptions.value.some((option) => option.disabled)
+    ? TRANSPARENCY_UNAVAILABLE_FORMAT_REASON
+    : null,
 );
 const resolutionAlignment = computed(
   () =>
@@ -782,6 +803,9 @@ function reset() {
           label="File format"
           @update:model-value="form.outputFormat = $event"
         />
+        <p v-if="formatNote" class="ms-field__hint" data-test="format-note">
+          {{ formatNote }}
+        </p>
 
         <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
              there is nothing here to type over — and typing over the

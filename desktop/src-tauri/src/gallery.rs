@@ -120,10 +120,16 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
         .map_err(|error| format!("Couldn't open the dropped image: {error}"))?
         .with_guessed_format()
         .map_err(|error| format!("Couldn't identify the dropped image: {error}"))?;
+    // WebP is read too: a recipe advertising WebP references (Qwen Image 2.1's
+    // `reference_images.formats`) takes one on its strip. Which well may hold
+    // it is the web layer's call (`applyDesktopImageDrop`), made against the
+    // resolved recipe — a source well still refuses it. The bytes are handed
+    // on untouched, alpha and all.
     let format = match reader.format() {
         Some(image::ImageFormat::Png) => mold_core::OutputFormat::Png,
         Some(image::ImageFormat::Jpeg) => mold_core::OutputFormat::Jpeg,
-        _ => return Err("Drop a PNG or JPEG image.".into()),
+        Some(image::ImageFormat::WebP) => mold_core::OutputFormat::Webp,
+        _ => return Err("Drop a PNG, JPEG or WebP image.".into()),
     };
     let (width, height) = reader
         .into_dimensions()
@@ -2513,8 +2519,30 @@ mod tests {
 
         assert_eq!(
             import_source_image_from_path(&path).unwrap_err(),
-            "Drop a PNG or JPEG image."
+            "Drop a PNG, JPEG or WebP image."
         );
+    }
+
+    #[test]
+    fn imports_a_transparent_webp_byte_for_byte() {
+        use base64::Engine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cutout.webp");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 0]))
+            .save(&path)
+            .unwrap();
+
+        let imported = import_source_image_from_path(&path).unwrap();
+        assert_eq!((imported.width, imported.height), (3, 2));
+        // Never re-encoded or flattened: the reference keeps its alpha.
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(imported.base64)
+                .unwrap(),
+            std::fs::read(path).unwrap()
+        );
+        assert!(imported.metadata.is_none());
     }
 
     #[test]

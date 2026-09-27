@@ -3,7 +3,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { galleryMediaPath } from "../../lib/gallery/media";
 import { readGalleryMediaBase64 } from "../../lib/gallery/sourceMedia";
-import { fileToBase64, isStillImageFile, isStillImageGalleryItem } from "../../lib/image";
+import { fileToBase64, isStillImageGalleryItem } from "../../lib/image";
+import {
+  fileMatchesImageInputFormats,
+  imageInputFormatsSentence,
+  LEGACY_REFERENCE_IMAGE_FORMATS,
+  referenceImageMimeTypes,
+  type ImageInputFormat,
+} from "@studio/lib/referenceImagesProfile";
 import { inTauri, ipc } from "../../lib/ipc";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
@@ -18,13 +25,23 @@ const props = withDefaults(
     /** Wells own drop + file picking themselves; their gallery link opens
      * this picker straight on the gallery with no redundant upload tab. */
     galleryOnly?: boolean;
+    /**
+     * The still containers this pick may carry: a reference strip passes its
+     * recipe's advertised `reference_images.formats` (Qwen Image 2.1 adds
+     * WebP); a source, mask or keyframe keeps PNG/JPEG. Bytes are handed on
+     * untouched either way — never re-encoded or flattened.
+     */
+    formats?: readonly ImageInputFormat[];
   }>(),
   {
     title: "Source image",
     multiple: false,
     galleryOnly: false,
+    formats: () => LEGACY_REFERENCE_IMAGE_FORMATS.slice(),
   },
 );
+const formatsSentence = computed(() => imageInputFormatsSentence(props.formats));
+const acceptAttribute = computed(() => referenceImageMimeTypes(props.formats).join(","));
 const emit = defineEmits<{
   (e: "pick", v: PickedImage[]): void;
   (e: "close"): void;
@@ -58,10 +75,11 @@ function loadGallery() {
   void gallery.fetchAll();
 }
 
-// Only PNG/JPEG are valid as source_image / mask / keyframe conditioning;
-// hide video and animated outputs so a pick can't fail at generation time.
+// Only PNG/JPEG are valid as source_image / mask / keyframe conditioning (a
+// WebP-accepting reference strip widens that through `formats`); hide video
+// and animated outputs so a pick can't fail at generation time.
 const entries = computed<MergedPrint[]>(() =>
-  gallery.merged.filter((entry) => isStillImageGalleryItem(entry.item)),
+  gallery.merged.filter((entry) => isStillImageGalleryItem(entry.item, props.formats)),
 );
 const loading = computed(() => entries.value.length === 0 && !gallery.loaded);
 /** Bucket fetch failures, shown only when there is nothing to render —
@@ -298,14 +316,11 @@ watch([() => props.open, tab], ([open, activeTab]) => {
 });
 
 async function ingestFiles(files: File[]) {
-  // Same constraint as the gallery tab: the engine only accepts PNG/JPEG for
-  // source_image / mask / keyframes — filter by MIME with a filename fallback.
-  const images = files.filter(
-    (f) =>
-      f.type === "image/png" || f.type === "image/jpeg" || (!f.type && isStillImageFile(f.name)),
-  );
+  // Same constraint as the gallery tab: the accepted containers only —
+  // filter by MIME with a filename fallback.
+  const images = files.filter((f) => fileMatchesImageInputFormats(f, props.formats));
   if (files.length && !images.length) {
-    error.value = "Only PNG or JPEG images can be used here.";
+    error.value = `Only ${formatsSentence.value} images can be used here.`;
     return;
   }
   error.value = null;
@@ -463,13 +478,13 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
             <span
               class="text-micro text-fg-2 underline decoration-dotted underline-offset-4 hover:text-fg"
             >
-              Drop a PNG or JPEG here, or choose a file
+              Drop a {{ formatsSentence }} here, or choose a file
             </span>
           </button>
           <input
             ref="fallbackFileInput"
             type="file"
-            accept="image/png,image/jpeg"
+            :accept="acceptAttribute"
             :multiple="multiple"
             class="hidden"
             data-test="picker-browser-file-input"

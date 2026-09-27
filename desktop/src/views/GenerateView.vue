@@ -49,6 +49,7 @@ import { outputKindFor, outputKindForModel } from "../composables/useCreateOutpu
 import { useOutputKindDoor } from "../composables/useOutputKindDoor";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { referenceCanvasSize, stagedReferenceDimensions } from "@studio/lib/referenceCanvas";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { useJobsStore } from "../stores/jobs";
@@ -824,7 +825,7 @@ async function listenForNativeImageDrops() {
     // record of which well the user aimed at.
     const hovered = dropTargetAtPosition(payload.position);
     if (path) void importDroppedImage(path, hovered);
-    else toasts.push("Drop a PNG or JPEG image.", "error");
+    else toasts.push("Drop a PNG, JPEG or WebP image.", "error");
   });
   if (nativeImageDropUnmounted) unlisten();
   else stopNativeImageDrop = unlisten;
@@ -1321,6 +1322,38 @@ watch(
     previousStillAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
+);
+
+/**
+ * `reference_images.canvas: last-reference` (Qwen Image 2.1): while the
+ * canvas intent is still the model default, the canvas follows the LAST
+ * reference's aspect at the recipe's default area, rounded half-to-even on
+ * its grid exactly like the CLI and the engine. A size the user picked never
+ * moves, and an emptied strip leaves the canvas where it is.
+ */
+watch(
+  [
+    () => caps.value.referenceImages?.canvas ?? null,
+    () => caps.value.sourceImageMode,
+    () => form.imageAttachments.map((image) => `${image.length}:${image.slice(-24)}`).join("|"),
+    () => canvasIntent.value,
+  ],
+  () => {
+    if (caps.value.sourceImageMode !== "references") return;
+    const recipe = effectiveGenerationRecipe(contractEntry.value, form.pipeline);
+    if (!recipe) return;
+    const next = referenceCanvasSize({
+      canvas: caps.value.referenceImages?.canvas ?? null,
+      references: stagedReferenceDimensions(form.imageAttachments.map((base64) => ({ base64 }))),
+      defaults: recipe.defaults,
+      alignment: recipe.resolution.alignment,
+      intent: canvasIntent.value,
+    });
+    if (next && (next.width !== form.width || next.height !== form.height)) {
+      form.width = next.width;
+      form.height = next.height;
+    }
+  },
 );
 
 // Availability data is demand-driven: fetch when the set of ready hosts

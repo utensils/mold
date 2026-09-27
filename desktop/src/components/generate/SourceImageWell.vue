@@ -31,6 +31,7 @@ import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { LEGACY_REFERENCE_IMAGE_FORMATS } from "@studio/lib/referenceImagesProfile";
 import {
   activeNamedViewsProfile,
   namedViewValidationError,
@@ -115,6 +116,14 @@ const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single policy every surface
  * renders (`@studio/lib/sourceMediaPlan`). */
 const plan = computed(() => sourceMediaPlan(caps.value));
+/** The containers the reference strip takes — the recipe's advertised
+ * `reference_images.formats` (Qwen Image 2.1 adds WebP); PNG/JPEG otherwise.
+ * An edit TARGET is a source-like input and stays PNG/JPEG. */
+const referenceFormats = computed(() =>
+  plan.value.kind === "attachments" && plan.value.primary === "target"
+    ? LEGACY_REFERENCE_IMAGE_FORMATS.slice()
+    : (caps.value.referenceImages?.formats ?? LEGACY_REFERENCE_IMAGE_FORMATS.slice()),
+);
 const namedViewsProfile = computed(() =>
   activeNamedViewsProfile(
     effectiveGenerationRecipe(props.selectedModel, props.form.pipeline)?.capabilities.mesh
@@ -667,9 +676,11 @@ function setSourceFitMode(e: Event) {
         @dragover.prevent
         @drop.prevent="onTileDrop(index, $event)"
       >
+        <!-- The alpha bed sits under every reference: a transparent PNG or
+             WebP (Qwen Image 2.1) shows exactly which pixels are empty. -->
         <img
           :src="base64ToDataUrl(image)"
-          class="h-12 w-20 object-cover"
+          class="ms-alpha-bed h-12 w-20 object-cover"
           :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
         />
         <div class="px-1.5 py-1 leading-tight">
@@ -782,6 +793,7 @@ function setSourceFitMode(e: Event) {
       :open="editPickerOpen"
       :multiple="true"
       :title="referencesOnly ? 'Add references' : 'Add pictures'"
+      :formats="referenceFormats"
       @pick="onEditPicked"
       @close="editPickerOpen = false"
     />
