@@ -15,8 +15,11 @@ hero:
       text: Get Started
       link: /guide/
     - theme: alt
-      text: Download Mold Studio for Mac
-      link: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
+      text: Mold Studio for Mac · Latest Release
+      link: https://github.com/utensils/mold/releases/latest
+    - theme: alt
+      text: Mold Studio for Mac · Latest Nightly
+      link: https://github.com/utensils/mold/releases/tag/latest
     - theme: alt
       text: Windows Nightly
       link: https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe
@@ -48,8 +51,8 @@ features:
     details: Single binary built on candle. NVIDIA GPUs on Linux and locally
       built x64 Windows packages use CUDA; Apple Silicon uses Metal. No Python
       or libtorch.
-    link: https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg
-    linkText: Download Mold Studio for Mac
+    link: https://github.com/utensils/mold/releases/latest
+    linkText: Mold Studio for Mac · Latest Release
   - icon:
       src: /icons/windows.svg
     title: Windows Desktop + CLI

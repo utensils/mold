@@ -6,17 +6,22 @@ Metal, and talks to every other `mold serve` machine you use over the same
 HTTP API.
 
 <div class="platform-downloads">
-  <a class="platform-download platform-download--primary" href="https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg">
+  <a class="platform-download platform-download--primary" href="https://github.com/utensils/mold/releases/latest">
     <img src="/icons/apple.svg" alt="" />
-    <span><strong>Download Mold Studio for Mac</strong><small>Signed and notarized · Apple Silicon · macOS 26+</small></span>
+    <span><strong>Mold Studio for Mac · Latest Release</strong><small>Signed and notarized · Apple Silicon · macOS 26+</small></span>
+  </a>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/tag/latest">
+    <img src="/icons/apple.svg" alt="" />
+    <span><strong>Mold Studio for Mac · Latest Nightly</strong><small>Latest main build · Apple Silicon · macOS 26+</small></span>
   </a>
 </div>
 
 Open the DMG and drag **Mold Studio** to Applications. It is signed,
 notarized, and stapled, so there is no quarantine step. Mold Studio updates
 itself through Sparkle: **Mold ▸ Check for Updates…** sits under About Mold.
-Version-pinned downloads (`Mold-native-<version>.dmg`) and `SHA256SUMS` are on
-the [releases page](https://github.com/utensils/mold/releases).
+Choose **Latest Release** for the newest stable build or **Latest Nightly** for
+the newest build from `main`. Each release page lists its versioned DMG and
+`SHA256SUMS`.
 
 ::: tip Coming from the Tauri desktop app?
 Mold Studio installs as **Mold Studio.app**; the older cross-platform desktop
