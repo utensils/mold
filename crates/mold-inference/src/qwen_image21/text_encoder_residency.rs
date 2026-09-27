@@ -339,6 +339,19 @@ pub fn transformer_device_bytes(paths: &mold_core::ModelPaths) -> u64 {
     }
 }
 
+/// The transformer tier's storage format, read from the first checkpoint
+/// file's header (`None` when it cannot be read — the caller then charges
+/// the BF16 workspace).
+pub fn transformer_format(
+    paths: &mold_core::ModelPaths,
+) -> Option<crate::artifact_format::QwenImage21TransformerFormat> {
+    let first = paths
+        .transformer_shards
+        .first()
+        .unwrap_or(&paths.transformer);
+    crate::artifact_format::probe_qwen_image21_transformer(first).ok()
+}
+
 /// Device bytes of the Qwen3-VL-8B GGUF `variant`: measured from its header
 /// when the file is installed, else its file size plus the F32 embedding the
 /// loader materializes (an upper bound — the quantized embedding it replaces
@@ -407,19 +420,28 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
 /// KV cache) and the measured VAE-decode peak
 /// (`device::qwen_image21_vae_decode_peak_bytes`) under the conv backend the
 /// family resolves to, at the VAE's `vae_dtype_bytes` (2 on CUDA's BF16 VAE).
+/// `format` is the transformer tier ([`transformer_format`]); the `int8-conv`
+/// tier adds its measured W8A8 activation workspace
+/// (`device::qwen_image21_linear_workspace_bytes`) to the denoise term.
 pub fn render_workspace_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
     width: u32,
     height: u32,
     batch: u32,
     vae_dtype_bytes: u32,
 ) -> (u64, u64) {
+    let joint =
+        u64::from(width) * u64::from(height) / 256 + super::LEGACY_PREFIX_CACHE_TOKENS as u64;
     let denoise = crate::device::activation_bytes(
         width,
         height,
         batch,
         2,
         crate::device::ActivationFamily::QwenImage21Dit,
-    );
+    )
+    .saturating_add(crate::device::qwen_image21_linear_workspace_bytes(
+        format, joint, batch,
+    ));
     let conv =
         crate::conv_policy::resolve_for(crate::conv_policy::policy_for_family("qwen-image21"));
     (
@@ -712,7 +734,7 @@ mod tests {
     /// The workspace both sides charge reads C's calibrated decode curve.
     #[test]
     fn the_render_workspace_uses_the_calibrated_decode_peak() {
-        let (_, decode) = render_workspace_bytes(2048, 2048, 1, 2);
+        let (_, decode) = render_workspace_bytes(None, 2048, 2048, 1, 2);
         let conv =
             crate::conv_policy::resolve_for(crate::conv_policy::policy_for_family("qwen-image21"));
         assert_eq!(
@@ -720,6 +742,30 @@ mod tests {
             crate::device::qwen_image21_vae_decode_peak_bytes(2048, 2048, conv, 2)
         );
         assert!(decode > 20 * GB);
+    }
+
+    /// The int8-conv tier's W8A8 activation workspace rides on the denoise
+    /// term (it was measured 2.2 GB above bf16 at 2K); every other tier's
+    /// denoise workspace is the BF16 estimate.
+    #[test]
+    fn the_render_workspace_charges_the_int8_tier_its_linear_workspace() {
+        use crate::artifact_format::QwenImage21TransformerFormat as Format;
+        let (bf16, decode) = render_workspace_bytes(Some(Format::Bf16), 2048, 2048, 1, 2);
+        let (none, _) = render_workspace_bytes(None, 2048, 2048, 1, 2);
+        let (int8, int8_decode) =
+            render_workspace_bytes(Some(Format::ComfyInt8ConvRot), 2048, 2048, 1, 2);
+        assert_eq!(bf16, none);
+        assert_eq!(decode, int8_decode);
+        let joint = 2048 * 2048 / 256 + super::super::LEGACY_PREFIX_CACHE_TOKENS as u64;
+        assert_eq!(
+            int8 - bf16,
+            crate::device::qwen_image21_linear_workspace_bytes(
+                Some(Format::ComfyInt8ConvRot),
+                joint,
+                1
+            )
+        );
+        assert!(int8 - bf16 > GB);
     }
 
     #[test]

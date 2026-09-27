@@ -259,6 +259,7 @@ impl QwenImage21Engine {
             _ => 0,
         };
         let (denoise_workspace_bytes, decode_peak_bytes) = residency::render_workspace_bytes(
+            residency::transformer_format(paths),
             req.width,
             req.height,
             1,

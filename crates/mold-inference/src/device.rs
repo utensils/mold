@@ -1044,6 +1044,34 @@ pub fn qwen_image21_activation_bytes(
         .max(ACTIVATION_FLOOR_BYTES)
 }
 
+/// Extra denoise workspace per joint token of the `int8-conv` tier's W8A8
+/// linears (the I8-quantized activation and the I32 accumulator of the
+/// 12,288-wide MLP projections) over the BF16 GEMMs
+/// [`QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN`] was fitted to. Fitted to the
+/// fast-path peaks the CUDA harness sampled on an L40S: int8-conv exceeded
+/// bf16 by 0.44 GB at 1024² and 2.18 GB at 2048² and 2752x1536.
+const QWEN_IMAGE21_INT8_LINEAR_BYTES_PER_TOKEN: u64 = 95_000;
+
+/// Tier-specific denoise workspace of a Qwen Image 2.1 transformer, on top of
+/// [`qwen_image21_activation_bytes`]. Only the `int8-conv` tier's activation
+/// quantization scales with the sequence; the GGUF dequant and FP8 widen arms
+/// hold one widened weight at a time (at most 12,288x4,096 BF16, ~100 MB),
+/// which the retained-prefix budget beside this estimate already covers.
+/// `None` (an unreadable header) charges nothing extra, like BF16.
+pub fn qwen_image21_linear_workspace_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    joint_tokens: u64,
+    batch: u32,
+) -> u64 {
+    use crate::artifact_format::QwenImage21TransformerFormat as Format;
+    match format {
+        Some(Format::ComfyInt8ConvRot) => QWEN_IMAGE21_INT8_LINEAR_BYTES_PER_TOKEN
+            .saturating_mul(joint_tokens)
+            .saturating_mul(u64::from(batch.max(1))),
+        _ => 0,
+    }
+}
+
 /// Scale a FLUX.2 activation budget by how much longer the sequence becomes
 /// once reference tokens are appended.
 ///
@@ -7832,6 +7860,39 @@ mod qwen_image21_activation_tests {
                 "{tokens} {backend:?}: {estimate} is loose against {measured}"
             );
         }
+    }
+
+    /// The `int8-conv` tier's W8A8 linears quantize every activation to I8
+    /// and accumulate in I32 before rescaling, which BF16 GEMMs never
+    /// materialize. Measured on the L40S under the fast path (peak increment
+    /// above the resident transformer, bf16 then int8-conv at the same
+    /// canvas): 0.805 / 1.242 GB at 1024², 3.121 / 5.302 GB at 2048²,
+    /// 3.154 / 5.335 GB at 2752x1536. The BF16 estimate plus the tier's
+    /// linear workspace must cover every int8 measurement within 15%.
+    #[test]
+    fn the_int8_tier_workspace_covers_its_measured_denoise() {
+        use super::qwen_image21_linear_workspace_bytes;
+        use crate::artifact_format::QwenImage21TransformerFormat as Format;
+        for (tokens, measured) in [
+            (4096 + 81, 1_241_513_984u64),
+            (16384 + 81, 5_301_600_256),
+            (16512 + 81, 5_335_154_688),
+        ] {
+            let estimate = qwen_image21_activation_bytes(tokens, 1, 2, AttentionBackend::Flash)
+                + qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), tokens, 1);
+            assert!(estimate >= measured, "{tokens}: {estimate} < {measured}");
+            assert!(
+                estimate as f64 <= measured as f64 * 1.15,
+                "{tokens}: {estimate} is loose against {measured}"
+            );
+        }
+        for format in [None, Some(Format::Bf16)] {
+            assert_eq!(qwen_image21_linear_workspace_bytes(format, 16593, 1), 0);
+        }
+        assert_eq!(
+            qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), 16593, 2),
+            2 * qwen_image21_linear_workspace_bytes(Some(Format::ComfyInt8ConvRot), 16593, 1)
+        );
     }
 
     #[test]

@@ -645,7 +645,9 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
         conservative_flux_offload
     };
     let qwen_family = hint.is_some_and(|h| h.family.is_qwen_image());
-    let qwen_quantized = qwen_family
+    // The 2512 quantized estimate below is that family's; Qwen Image 2.1's
+    // GGUF tiers are priced like its other tiers, as the plan path does.
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && paths
             .transformer
             .extension()
@@ -664,7 +666,8 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
     // hint is the resolution/dtype/arch-aware delta on top.
-    let activation = activation_memory_for_estimate(hint, qwen_quantized);
+    let activation = activation_memory_for_estimate(hint, qwen_quantized)
+        .saturating_add(qwen_image21_tier_workspace_bytes(paths, hint));
     let peak_with_activation = peak.saturating_add(activation);
     // Qwen-Image runs phase-sequential on BOTH runtimes — GGUF and BF16 drop
     // the text encoder before the transformer loads (encode → drop TE →
@@ -1207,6 +1210,22 @@ pub(crate) fn request_charges_true_cfg_overhead_with_projection(
     )
 }
 
+/// Qwen Image 2.1's tier-specific denoise workspace on top of the hint's
+/// canvas estimate: the `int8-conv` tier's W8A8 activation quantization
+/// (`device::qwen_image21_linear_workspace_bytes`), read from the
+/// checkpoint's own header. Zero for every other family and tier.
+fn qwen_image21_tier_workspace_bytes(paths: &ModelPaths, hint: Option<ActivationHint>) -> u64 {
+    let Some(hint) = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit) else {
+        return 0;
+    };
+    let joint = u64::from(hint.width) * u64::from(hint.height) / 256 + 512;
+    mold_inference::device::qwen_image21_linear_workspace_bytes(
+        mold_inference::qwen_image21::text_encoder_residency::transformer_format(paths),
+        joint,
+        hint.batch,
+    )
+}
+
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
     if qwen_quantized {
         0
@@ -1707,8 +1726,13 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
     let available = available_bytes.filter(|bytes| *bytes > 0)?;
     let vae_dtype_bytes = if cfg!(feature = "metal") { 4 } else { 2 };
-    let (denoise, decode) =
-        residency::render_workspace_bytes(hint.width, hint.height, hint.batch, vae_dtype_bytes);
+    let (denoise, decode) = residency::render_workspace_bytes(
+        residency::transformer_format(paths),
+        hint.width,
+        hint.height,
+        hint.batch,
+        vae_dtype_bytes,
+    );
     let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
     let plan = residency::plan(&residency::Qwen21PlanInputs {
         paths,
@@ -2212,7 +2236,8 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 wan_distilled,
                 flux2_geometry,
                 projection,
-            );
+            )
+            .saturating_add(qwen_image21_tier_workspace_bytes(paths, hint));
             let peak = if let Some(plan) = &qwen21_plan {
                 plan.decision.eager_peak_bytes
             } else if wan && offload_policy.metal {
@@ -5388,6 +5413,59 @@ mod qwen_image21_residency_tests {
             dtype_bytes: 2,
             family: ActivationFamily::QwenImage21Dit,
         })
+    }
+
+    /// A minimal Comfy `int8_tensorwise` ConvRot header: one I8 linear with
+    /// its F32 row scale and `.comfy_quant` marker.
+    fn int8_convrot_transformer(dir: &Path) -> std::path::PathBuf {
+        let marker = br#"{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}"#;
+        let header = serde_json::json!({
+            "transformer_blocks.0.img_mlp.gate_up.weight":
+                {"dtype": "I8", "shape": [2, 256], "data_offsets": [0, 512]},
+            "transformer_blocks.0.img_mlp.gate_up.weight_scale":
+                {"dtype": "F32", "shape": [2, 1], "data_offsets": [512, 520]},
+            "transformer_blocks.0.img_mlp.gate_up.comfy_quant":
+                {"dtype": "U8", "shape": [marker.len()], "data_offsets": [520, 520 + marker.len()]},
+        })
+        .to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend(std::iter::repeat_n(0u8, 520));
+        bytes.extend_from_slice(marker);
+        let path = dir.join("qwen_image_2.1_int8_convrot.safetensors");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The int8-conv tier's measured W8A8 workspace reaches the server's
+    /// denoise charge, read from the checkpoint header; a BF16 (or
+    /// unreadable) transformer and every other family charge nothing extra.
+    #[test]
+    fn the_int8_tier_charges_its_linear_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = qwen21_paths(dir.path(), 14 * GIB);
+        assert_eq!(
+            qwen_image21_tier_workspace_bytes(&paths, hint(2048, 2048)),
+            0
+        );
+        paths.transformer = int8_convrot_transformer(dir.path());
+        let int8 = qwen_image21_tier_workspace_bytes(&paths, hint(2048, 2048));
+        assert_eq!(
+            int8,
+            mold_inference::device::qwen_image21_linear_workspace_bytes(
+                Some(
+                    mold_inference::artifact_format::QwenImage21TransformerFormat::ComfyInt8ConvRot
+                ),
+                2048 * 2048 / 256 + 512,
+                1,
+            )
+        );
+        assert!(int8 > GIB);
+        let flux = hint(2048, 2048).map(|h| ActivationHint {
+            family: ActivationFamily::FluxDit,
+            ..h
+        });
+        assert_eq!(qwen_image21_tier_workspace_bytes(&paths, flux), 0);
     }
 
     /// The mandatory 24 GB row: a quantized transformer stays Eager at 1024²
