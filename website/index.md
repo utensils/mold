@@ -82,8 +82,9 @@ features:
       src: /icons/discord.svg
     title: Discord Bot
     details:
-      Built-in Discord bot with /generate, /mesh, /identity, /expand, /remix,
-      /models, and /status slash commands. Run standalone or embedded in the server.
+      Built-in Discord bot for generation, mesh, identity, transparency, prompt
+      tools, attachment upscaling, models, and status. Server profiles govern
+      generation; scripted chains and durable mesh workflows stay in the CLI/API.
   - icon:
       src: /icons/layers.svg
     title: img2img, Edit & ControlNet

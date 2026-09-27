@@ -794,9 +794,18 @@ Start the Discord bot, or run it in-process with `mold serve --discord`.
 mold discord
 ```
 
-The Discord bot exposes slash commands for generation, durable LTX-2 sequences,
-expansion, model listing, and status. Advanced catalog, placement, and script
-authoring flows remain in the web UI/API. See [Discord Bot](/api/discord).
+The Discord bot exposes focused slash commands for one-shot image, video, and
+ordinary image-to-mesh generation, plus prompt expansion/remixing, model
+catalog search, attachment-based image upscaling, model listing, quota, and
+status. Manage Server operators also have ephemeral, guild-only queue,
+download, read-only gallery, and Library-backed video-upscale commands. Its
+request-field and generation-profile coverage
+is documented in the [Discord capability matrix](/api/discord#capability-and-exclusion-matrix).
+Scripted chain jobs and durable mesh workflows are CLI/API-only: Discord has no
+sequence authoring or workflow-lifecycle commands. Catalog installation,
+placement, local inference, destructive Library actions, and general host
+administration also remain outside the chat generation surface. See
+[Discord Bot](/api/discord).
 
 ## `mold upscale`
 

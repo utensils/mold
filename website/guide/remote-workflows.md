@@ -87,7 +87,11 @@ SDK or manage login, ACLs, MagicDNS, or certificates. See the
 Remote workflows pair well with both:
 
 - [OpenClaw](/guide/openclaw) when you want agent-driven generation
-- [Discord Bot](/api/discord) when you want a chat interface
+- [Discord Bot](/api/discord) when you want a bounded chat interface for
+  one-shot generation, prompt tools, attachment upscaling, read-only catalog
+  search, and permission-gated host operations. Discord reads the remote
+  server's advertised model capabilities; scripted chain jobs and durable
+  mesh workflows remain CLI/API-only.
 
 In both cases, the key variable is still `MOLD_HOST`.
 

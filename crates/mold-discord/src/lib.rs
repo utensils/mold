@@ -49,9 +49,15 @@ pub fn slash_commands() -> Vec<poise::Command<state::BotState, anyhow::Error>> {
         commands::mesh::mesh(),
         commands::expand::expand(),
         commands::remix::remix(),
+        commands::upscale::upscale(),
+        commands::operations::search(),
         commands::models::models(),
         commands::status::status(),
         commands::quota::quota(),
+        commands::operations::queue(),
+        commands::operations::downloads(),
+        commands::operations::video_upscale(),
+        commands::operations::gallery(),
         commands::admin::admin(),
     ]
 }
@@ -128,32 +134,81 @@ mod tests {
     /// oversized command would take every command offline.
     #[test]
     fn every_command_fits_discords_registration_limits() {
-        let commands = super::slash_commands();
-        assert!(commands.iter().any(|command| command.name == "transparent"));
-        for command in &commands {
+        fn check(command: &poise::Command<crate::state::BotState, anyhow::Error>, path: &str) {
             assert!(
                 command.parameters.len() <= 25,
-                "/{} has {} options",
-                command.name,
+                "/{path} has {} options",
                 command.parameters.len()
+            );
+            assert!(
+                command.subcommands.len() <= 25,
+                "/{path} has {} subcommands",
+                command.subcommands.len()
             );
             let description = command.description.as_deref().unwrap_or_default();
             assert!(
                 !description.is_empty() && description.chars().count() <= 100,
-                "/{} description is {} characters",
-                command.name,
+                "/{path} description is {} characters",
                 description.chars().count()
             );
             for parameter in &command.parameters {
                 let description = parameter.description.as_deref().unwrap_or_default();
                 assert!(
                     !description.is_empty() && description.chars().count() <= 100,
-                    "/{} option {} description is {} characters",
-                    command.name,
+                    "/{path} option {} description is {} characters",
                     parameter.name,
                     description.chars().count()
                 );
             }
+            for subcommand in &command.subcommands {
+                check(subcommand, &format!("{path} {}", subcommand.name));
+            }
+        }
+
+        let commands = super::slash_commands();
+        assert!(commands.iter().any(|command| command.name == "transparent"));
+        for command in &commands {
+            check(command, &command.name);
+        }
+    }
+
+    #[test]
+    fn operator_commands_are_guild_only_and_require_manage_guild() {
+        let commands = super::slash_commands();
+        for name in ["queue", "downloads", "video-upscale", "gallery"] {
+            let command = commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap();
+            assert!(command.guild_only, "/{name} must be guild-only");
+            assert!(
+                command
+                    .required_permissions
+                    .contains(super::serenity::Permissions::MANAGE_GUILD),
+                "/{name} must require Manage Server"
+            );
+            for subcommand in &command.subcommands {
+                assert!(
+                    subcommand.guild_only,
+                    "/{name} {} must be guild-only",
+                    subcommand.name
+                );
+                assert!(
+                    subcommand
+                        .required_permissions
+                        .contains(super::serenity::Permissions::MANAGE_GUILD),
+                    "/{name} {} must require Manage Server",
+                    subcommand.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn intentional_cli_only_workflows_are_not_registered() {
+        let commands = super::slash_commands();
+        for forbidden in ["sequence", "jobs", "mesh-workflow"] {
+            assert!(commands.iter().all(|command| command.name != forbidden));
         }
     }
 }
