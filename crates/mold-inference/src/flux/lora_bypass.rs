@@ -199,22 +199,34 @@ impl LoraLinear {
         match self {
             Self::Plain(l) => Ok(<Linear as candle_core::Module>::forward(l, x)?),
             Self::WithAdapters { inner, adapters } => {
-                let mut out = <Linear as candle_core::Module>::forward(inner, x)?;
-                for adapter in adapters {
-                    out = adapter.apply(x, &out)?;
-                }
-                Ok(out)
+                let out = <Linear as candle_core::Module>::forward(inner, x)?;
+                apply_adapters(adapters, x, out)
             }
             Self::Quantized(q) => Ok(<QuantizedLinear as candle_core::Module>::forward(q, x)?),
             Self::WithAdaptersQuantized { inner, adapters } => {
-                let mut out = <QuantizedLinear as candle_core::Module>::forward(inner, x)?;
-                for adapter in adapters {
-                    out = adapter.apply(x, &out)?;
-                }
-                Ok(out)
+                let out = <QuantizedLinear as candle_core::Module>::forward(inner, x)?;
+                apply_adapters(adapters, x, out)
             }
         }
     }
+}
+
+/// Layer every adapter in `adapters` onto a base linear's `out`, in order.
+///
+/// The one bypass loop every adapter-carrying linear shares — FLUX's
+/// [`LoraLinear`] and Qwen Image 2.1's `Q21Linear`, whose base arms (dense,
+/// GGUF, Comfy INT8 ConvRot, torchao FP8) differ but whose adapter math is the
+/// same `out + Σ scaleᵢ · (x @ Aᵢᵀ) @ Bᵢᵀ` (ComfyUI
+/// `comfy/weight_adapter/bypass.py`).
+pub(crate) fn apply_adapters(
+    adapters: &[LinearLoraAdapter],
+    x: &Tensor,
+    mut out: Tensor,
+) -> Result<Tensor> {
+    for adapter in adapters {
+        out = adapter.apply(x, &out)?;
+    }
+    Ok(out)
 }
 
 impl candle_core::Module for LoraLinear {
@@ -340,13 +352,92 @@ pub(crate) fn build_registry(
     device: &Device,
     dtype: DType,
 ) -> Result<LoraRegistry> {
+    build_registry_with(
+        specs,
+        |diffusers_key| {
+            Ok(super::lora::map_lora_key(diffusers_key)
+                .map(|target| match target {
+                    super::lora::LoraTarget::Direct { candle_key } => {
+                        BypassTarget::Direct { candle_key }
+                    }
+                    super::lora::LoraTarget::FusedSlice {
+                        candle_key,
+                        component,
+                        num_components,
+                    } => BypassTarget::FusedSlice {
+                        candle_key,
+                        component,
+                        num_components,
+                    },
+                })
+                .into_iter()
+                .collect())
+        },
+        linear_out_dims,
+        device,
+        dtype,
+    )
+}
+
+/// Where one LoRA layer lands in a bypass registry.
+///
+/// A family's key mapper answers every LoRA stem with zero or more of these.
+/// Zero means "not a module this family adapts" and the layer is skipped;
+/// more than one is how a LoRA trained against a FUSED module lands on a
+/// model that holds the halves separately.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BypassTarget {
+    /// The adapter's whole `up` output lands on the whole linear.
+    Direct { candle_key: String },
+    /// FLUX's fused-linear convention: component `component` of
+    /// `num_components`, sized by [`super::lora::fused_slice_range`] against
+    /// the linear's full row count in `linear_out_dims`.
+    FusedSlice {
+        candle_key: String,
+        component: usize,
+        num_components: usize,
+    },
+    /// Rows `[up_offset, up_offset + rows)` of the adapter's `up` matrix
+    /// (all of them when `up_rows` is `None`) land at output rows
+    /// `[out_offset, out_offset + rows)` of `candle_key` (the whole output when
+    /// `out_offset` is `None`). `down` is shared by every target of one layer.
+    ///
+    /// Covers both directions of a fused/split mismatch: ComfyUI's Qwen Image
+    /// 2.1 `img_mlp.gate_up` LoRA split onto separate `gate_layer`/`proj`
+    /// linears (`comfy/lora.py:331-333`: `(0, half)` to the gate, `(half,
+    /// half)` to proj — gate rows first), and a split LoRA landing on a fused
+    /// `gate_up` linear (whole `up`, `out_offset` 0 or `half`).
+    Rows {
+        candle_key: String,
+        up_rows: Option<(usize, usize)>,
+        out_offset: Option<usize>,
+    },
+}
+
+/// Build a [`LoraRegistry`] from an ordered LoRA stack through a family's own
+/// key mapper.
+///
+/// [`build_registry`] is this with FLUX's [`super::lora::map_lora_key`]; Qwen
+/// Image 2.1 passes its module table. The scale rule, the device/dtype
+/// placement, the fused-slice arithmetic and the skip-with-warning cases are
+/// shared, so a family only owns the question it actually differs on — which
+/// linear a LoRA stem names. A mapper error aborts the build (a family can
+/// refuse a LoRA written for a different architecture rather than silently
+/// adapting nothing).
+pub(crate) fn build_registry_with(
+    specs: &[super::lora::LoraSpec<'_>],
+    mapper: impl Fn(&str) -> Result<Vec<BypassTarget>>,
+    linear_out_dims: &HashMap<String, usize>,
+    device: &Device,
+    dtype: DType,
+) -> Result<LoraRegistry> {
     let mut registry = LoraRegistry::new();
     for spec in specs {
         for (diffusers_key, lora_layer) in &spec.adapter.layers {
-            let target = match super::lora::map_lora_key(diffusers_key) {
-                Some(t) => t,
-                None => continue,
-            };
+            let targets = mapper(diffusers_key)?;
+            if targets.is_empty() {
+                continue;
+            }
 
             // Effective scale folds in alpha/rank just like merge mode.
             let layer_rank = lora_layer.a.dims()[0] as f64;
@@ -358,53 +449,92 @@ pub(crate) fn build_registry(
             let down = lora_layer.a.to_device(device)?.to_dtype(dtype)?;
             let up = lora_layer.b.to_device(device)?.to_dtype(dtype)?;
 
-            let (candle_key, fused_slice) = match target {
-                super::lora::LoraTarget::Direct { candle_key } => (candle_key, None),
-                super::lora::LoraTarget::FusedSlice {
-                    candle_key,
-                    component,
-                    num_components,
-                } => {
-                    let base_rows = match linear_out_dims.get(&candle_key) {
-                        Some(n) => *n,
-                        None => {
+            for target in targets {
+                let (candle_key, up, fused_slice) = match target {
+                    BypassTarget::Direct { candle_key } => (candle_key, up.clone(), None),
+                    BypassTarget::FusedSlice {
+                        candle_key,
+                        component,
+                        num_components,
+                    } => {
+                        let base_rows = match linear_out_dims.get(&candle_key) {
+                            Some(n) => *n,
+                            None => {
+                                tracing::warn!(
+                                    key = candle_key.as_str(),
+                                    "fused-slice target unknown to bypass registry, skipping"
+                                );
+                                continue;
+                            }
+                        };
+                        let lora_out_dim = up.dim(0)?;
+                        let (offset, length) = super::lora::fused_slice_range(
+                            base_rows,
+                            lora_out_dim,
+                            component,
+                            num_components,
+                        );
+                        if offset + length > base_rows {
                             tracing::warn!(
                                 key = candle_key.as_str(),
-                                "fused-slice target unknown to bypass registry, skipping"
+                                offset,
+                                length,
+                                base_rows,
+                                "fused slice out of bounds, skipping"
                             );
                             continue;
                         }
-                    };
-                    let lora_out_dim = up.dim(0)?;
-                    let (offset, length) = super::lora::fused_slice_range(
-                        base_rows,
-                        lora_out_dim,
-                        component,
-                        num_components,
-                    );
-                    if offset + length > base_rows {
-                        tracing::warn!(
-                            key = candle_key.as_str(),
-                            offset,
-                            length,
-                            base_rows,
-                            "fused slice out of bounds, skipping"
-                        );
-                        continue;
+                        (candle_key, up.clone(), Some(FusedSlice { offset, length }))
                     }
-                    (candle_key, Some(FusedSlice { offset, length }))
-                }
-            };
+                    BypassTarget::Rows {
+                        candle_key,
+                        up_rows,
+                        out_offset,
+                    } => {
+                        let up = match up_rows {
+                            None => up.clone(),
+                            Some((start, rows)) => {
+                                if start + rows > up.dim(0)? {
+                                    anyhow::bail!(
+                                        "LoRA layer {diffusers_key} has {} up rows; its target \
+                                         {candle_key} needs rows [{start}, {})",
+                                        up.dim(0)?,
+                                        start + rows
+                                    );
+                                }
+                                up.narrow(0, start, rows)?.contiguous()?
+                            }
+                        };
+                        let fused_slice = match out_offset {
+                            None => None,
+                            Some(offset) => {
+                                let length = up.dim(0)?;
+                                if let Some(base_rows) = linear_out_dims.get(&candle_key) {
+                                    if offset + length > *base_rows {
+                                        anyhow::bail!(
+                                            "LoRA layer {diffusers_key} writes rows [{offset}, {}) \
+                                             of {candle_key}, which has {base_rows}",
+                                            offset + length
+                                        );
+                                    }
+                                }
+                                Some(FusedSlice { offset, length })
+                            }
+                        };
+                        (candle_key, up, fused_slice)
+                    }
+                };
 
-            registry.push(
-                candle_key,
-                LinearLoraAdapter {
-                    down,
-                    up,
-                    scale: effective_scale as f32,
-                    fused_slice,
-                },
-            );
+                registry.push(
+                    candle_key,
+                    LinearLoraAdapter {
+                        down: down.clone(),
+                        up,
+                        scale: effective_scale as f32,
+                        fused_slice,
+                    },
+                );
+            }
         }
     }
     Ok(registry)
@@ -1133,5 +1263,187 @@ mod tests {
         .unwrap();
         let q = LoraLinear::quantized(inner);
         let _ = q.inner();
+    }
+
+    /// A LoRA trained against a FUSED `gate_up` (ComfyUI's Qwen Image 2.1
+    /// layout) must land on a model that holds the halves separately as
+    /// exactly the merged fused delta would: rows `[0, h)` of `up` to the
+    /// gate, rows `[h, 2h)` to proj, `down` shared (`comfy/lora.py:331-333`).
+    #[test]
+    fn rows_targets_split_a_fused_lora_onto_separate_halves() {
+        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+
+        let (dim, hidden, rank) = (8, 6, 2);
+        let (down, up) = make_lora_pair(2 * hidden, rank, dim, 3.0);
+        let mut layers = HashMap::new();
+        layers.insert(
+            "diffusion_model.transformer_blocks.0.img_mlp.gate_up".to_string(),
+            LoraLayer {
+                a: down.clone(),
+                b: up.clone(),
+                alpha: Some(1.0),
+            },
+        );
+        let adapter = LoraAdapter { layers, rank };
+        let specs = [LoraSpec {
+            adapter: &adapter,
+            scale: 0.8,
+            path_hash: 1,
+        }];
+        let registry = build_registry_with(
+            &specs,
+            |key| {
+                assert!(key.ends_with("img_mlp.gate_up"));
+                Ok(vec![
+                    BypassTarget::Rows {
+                        candle_key: "gate".into(),
+                        up_rows: Some((0, hidden)),
+                        out_offset: None,
+                    },
+                    BypassTarget::Rows {
+                        candle_key: "proj".into(),
+                        up_rows: Some((hidden, hidden)),
+                        out_offset: None,
+                    },
+                ])
+            },
+            &HashMap::new(),
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+
+        let gate = make_linear(hidden, dim, false);
+        let proj = make_linear(hidden, dim, false);
+        let x = make_input(1, 3, dim);
+        let fused_delta = x
+            .reshape((3, dim))
+            .unwrap()
+            .matmul(&down.t().unwrap())
+            .unwrap()
+            .matmul(&up.t().unwrap())
+            .unwrap()
+            .affine(0.8 / rank as f64, 0.0)
+            .unwrap()
+            .reshape((1, 3, 2 * hidden))
+            .unwrap();
+        for (key, base, offset) in [("gate", &gate, 0), ("proj", &proj, hidden)] {
+            let stack = registry.adapters_for(key);
+            assert_eq!(stack.len(), 1, "{key} gets one half");
+            assert!(stack[0].fused_slice.is_none());
+            assert!((stack[0].scale - 0.4).abs() < 1e-7, "alpha/rank folds in");
+            let out = apply_adapters(stack, &x, base.forward(&x).unwrap()).unwrap();
+            let expected = (base.forward(&x).unwrap()
+                + fused_delta.narrow(2, offset, hidden).unwrap())
+            .unwrap();
+            assert!(max_abs_diff(&out, &expected) < 1e-5, "{key} half diverged");
+        }
+    }
+
+    /// The reverse mismatch: a split LoRA (`gate_layer`, `proj`) landing on a
+    /// fused linear writes only its own half of the output.
+    #[test]
+    fn rows_targets_place_a_split_lora_on_its_half_of_a_fused_linear() {
+        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+
+        let (dim, hidden, rank) = (8, 4, 2);
+        let (down, up) = make_lora_pair(hidden, rank, dim, 9.0);
+        let mut layers = HashMap::new();
+        layers.insert(
+            "transformer_blocks.0.img_mlp.proj".to_string(),
+            LoraLayer {
+                a: down,
+                b: up,
+                alpha: None,
+            },
+        );
+        let adapter = LoraAdapter { layers, rank };
+        let specs = [LoraSpec {
+            adapter: &adapter,
+            scale: 1.0,
+            path_hash: 2,
+        }];
+        let mut dims = HashMap::new();
+        dims.insert("gate_up".to_string(), 2 * hidden);
+        let registry = build_registry_with(
+            &specs,
+            |_| {
+                Ok(vec![BypassTarget::Rows {
+                    candle_key: "gate_up".into(),
+                    up_rows: None,
+                    out_offset: Some(hidden),
+                }])
+            },
+            &dims,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        let stack = registry.adapters_for("gate_up");
+        assert_eq!(
+            stack[0].fused_slice,
+            Some(FusedSlice {
+                offset: hidden,
+                length: hidden
+            })
+        );
+        let fused = make_linear(2 * hidden, dim, false);
+        let x = make_input(1, 2, dim);
+        let base = fused.forward(&x).unwrap();
+        let out = apply_adapters(stack, &x, base.clone()).unwrap();
+        assert!(
+            max_abs_diff(
+                &out.narrow(2, 0, hidden).unwrap(),
+                &base.narrow(2, 0, hidden).unwrap()
+            ) == 0.0,
+            "the gate half is untouched by a proj LoRA"
+        );
+        assert!(max_abs_diff(&out, &base) > 0.0, "the proj half moved");
+    }
+
+    /// A mapper refusal aborts the build rather than adapting nothing, and an
+    /// out-of-range row request is an error rather than a panic.
+    #[test]
+    fn mapper_errors_and_bad_rows_abort_the_build() {
+        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+
+        let (down, up) = make_lora_pair(4, 2, 8, 1.0);
+        let mut layers = HashMap::new();
+        layers.insert(
+            "k".to_string(),
+            LoraLayer {
+                a: down,
+                b: up,
+                alpha: None,
+            },
+        );
+        let adapter = LoraAdapter { layers, rank: 2 };
+        let specs = [LoraSpec {
+            adapter: &adapter,
+            scale: 1.0,
+            path_hash: 3,
+        }];
+        let refused = build_registry_with(
+            &specs,
+            |_| anyhow::bail!("wrong family"),
+            &HashMap::new(),
+            &Device::Cpu,
+            DType::F32,
+        );
+        assert!(refused.unwrap_err().to_string().contains("wrong family"));
+        let out_of_range = build_registry_with(
+            &specs,
+            |_| {
+                Ok(vec![BypassTarget::Rows {
+                    candle_key: "x".into(),
+                    up_rows: Some((2, 4)),
+                    out_offset: None,
+                }])
+            },
+            &HashMap::new(),
+            &Device::Cpu,
+            DType::F32,
+        );
+        assert!(out_of_range.is_err());
     }
 }

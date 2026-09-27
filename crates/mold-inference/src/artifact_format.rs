@@ -124,6 +124,260 @@ pub fn probe(path: &Path) -> Result<ArtifactStorageFormat, ArtifactProbeFailure>
     probe_safetensors(path)
 }
 
+/// The weight encoding of a Qwen Image 2.1 transformer artifact.
+///
+/// Decided from the artifact's own header, never its tag or filename, so a
+/// renamed or config-registered file loads through the right arm and the
+/// transformer code itself never branches on a format — it asks for linears by
+/// name and the loader answers with the matching `Q21Linear` arm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum QwenImage21TransformerFormat {
+    /// Plain floating-point safetensors — the diffusers BF16 shards
+    /// (`Qwen/Qwen-Image-2.1` `transformer/`), with split `gate_layer`/`proj`.
+    Bf16,
+    /// Comfy `int8_tensorwise` with a regular 256-wide ConvRot: every quantized
+    /// linear carries an `I8` weight, an `F32 [out, 1]` `weight_scale`, and a
+    /// `.comfy_quant` marker naming the format (ComfyUI `comfy/ops.py:1224-1235`,
+    /// `:1315-1317`). The MLP's gate and up projections are FUSED as
+    /// `img_mlp.gate_up` (`comfy/ldm/qwen_image21/model.py:49-63`).
+    ComfyInt8ConvRot,
+    /// torchao `Float8Tensor` (unsloth `Qwen-Image-2.1-FP8`): `X._weight_qdata`
+    /// `F8_E4M3` plus a per-output-row `X._weight_scale` `F32 [out, 1]`, with
+    /// the MLP split as in the diffusers shards.
+    TorchaoFp8,
+    /// A GGUF (leejet / stable-diffusion.cpp or unsloth). Unsloth prefixes every
+    /// tensor with [`QWEN_IMAGE21_GGUF_PREFIX`] and mixes block types per
+    /// tensor; both ship the fused `img_mlp.gate_up`.
+    Gguf { diffusion_model_prefix: bool },
+}
+
+impl QwenImage21TransformerFormat {
+    /// Short label for logs and the per-step finiteness error.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bf16 => "bf16",
+            Self::ComfyInt8ConvRot => "int8-conv",
+            Self::TorchaoFp8 => "fp8",
+            Self::Gguf { .. } => "gguf",
+        }
+    }
+
+    /// Whether the checkpoint fuses the MLP gate and up projections into one
+    /// `img_mlp.gate_up` linear (gate rows first).
+    pub fn fused_gate_up(self) -> bool {
+        matches!(self, Self::ComfyInt8ConvRot | Self::Gguf { .. })
+    }
+}
+
+/// The ComfyUI model prefix unsloth's GGUF conversions keep on every tensor.
+pub const QWEN_IMAGE21_GGUF_PREFIX: &str = "model.diffusion_model.";
+
+/// Largest `.comfy_quant` marker the probe will read. Real markers are a
+/// 72-byte JSON object; anything near this bound is not a marker.
+const MAX_COMFY_QUANT_MARKER_BYTES: usize = 4096;
+
+/// Probe the transformer artifact at `path` (the first shard of a sharded
+/// checkpoint is enough: every shard of one checkpoint shares its encoding).
+pub fn probe_qwen_image21_transformer(
+    path: &Path,
+) -> Result<QwenImage21TransformerFormat, ArtifactProbeFailure> {
+    let mut file = File::open(path).map_err(|_| ArtifactProbeFailure::Io)?;
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|_| ArtifactProbeFailure::UnsupportedContainer)?;
+    if &magic == b"GGUF" {
+        return probe_qwen_image21_gguf(path);
+    }
+    probe_qwen_image21_safetensors(path)
+}
+
+fn probe_qwen_image21_gguf(
+    path: &Path,
+) -> Result<QwenImage21TransformerFormat, ArtifactProbeFailure> {
+    let file = File::open(path).map_err(|_| ArtifactProbeFailure::Io)?;
+    let mut reader = file.take(MAX_GGUF_HEADER_BYTES);
+    let magic = read_exact_array::<4>(&mut reader)?;
+    if &magic != b"GGUF" {
+        return Err(ArtifactProbeFailure::InvalidHeader);
+    }
+    let version = read_u32(&mut reader)?;
+    if !(2..=3).contains(&version) {
+        return Err(ArtifactProbeFailure::InvalidHeader);
+    }
+    let tensor_count = read_versioned_count(&mut reader, version)?;
+    let metadata_count = read_versioned_count(&mut reader, version)?;
+    if tensor_count == 0
+        || tensor_count > MAX_GGUF_TENSORS
+        || metadata_count > MAX_GGUF_METADATA_ITEMS
+    {
+        return Err(ArtifactProbeFailure::InvalidHeader);
+    }
+    for _ in 0..metadata_count {
+        skip_gguf_string(&mut reader, version)?;
+        let value_type = read_u32(&mut reader)?;
+        skip_gguf_value(&mut reader, version, value_type, 0)?;
+    }
+    let (mut prefixed, mut bare) = (0_u64, 0_u64);
+    for _ in 0..tensor_count {
+        let length = read_versioned_count(&mut reader, version)?;
+        if length > MAX_SAFETENSORS_KEY_BYTES as u64 {
+            return Err(ArtifactProbeFailure::InvalidHeader);
+        }
+        let mut name = vec![0_u8; length as usize];
+        reader
+            .read_exact(&mut name)
+            .map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+        if name.starts_with(QWEN_IMAGE21_GGUF_PREFIX.as_bytes()) {
+            prefixed += 1;
+        } else {
+            bare += 1;
+        }
+        let dimensions = read_u32(&mut reader)?;
+        if dimensions > 8 {
+            return Err(ArtifactProbeFailure::InvalidHeader);
+        }
+        skip_exact(&mut reader, u64::from(dimensions) * 8)?;
+        // Tensor type, then the data offset.
+        skip_exact(&mut reader, 4 + 8)?;
+    }
+    // A checkpoint either carries ComfyUI's model prefix on every tensor or on
+    // none; a mixture has no single key space a loader could strip.
+    match (prefixed, bare) {
+        (0, _) => Ok(QwenImage21TransformerFormat::Gguf {
+            diffusion_model_prefix: false,
+        }),
+        (_, 0) => Ok(QwenImage21TransformerFormat::Gguf {
+            diffusion_model_prefix: true,
+        }),
+        _ => Err(ArtifactProbeFailure::InvalidHeader),
+    }
+}
+
+#[derive(Deserialize)]
+struct Qwen21TensorHeader {
+    dtype: String,
+    data_offsets: (u64, u64),
+}
+
+fn probe_qwen_image21_safetensors(
+    path: &Path,
+) -> Result<QwenImage21TransformerFormat, ArtifactProbeFailure> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = File::open(path).map_err(|_| ArtifactProbeFailure::Io)?;
+    let file_len = file.metadata().map_err(|_| ArtifactProbeFailure::Io)?.len();
+    let mut length = [0_u8; 8];
+    file.read_exact(&mut length)
+        .map_err(|_| ArtifactProbeFailure::UnsupportedContainer)?;
+    let header_len = u64::from_le_bytes(length);
+    if header_len == 0
+        || header_len > MAX_SAFETENSORS_HEADER_BYTES
+        || header_len > file_len.saturating_sub(8)
+    {
+        return Err(ArtifactProbeFailure::InvalidHeader);
+    }
+    let mut header = Vec::new();
+    (&mut file)
+        .take(header_len)
+        .read_to_end(&mut header)
+        .map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+    let mut entries: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&header).map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+    entries.remove("__metadata__");
+    if entries.is_empty() || entries.len() > MAX_SAFETENSORS_TENSORS {
+        return Err(ArtifactProbeFailure::InvalidHeader);
+    }
+    let mut tensors = std::collections::BTreeMap::new();
+    for (name, value) in entries {
+        let tensor: Qwen21TensorHeader =
+            serde_json::from_value(value).map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+        let dtype = parse_safetensors_dtype(&tensor.dtype)?;
+        tensors.insert(name, (dtype, tensor.data_offsets));
+    }
+    let data_start = 8 + header_len;
+
+    let markers = tensors
+        .iter()
+        .filter(|(name, _)| name.ends_with(".comfy_quant"))
+        .map(|(name, (_, offsets))| (name.clone(), *offsets))
+        .collect::<Vec<_>>();
+    if !markers.is_empty() {
+        for (marker, (begin, end)) in markers {
+            let bytes = end
+                .checked_sub(begin)
+                .filter(|bytes| *bytes as usize <= MAX_COMFY_QUANT_MARKER_BYTES)
+                .ok_or(ArtifactProbeFailure::InvalidHeader)?;
+            let mut raw = vec![0_u8; bytes as usize];
+            file.seek(SeekFrom::Start(data_start + begin))
+                .map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+            file.read_exact(&mut raw)
+                .map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+            let config: serde_json::Value =
+                serde_json::from_slice(&raw).map_err(|_| ArtifactProbeFailure::InvalidHeader)?;
+            if !is_int8_convrot_256_marker(&config) {
+                return Err(ArtifactProbeFailure::UnsupportedTensorDType);
+            }
+            let base = marker.trim_end_matches(".comfy_quant");
+            let weight = tensors.get(&format!("{base}.weight"));
+            let scale = tensors.get(&format!("{base}.weight_scale"));
+            if !matches!(weight, Some((TensorDType::I8, _)))
+                || !matches!(scale, Some((TensorDType::F32, _)))
+            {
+                return Err(ArtifactProbeFailure::InvalidHeader);
+            }
+        }
+        return Ok(QwenImage21TransformerFormat::ComfyInt8ConvRot);
+    }
+
+    let fp8 = tensors
+        .iter()
+        .filter(|(name, _)| name.ends_with("._weight_qdata"))
+        .collect::<Vec<_>>();
+    if !fp8.is_empty() {
+        for (name, (dtype, _)) in fp8 {
+            let base = name.trim_end_matches("._weight_qdata");
+            if *dtype != TensorDType::F8E4M3
+                || !matches!(
+                    tensors.get(&format!("{base}._weight_scale")),
+                    Some((TensorDType::F32, _))
+                )
+            {
+                return Err(ArtifactProbeFailure::InvalidHeader);
+            }
+        }
+        return Ok(QwenImage21TransformerFormat::TorchaoFp8);
+    }
+
+    // No recognised quantization side-channel: every tensor must be a plain
+    // float, or this is a quantized layout mold does not know how to read.
+    if tensors.values().all(|(dtype, _)| {
+        matches!(
+            dtype,
+            TensorDType::Bf16 | TensorDType::F16 | TensorDType::F32
+        )
+    }) {
+        Ok(QwenImage21TransformerFormat::Bf16)
+    } else {
+        Err(ArtifactProbeFailure::UnsupportedTensorDType)
+    }
+}
+
+/// The one Comfy marker Qwen Image 2.1's INT8 tier uses:
+/// `{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}`,
+/// with the options either at the top level or under `params` exactly as
+/// ComfyUI reads them (`comfy/ops.py:1228-1235`; the group size defaults to 256).
+fn is_int8_convrot_256_marker(config: &serde_json::Value) -> bool {
+    let params = config.get("params");
+    let field = |name: &str| {
+        config
+            .get(name)
+            .or_else(|| params.and_then(|params| params.get(name)))
+    };
+    config.get("format").and_then(serde_json::Value::as_str) == Some("int8_tensorwise")
+        && field("convrot").and_then(serde_json::Value::as_bool) == Some(true)
+        && field("convrot_groupsize").map_or(Some(256), serde_json::Value::as_u64) == Some(256)
+}
+
 fn probe_gguf(path: &Path) -> Result<ArtifactStorageFormat, ArtifactProbeFailure> {
     let file = File::open(path).map_err(|_| ArtifactProbeFailure::Io)?;
     let mut reader = file.take(MAX_GGUF_HEADER_BYTES);
@@ -614,5 +868,291 @@ mod tests {
         drop(file);
 
         assert_eq!(probe(&path), Ok(ArtifactStorageFormat::Json));
+    }
+
+    /// Write a safetensors file from `(name, dtype, shape, bytes)` records.
+    fn write_safetensors_records(path: &Path, records: &[(&str, &str, Vec<usize>, Vec<u8>)]) {
+        let mut header = serde_json::Map::new();
+        let mut data = Vec::new();
+        for (name, dtype, shape, bytes) in records {
+            let begin = data.len();
+            data.extend_from_slice(bytes);
+            header.insert(
+                (*name).to_string(),
+                serde_json::json!({
+                    "dtype": dtype,
+                    "shape": shape,
+                    "data_offsets": [begin, data.len()],
+                }),
+            );
+        }
+        write_safetensors(path, Value::Object(header), &data);
+    }
+
+    fn marker(json: &str) -> Vec<u8> {
+        json.as_bytes().to_vec()
+    }
+
+    const INT8_MARKER: &str =
+        r#"{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}"#;
+
+    #[test]
+    fn qwen21_probe_reads_the_diffusers_bf16_shards_as_bf16() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shard.safetensors");
+        write_safetensors_records(
+            &path,
+            &[
+                ("img_in.weight", "BF16", vec![2, 2], vec![0; 8]),
+                (
+                    "transformer_blocks.0.img_mlp.gate_layer.weight",
+                    "BF16",
+                    vec![1, 2],
+                    vec![0; 4],
+                ),
+                ("txt_in.text_norm.weight", "F32", vec![1], vec![0; 4]),
+            ],
+        );
+        assert_eq!(
+            probe_qwen_image21_transformer(&path),
+            Ok(QwenImage21TransformerFormat::Bf16)
+        );
+    }
+
+    #[test]
+    fn qwen21_probe_recognises_the_comfy_int8_convrot_tier_by_its_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("opaque.asset");
+        let records = [
+            ("img_in.weight", "BF16", vec![2, 2], vec![0; 8]),
+            (
+                "transformer_blocks.0.img_mlp.gate_up.weight",
+                "I8",
+                vec![2, 256],
+                vec![0; 512],
+            ),
+            (
+                "transformer_blocks.0.img_mlp.gate_up.weight_scale",
+                "F32",
+                vec![2, 1],
+                vec![0; 8],
+            ),
+            (
+                "transformer_blocks.0.img_mlp.gate_up.comfy_quant",
+                "U8",
+                vec![INT8_MARKER.len()],
+                marker(INT8_MARKER),
+            ),
+        ];
+        write_safetensors_records(&path, &records);
+        let format = probe_qwen_image21_transformer(&path).unwrap();
+        assert_eq!(format, QwenImage21TransformerFormat::ComfyInt8ConvRot);
+        assert!(format.fused_gate_up());
+        assert_eq!(format.label(), "int8-conv");
+
+        // The options may also sit under `params`, as ComfyUI reads them.
+        let nested = r#"{"format":"int8_tensorwise","params":{"convrot":true}}"#;
+        let mut nested_records = records.clone();
+        nested_records[3] = (
+            "transformer_blocks.0.img_mlp.gate_up.comfy_quant",
+            "U8",
+            vec![nested.len()],
+            marker(nested),
+        );
+        write_safetensors_records(&path, &nested_records);
+        assert_eq!(
+            probe_qwen_image21_transformer(&path),
+            Ok(QwenImage21TransformerFormat::ComfyInt8ConvRot)
+        );
+
+        // Any other Comfy format — W4A4, unrotated INT8, another group size —
+        // is a layout this loader does not execute.
+        for other in [
+            r#"{"format":"convrot_w4a4","convrot_groupsize":256}"#,
+            r#"{"format":"int8_tensorwise"}"#,
+            r#"{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":128}"#,
+        ] {
+            let mut other_records = records.clone();
+            other_records[3] = (
+                "transformer_blocks.0.img_mlp.gate_up.comfy_quant",
+                "U8",
+                vec![other.len()],
+                marker(other),
+            );
+            write_safetensors_records(&path, &other_records);
+            assert_eq!(
+                probe_qwen_image21_transformer(&path),
+                Err(ArtifactProbeFailure::UnsupportedTensorDType),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen21_probe_recognises_torchao_fp8_by_its_qdata_and_scale_pairs() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fp8.safetensors");
+        let good = [
+            ("img_in.weight", "BF16", vec![2, 2], vec![0; 8]),
+            (
+                "transformer_blocks.0.attn.to_q._weight_qdata",
+                "F8_E4M3",
+                vec![2, 2],
+                vec![0; 4],
+            ),
+            (
+                "transformer_blocks.0.attn.to_q._weight_scale",
+                "F32",
+                vec![2, 1],
+                vec![0; 8],
+            ),
+        ];
+        write_safetensors_records(&path, &good);
+        let format = probe_qwen_image21_transformer(&path).unwrap();
+        assert_eq!(format, QwenImage21TransformerFormat::TorchaoFp8);
+        assert!(!format.fused_gate_up());
+
+        // A qdata with no scale is not a checkpoint this loader can widen.
+        write_safetensors_records(&path, &good[..2]);
+        assert_eq!(
+            probe_qwen_image21_transformer(&path),
+            Err(ArtifactProbeFailure::InvalidHeader)
+        );
+        // A bare F8 tensor with no torchao side channel is an unknown layout.
+        write_safetensors_records(
+            &path,
+            &[("img_in.weight", "F8_E4M3", vec![2, 2], vec![0; 4])],
+        );
+        assert_eq!(
+            probe_qwen_image21_transformer(&path),
+            Err(ArtifactProbeFailure::UnsupportedTensorDType)
+        );
+    }
+
+    fn gguf_tensor(dtype: GgmlDType, rows: usize) -> candle_core::quantized::QTensor {
+        let source = Tensor::zeros((rows, 256), candle_core::DType::F32, &Device::Cpu).unwrap();
+        QTensor::quantize(&source, dtype).unwrap()
+    }
+
+    /// Unsloth's GGUFs keep ComfyUI's `model.diffusion_model.` prefix on every
+    /// tensor and mix block types per tensor (Q4_K/Q5_K/Q6_K/Q8_0 blocks, Q5_K
+    /// modulation, F32 norms) — the header of `qwen-image-2.1-Q4_K_M.gguf`,
+    /// mirrored here in miniature. leejet's carry no prefix at all.
+    #[test]
+    fn qwen21_probe_reports_the_gguf_key_space() {
+        let root = tempfile::tempdir().unwrap();
+        let unsloth = root.path().join("unsloth.gguf");
+        let tensors = [
+            ("model.diffusion_model.img_in.weight", GgmlDType::BF16),
+            ("model.diffusion_model.modulation.1.weight", GgmlDType::Q5K),
+            (
+                "model.diffusion_model.norm_out.linear.weight",
+                GgmlDType::F32,
+            ),
+            (
+                "model.diffusion_model.transformer_blocks.0.attn.to_q.weight",
+                GgmlDType::Q4K,
+            ),
+            (
+                "model.diffusion_model.transformer_blocks.0.attn.to_v.weight",
+                GgmlDType::Q6K,
+            ),
+            (
+                "model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight",
+                GgmlDType::Q8_0,
+            ),
+        ]
+        .map(|(name, dtype)| (name, gguf_tensor(dtype, 2)));
+        let refs = tensors
+            .iter()
+            .map(|(name, tensor)| (*name, tensor))
+            .collect::<Vec<_>>();
+        let mut file = File::create(&unsloth).unwrap();
+        gguf_file::write(&mut file, &[], &refs).unwrap();
+        drop(file);
+        assert_eq!(
+            probe_qwen_image21_transformer(&unsloth),
+            Ok(QwenImage21TransformerFormat::Gguf {
+                diffusion_model_prefix: true
+            })
+        );
+
+        let leejet = root.path().join("leejet.gguf");
+        let bare = [("img_in.weight", gguf_tensor(GgmlDType::BF16, 2))];
+        let refs = bare.iter().map(|(n, t)| (*n, t)).collect::<Vec<_>>();
+        let mut file = File::create(&leejet).unwrap();
+        gguf_file::write(&mut file, &[], &refs).unwrap();
+        drop(file);
+        assert_eq!(
+            probe_qwen_image21_transformer(&leejet),
+            Ok(QwenImage21TransformerFormat::Gguf {
+                diffusion_model_prefix: false
+            })
+        );
+
+        let mixed = root.path().join("mixed.gguf");
+        let both = [
+            ("img_in.weight", gguf_tensor(GgmlDType::BF16, 2)),
+            (
+                "model.diffusion_model.proj_out.weight",
+                gguf_tensor(GgmlDType::BF16, 2),
+            ),
+        ];
+        let refs = both.iter().map(|(n, t)| (*n, t)).collect::<Vec<_>>();
+        let mut file = File::create(&mixed).unwrap();
+        gguf_file::write(&mut file, &[], &refs).unwrap();
+        drop(file);
+        assert_eq!(
+            probe_qwen_image21_transformer(&mixed),
+            Err(ArtifactProbeFailure::InvalidHeader)
+        );
+    }
+
+    /// Every staged real tier probes to the format its loader expects. The
+    /// unsloth entry is the first 16 MiB of `qwen-image-2.1-Q4_K_M.gguf` — the
+    /// probe reads the header only, so a truncated file is a complete fixture.
+    ///
+    /// `MOLD_QWEN_IMAGE21_TIERS_DIR` names the staging directory (on plato,
+    /// `/storage/mold/fixtures/qwen_image21/tiers-staging`).
+    #[test]
+    #[ignore = "needs the staged Qwen Image 2.1 tier checkpoints"]
+    fn qwen21_probe_classifies_every_staged_tier() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("MOLD_QWEN_IMAGE21_TIERS_DIR")
+                .expect("MOLD_QWEN_IMAGE21_TIERS_DIR must name the staging dir"),
+        );
+        let gguf = |prefix| QwenImage21TransformerFormat::Gguf {
+            diffusion_model_prefix: prefix,
+        };
+        let expectations = [
+            (
+                "qwen_image_2.1_int8_convrot.safetensors",
+                QwenImage21TransformerFormat::ComfyInt8ConvRot,
+            ),
+            (
+                "Qwen-Image-2.1-FP8.safetensors",
+                QwenImage21TransformerFormat::TorchaoFp8,
+            ),
+            ("qwen_image_2.1-Q8_0.gguf", gguf(false)),
+            ("qwen_image_2.1-Q4_K.gguf", gguf(false)),
+            ("unsloth-qwen-image-2.1-Q4_K_M.head.gguf", gguf(true)),
+        ];
+        for (file, expected) in expectations {
+            let path = dir.join(file);
+            assert_eq!(
+                probe_qwen_image21_transformer(&path),
+                Ok(expected),
+                "{}",
+                path.display()
+            );
+        }
+        if let Some(shard) = std::env::var_os("MOLD_QWEN_IMAGE21_BF16_DIR") {
+            let path = std::path::PathBuf::from(shard)
+                .join("transformer/diffusion_pytorch_model-00001-of-00002.safetensors");
+            assert_eq!(
+                probe_qwen_image21_transformer(&path),
+                Ok(QwenImage21TransformerFormat::Bf16)
+            );
+        }
     }
 }
