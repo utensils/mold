@@ -750,10 +750,32 @@ mod tests {
             "wuerstchen",
             "hunyuan3d",
         ];
+        // The H3 entry sits directly after LTX-Video in the registry. Anchor
+        // it by name: a positional index silently went stale when #1746
+        // inserted `qwen-image21` ahead of it.
         #[cfg(feature = "h3")]
         let expected = {
             let mut expected = expected;
-            expected.insert(9, mold_core::minimax_h3::FAMILY);
+            let after_ltx_video = expected
+                .iter()
+                .position(|family| *family == "ltx-video")
+                .expect("the registry lists ltx-video")
+                + 1;
+            expected.insert(after_ltx_video, mold_core::minimax_h3::FAMILY);
+            expected
+        };
+        // The hidden mesh preprocessing workers close the registry in the
+        // builds that compile them.
+        #[cfg(feature = "mesh-matting")]
+        let expected = {
+            let mut expected = expected;
+            expected.push("hunyuan3d-matting");
+            expected
+        };
+        #[cfg(feature = "mesh-delight")]
+        let expected = {
+            let mut expected = expected;
+            expected.push("hunyuan3d-delight");
             expected
         };
         assert_eq!(
