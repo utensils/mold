@@ -112,6 +112,10 @@ public extension RenderDraft {
         // pins a choice nobody made (`generateForm.ts` `pipelineForSettingsReuse`).
         pipeline = metadata.pipelineRequested == true ? metadata.pipeline : nil
         outputFormat = metadata.outputFormat
+        // The REQUEST, never `has_alpha`: that describes the file, which a
+        // transparent reference edited with the toggle off also sets
+        // (`studio/lib/outputReuse.ts`).
+        transparentBackground = metadata.transparentBackground == true
         upscaleModel = metadata.upscaleModel
     }
 

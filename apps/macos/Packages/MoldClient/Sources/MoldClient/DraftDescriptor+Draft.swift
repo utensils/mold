@@ -34,6 +34,7 @@ public extension DraftDescriptor {
         collectionName = draft.collectionName
         autoTagTitle = draft.autoTagTitle
         outputFormat = draft.outputFormat
+        transparentBackground = draft.transparentBackground
         upscaleModel = draft.upscaleModel
         savesToGallery = draft.savesToGallery
         canvasIntent = draft.canvasIntent
@@ -85,6 +86,7 @@ public extension DraftDescriptor {
         draft.collectionName = collectionName
         draft.autoTagTitle = autoTagTitle
         draft.outputFormat = outputFormat
+        draft.transparentBackground = transparentBackground ?? false
         draft.upscaleModel = upscaleModel
         draft.savesToGallery = savesToGallery
         draft.canvasIntent = canvasIntent

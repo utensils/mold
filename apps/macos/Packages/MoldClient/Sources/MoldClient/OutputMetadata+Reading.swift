@@ -49,3 +49,12 @@ public extension OutputMetadata {
         return joined.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? joined
     }
 }
+
+public extension OutputMetadata {
+    /// Whether this print is drawn over the checkerboard alpha bed. Port of
+    /// `showsAlphaBed` (`studio/lib/alphaMedia.ts`): the FILE's `has_alpha`,
+    /// or the REQUEST's `transparent_background` -- which is what a print
+    /// whose file has not been re-read yet still carries. Every other print
+    /// keeps the plain bed, so an opaque picture never sits on a pattern.
+    var showsAlphaBed: Bool { hasAlpha == true || transparentBackground == true }
+}

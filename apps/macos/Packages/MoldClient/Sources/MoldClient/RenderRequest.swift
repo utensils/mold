@@ -91,6 +91,8 @@ public enum RenderRequest {
         request.tags = composedTags.isEmpty ? nil : composedTags
         request.collection = draft.collectionName.map(CollectionRef.named)
         request.outputFormat = draft.outputFormat
+        // Only `true` ever travels; off is the ABSENCE of the field.
+        request.transparentBackground = draft.transparencyActive ? true : nil
         request.upscaleModel = draft.upscaleModel
         // Absent means the server's own default (save). `false` is the only
         // instruction worth sending over the wire.

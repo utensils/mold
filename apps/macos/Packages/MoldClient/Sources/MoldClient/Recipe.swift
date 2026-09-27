@@ -70,6 +70,10 @@ public struct RecipeCapabilities: Codable, Hashable, Sendable {
     /// Wan's sampler controls. Nothing in M4 reads this -- see the type's own
     /// doc comment.
     public let wanRecipe: WanRecipeCapabilities?
+    /// `transparent_background`. ADDITIVE: absent means an OLDER host, and
+    /// there is no older behaviour to fall back to -- read it through
+    /// `transparencyControl`, which offers no toggle then.
+    public var transparency: TransparencyCapability? = nil
 
     public var promptRequirement: PromptRequirement {
         (prompt ?? .assumedRequired).mode

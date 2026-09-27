@@ -109,6 +109,13 @@ public struct RenderDraft: Hashable, Sendable {
     /// applied at request time, not here (`ClientTags`, M3 S4).
     public var autoTagTitle: Bool = true
     public var outputFormat: String?
+    /// The person's Transparent background choice, apart from whether the
+    /// current recipe can honour it -- parked, not dropped, across a model
+    /// that cannot (`RenderDraft+Transparency.swift`).
+    public var transparentBackground: Bool = false
+    /// The adopted recipe's `transparencyControl`, recorded by `adopting` the
+    /// way `supportsAudio` is, so every request path reads one answer.
+    public var transparency: TransparencyControl?
     public var upscaleModel: String?
     /// `false` publishes the print and moves it straight to the trash. `true`
     /// is the server's own default, so a request never has to say so.

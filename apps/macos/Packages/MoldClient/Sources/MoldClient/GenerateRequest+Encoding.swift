@@ -21,7 +21,7 @@ extension GenerateRequest {
              controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
              sourceVideo, scheduler, cfgPlus, sampleShift, distillStrengthHigh,
              distillStrengthLow, guidanceOverrides, sourceFit,
-             outputFormat, upscaleModel, title, tags, collection,
+             outputFormat, transparentBackground, upscaleModel, title, tags, collection,
              originalPrompt, promptTransform, batchId, batchIndex, batchCount
     }
 }
@@ -83,6 +83,7 @@ public extension GenerateRequest {
         try container.encodeIfPresent(guidanceOverrides, forKey: .guidanceOverrides)
         try container.encodeIfPresent(sourceFit, forKey: .sourceFit)
         try container.encodeIfPresent(outputFormat, forKey: .outputFormat)
+        try container.encodeIfPresent(transparentBackground, forKey: .transparentBackground)
         try container.encodeIfPresent(upscaleModel, forKey: .upscaleModel)
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(tags, forKey: .tags)

@@ -117,6 +117,11 @@ public extension RenderDraft {
             draft.outputFormat = nil
         }
 
+        // Recorded, never cleared: the toggle itself is the person's and
+        // parks on a recipe without one (`RenderDraft+Transparency.swift`).
+        draft.transparency = recipe.capabilities.transparencyControl
+        draft.coerceFormatForTransparency(output: recipe.capabilities.output)
+
         draft.reconcileAudio(
             recipe: recipe, family: family, modelSupportsAudio: modelSupportsAudio)
         if !draft.supportsAudio {
@@ -128,6 +133,9 @@ public extension RenderDraft {
                   recipe.capabilities.output?.audioRequiresMp4 == true {
             draft.outputFormat = "mp4"
         }
+        // Last, over every size written above: while the canvas is still the
+        // model's, a `last-reference` recipe takes its shape from the strip.
+        draft.followLastReference(recipe: recipe)
         return draft
     }
 

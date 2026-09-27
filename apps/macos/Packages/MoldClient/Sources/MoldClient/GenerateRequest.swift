@@ -101,6 +101,9 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// (`types.rs:3268-3273`).
     public var sourceFit: SourceFit?
     public var outputFormat: String?
+    /// Sent only as `true`, and only where the recipe advertises an
+    /// adjustable `transparency` block (`RenderDraft.transparencyActive`).
+    public var transparentBackground: Bool?
     public var upscaleModel: String?
     /// User-authored print title. Validated at admission; absent means
     /// untitled.

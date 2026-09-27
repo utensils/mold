@@ -57,6 +57,7 @@ import Testing
             modalityScale: 3.0, skipStep: 0)
         request.sourceFit = .default
         request.outputFormat = "png"
+        request.transparentBackground = true
         request.upscaleModel = "real-esrgan-x4plus:fp16"
         request.title = "Robots"
         request.tags = ["metal"]

@@ -55,6 +55,8 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var collectionName: String?
     public var autoTagTitle: Bool
     public var outputFormat: String?
+    /// Optional so a descriptor written before the toggle still decodes.
+    public var transparentBackground: Bool?
     public var upscaleModel: String?
     public var savesToGallery: Bool
     public var canvasIntent: CanvasIntent
@@ -78,7 +80,8 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
         case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline
         case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
              collectionName, autoTagTitle
-        case outputFormat, upscaleModel, savesToGallery, canvasIntent, sourceFit
+        case outputFormat, transparentBackground, upscaleModel, savesToGallery, canvasIntent,
+             sourceFit
         case scheduler, cfgPlus, sampleShift, distillStrengthHigh, distillStrengthLow
         case stgScale, stgBlocks, rescaleScale, modalityScale, skipStep
     }

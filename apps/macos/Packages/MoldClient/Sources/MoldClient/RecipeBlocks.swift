@@ -40,6 +40,17 @@ public enum ReferenceSourceRelation: String, OpenWireEnum {
     case unknown
 }
 
+/// Where a recipe's DEFAULT canvas comes from once references are staged
+/// (`ReferenceCanvasRule`, `generation_profile.rs`).
+public enum ReferenceCanvasRule: String, OpenWireEnum {
+    /// Qwen Image 2.1: the last reference's aspect at upstream's fixed area
+    /// (`ReferenceCanvas.lastReference`).
+    case lastReference = "last-reference"
+    /// A rule added after this build. Treated as no rule: resizing a canvas
+    /// by a rule this build cannot read would be a guess.
+    case unknown
+}
+
 public struct ReferenceImagesCapability: Codable, Hashable, Sendable {
     public let mode: ControlMode
     public let required: Bool
@@ -48,6 +59,19 @@ public struct ReferenceImagesCapability: Codable, Hashable, Sendable {
     public let sourceRelation: ReferenceSourceRelation
     public let reason: String?
     public let weight: FloatControl?
+    /// ADDITIVE: absent on every recipe but Qwen Image 2.1, and on an older
+    /// host. Absence means the canvas never follows the references.
+    public var canvas: ReferenceCanvasRule? = nil
+    /// The containers a reference may arrive in (`ImageInputFormat`). Absent
+    /// is the server's legacy PNG-and-JPEG set; read it through
+    /// `acceptedFormats`, never directly.
+    public var formats: [String]? = nil
+
+    /// `ImageInputFormat::LEGACY`: what a recipe that advertises no list
+    /// accepts.
+    public static let legacyFormats = ["png", "jpeg"]
+
+    public var acceptedFormats: [String] { formats ?? Self.legacyFormats }
 }
 
 public struct GenerationDefaults: Codable, Hashable, Sendable {
