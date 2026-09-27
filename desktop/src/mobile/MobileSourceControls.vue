@@ -230,6 +230,14 @@ const referenceMax = computed(() =>
       ? plan.value.references.max
       : null,
 );
+// Only the `attachments` plan (Qwen edit, FLUX.2 [dev]) carries a
+// requiredness the strip itself answers for — the two-well plans' reference
+// well is never required on its own (the source well covers `single.required`
+// for Klein; IP-Adapter's reference is purely additive), matching web's
+// `plan.required` gate on the same `attachments`-only branch.
+const stripRequired = computed(() =>
+  plan.value.kind === "attachments" ? plan.value.required : false,
+);
 /**
  * The adapter's injection strength, from the recipe alone. `null` — no
  * adapter, or an older host — renders nothing.
@@ -854,7 +862,7 @@ function applyMask(mask: string): void {
         :sets-canvas="stripCanvas"
         :ordinal-base="stripOrdinalBase"
         :max="referenceMax"
-        :required="plan.required"
+        :required="stripRequired"
         touch-friendly
         add-label="Add photos"
         empty-label="Add photos"
