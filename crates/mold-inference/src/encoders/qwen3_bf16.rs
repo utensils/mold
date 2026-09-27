@@ -243,6 +243,58 @@ impl RotaryEmbedding {
     }
 }
 
+impl RotaryEmbedding {
+    /// Interleaved-MRoPE `(cos, sin)` `[L, head_dim / 2]` for one batch-1
+    /// sequence, GATHERED from the existing 1-D tables: frequency column `i`
+    /// reads row `mrope[axis(i)][t]` (transformers `apply_interleaved_mrope`,
+    /// `modeling_qwen3_vl.py:299-314`). Each HF frequency is the same
+    /// `position * inv_freq[i]` product the table already holds, so with all
+    /// three axes equal this is exactly the text-only table, bit for bit.
+    fn mrope_tables(
+        &self,
+        mrope: &[Vec<u32>; 3],
+        sections: [usize; 3],
+    ) -> Result<(Tensor, Tensor)> {
+        let sequence = mrope[0].len();
+        anyhow::ensure!(
+            mrope.iter().all(|axis| axis.len() == sequence),
+            "Qwen3-VL MRoPE axes differ in length"
+        );
+        let (rows, half) = self.cos.dims2()?;
+        anyhow::ensure!(
+            sections.iter().sum::<usize>() == half,
+            "MRoPE sections {sections:?} do not cover {half} frequencies"
+        );
+        anyhow::ensure!(
+            mrope
+                .iter()
+                .flatten()
+                .all(|position| (*position as usize) < rows),
+            "Qwen3-VL MRoPE position exceeds the configured position table"
+        );
+        let device = self.cos.device();
+        let columns = Tensor::from_vec(
+            (0..half)
+                .map(|i| (super::qwen3_vl_inject::mrope_axis(i, sections) * half + i) as u32)
+                .collect::<Vec<_>>(),
+            half,
+            device,
+        )?;
+        let gather = |table: &Tensor| -> Result<Tensor> {
+            let per_axis = mrope
+                .iter()
+                .map(|axis| {
+                    table.index_select(&Tensor::from_vec(axis.clone(), sequence, device)?, 0)
+                })
+                .collect::<candle_core::Result<Vec<_>>>()?;
+            Ok(Tensor::cat(&per_axis, 1)?
+                .index_select(&columns, 1)?
+                .contiguous()?)
+        };
+        Ok((gather(&self.cos)?, gather(&self.sin)?))
+    }
+}
+
 // ── GQA repeat_kv ───────────────────────────────────────────────────────────
 
 fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
@@ -373,24 +425,8 @@ impl Attention {
         positions: Option<&[Vec<usize>]>,
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
-        let (h_q, h_kv, d) = (self.num_attention_heads, self.num_kv_heads, self.head_dim);
-
-        let q = self.q_proj.forward(xs)?;
-        let k = self.k_proj.forward(xs)?;
-        let v = self.v_proj.forward(xs)?;
-
-        // Reshape to (B, L, H, D) then transpose to (B, H, L, D)
-        let q = q.reshape((b, l, h_q, d))?.transpose(1, 2)?;
-        let k = k.reshape((b, l, h_kv, d))?.transpose(1, 2)?;
-        let v = v.reshape((b, l, h_kv, d))?.transpose(1, 2)?;
-
-        // Per-head RMSNorm (flatten batch+heads, norm, reshape back)
-        let q_flat = q.flatten(0, 2)?;
-        let k_flat = k.flatten(0, 2)?;
-        let q_flat = self.q_norm.forward(&q_flat)?;
-        let k_flat = self.k_norm.forward(&k_flat)?;
-        let q = q_flat.reshape((b, h_q, l, d))?;
-        let k = k_flat.reshape((b, h_kv, l, d))?;
+        let (h_q, d) = (self.num_attention_heads, self.head_dim);
+        let (q, k, v) = self.project_normalized(xs)?;
 
         // RoPE
         let (q, k) = match positions {
@@ -417,6 +453,99 @@ impl Attention {
             .apply(&self.o_proj)
             .map_err(Into::into)
     }
+
+    /// Q/K/V `(B, H, L, D)` after the per-head RMSNorm, before RoPE.
+    fn project_normalized(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let (b, l, _) = xs.dims3()?;
+        let (h_q, h_kv, d) = (self.num_attention_heads, self.num_kv_heads, self.head_dim);
+
+        let q = self.q_proj.forward(xs)?;
+        let k = self.k_proj.forward(xs)?;
+        let v = self.v_proj.forward(xs)?;
+
+        // Reshape to (B, L, H, D) then transpose to (B, H, L, D)
+        let q = q.reshape((b, l, h_q, d))?.transpose(1, 2)?;
+        let k = k.reshape((b, l, h_kv, d))?.transpose(1, 2)?;
+        let v = v.reshape((b, l, h_kv, d))?.transpose(1, 2)?;
+
+        // Per-head RMSNorm (flatten batch+heads, norm, reshape back)
+        let q_flat = q.flatten(0, 2)?;
+        let k_flat = k.flatten(0, 2)?;
+        let q_flat = self.q_norm.forward(&q_flat)?;
+        let k_flat = self.k_norm.forward(&k_flat)?;
+        let q = q_flat.reshape((b, h_q, l, d))?;
+        let k = k_flat.reshape((b, h_kv, l, d))?;
+        Ok((q, k, v))
+    }
+
+    /// Batch-1, unpadded causal attention with caller-supplied rotary tables
+    /// `[L, D/2]` (interleaved MRoPE). Queries run in chunks whose causal
+    /// bias is built ON the device, and each chunk reads only the keys it can
+    /// see, so the score tile is `heads x chunk x keys` however long the
+    /// multimodal sequence gets.
+    fn forward_causal_with_tables(
+        &self,
+        xs: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        chunk: Option<usize>,
+    ) -> Result<Tensor> {
+        let (b, l, _) = xs.dims3()?;
+        anyhow::ensure!(b == 1, "Qwen3-VL multimodal attention is batch-1");
+        let (h_q, d) = (self.num_attention_heads, self.head_dim);
+        let (q, k, v) = self.project_normalized(xs)?;
+        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, cos, sin)?;
+        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, cos, sin)?;
+        let k = repeat_kv(k, self.kv_repeat)?.contiguous()?;
+        let v = repeat_kv(v, self.kv_repeat)?.contiguous()?;
+        let scale = 1.0 / (d as f64).sqrt();
+        let chunk = chunk
+            .unwrap_or_else(|| multimodal_query_chunk(h_q, l))
+            .max(1);
+        let mut outputs = Vec::with_capacity(l.div_ceil(chunk));
+        let mut start = 0;
+        while start < l {
+            let rows = chunk.min(l - start);
+            let keys = start + rows;
+            let q_chunk = q.narrow(2, start, rows)?;
+            let k_seen = k.narrow(2, 0, keys)?;
+            let v_seen = v.narrow(2, 0, keys)?;
+            let scores = (q_chunk.matmul(&k_seen.transpose(2, 3)?)? * scale)?;
+            let scores = if rows > 1 {
+                // key j is visible to query start + r iff j <= start + r.
+                let key_index =
+                    Tensor::arange(0u32, keys as u32, xs.device())?.reshape((1, keys))?;
+                let query_index =
+                    Tensor::arange(start as u32, keys as u32, xs.device())?.reshape((rows, 1))?;
+                let visible = key_index.broadcast_le(&query_index)?;
+                let blocked = Tensor::full(f32::NEG_INFINITY, (rows, keys), xs.device())?
+                    .to_dtype(scores.dtype())?;
+                let zero = Tensor::zeros((rows, keys), scores.dtype(), xs.device())?;
+                let bias = visible.where_cond(&zero, &blocked)?;
+                scores.broadcast_add(&bias.reshape((1, 1, rows, keys))?)?
+            } else {
+                scores
+            };
+            let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+            outputs.push(weights.matmul(&v_seen)?);
+            start = keys;
+        }
+        let ctx = Tensor::cat(&outputs, 2)?;
+        ctx.transpose(1, 2)?
+            .reshape((b, l, h_q * d))?
+            .apply(&self.o_proj)
+            .map_err(Into::into)
+    }
+}
+
+/// Score-tile element budget for the multimodal LM attention (bf16: 512 MiB).
+const MULTIMODAL_SCORE_ELEMENTS: usize = 1 << 28;
+
+/// Query rows per multimodal attention chunk: the whole sequence when its
+/// `heads x L x L` tile fits the budget (every one-to-three-reference prompt
+/// at 1024² does), otherwise the largest row count that does.
+fn multimodal_query_chunk(heads: usize, sequence: usize) -> usize {
+    (MULTIMODAL_SCORE_ELEMENTS / (heads * sequence).max(1)).clamp(1, sequence.max(1))
 }
 
 // ── Decoder Layer ───────────────────────────────────────────────────────────
@@ -464,6 +593,23 @@ impl DecoderLayer {
         let h = self.mlp.forward(&h)?;
         (xs + h).map_err(Into::into)
     }
+
+    fn forward_multimodal(
+        &self,
+        xs: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        chunk: Option<usize>,
+    ) -> Result<Tensor> {
+        let h = self.input_layernorm.forward(xs)?;
+        let h = self
+            .self_attn
+            .forward_causal_with_tables(&h, cos, sin, chunk)?;
+        let xs = (xs + h)?;
+        let h = self.post_attention_layernorm.forward(&xs)?;
+        let h = self.mlp.forward(&h)?;
+        (xs + h).map_err(Into::into)
+    }
 }
 
 // ── Bf16Qwen3Encoder ───────────────────────────────────────────────────────
@@ -476,6 +622,7 @@ impl DecoderLayer {
 pub(crate) struct Bf16Qwen3Encoder {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
+    rotary_emb: std::sync::Arc<RotaryEmbedding>,
     device: Device,
     dtype: DType,
 }
@@ -502,9 +649,68 @@ impl Bf16Qwen3Encoder {
         Ok(Self {
             embed_tokens,
             layers,
+            rotary_emb,
             device,
             dtype,
         })
+    }
+
+    /// The Qwen3-VL multimodal forward through the final pre-norm state
+    /// (`pipeline_qwenimage21.py:293-311` reads `hidden_states[-1]` BEFORE the
+    /// language model's final norm).
+    ///
+    /// Batch-1 and unpadded: upstream encodes the positive and negative
+    /// prompts in separate calls (`:689-696`). `<|image_pad|>` embedding rows
+    /// are replaced by the merger output, RoPE is interleaved MRoPE over
+    /// `mrope`'s T/H/W positions, and DeepStack feature `k` is added at the
+    /// visual rows after decoder layer `k` (`modeling_qwen3_vl.py:861-883`).
+    /// The signature matches the GGUF arm's.
+    pub(crate) fn forward_multimodal_final_pre_norm(
+        &self,
+        input_ids: &Tensor,
+        visual: Option<super::qwen3_vl_inject::VisualInjection>,
+        mrope: &[Vec<u32>; 3],
+    ) -> Result<Tensor> {
+        self.forward_multimodal_with(
+            input_ids,
+            visual,
+            mrope,
+            super::qwen3_vl_inject::QWEN3_VL_MROPE_SECTIONS,
+            None,
+        )
+    }
+
+    /// [`Self::forward_multimodal_final_pre_norm`] with explicit MRoPE
+    /// sections and an optional query-chunk override (tests).
+    fn forward_multimodal_with(
+        &self,
+        input_ids: &Tensor,
+        visual: Option<super::qwen3_vl_inject::VisualInjection>,
+        mrope: &[Vec<u32>; 3],
+        sections: [usize; 3],
+        chunk: Option<usize>,
+    ) -> Result<Tensor> {
+        let (batch, sequence) = input_ids.dims2()?;
+        anyhow::ensure!(batch == 1, "Qwen3-VL multimodal forward is batch-1");
+        anyhow::ensure!(
+            mrope.iter().all(|axis| axis.len() == sequence),
+            "Qwen3-VL MRoPE covers {} positions but the input has {sequence}",
+            mrope[0].len()
+        );
+        let mut hidden = self.embed_tokens.forward(input_ids)?;
+        let (_, _, width) = hidden.dims3()?;
+        if let Some(visual) = &visual {
+            visual.validate(sequence, width, self.layers.len())?;
+            hidden = super::qwen3_vl_inject::inject_visual_rows(&hidden, visual)?;
+        }
+        let (cos, sin) = self.rotary_emb.mrope_tables(mrope, sections)?;
+        for (index, layer) in self.layers.iter().enumerate() {
+            hidden = layer.forward_multimodal(&hidden, &cos, &sin, chunk)?;
+            if let Some(visual) = &visual {
+                hidden = super::qwen3_vl_inject::apply_deepstack(&hidden, visual, index)?;
+            }
+        }
+        Ok(hidden)
     }
 
     /// Create causal attention mask.
@@ -1108,5 +1314,179 @@ mod tests {
             enc.forward_final_pre_norm(&one).unwrap().dims3().unwrap(),
             (1, 1, 16)
         );
+    }
+    // ── Qwen3-VL multimodal forward (Qwen Image 2.1 reference conditioning) ─
+
+    const TINY_SECTIONS: [usize; 3] = [2, 1, 1];
+
+    fn random_encoder() -> Bf16Qwen3Encoder {
+        let cfg = tiny_cfg("model.language_model");
+        let weights = tiny_weights("model.language_model")
+            .into_iter()
+            .enumerate()
+            .map(|(seed, (name, tensor))| {
+                let random = if name.ends_with("norm.weight") {
+                    (crate::engine::seeded_randn(
+                        seed as u64,
+                        tensor.dims(),
+                        &Device::Cpu,
+                        DType::F32,
+                    )
+                    .unwrap()
+                        * 0.1)
+                        .unwrap()
+                        .affine(1.0, 1.0)
+                        .unwrap()
+                } else {
+                    (crate::engine::seeded_randn(
+                        seed as u64,
+                        tensor.dims(),
+                        &Device::Cpu,
+                        DType::F32,
+                    )
+                    .unwrap()
+                        * 0.3)
+                        .unwrap()
+                };
+                (name, random)
+            })
+            .collect();
+        let vb = VarBuilder::from_tensors(weights, DType::F32, &Device::Cpu);
+        Bf16Qwen3Encoder::load(&cfg, vb).unwrap()
+    }
+
+    fn flat(tensor: &Tensor) -> Vec<f32> {
+        tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    fn max_diff(a: &Tensor, b: &Tensor) -> f32 {
+        flat(a)
+            .iter()
+            .zip(flat(b))
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn mrope_with_equal_axes_is_the_text_table_bit_for_bit() {
+        let enc = random_encoder();
+        let positions: Vec<u32> = (0..9).collect();
+        let (cos, sin) = enc
+            .rotary_emb
+            .mrope_tables(
+                &[positions.clone(), positions.clone(), positions],
+                TINY_SECTIONS,
+            )
+            .unwrap();
+        assert_eq!(
+            flat(&cos),
+            flat(&enc.rotary_emb.cos.narrow(0, 0, 9).unwrap())
+        );
+        assert_eq!(
+            flat(&sin),
+            flat(&enc.rotary_emb.sin.narrow(0, 0, 9).unwrap())
+        );
+    }
+
+    #[test]
+    fn mrope_columns_read_their_interleaved_axis() {
+        let enc = random_encoder();
+        let mrope = [vec![1u32, 5], vec![2, 6], vec![3, 7]];
+        let (cos, _) = enc.rotary_emb.mrope_tables(&mrope, TINY_SECTIONS).unwrap();
+        let table = enc.rotary_emb.cos.to_vec2::<f32>().unwrap();
+        let rows = cos.to_vec2::<f32>().unwrap();
+        for (t, row) in rows.iter().enumerate() {
+            for (i, value) in row.iter().enumerate() {
+                let axis = super::super::qwen3_vl_inject::mrope_axis(i, TINY_SECTIONS);
+                assert_eq!(*value, table[mrope[axis][t] as usize][i], "t {t} i {i}");
+            }
+        }
+        // Frequency 1 is H, 2 is W, 0 and 3 are T for sections [2, 1, 1].
+        assert_eq!(
+            (0..4)
+                .map(|i| super::super::qwen3_vl_inject::mrope_axis(i, TINY_SECTIONS))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 0]
+        );
+    }
+
+    #[test]
+    fn text_only_multimodal_forward_is_the_text_forward() {
+        let enc = random_encoder();
+        let ids = Tensor::from_slice(&[3u32, 7, 1, 9, 4, 2, 8], (1, 7), &Device::Cpu).unwrap();
+        let positions: Vec<u32> = (0..7).collect();
+        let mrope = [positions.clone(), positions.clone(), positions];
+        let text = enc.forward_final_pre_norm(&ids).unwrap();
+        let whole = enc
+            .forward_multimodal_with(&ids, None, &mrope, TINY_SECTIONS, None)
+            .unwrap();
+        assert_eq!(flat(&whole), flat(&text));
+        for chunk in [1, 2, 3] {
+            let chunked = enc
+                .forward_multimodal_with(&ids, None, &mrope, TINY_SECTIONS, Some(chunk))
+                .unwrap();
+            assert!(max_diff(&chunked, &text) < 1e-5, "chunk {chunk}");
+        }
+    }
+
+    #[test]
+    fn visual_rows_and_deepstack_change_the_forward_and_chunking_does_not() {
+        let enc = random_encoder();
+        let ids = Tensor::from_slice(&[3u32, 5, 5, 5, 5, 6, 8], (1, 7), &Device::Cpu).unwrap();
+        // One 2x2 merged image at positions 1..=4 (h/w vary inside it).
+        let mrope = [
+            vec![0u32, 1, 1, 1, 1, 3, 4],
+            vec![0, 1, 1, 2, 2, 3, 4],
+            vec![0, 1, 2, 1, 2, 3, 4],
+        ];
+        let embeds = crate::engine::seeded_randn(90, &[4, 16], &Device::Cpu, DType::F32).unwrap();
+        let visual = super::super::qwen3_vl_inject::VisualInjection {
+            positions: vec![1, 2, 3, 4],
+            embeds: embeds.clone(),
+            deepstack: vec![
+                crate::engine::seeded_randn(91, &[4, 16], &Device::Cpu, DType::F32).unwrap(),
+            ],
+        };
+        let whole = enc
+            .forward_multimodal_with(&ids, Some(visual.clone()), &mrope, TINY_SECTIONS, None)
+            .unwrap();
+        let chunked = enc
+            .forward_multimodal_with(&ids, Some(visual.clone()), &mrope, TINY_SECTIONS, Some(2))
+            .unwrap();
+        assert!(max_diff(&whole, &chunked) < 1e-5);
+        let no_deepstack = super::super::qwen3_vl_inject::VisualInjection {
+            deepstack: vec![],
+            ..visual
+        };
+        let without = enc
+            .forward_multimodal_with(&ids, Some(no_deepstack), &mrope, TINY_SECTIONS, None)
+            .unwrap();
+        // Causality: the first token precedes every visual row, so neither
+        // injection may move it.
+        assert_eq!(
+            flat(&whole.narrow(1, 0, 1).unwrap()),
+            flat(&without.narrow(1, 0, 1).unwrap())
+        );
+        assert!(max_diff(&whole, &without) > 1e-3);
+        // A mismatched MRoPE length is refused.
+        assert!(enc
+            .forward_multimodal_with(
+                &ids,
+                None,
+                &[vec![0; 6], vec![0; 6], vec![0; 6]],
+                TINY_SECTIONS,
+                None
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn the_multimodal_query_chunk_covers_short_prompts_whole() {
+        // One 1024² reference plus a prompt (~1.3k tokens) runs as one chunk.
+        assert_eq!(multimodal_query_chunk(32, 1_300), 1_300);
+        // Ten references (~10.3k tokens) are chunked under the budget.
+        let chunk = multimodal_query_chunk(32, 10_300);
+        assert!(chunk < 10_300 && 32 * chunk * 10_300 <= MULTIMODAL_SCORE_ELEMENTS);
+        assert_eq!(multimodal_query_chunk(32, 1), 1);
     }
 }

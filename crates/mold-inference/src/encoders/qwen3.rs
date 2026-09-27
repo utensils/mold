@@ -73,6 +73,22 @@ impl Qwen3Model {
             ),
         }
     }
+
+    /// Qwen3-VL's multimodal forward (image rows, MRoPE, DeepStack) through
+    /// the final pre-norm state. Batch-1.
+    pub(crate) fn forward_multimodal_final_pre_norm(
+        &mut self,
+        input_ids: &Tensor,
+        visual: Option<super::qwen3_vl_inject::VisualInjection>,
+        mrope: &[Vec<u32>; 3],
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(m) => m.forward_multimodal_final_pre_norm(input_ids, visual, mrope),
+            Self::Quantized(_) => anyhow::bail!(
+                "Qwen Image 2.1 reference conditioning requires the BF16 text encoder in this build"
+            ),
+        }
+    }
 }
 
 /// Reusable Qwen3 text encoder wrapper.
