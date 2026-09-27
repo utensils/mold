@@ -2075,24 +2075,25 @@ pub fn flux_vae_decode_peak_bytes(width: u32, height: u32, vae_dtype_bytes: u32)
 }
 
 /// Qwen Image 2.1 VAE-decode workspace independent of the canvas (BF16
-/// bytes): the latent-resolution trunk, allocator scratch and the cuDNN
-/// workspace. Fitted with [`QWEN_IMAGE21_VAE_DECODE_BYTES_PER_PIXEL`].
-const QWEN_IMAGE21_VAE_DECODE_BASE_BYTES: f64 = 1.25e9;
+/// bytes). Fitted together with [`QWEN_IMAGE21_VAE_DECODE_BYTES_PER_PIXEL`].
+const QWEN_IMAGE21_VAE_DECODE_BASE_BYTES: f64 = 0.3e9;
 
 /// Qwen Image 2.1 VAE-decode peak per output pixel (BF16) when no im2col
 /// column buffer is live: cuDNN, or im2col banded at 2 GiB. The
 /// full-resolution 288- and 144-channel stages dominate, and each
-/// `RmsNorm2d` widens its input to F32. Fitted on an L40S against
-/// `official_cuda_vae_decode_benchmark` — 6.45 GB at 1024², 6.34 GB at
-/// 1344x768, 22.98 GB at 2048², 22.68 GB at 2752x1536 — with ~4% margin.
-const QWEN_IMAGE21_VAE_DECODE_BYTES_PER_PIXEL: f64 = 5_300.0;
+/// `RmsNorm2d` widens its input to F32. Fitted on an L40S to the worst peak
+/// of the standalone decode benchmark and of decodes inside real renders
+/// (after the transformer is dropped, where the stream-ordered pool is
+/// fragmented and the 2K cuDNN peak rose from 22.9 to 27.6 GB): 6.45 GB at
+/// 1024², 6.34 GB at 1344x768, 27.25 GB at 2048², 27.55 GB at 2752x1536.
+const QWEN_IMAGE21_VAE_DECODE_BYTES_PER_PIXEL: f64 = 6_600.0;
 
 /// Extra per-pixel peak of an UNBANDED im2col decode, i.e. every canvas
 /// inside the v0.32 envelope under `MOLD_CONV=im2col` or a build without
 /// `cudnn`: the 288-channel full-resolution 3x3 convolution's column buffer
 /// (`288 * 9 * 2` = 5,184 B/px) plus its GEMM output. Measured 13.52 GB at
 /// 1024² and 13.32 GB at 1344x768.
-const QWEN_IMAGE21_VAE_DECODE_IM2COL_EXTRA_BYTES_PER_PIXEL: f64 = 7_000.0;
+const QWEN_IMAGE21_VAE_DECODE_IM2COL_EXTRA_BYTES_PER_PIXEL: f64 = 6_700.0;
 
 /// Peak device bytes a Qwen Image 2.1 VAE decode allocates at this canvas
 /// under `conv_backend`, above what was resident before the decode.
@@ -2100,8 +2101,9 @@ const QWEN_IMAGE21_VAE_DECODE_IM2COL_EXTRA_BYTES_PER_PIXEL: f64 = 7_000.0;
 /// Calibrated in BF16 (the CUDA VAE dtype); `vae_dtype_bytes` scales it, so
 /// Metal's F32 VAE is priced at twice the workspace. im2col pays its column
 /// buffer only inside `qwen_image21::banded_conv::V032_MAX_PIXELS`; past it
-/// every column buffer is banded at 2 GiB and the decode costs what the cuDNN
-/// decode costs (measured: 21.5–22.6 GB against 22.4–23.0 GB at 2K).
+/// every column buffer is banded at 2 GiB and is priced on the cuDNN curve,
+/// which bounds it (banded im2col measured 21.5–25.1 GB at 2K against cuDNN's
+/// 22.4–27.6 GB).
 pub fn qwen_image21_vae_decode_peak_bytes(
     width: u32,
     height: u32,
@@ -7724,8 +7726,9 @@ mod qwen_image21_vae_decode_peak_tests {
     use super::qwen_image21_vae_decode_peak_bytes;
     use crate::conv_policy::ConvBackend;
 
-    /// Peak increments `official_cuda_vae_decode_benchmark` measured on an
-    /// L40S (BF16 VAE, max of a cold and a warm run), recorded in
+    /// Worst peak increments measured on an L40S (BF16 VAE) across the
+    /// standalone `official_cuda_vae_decode_benchmark` and decodes inside real
+    /// `official_cuda_mode_benchmark` renders, recorded in
     /// `docs/qualification/qwen-image-2.1-cuda-performance.json`. The estimate
     /// must cover every one of them with no more than 15% slack.
     const MEASURED: [(u32, u32, ConvBackend, u64); 8] = [
@@ -7733,10 +7736,10 @@ mod qwen_image21_vae_decode_peak_tests {
         (1024, 1024, ConvBackend::Im2Col, 13_522_436_096),
         (1344, 768, ConvBackend::Cudnn, 6_341_787_648),
         (1344, 768, ConvBackend::Im2Col, 13_321_109_504),
-        (2048, 2048, ConvBackend::Cudnn, 22_984_785_920),
-        (2048, 2048, ConvBackend::Im2Col, 21_474_836_480),
-        (2752, 1536, ConvBackend::Cudnn, 22_682_796_032),
-        (2752, 1536, ConvBackend::Im2Col, 22_615_687_168),
+        (2048, 2048, ConvBackend::Cudnn, 27_248_295_936),
+        (2048, 2048, ConvBackend::Im2Col, 24_897_388_544),
+        (2752, 1536, ConvBackend::Cudnn, 27_550_285_824),
+        (2752, 1536, ConvBackend::Im2Col, 25_065_160_704),
     ];
 
     #[test]
@@ -7760,7 +7763,8 @@ mod qwen_image21_vae_decode_peak_tests {
     fn im2col_pays_the_column_buffer_only_inside_the_v032_envelope() {
         let cudnn = qwen_image21_vae_decode_peak_bytes(1024, 1024, ConvBackend::Cudnn, 2);
         let im2col = qwen_image21_vae_decode_peak_bytes(1024, 1024, ConvBackend::Im2Col, 2);
-        assert!(im2col > 2 * cudnn);
+        // At least the 288-channel column buffer: 288 * 9 * 2 B/px.
+        assert!(im2col >= cudnn + 288 * 9 * 2 * 1024 * 1024);
         assert_eq!(
             qwen_image21_vae_decode_peak_bytes(2752, 1536, ConvBackend::Im2Col, 2),
             qwen_image21_vae_decode_peak_bytes(2752, 1536, ConvBackend::Cudnn, 2),
