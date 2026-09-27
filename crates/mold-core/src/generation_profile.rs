@@ -2092,6 +2092,22 @@ fn base_compact_steps_note() -> String {
 /// table is named alongside them because a timestep means nothing without
 /// one, and the shipped distills do not share a table — the 1.3B sits on
 /// shift 8 and the TI2V-5B on shift 5.
+/// Why a Qwen Image 2.1 turbo tier's guidance is pinned.
+const QWEN21_TURBO_GUIDANCE_NOTE: &str = "The Viggle turbo distill runs one forward per step; guidance is fixed at 1.0 and a negative prompt is not encoded.";
+
+fn fixed_qwen21_turbo_steps_note(schedule: crate::manifest::QwenTurboSchedule) -> String {
+    let sigmas = schedule
+        .sigmas
+        .iter()
+        .map(|sigma| sigma.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Fixed by the Viggle turbo distill: {} steps on the published sigmas {sigmas}.",
+        schedule.steps()
+    )
+}
+
 fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
     let rungs = ladder
         .rungs
@@ -2339,6 +2355,13 @@ fn recipe(
         .then(|| crate::manifest::wan_dmd_ladder(&normalized_model))
         .flatten();
     let wan_dmd_steps = wan_dmd_ladder.map(|ladder| ladder.rungs.len() as u32);
+    // A Qwen Image 2.1 turbo tier walks Viggle's six published sigmas with
+    // the distilled adapter installed: steps and guidance are the recipe's
+    // (`manifest::qwen_image21_turbo_schedule`), never a preference.
+    let qwen21_turbo = (family == "qwen-image21")
+        .then(|| crate::manifest::qwen_image21_turbo_schedule(&normalized_model))
+        .flatten();
+    let pinned_steps = wan_dmd_steps.or(qwen21_turbo.map(|schedule| schedule.steps()));
     // BFL's own FP8 Flux.2 conversions store `weight / weight_scale`, and a
     // LoRA merge widens the weight it patches — dropping the scale on exactly
     // the layers the adapter touches. `Flux2Engine::load_transformer` refuses
@@ -2459,12 +2482,12 @@ fn recipe(
     // the identity and never from `input.default_steps` — that value is
     // laundered through user `model_prefs` in `build_model_catalog` and can
     // carry a stale off-ladder number.
-    let default_steps = match (wan_dmd_steps, h3_compact) {
+    let default_steps = match (pinned_steps, h3_compact) {
         (Some(steps), _) => steps,
         (None, true) => h3_compact_steps,
         (None, false) => input.default_steps,
     };
-    let steps_min = match (wan_dmd_steps, h3_compact_turbo_steps, family) {
+    let steps_min = match (pinned_steps, h3_compact_turbo_steps, family) {
         (Some(steps), _, _) | (None, Some(steps), _) => steps,
         // The undistilled floor is the identity's own smallest REVIEWED
         // schedule, not the sampler's arithmetic minimum — the same authority
@@ -2473,12 +2496,12 @@ fn recipe(
         (None, None, "minimax-h3") => crate::minimax_h3::steps_floor_for_model(input.model),
         _ => 1,
     };
-    let steps_max = match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
+    let steps_max = match (pinned_steps, h3_compact_turbo_steps, h3_compact) {
         (Some(steps), _, _) | (None, Some(steps), _) => steps,
         (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
         (None, None, false) => 100,
     };
-    let steps_mode = if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
+    let steps_mode = if pinned_steps.is_some() || h3_compact_turbo_steps.is_some() {
         ControlMode::Fixed
     } else {
         ControlMode::Adjustable
@@ -2530,6 +2553,7 @@ fn recipe(
             // the note contract was widened for.
             note: wan_dmd_ladder
                 .map(fixed_dmd_steps_note)
+                .or_else(|| qwen21_turbo.map(fixed_qwen21_turbo_steps_note))
                 .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note))
                 .or_else(|| (family == "minimax-h3").then(base_compact_steps_note)),
         },
@@ -2551,7 +2575,11 @@ fn recipe(
             } else {
                 ControlMode::Fixed
             },
-            note: fixed_guidance_note(family, wan_dmd_ladder, guidance_caps, effective_guidance),
+            note: if qwen21_turbo.is_some() && !guidance_caps.adjustable {
+                Some(QWEN21_TURBO_GUIDANCE_NOTE.to_string())
+            } else {
+                fixed_guidance_note(family, wan_dmd_ladder, guidance_caps, effective_guidance)
+            },
         },
         temporal,
         capabilities: GenerationCapabilitiesProfile {
@@ -3377,6 +3405,79 @@ mod tests {
         assert!(crate::validation::validate_generate_request(&req).is_err());
         assert_eq!(recipe.provenance.len(), 2);
         assert_eq!(recipe.provenance[1].kind, ProvenanceKind::MoldPolicy);
+    }
+
+    /// A turbo tag pins the distill's recipe — steps, guidance, no negative
+    /// prompt — from its IDENTITY, while keeping everything else the base
+    /// tier advertises: references, transparency and a user LoRA on top.
+    #[test]
+    fn qwen_image21_turbo_tiers_pin_the_viggle_recipe() {
+        for tag in crate::manifest::QWEN_IMAGE21_TURBO_TAGS {
+            let name = format!("qwen-image-2.1-turbo:{tag}");
+            let manifest = crate::manifest::find_manifest(&name).unwrap();
+            // A stale model_prefs default must not reach the pinned control.
+            let profile = generation_profile_for_manifest_with_defaults(
+                manifest,
+                GenerationDefaultsProfile {
+                    width: 1024,
+                    height: 1024,
+                    steps: 40,
+                    guidance: 4.0,
+                    frames: None,
+                    fps: None,
+                    negative_prompt: None,
+                },
+            );
+            let recipe = profile.default_recipe().unwrap();
+            assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{name}");
+            assert_eq!((recipe.steps.min, recipe.steps.max), (6, 6), "{name}");
+            assert_eq!(recipe.defaults.steps, 6, "{name}");
+            assert!(recipe.steps.note.as_deref().unwrap().contains("0.9375"));
+            assert_eq!(recipe.guidance.mode, ControlMode::Fixed, "{name}");
+            assert_eq!(recipe.guidance.default, 1.0, "{name}");
+            assert_eq!(recipe.defaults.guidance, 1.0, "{name}");
+            assert!(recipe.guidance.note.as_deref().unwrap().contains("turbo"));
+            assert_eq!(
+                recipe.capabilities.negative_prompt.mode,
+                ControlMode::Hidden,
+                "{name}"
+            );
+            assert!(recipe.capabilities.supports_lora, "{name}");
+            let base = crate::manifest::find_manifest(&format!("qwen-image-2.1:{tag}")).unwrap();
+            let base_profile = generation_profile_for_manifest(base);
+            let base_recipe = base_profile.default_recipe().unwrap();
+            assert_eq!(
+                recipe.capabilities.lora.max_count,
+                base_recipe.capabilities.lora.max_count
+            );
+            assert_eq!(
+                recipe.capabilities.reference_images,
+                base_recipe.capabilities.reference_images
+            );
+            assert_eq!(
+                recipe.capabilities.transparency,
+                base_recipe.capabilities.transparency
+            );
+            assert_eq!(recipe.resolution, base_recipe.resolution);
+            // The base tier keeps ordinary true CFG.
+            assert_eq!(base_recipe.steps.mode, ControlMode::Adjustable);
+            assert_eq!(base_recipe.guidance.mode, ControlMode::Adjustable);
+            assert_eq!(
+                base_recipe.capabilities.negative_prompt.mode,
+                ControlMode::Adjustable
+            );
+
+            // Admission refuses anything but the recipe.
+            let mut req = qwen21_request(&name);
+            req.steps = 6;
+            req.guidance = 1.0;
+            validate_request_against_generation_profile(&profile, &req).unwrap();
+            req.steps = 8;
+            assert!(validate_request_against_generation_profile(&profile, &req).is_err());
+            req.steps = 6;
+            req.guidance = 4.0;
+            assert!(validate_request_against_generation_profile(&profile, &req).is_err());
+        }
     }
 
     #[test]

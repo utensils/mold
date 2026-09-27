@@ -2571,6 +2571,12 @@ impl GuidanceCapabilities {
             {
                 Self::FIXED_ONE
             }
+            // A Qwen Image 2.1 turbo tier runs Viggle's 6-step distill at
+            // `true_cfg_scale = 1.0`: one forward per step, no negative
+            // branch (`manifest::qwen_image21_turbo_schedule`).
+            "qwen-image21" if crate::manifest::qwen_image21_turbo_schedule(model).is_some() => {
+                Self::FIXED_ONE
+            }
             // The undistilled FLUX.2 [klein] base checkpoints are the one
             // Flux.2 tier that runs a real unconditional branch, so they are
             // the one that can use a negative prompt. Every distilled tier —
