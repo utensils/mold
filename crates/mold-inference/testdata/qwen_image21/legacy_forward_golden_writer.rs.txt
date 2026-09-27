@@ -1,0 +1,155 @@
+#[cfg(test)]
+mod golden_writer {
+    //! Throwaway: writes the v0.32 (c1dfa872) text-to-image forward's outputs
+    //! for `qwen_image21/transformer.rs`'s committed legacy golden.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config(heads: usize) -> QwenImage21TransformerConfig {
+        QwenImage21TransformerConfig {
+            in_channels: 4,
+            out_channels: 4,
+            context_in_dim: 8,
+            num_attention_heads: heads,
+            attention_head_dim: 8,
+            num_layers: 3,
+            mlp_ratio: 2,
+            axes_dims_rope: [2, 2, 4],
+            eps: 1e-6,
+        }
+    }
+
+    fn shapes(cfg: &QwenImage21TransformerConfig) -> Vec<(String, Vec<usize>)> {
+        let inner = cfg.inner_dim();
+        let mut out = vec![
+            ("img_in.weight".to_string(), vec![inner, cfg.in_channels]),
+            (
+                "time_text_embed.timestep_embedder.linear_1.weight".into(),
+                vec![inner, 256],
+            ),
+            (
+                "time_text_embed.timestep_embedder.linear_2.weight".into(),
+                vec![inner, inner],
+            ),
+            ("txt_in.text_norm.weight".into(), vec![cfg.context_in_dim]),
+            (
+                "txt_in.in_layer.weight".into(),
+                vec![inner, cfg.context_in_dim],
+            ),
+            ("txt_in.out_layer.weight".into(), vec![inner, inner]),
+            ("modulation.1.weight".into(), vec![4 * inner, inner]),
+            ("norm_out.linear.weight".into(), vec![inner, inner]),
+            ("proj_out.weight".into(), vec![cfg.out_channels, inner]),
+        ];
+        for index in 0..cfg.num_layers {
+            let p = format!("transformer_blocks.{index}");
+            out.push((
+                format!("{p}.attn.norm_q.weight"),
+                vec![cfg.attention_head_dim],
+            ));
+            out.push((
+                format!("{p}.attn.norm_k.weight"),
+                vec![cfg.attention_head_dim],
+            ));
+            for name in ["to_q", "to_k", "to_v"] {
+                out.push((format!("{p}.attn.{name}.weight"), vec![inner, inner]));
+            }
+            out.push((format!("{p}.attn.to_out.0.weight"), vec![inner, inner]));
+            out.push((
+                format!("{p}.img_mlp.proj.weight"),
+                vec![inner * cfg.mlp_ratio, inner],
+            ));
+            out.push((
+                format!("{p}.img_mlp.gate_layer.weight"),
+                vec![inner * cfg.mlp_ratio, inner],
+            ));
+            out.push((
+                format!("{p}.img_mlp.out.weight"),
+                vec![inner, inner * cfg.mlp_ratio],
+            ));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn write_legacy_golden() {
+        let out = std::env::var("QWEN21_LEGACY_GOLDEN").expect("QWEN21_LEGACY_GOLDEN");
+        let cpu = Device::Cpu;
+        let mut saved: HashMap<String, Tensor> = HashMap::new();
+        // Conditioning: batch 2 with two padding rows on row 0, and batch 1.
+        let length = 5usize;
+        let conds = vec![
+            (
+                crate::engine::seeded_randn(41, &[2, length, 8], &cpu, DType::F32).unwrap(),
+                vec![
+                    (0..length).map(|i| i + 2 < length).collect::<Vec<bool>>(),
+                    vec![true; length],
+                ],
+            ),
+            (
+                crate::engine::seeded_randn(42, &[1, length, 8], &cpu, DType::F32).unwrap(),
+                vec![vec![true; length]],
+            ),
+        ];
+        for (ci, (emb, valid)) in conds.iter().enumerate() {
+            saved.insert(format!("cond{ci}.embeddings"), emb.clone());
+            let mask: Vec<u8> = valid.iter().flatten().map(|v| u8::from(*v)).collect();
+            saved.insert(
+                format!("cond{ci}.valid"),
+                Tensor::from_vec(mask, (valid.len(), length), &cpu).unwrap(),
+            );
+        }
+        let mut seed = 1000u64;
+        for heads in [1usize, 2] {
+            let cfg = config(heads);
+            let mut weights = HashMap::new();
+            for (name, shape) in shapes(&cfg) {
+                seed += 1;
+                let w = (crate::engine::seeded_randn(seed, &shape, &cpu, DType::F32).unwrap()
+                    * 0.2)
+                    .unwrap();
+                saved.insert(format!("h{heads}.weight.{name}"), w.clone());
+                weights.insert(name, w);
+            }
+            for dtype in [DType::F32, DType::F16] {
+                let vb = VarBuilder::from_tensors(weights.clone(), dtype, &cpu);
+                let transformer =
+                    QwenImage21Transformer::from_var_builder(config(heads), vb).unwrap();
+                for (ci, (emb, valid)) in conds.iter().enumerate() {
+                    let conditioning = QwenImage21TextConditioning {
+                        embeddings: emb.to_dtype(dtype).unwrap(),
+                        valid_tokens: valid.clone(),
+                    };
+                    let batch = valid.len();
+                    let mut branch = transformer.prepare_t2i(&conditioning, 2, 4);
+                    for (step, time) in [1.0f64, 0.6, 0.2].into_iter().enumerate() {
+                        let latents = crate::engine::seeded_randn(
+                            50 + step as u64,
+                            &[batch, 8, 4],
+                            &cpu,
+                            dtype,
+                        )
+                        .unwrap();
+                        let uncached = transformer
+                            .forward_with_cache(
+                                &latents,
+                                time,
+                                &conditioning,
+                                2,
+                                4,
+                                PrefixCache::Disabled,
+                            )
+                            .unwrap();
+                        let cached = branch.forward(&latents, time).unwrap();
+                        let key = format!("h{heads}.{dtype:?}.c{ci}.s{step}");
+                        saved.insert(format!("{key}.latents"), latents);
+                        saved.insert(format!("{key}.uncached"), uncached);
+                        saved.insert(format!("{key}.cached"), cached);
+                    }
+                }
+            }
+        }
+        candle_core::safetensors::save(&saved, &out).unwrap();
+    }
+}

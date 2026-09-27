@@ -2243,6 +2243,80 @@ mod tests {
         ]
     }
 
+    /// The legacy forward is BITWISE the output `c1dfa872` (v0.32) itself
+    /// produced — not the in-tree oracle, which reads live helpers that may
+    /// move with it. `testdata/qwen_image21/legacy_forward_golden.safetensors`
+    /// was written by that revision's code (the README has the recipe) from
+    /// seeded random weights: 1- and 2-head, 3 layers, padded and unpadded
+    /// conditioning, F32 and F16 on CPU, uncached and cached over three steps.
+    #[test]
+    fn legacy_forward_matches_the_c1dfa872_golden() {
+        let golden = candle_core::safetensors::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/qwen_image21/legacy_forward_golden.safetensors"),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let length = 5;
+        let conditionings: Vec<(Tensor, Vec<Vec<bool>>)> = (0..2)
+            .map(|ci| {
+                let valid = golden[&format!("cond{ci}.valid")].to_vec2::<u8>().unwrap();
+                (
+                    golden[&format!("cond{ci}.embeddings")].clone(),
+                    valid
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|v| v != 0).collect())
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut compared = 0;
+        for heads in [1usize, 2] {
+            let prefix = format!("h{heads}.weight.");
+            let weights: HashMap<String, Tensor> = golden
+                .iter()
+                .filter_map(|(name, value)| {
+                    name.strip_prefix(&prefix)
+                        .map(|name| (name.to_string(), value.clone()))
+                })
+                .collect();
+            for dtype in [DType::F32, DType::F16] {
+                let mut cfg = tiny_config();
+                cfg.num_layers = 3;
+                cfg.num_attention_heads = heads;
+                let vb = VarBuilder::from_tensors(weights.clone(), dtype, &Device::Cpu);
+                let mut transformer = QwenImage21Transformer::from_var_builder(cfg, vb).unwrap();
+                transformer.set_exec_path(Qwen21ExecPath::legacy());
+                for (ci, (embeddings, valid)) in conditionings.iter().enumerate() {
+                    let conditioning = QwenImage21TextConditioning {
+                        embeddings: embeddings.to_dtype(dtype).unwrap(),
+                        valid_tokens: valid.clone(),
+                        image_slots: vec![vec![false; length]; valid.len()],
+                    };
+                    let mut branch = transformer
+                        .prepare_t2i(&conditioning, 2, 4, PrefixCacheDecision::Retain)
+                        .unwrap();
+                    for (step, time) in [1.0, 0.6, 0.2].into_iter().enumerate() {
+                        let key = format!("h{heads}.{dtype:?}.c{ci}.s{step}");
+                        let latents = &golden[&format!("{key}.latents")];
+                        assert_eq!(latents.dtype(), dtype);
+                        let uncached = transformer
+                            .forward_t2i(latents, time, &conditioning, 2, 4)
+                            .unwrap();
+                        let cached = branch.forward(latents, time).unwrap();
+                        for (name, actual) in [("uncached", uncached), ("cached", cached)] {
+                            let expected = &golden[&format!("{key}.{name}")];
+                            assert_eq!(actual.dtype(), expected.dtype(), "{key}.{name}");
+                            assert_eq!(flat(&actual), flat(expected), "{key}.{name}");
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 2 * 2 * 2 * 3 * 2);
+    }
+
     /// The layout-generalized text-to-image forward is BITWISE the frozen
     /// v0.32 forward, uncached and across cached steps, padded or not, in
     /// F32 and BF16 — archived seeds keep their bytes.
