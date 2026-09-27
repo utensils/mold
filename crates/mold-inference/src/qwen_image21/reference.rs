@@ -96,15 +96,19 @@ impl PreparedReference {
     }
 }
 
-/// Decode (EXIF orientation, ICC to sRGB) and resize one reference
-/// (`P:653-663`): a non-RGBA source becomes opaque RGBA, the canvas is the
-/// reference area at the source's own aspect, and the resize is Pillow's
-/// premultiplied LANCZOS.
+/// Decode and resize one reference (`P:653-663`): a non-RGBA source becomes
+/// opaque RGBA, the canvas is the reference area at the source's own aspect,
+/// and the resize is Pillow's premultiplied LANCZOS.
 ///
-/// Upstream's PIL `open` does not apply EXIF orientation; mold does for every
-/// source image, so a phone photo is conditioned the right way up.
+/// The decode is `img_utils::decode_reference_rgba` — bounded by the
+/// admission limits, Pillow's 16-bit conversion, and the one decoder the
+/// output-alpha rule also reads. Two deliberate divergences from upstream's
+/// PIL `open` live there, documented where they happen: EXIF orientation is
+/// applied (a phone photo conditions the right way up, and every canvas
+/// authority reads the same oriented size), and an embedded ICC profile is
+/// converted to sRGB.
 pub(crate) fn prepare_reference(bytes: &[u8]) -> Result<PreparedReference> {
-    let source = crate::img_utils::decode_oriented_srgb_rgba(bytes)
+    let source = crate::img_utils::decode_reference_rgba(bytes)
         .context("failed to decode a Qwen Image 2.1 reference image")?;
     prepare_decoded_reference(&source)
 }
