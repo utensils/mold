@@ -748,6 +748,7 @@ fn every_staged_tier_dequantizes_to_the_bf16_shards() {
                 Q21Backend::Safetensors(st) => st
                     .get(&format!("{name}.weight"))
                     .is_ok_and(|view| format!("{:?}", view.dtype()) == "BF16"),
+                Q21Backend::Dense(_) => true,
             };
             if stored_dense {
                 if error > dense_worst {

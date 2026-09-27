@@ -515,6 +515,7 @@ impl QwenImage21Engine {
             } else {
                 conditional_prediction
             };
+            transformer.ensure_finite(&prediction, step)?;
             latents = scheduler.step(&prediction, &latents)?;
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,

@@ -28,11 +28,6 @@
 //! checkpoint fused — one GEMM, one dequant — and [`split_gate_up`] is the one
 //! place the halves are named.
 
-// The transformer takes its linears from `Q21WeightSource` once the tier
-// loader is wired into `transformer.rs` (which the layout-seam work owns this
-// wave); until then the weight-gated parity tests are the only constructors.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -62,7 +57,6 @@ pub(crate) fn parse_qwen_image21_qmatmul(value: Option<&str>) -> bool {
 }
 
 /// Process-frozen [`QMATMUL_ENV`].
-#[allow(dead_code)] // read by the engine when the tier wiring lands
 pub(crate) fn qmatmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -217,12 +211,14 @@ impl Q21Linear {
     }
 
     /// The installed bypass stack.
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn adapters(&self) -> &[LinearLoraAdapter] {
         &self.adapters
     }
 
     /// Replace the bypass stack. The base weight is untouched, so a new
     /// request's LoRA set is an adapter swap, never a transformer rebuild.
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn set_adapters(&mut self, adapters: Vec<LinearLoraAdapter>) -> Result<()> {
         for adapter in &adapters {
             let (rank, in_features) = adapter.down.dims2()?;
@@ -249,11 +245,13 @@ impl Q21Linear {
         Ok(())
     }
 
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn clear_adapters(&mut self) {
         self.adapters.clear();
     }
 
     /// Device bytes the installed adapters hold.
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn adapter_bytes(&self) -> u64 {
         self.adapters
             .iter()
@@ -354,7 +352,7 @@ pub(crate) enum Q21GateUp {
 }
 
 impl Q21GateUp {
-    #[allow(dead_code)] // read by the transformer MLP when the tier wiring lands
+    #[allow(dead_code)] // the LoRA installer sizes gate/proj adapters with it
     pub(crate) fn hidden(&self) -> usize {
         match self {
             Self::Split { gate, .. } => gate.out_features(),
@@ -377,6 +375,7 @@ impl Q21GateUp {
         Ok((candle_nn::ops::silu(&gate)? * up)?)
     }
 
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     /// Install the bypass stacks that target `gate_layer` and `proj`. On a
     /// fused checkpoint each lands on its own half of `gate_up`'s output.
     pub(crate) fn set_adapters(
@@ -414,6 +413,7 @@ impl Q21GateUp {
         }
     }
 
+    #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn clear_adapters(&mut self) {
         match self {
             Self::Split { gate, proj } => {
@@ -430,6 +430,10 @@ enum Q21Backend {
     Safetensors(MmapedSafetensors),
     /// A resident GGUF builder, already `pp`'d past unsloth's prefix.
     Gguf(mold_candle::quantized::VarBuilder),
+    /// An ordinary dense builder (synthetic tests, or any caller that already
+    /// holds one): every linear is the Dense arm, bit-identical to
+    /// `candle_nn::linear_no_bias` over the same builder.
+    Dense(candle_nn::VarBuilder<'static>),
 }
 
 /// The one loader every Qwen Image 2.1 tier goes through.
@@ -518,7 +522,7 @@ impl Q21WeightSource {
                 types.dedup();
                 types
             }
-            Q21Backend::Safetensors(_) => Vec::new(),
+            Q21Backend::Safetensors(_) | Q21Backend::Dense(_) => Vec::new(),
         };
         Ok(Self {
             format,
@@ -530,6 +534,33 @@ impl Q21WeightSource {
         })
     }
 
+    /// Wrap a dense `VarBuilder`. Its dtype is the working dtype.
+    pub(crate) fn from_var_builder(vb: candle_nn::VarBuilder<'static>) -> Self {
+        Self {
+            format: QwenImage21TransformerFormat::Bf16,
+            device: vb.device().clone(),
+            dtype: vb.dtype(),
+            backend: Q21Backend::Dense(vb),
+            qmatmul: false,
+            gguf_types: Vec::new(),
+        }
+    }
+
+    /// The whole source as a path builder at its root.
+    pub(crate) fn root(&self) -> Q21Vb<'_> {
+        Q21Vb {
+            source: self,
+            prefix: String::new(),
+        }
+    }
+
+    /// Whether a CUDA GGUF linear may have taken the QMatMul arm, which is
+    /// what the per-step finiteness guard names.
+    pub(crate) fn qmatmul_guard(&self) -> bool {
+        self.qmatmul && matches!(self.format, QwenImage21TransformerFormat::Gguf { .. })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))] // qualification surface
     pub(crate) fn format(&self) -> QwenImage21TransformerFormat {
         self.format
     }
@@ -550,21 +581,13 @@ impl Q21WeightSource {
         }
     }
 
-    /// The per-step finiteness guard for a transformer built from this source:
-    /// [`ensure_finite_prediction`] with this tier's label and QMatMul switch.
-    #[allow(dead_code)] // the denoise loop's caller lands with the tier wiring
-    pub(crate) fn ensure_finite(&self, prediction: &Tensor, step: usize) -> Result<()> {
-        let qmatmul =
-            self.qmatmul && matches!(self.format, QwenImage21TransformerFormat::Gguf { .. });
-        ensure_finite_prediction(prediction, step, &self.tier_label(), qmatmul)
-    }
-
     /// Whether the checkpoint carries tensor `name` (in the logical, unprefixed
     /// key space — for a torchao FP8 linear the `.weight` name answers for its
     /// `._weight_qdata`).
     pub(crate) fn contains(&self, name: &str) -> bool {
         match &self.backend {
             Q21Backend::Gguf(vb) => vb.contains_key(name),
+            Q21Backend::Dense(vb) => vb.contains_tensor(name),
             Q21Backend::Safetensors(st) => {
                 st.get(name).is_ok()
                     || name
@@ -585,6 +608,7 @@ impl Q21WeightSource {
                 .get_no_shape(name)?
                 .dequantize(&self.device)?
                 .to_dtype(dtype)?),
+            Q21Backend::Dense(vb) => Ok(vb.get_unchecked_dtype(name, dtype)?),
         }
     }
 
@@ -608,6 +632,11 @@ impl Q21WeightSource {
                 let weight = vb.get((out_features, in_features), &weight_name)?;
                 Q21Linear::quantized(weight, &self.device, self.dtype, self.qmatmul)?
             }
+            Q21Backend::Dense(vb) => Q21Linear::dense(candle_nn::linear_no_bias(
+                in_features,
+                out_features,
+                vb.pp(prefix),
+            )?)?,
             Q21Backend::Safetensors(st) => {
                 let bias = st
                     .get(&bias_name)
@@ -678,6 +707,7 @@ impl Q21WeightSource {
     /// A fused checkpoint answers `…img_mlp.gate_layer` / `…img_mlp.proj` from
     /// the matching half of `gate_up`. This is the qualification surface: it is
     /// what the parity tests compare against the BF16 shards.
+    #[cfg_attr(not(test), allow(dead_code))] // qualification surface
     pub(crate) fn dequantized_weight(&self, prefix: &str, device: &Device) -> Result<Tensor> {
         let half = |fused_base: &str, second: bool| -> Result<Tensor> {
             let fused = self.dequantized_weight(fused_base, device)?;
@@ -702,6 +732,9 @@ impl Q21WeightSource {
                 .get_no_shape(&weight_name)?
                 .dequantize(device)?
                 .to_dtype(DType::F32)?),
+            Q21Backend::Dense(vb) => Ok(vb
+                .get_unchecked_dtype(&weight_name, DType::F32)?
+                .to_device(device)?),
             Q21Backend::Safetensors(st) => {
                 let qdata = format!("{prefix}._weight_qdata");
                 if st.get(&qdata).is_ok() {
@@ -739,6 +772,7 @@ impl Q21WeightSource {
     /// normalized to diffusers' names (a fused `gate_up` answers as its
     /// `gate_layer` and `proj` halves). Used by the parity tests to cover the
     /// whole file rather than a sample.
+    #[cfg_attr(not(test), allow(dead_code))] // qualification surface
     pub(crate) fn logical_linear_names(&self) -> Vec<String> {
         let names: Vec<String> = match &self.backend {
             Q21Backend::Gguf(vb) => {
@@ -753,6 +787,7 @@ impl Q21WeightSource {
                     .map(str::to_string)
                     .collect()
             }
+            Q21Backend::Dense(_) => Vec::new(),
             Q21Backend::Safetensors(st) => st
                 .tensors()
                 .into_iter()
@@ -775,6 +810,62 @@ impl Q21WeightSource {
             }
         }
         logical.into_keys().collect()
+    }
+}
+
+/// A `VarBuilder`-shaped view of a [`Q21WeightSource`]: a dotted prefix plus
+/// the accessors a transformer module needs. It is what the transformer's
+/// constructors take, so the one `linear()` helper answers in whatever arm the
+/// checkpoint encodes.
+#[derive(Clone)]
+pub(crate) struct Q21Vb<'a> {
+    source: &'a Q21WeightSource,
+    prefix: String,
+}
+
+impl<'a> Q21Vb<'a> {
+    pub(crate) fn pp<S: ToString>(&self, segment: S) -> Self {
+        let segment = segment.to_string();
+        Self {
+            source: self.source,
+            prefix: if self.prefix.is_empty() {
+                segment
+            } else {
+                format!("{}.{segment}", self.prefix)
+            },
+        }
+    }
+
+    fn name(&self, leaf: &str) -> String {
+        if self.prefix.is_empty() {
+            leaf.to_string()
+        } else {
+            format!("{}.{leaf}", self.prefix)
+        }
+    }
+
+    /// A dense tensor at the working dtype, shape-checked like
+    /// `VarBuilder::get`.
+    pub(crate) fn get<S: Into<candle_core::Shape>>(&self, shape: S, leaf: &str) -> Result<Tensor> {
+        let name = self.name(leaf);
+        let tensor = self.source.tensor(&name, self.source.dtype)?;
+        let expected = shape.into();
+        anyhow::ensure!(
+            tensor.shape() == &expected,
+            "Qwen Image 2.1 tensor {name} is {:?}, expected {expected:?}",
+            tensor.shape()
+        );
+        Ok(tensor)
+    }
+
+    /// The linear at this prefix.
+    pub(crate) fn linear(&self, in_features: usize, out_features: usize) -> Result<Q21Linear> {
+        self.source.linear(&self.prefix, in_features, out_features)
+    }
+
+    /// The MLP input projections at this (`img_mlp`) prefix.
+    pub(crate) fn gate_up(&self, dim: usize, hidden: usize) -> Result<Q21GateUp> {
+        self.source.gate_up(&self.prefix, dim, hidden)
     }
 }
 
