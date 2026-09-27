@@ -3698,7 +3698,7 @@ fn qwen_image21_tiers() -> Vec<QwenImage21Tier> {
         },
         QwenImage21Tier {
             tag: "q3",
-            description: "Qwen Image 2.1 Q3_K GGUF transformer (3.3 GB)",
+            description: "Qwen Image 2.1 Q3_K GGUF transformer (3.3 GB) — coherent, softer fine text",
             transformer: vec![gguf(
                 "qwen_image_2.1-Q3_K.gguf",
                 3_270_553_632,
@@ -3707,7 +3707,7 @@ fn qwen_image21_tiers() -> Vec<QwenImage21Tier> {
         },
         QwenImage21Tier {
             tag: "q2",
-            description: "Qwen Image 2.1 Q2_K GGUF transformer (2.6 GB)",
+            description: "Qwen Image 2.1 Q2_K GGUF transformer (2.6 GB) — last resort for small cards; visibly degraded, lettering illegible",
             transformer: vec![gguf(
                 "qwen_image_2.1-Q2_K.gguf",
                 2_561_716_256,
