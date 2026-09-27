@@ -399,6 +399,73 @@ mod tests {
         }
     }
 
+    /// P4's encoder parity feeds the CAPTURED `*_input` straight into the VAE
+    /// (`vae_encoder.rs`), so on its own it never checks that mold BUILDS
+    /// that input. This closes the gap end to end and needs no weights: the
+    /// committed reference files through `prepare_reference` (decode, Pillow
+    /// premultiplied LANCZOS, `VaeImageProcessor` normalization) must equal
+    /// the tensors upstream handed its encoder, bit for bit — including the
+    /// colour Pillow's premultiplied resize ZEROES under alpha 0, which the
+    /// transparent reference exercises.
+    #[test]
+    #[ignore = "requires QWEN_IMAGE21_FIXTURES"]
+    fn prepared_vae_inputs_match_the_captured_upstream_inputs() {
+        let Some(fixtures) = std::env::var_os("QWEN_IMAGE21_FIXTURES") else {
+            return;
+        };
+        let captured = candle_core::safetensors::load(
+            std::path::Path::new(&fixtures).join("p4_vae_encode_fp32.safetensors"),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let testdata =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/qwen_image21");
+        for (case, file) in [("opaque", "ref_opaque.png"), ("rgba", "ref_rgba.png")] {
+            let prepared = prepare_reference(&std::fs::read(testdata.join(file)).unwrap()).unwrap();
+            let actual = prepared.vae_input(&Device::Cpu, DType::F32).unwrap();
+            let expected = captured[&format!("{case}_input")].squeeze(2).unwrap();
+            assert_eq!(actual.dims(), expected.dims(), "{case} shape");
+            let worst = (&actual - &expected)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_eq!(worst, 0.0, "{case}: max |mold - upstream| = {worst}");
+
+            // Premultiplied zeroing: the transparent reference hides colour
+            // under EVERY one of its alpha-0 pixels, which a straight resize
+            // would smear into the result. Pillow's premultiplied LANCZOS
+            // (and mold's port) zero it instead — all but the few edge pixels
+            // whose resampled alpha rounds to 0 from a non-zero premultiplied
+            // colour, which the bit-exact comparison above already pins.
+            if case == "rgba" {
+                let source = crate::img_utils::decode_reference_rgba(
+                    &std::fs::read(testdata.join(file)).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    source
+                        .pixels()
+                        .any(|p| p.0[3] == 0 && p.0[..3] != [0, 0, 0]),
+                    "the fixture hides colour under alpha 0"
+                );
+                let clear: Vec<_> = prepared.rgba.pixels().filter(|p| p.0[3] == 0).collect();
+                let zeroed = clear.iter().filter(|p| p.0[..3] == [0, 0, 0]).count();
+                assert!(!clear.is_empty());
+                assert!(
+                    zeroed * 100 >= clear.len() * 99,
+                    "{zeroed} of {} clear pixels zeroed",
+                    clear.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn vision_inputs_pack_every_reference_in_order() {
         let first =
