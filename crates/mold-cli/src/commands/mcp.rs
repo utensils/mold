@@ -2944,6 +2944,7 @@ fn build_generate_request(
         id_image_names: None,
         true_cfg: None,
         cfg_start_step: None,
+        transparent_background: None,
     })
 }
 
@@ -6410,6 +6411,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         };
 
         let id = jobs.create(&req).await.unwrap();
@@ -6548,6 +6550,8 @@ mod tests {
                 id_image_sha256s: None,
                 true_cfg: None,
                 cfg_start_step: None,
+                has_alpha: None,
+                transparent_background: None,
             },
             timestamp,
             format: Some(OutputFormat::Png),

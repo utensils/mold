@@ -1265,6 +1265,8 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
+            transparent_background: None,
         }
     }
 
@@ -6891,6 +6893,72 @@ mod tests {
             journal.list_all().is_empty(),
             "a refused request must enqueue nothing"
         );
+    }
+
+    /// `transparent_background` is refused at the door, with the one
+    /// profile sentence, on a recipe that cannot render it — and on a
+    /// transparency-capable recipe whose chosen container carries no alpha.
+    #[tokio::test(flavor = "current_thread")]
+    async fn transparency_is_refused_at_admission_where_the_recipe_cannot_deliver_it() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let cases = [
+            ("flux-dev:q8", None, mold_core::TRANSPARENCY_UNSUPPORTED_REASON.to_string()),
+            (
+                "qwen-image-2.1:bf16",
+                Some("jpeg"),
+                "transparent_background needs a format with an alpha channel; use png or webp instead of jpeg"
+                    .to_string(),
+            ),
+        ];
+        for (model, format, expected) in cases {
+            let mut request_json = serde_json::from_str::<serde_json::Value>(
+                &generate_body_for_model("a paper lantern", model, 1024, 1024),
+            )
+            .unwrap();
+            request_json["transparent_background"] = serde_json::json!(true);
+            if let Some(format) = format {
+                request_json["output_format"] = serde_json::json!(format);
+            }
+            let body = serde_json::json!({
+                "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                "requests": [request_json],
+            });
+            let response = app
+                .clone()
+                .oneshot(json_request("POST", "/api/generation-batches", body))
+                .await
+                .unwrap();
+            let status = response.status();
+            let response_body = json_body(response).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response_body}");
+            assert_eq!(response_body["error"], format!("requests[1]: {expected}"));
+        }
+        assert!(journal.list_all().is_empty());
+
+        // `false` is the same request as an absent field, and is admitted and
+        // persisted without it.
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "a paper lantern",
+            "flux-dev:q8",
+            1024,
+            1024,
+        ))
+        .unwrap();
+        request_json["transparent_background"] = serde_json::json!(false);
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].request_json.contains("transparent_background"));
     }
 
     /// A mesh model stores binary glTF and nothing else, so an explicit
@@ -17905,6 +17973,8 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
+            transparent_background: None,
         };
         let mut rec = GenerationRecord::from_save(
             dir.path(),
@@ -18883,6 +18953,8 @@ mod tests {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
+            transparent_background: None,
         };
         let rec = GenerationRecord::from_save(
             dir.path(),

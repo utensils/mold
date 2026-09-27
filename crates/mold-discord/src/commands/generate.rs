@@ -722,6 +722,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
             .as_ref()
             .and_then(|_| params.id_image_name.clone()),
         id_image: params.id_image,
+        transparent_background: None,
     }
 }
 

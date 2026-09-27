@@ -152,6 +152,10 @@ export type SourceImageCapability = "unsupported" | "optional" | "required";
 
 export type ReferenceSourceRelation = "replaces" | "exclusive" | "combines";
 
+export type ReferenceCanvasRule = "last-reference";
+
+export type ImageInputFormat = "png" | "jpeg" | "webp";
+
 export type ReferenceImagesProfile = {
 /**
  * `Hidden` on a recipe that has no reference protocol at all; every
@@ -203,7 +207,46 @@ reason?: string | null,
  * control. That is safe because a recipe with no adapter has no strength
  * to set.
  */
-weight?: FloatControl | null, };
+weight?: FloatControl | null,
+/**
+ * How a client sizes the default canvas from the references. `None`
+ * means no rule (the canvas is the recipe default) — or an older server.
+ */
+canvas?: ReferenceCanvasRule | null,
+/**
+ * Still containers accepted as references. EMPTY means
+ * [`ImageInputFormat::LEGACY`] (PNG and JPEG): every recipe that
+ * predates the field, and every older server.
+ */
+formats?: Array<ImageInputFormat>, };
+
+export type TransparencyCapabilitiesProfile = {
+/**
+ * `Adjustable` where the recipe renders a transparent background on
+ * request; `Hidden` everywhere else.
+ */
+mode: ControlMode,
+/**
+ * The toggle's default position. Always `false` today.
+ */
+default: boolean,
+/**
+ * Output containers that carry alpha and may be chosen while the toggle
+ * is on. Narrowed to what the binary can encode
+ * ([`qualify_generation_profile_delivery`]).
+ */
+formats: Array<OutputFormat>,
+/**
+ * Whether an alpha-carrying REFERENCE keeps alpha in the output even
+ * with the toggle off (Qwen Image 2.1's four-channel VAE: editing a
+ * transparent layer returns a transparent layer). With neither the
+ * toggle nor such a reference, the render is delivered as RGB.
+ */
+native_alpha: boolean,
+/**
+ * The sentence a `Hidden` recipe shows and refuses the toggle with.
+ */
+reason?: string | null, };
 
 export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "edm-dpm-pp-2m" | "euler" | "dpm-pp";
 
@@ -244,6 +287,12 @@ supports_strength: boolean,
  */
 reference_images?: ReferenceImagesProfile | null,
 /**
+ * The transparent-background contract, or `None` on an OLDER SERVER
+ * (clients hide the toggle). Every recipe this build emits carries
+ * `Some`; see [`transparency_for_recipe`].
+ */
+transparency?: TransparencyCapabilitiesProfile | null,
+/**
  * 3-D controls. Present only on a mesh recipe; its absence means
  * `GenerateRequest.mesh` is refused here.
  */
@@ -262,7 +311,7 @@ export const LEGACY_RESOLUTION_PRESETS_V1 = {
   "z-image": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1152, height: 896, aspect: "9:7" }, { width: 896, height: 1152, aspect: "7:9" }, { width: 1152, height: 864, aspect: "4:3" }, { width: 864, height: 1152, aspect: "3:4" }, { width: 1248, height: 832, aspect: "3:2" }, { width: 832, height: 1248, aspect: "2:3" }, { width: 1280, height: 720, aspect: "16:9" }, { width: 720, height: 1280, aspect: "9:16" }, { width: 1344, height: 576, aspect: "7:3" }, { width: 576, height: 1344, aspect: "3:7" }],
   "qwen-image": [{ width: 1328, height: 1328, aspect: "1:1" }, { width: 1664, height: 928, aspect: "≈16:9" }, { width: 928, height: 1664, aspect: "≈9:16" }, { width: 1472, height: 1104, aspect: "4:3" }, { width: 1104, height: 1472, aspect: "3:4" }, { width: 1584, height: 1056, aspect: "3:2" }, { width: 1056, height: 1584, aspect: "2:3" }],
   "qwen-image-edit": [{ width: 1328, height: 1328, aspect: "1:1" }, { width: 1664, height: 928, aspect: "≈16:9" }, { width: 928, height: 1664, aspect: "≈9:16" }, { width: 1472, height: 1104, aspect: "4:3" }, { width: 1104, height: 1472, aspect: "3:4" }, { width: 1584, height: 1056, aspect: "3:2" }, { width: 1056, height: 1584, aspect: "2:3" }],
-  "qwen-image21": [{ width: 1024, height: 1024, aspect: "1:1" }],
+  "qwen-image21": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1184, height: 896, aspect: "4:3" }, { width: 896, height: 1184, aspect: "3:4" }, { width: 1248, height: 832, aspect: "3:2" }, { width: 832, height: 1248, aspect: "2:3" }, { width: 1376, height: 768, aspect: "16:9" }, { width: 768, height: 1376, aspect: "9:16" }, { width: 2048, height: 2048, aspect: "1:1" }, { width: 2400, height: 1792, aspect: "4:3" }, { width: 1792, height: 2400, aspect: "3:4" }, { width: 2528, height: 1696, aspect: "3:2" }, { width: 1696, height: 2528, aspect: "2:3" }, { width: 2752, height: 1536, aspect: "16:9" }, { width: 1536, height: 2752, aspect: "9:16" }],
   "wuerstchen": [{ width: 1024, height: 1024, aspect: "1:1" }],
   "ltx-video": [{ width: 704, height: 480, aspect: "22:15" }, { width: 768, height: 512, aspect: "3:2" }, { width: 512, height: 512, aspect: "1:1" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 1216, height: 704, aspect: "19:11" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }, { width: 512, height: 768, aspect: "2:3" }],
   "ltx2": [{ width: 704, height: 480, aspect: "22:15" }, { width: 768, height: 512, aspect: "3:2" }, { width: 512, height: 512, aspect: "1:1" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 1216, height: 704, aspect: "19:11" }, { width: 704, height: 1216, aspect: "11:19" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }, { width: 512, height: 768, aspect: "2:3" }, { width: 1536, height: 1024, aspect: "3:2" }, { width: 1024, height: 1536, aspect: "2:3" }, { width: 1920, height: 1088, aspect: "30:17" }, { width: 1088, height: 1920, aspect: "17:30" }],
