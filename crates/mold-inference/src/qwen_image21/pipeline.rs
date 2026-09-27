@@ -13,7 +13,8 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Output
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::scheduler::{QwenImage21Scheduler, QwenShiftPolicy};
+use super::conditioning::OutputAlpha;
+use super::scheduler::{scheduler_for, transformer_timestep, ScheduleKind};
 use super::transformer::QwenImage21Transformer;
 use super::vae::QwenImage21Vae;
 use super::{
@@ -49,6 +50,10 @@ pub struct QwenImage21Engine {
     base: EngineBase<LoadedQwenImage21>,
     /// Placement is request-scoped because it affects component construction.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// Parity tests inject upstream's exact initial latents: torch's RNG is
+    /// not mold's ChaCha stream, so a seed cannot reproduce them.
+    #[cfg(test)]
+    injected_latents: Option<Tensor>,
 }
 
 impl QwenImage21Engine {
@@ -61,6 +66,27 @@ impl QwenImage21Engine {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             pending_placement: None,
+            #[cfg(test)]
+            injected_latents: None,
+        }
+    }
+
+    /// Use `latents` `[1, target_tokens, 64]` as the next render's initial
+    /// latents, exactly as upstream's `latents=` argument (no sigma scaling:
+    /// the schedule starts at sigma 1).
+    #[cfg(test)]
+    pub(crate) fn inject_initial_latents(&mut self, latents: Tensor) {
+        self.injected_latents = Some(latents);
+    }
+
+    fn take_initial_latents(&mut self) -> Option<Tensor> {
+        #[cfg(test)]
+        {
+            self.injected_latents.take()
+        }
+        #[cfg(not(test))]
+        {
+            None
         }
     }
 
@@ -296,6 +322,7 @@ impl QwenImage21Engine {
         Ok((conditional, unconditional))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn denoise(
         progress: &ProgressReporter,
         req: &GenerateRequest,
@@ -304,23 +331,36 @@ impl QwenImage21Engine {
         negative_conditioning: Option<&QwenImage21TextConditioning>,
         compute: (&Device, DType),
         seed: u64,
+        initial_latents: Option<Tensor>,
     ) -> Result<(Tensor, usize, usize)> {
         let (device, dtype) = compute;
         let latent_height = req.height as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
         let latent_width = req.width as usize / QWEN_IMAGE_21_VAE_SCALE_FACTOR;
         let latent_tokens = latent_height * latent_width;
-        let mut scheduler = QwenImage21Scheduler::new(
-            req.steps as usize,
-            latent_tokens,
-            QwenShiftPolicy::DynamicResolution,
-        );
-        let noise = seeded_randn(
-            seed,
-            &[1, latent_tokens, QWEN_IMAGE_21_LATENT_CHANNELS],
-            device,
-            dtype,
-        )?;
-        let mut latents = (noise * scheduler.initial_sigma())?;
+        let (mut scheduler, schedule_warning) =
+            scheduler_for(ScheduleKind::Base, req.steps as usize, latent_tokens);
+        if let Some(warning) = schedule_warning {
+            progress.info(&warning);
+        }
+        let mut latents = match initial_latents {
+            Some(latents) => {
+                anyhow::ensure!(
+                    latents.dims() == [1, latent_tokens, QWEN_IMAGE_21_LATENT_CHANNELS],
+                    "Qwen Image 2.1 injected latents {:?} do not match the {latent_tokens}-token canvas",
+                    latents.dims()
+                );
+                latents.to_device(device)?.to_dtype(dtype)?
+            }
+            None => {
+                let noise = seeded_randn(
+                    seed,
+                    &[1, latent_tokens, QWEN_IMAGE_21_LATENT_CHANNELS],
+                    device,
+                    dtype,
+                )?;
+                (noise * scheduler.initial_sigma())?
+            }
+        };
 
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
@@ -349,9 +389,9 @@ impl QwenImage21Engine {
         for step in 0..total {
             progress.checkpoint()?;
             let step_start = Instant::now();
-            // The diffusion transformer takes normalized `[0, 1]` time;
-            // the packaged scheduler exposes the usual `[0, 1000]` values.
-            let timestep = scheduler.current_timestep() / 1000.0;
+            // The diffusion transformer takes normalized `[0, 1]` time,
+            // rounded through the working dtype exactly as upstream divides it.
+            let timestep = transformer_timestep(scheduler.current_sigma(), dtype);
             let conditional_prediction = conditional.forward(&latents, timestep)?;
             let prediction = if let Some(negative) = &mut negative {
                 progress.checkpoint()?;
@@ -373,7 +413,7 @@ impl QwenImage21Engine {
         Ok((latents, latent_height, latent_width))
     }
 
-    fn decode_rgb(
+    fn decode_rgba(
         progress: &ProgressReporter,
         vae: &QwenImage21Vae,
         latents: &Tensor,
@@ -387,23 +427,64 @@ impl QwenImage21Engine {
         let start = Instant::now();
         let latents = latents.to_device(vae_device)?.to_dtype(vae_dtype)?;
         let decoded = vae.decode_packed(&latents, latent_height, latent_width)?;
-        // The checkpoint decodes RGBA. Mold's image artifact contract is RGB,
-        // so preserve the trained RGB channels and do not pretend to publish a
-        // separate alpha-capable format.
-        let image = postprocess_image(&decoded)?.narrow(1, 0, 3)?.i(0)?;
+        // The checkpoint decodes RGBA (`conv_out` has four channels, V:1137);
+        // keep all four here and let the output-alpha rule decide what is
+        // published.
+        let image = postprocess_image(&decoded)?.i(0)?;
         progress.phase_done(ProgressPhase::Vae, label, start.elapsed());
         Ok(image)
     }
 
+    /// Whether the request asked for a transparent background. The request
+    /// contract carries no such field in this build, so no request asks.
+    fn transparent_background_requested(_req: &GenerateRequest) -> bool {
+        false
+    }
+
+    /// The output-alpha rule for this request. This engine admits no
+    /// reference images, so none can carry alpha into the output.
+    fn output_alpha(req: &GenerateRequest) -> OutputAlpha {
+        OutputAlpha::decide(
+            Self::transparent_background_requested(req),
+            false,
+            matches!(
+                req.resolved_output_format(),
+                OutputFormat::Png | OutputFormat::Webp
+            ),
+        )
+    }
+
+    /// Apply `plan` to the decoded `[4, H, W]` u8 RGBA image.
+    fn publishable_image(rgba: &Tensor, plan: OutputAlpha) -> Result<Tensor> {
+        match plan {
+            // Dropping alpha leaves the RGB bytes exactly as v0.32 wrote them.
+            OutputAlpha::Rgb => Ok(rgba.narrow(0, 0, 3)?),
+            OutputAlpha::Rgba => Ok(rgba.clone()),
+            OutputAlpha::CompositeOverWhite => {
+                let (_, height, width) = rgba.dims3()?;
+                let pixels = rgba.permute((1, 2, 0))?.flatten_all()?.to_vec1::<u8>()?;
+                let image = image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+                    .ok_or_else(|| anyhow::anyhow!("decoded RGBA has the wrong size"))?;
+                let flattened = crate::pillow_resize::composite_over_white(&image);
+                Ok(
+                    Tensor::from_vec(flattened.into_raw(), (height, width, 3), rgba.device())?
+                        .permute((2, 0, 1))?,
+                )
+            }
+        }
+    }
+
     fn response(
         req: &GenerateRequest,
-        image: &Tensor,
+        rgba: &Tensor,
         seed: u64,
         started: Instant,
     ) -> Result<GenerateResponse> {
+        let plan = Self::output_alpha(req);
+        let image = Self::publishable_image(rgba, plan)?;
         let output_metadata = build_output_metadata(req, seed, None);
         let data = encode_image(
-            image,
+            &image,
             req.resolved_output_format(),
             req.width,
             req.height,
@@ -411,7 +492,7 @@ impl QwenImage21Engine {
         )?;
         Ok(GenerateResponse {
             mesh: None,
-            request_warnings: Vec::new(),
+            request_warnings: plan.warning().map(str::to_string).into_iter().collect(),
             audio: None,
             images: vec![ImageData {
                 data,
@@ -474,6 +555,7 @@ impl QwenImage21Engine {
         self.base
             .progress
             .stage_done(&transformer_label, transformer_start.elapsed());
+        let initial_latents = self.take_initial_latents();
         let (latents, latent_height, latent_width) = Self::denoise(
             &self.base.progress,
             req,
@@ -482,6 +564,7 @@ impl QwenImage21Engine {
             negative_conditioning.as_ref(),
             (&device, dtype),
             seed,
+            initial_latents,
         )?;
         drop(transformer);
         drop(conditioning);
@@ -495,7 +578,7 @@ impl QwenImage21Engine {
         self.base
             .progress
             .stage_done(&vae_label, vae_start.elapsed());
-        let image = Self::decode_rgb(
+        let image = Self::decode_rgba(
             &self.base.progress,
             &vae,
             &latents,
@@ -513,6 +596,7 @@ impl QwenImage21Engine {
         }
         let started = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
+        let initial_latents = self.take_initial_latents();
         let progress = &self.base.progress;
         let loaded = self
             .base
@@ -534,8 +618,9 @@ impl QwenImage21Engine {
             negative_conditioning.as_ref(),
             (&loaded.device, loaded.dtype),
             seed,
+            initial_latents,
         )?;
-        let image = Self::decode_rgb(
+        let image = Self::decode_rgba(
             progress,
             &loaded.vae,
             &latents,
@@ -641,6 +726,100 @@ mod tests {
             "guidance": 1.0
         }))
         .unwrap()
+    }
+
+    fn decoded_rgba() -> Tensor {
+        // [4, 1, 2]: two pixels, the second translucent.
+        Tensor::from_vec(
+            vec![10u8, 200, 20, 100, 30, 50, 255, 128],
+            (4, 1, 2),
+            &Device::Cpu,
+        )
+        .unwrap()
+    }
+
+    fn pixels(tensor: &Tensor) -> Vec<u8> {
+        tensor
+            .permute((1, 2, 0))
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<u8>()
+            .unwrap()
+    }
+
+    #[test]
+    fn text_to_image_publishes_the_v032_rgb_bytes() {
+        // Plain text-to-image drops alpha however the decoder painted it.
+        for format in [OutputFormat::Png, OutputFormat::Jpeg] {
+            let mut req = request();
+            req.output_format = Some(format);
+            assert_eq!(QwenImage21Engine::output_alpha(&req), OutputAlpha::Rgb);
+        }
+        let rgba = decoded_rgba();
+        let published = QwenImage21Engine::publishable_image(&rgba, OutputAlpha::Rgb).unwrap();
+        // v0.32 narrowed the decoded batch to its first three channels.
+        let legacy = rgba
+            .unsqueeze(0)
+            .unwrap()
+            .narrow(1, 0, 3)
+            .unwrap()
+            .i(0)
+            .unwrap();
+        assert_eq!(pixels(&published), pixels(&legacy));
+    }
+
+    #[test]
+    fn alpha_plans_keep_or_composite_the_alpha_plane() {
+        let rgba = decoded_rgba();
+        let kept = QwenImage21Engine::publishable_image(&rgba, OutputAlpha::Rgba).unwrap();
+        assert_eq!(kept.dims(), &[4, 1, 2]);
+        let flat =
+            QwenImage21Engine::publishable_image(&rgba, OutputAlpha::CompositeOverWhite).unwrap();
+        assert_eq!(flat.dims(), &[3, 1, 2]);
+        // Opaque pixel unchanged; the alpha-128 pixel blends toward white.
+        let bytes = pixels(&flat);
+        assert_eq!(&bytes[..3], &[10, 20, 30]);
+        assert_eq!(
+            &bytes[3..],
+            crate::pillow_resize::composite_over_white(
+                &image::RgbaImage::from_raw(1, 1, vec![200, 100, 50, 128]).unwrap()
+            )
+            .as_raw()
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn injected_latents_are_consumed_by_exactly_one_render() {
+        let mut engine = QwenImage21Engine::new(
+            "qwen-image-2.1:bf16".to_string(),
+            ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
+                transformer: PathBuf::from("/nonexistent/transformer"),
+                transformer_shards: vec![],
+                vae: PathBuf::from("/nonexistent/vae"),
+                spatial_upscaler: None,
+                temporal_upscaler: None,
+                distilled_lora: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![],
+                text_tokenizer: None,
+                decoder: None,
+            },
+            LoadStrategy::Eager,
+            0,
+        );
+        assert!(engine.take_initial_latents().is_none());
+        engine.inject_initial_latents(Tensor::zeros((1, 4, 64), DType::F32, &Device::Cpu).unwrap());
+        assert_eq!(engine.take_initial_latents().unwrap().dims(), &[1, 4, 64]);
+        assert!(engine.take_initial_latents().is_none());
     }
 
     #[test]
