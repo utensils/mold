@@ -5844,17 +5844,23 @@ fn load_plan_independent_components(
         .collect()
 }
 
-/// Families whose engine installs the request's adapter stack per render on a
-/// resident transformer instead of merging it at build time.
+/// Families whose engine settles its adapter stack AND its component
+/// residency per request, on an engine that is otherwise identical.
 ///
 /// Qwen Image 2.1 carries every LoRA in bypass slots (`plan.md`: "LoRA is
 /// always bypass, never merged ... every tier takes adapters without
 /// rebuilds"); `qwen_image21::pipeline` compares the wanted stack with its
-/// `active_lora` and swaps the slots in place. The resident engine is the
-/// same whatever adapters a request carries, and rebuilding it for one would
-/// reload the whole transformer to arrive at the state an in-place install
-/// reaches in a second.
-fn adapters_install_per_request(family: &str) -> bool {
+/// `active_lora` and swaps the slots in place. Its encoder park/drop and the
+/// transformer's 2K decode park are likewise decided inside each render
+/// (`settle_text_encoder_residency`), so the planner's per-request component
+/// strategies — which a LoRA, a reference or the canvas moves — describe that
+/// render's cost, not the engine that is resident. Rebuilding for either
+/// would reload the whole transformer to arrive at a state the engine reaches
+/// in place. What the engine IS (checkpoint content, dtype, quantization,
+/// encoder variant, semantic config, authored placement) still moves both
+/// identities, and a load-strategy or block-offload change is still caught by
+/// the separate planned-mode comparison.
+fn engine_settles_per_request(family: &str) -> bool {
     family == "qwen-image21"
 }
 
@@ -5862,14 +5868,14 @@ fn adapters_install_per_request(family: &str) -> bool {
 /// ([`ResolvedExecutionPlan::execution_fingerprint`] and
 /// [`ResolvedExecutionPlan::warm_reuse_fingerprint`]).
 ///
-/// For a family that installs adapters per request
-/// ([`adapters_install_per_request`]) BOTH are blind to the adapter stack —
-/// its `Lora` components and `effective_loras` — because neither describes the
-/// engine that is resident: an eager engine (no retained residency) is
-/// compared by the exact identity, so leaving the stack in it would still
-/// rebuild on every adapter change. The stack itself stays frozen on the plan
-/// (`effective_loras`), is re-validated at dispatch, and is still charged by
-/// the memory estimate. Every other family keeps the stack in both.
+/// For a family that settles adapters and residency per request
+/// ([`engine_settles_per_request`]) BOTH are blind to the adapter stack (its
+/// `Lora` components and `effective_loras`) and to the per-request load plan,
+/// because an eager engine — which retains no residency the cache could credit
+/// — is compared by the EXACT identity: leaving either in it rebuilt the engine
+/// on every LoRA toggle (UAT, 2026-09-27). The stack itself stays frozen on the
+/// plan (`effective_loras`), is re-validated at dispatch, and is still charged
+/// by the memory estimate. Every other family keeps both in the exact identity.
 fn engine_fingerprints(
     model: &str,
     device: &DeviceFact,
@@ -5879,18 +5885,26 @@ fn engine_fingerprints(
     effective_loras: &[PlannedLora],
     offload: bool,
 ) -> (String, String) {
-    let mut components = components.clone();
-    let effective_loras = if adapters_install_per_request(&engine_config.family) {
-        components.retain(|role, _| !matches!(role, ComponentRole::Lora(_)));
-        &[]
-    } else {
-        effective_loras
-    };
+    let load_plan_independent = load_plan_independent_components(components);
+    if engine_settles_per_request(&engine_config.family) {
+        let mut engine = load_plan_independent;
+        engine.retain(|role, _| !matches!(role, ComponentRole::Lora(_)));
+        let identity = execution_fingerprint(
+            model,
+            device,
+            effective,
+            &engine,
+            engine_config,
+            &[],
+            offload,
+        );
+        return (identity.clone(), identity);
+    }
     let exact = execution_fingerprint(
         model,
         device,
         effective,
-        &components,
+        components,
         engine_config,
         effective_loras,
         offload,
@@ -5899,7 +5913,7 @@ fn engine_fingerprints(
         model,
         device,
         effective,
-        &load_plan_independent_components(&components),
+        &load_plan_independent,
         engine_config,
         effective_loras,
         offload,
@@ -10065,12 +10079,14 @@ mod tests {
 
     /// Qwen Image 2.1 installs its adapter stack per request into bypass
     /// slots on the resident transformer (`qwen_image21::pipeline`'s
-    /// `active_lora`), so a warm engine serves a request whose LoRA stack
-    /// differs from the one it was built under. Its WARM identity is
-    /// therefore blind to the stack — adding, removing or rescaling an
-    /// adapter must not tear down and reload 28 GB of weights — while the
-    /// EXACT identity (residency, grants, provenance) still records it, and
-    /// every other family keeps rebuilding on an adapter change.
+    /// `active_lora`) and settles its encoder and decode residency per
+    /// request (`settle_text_encoder_residency`), so one engine serves a
+    /// request whose LoRA stack — or whose per-request component plan, which
+    /// a LoRA or a reference moves — differs from the one it was built under.
+    /// An eager engine is compared by the EXACT identity, so both identities
+    /// must be blind to both; adding, removing or rescaling an adapter must
+    /// not tear down and reload 28 GB of weights. Every other family keeps
+    /// rebuilding on either.
     #[test]
     fn a_qwen_image21_warm_engine_serves_any_adapter_stack() {
         let device = DeviceFact {
@@ -10196,6 +10212,22 @@ mod tests {
                 exact(&bare, &[]),
                 exact(&replaced, &[]),
                 "{family}: a replaced checkpoint still rebuilds an eager engine"
+            );
+            // The per-request component plan: the same transformer, planned
+            // parked for a 2K decode, with the adapter's bytes charged.
+            let replanned = BTreeMap::from([(
+                ComponentRole::Transformer,
+                ComponentExecutionPlan {
+                    load_strategy: ComponentLoadStrategy::ParkedCpu,
+                    predicted_vram_bytes: 16 * GIB,
+                    predicted_host_bytes: 15 * GIB,
+                    ..transformer.clone()
+                },
+            )]);
+            assert_eq!(
+                same(exact(&bare, &[]), exact(&replanned, &[])),
+                request_scoped,
+                "{family}: an eager engine asked for a different per-request plan"
             );
         }
     }
