@@ -2941,6 +2941,15 @@ mod tests {
 
     use super::*;
 
+    /// `MOLD_WAN_SOLVER` and `MOLD_WAN_SHIFT` are process-wide, and the lib
+    /// tests run in parallel threads of one process. Every test that writes
+    /// either variable, or asserts a resolution that reads them, holds this
+    /// lock for its whole body, so no test can observe another's value.
+    fn wan_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[derive(Debug)]
     struct ZeroizeProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
@@ -3697,6 +3706,7 @@ mod tests {
 
     #[test]
     fn flow_shift_defaults_and_validates() {
+        let _env = wan_env_lock();
         // The env var is process-global; this test owns it for its duration.
         let previous = std::env::var(FLOW_SHIFT_ENV).ok();
         unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
@@ -3739,6 +3749,7 @@ mod tests {
     /// FlowUniPC, and the UNet schedulers are refused by name.
     #[test]
     fn wan_solver_resolves_request_env_and_default() {
+        let _env = wan_env_lock();
         use mold_core::Scheduler;
         let previous = std::env::var(SOLVER_ENV).ok();
         unsafe { std::env::remove_var(SOLVER_ENV) };
@@ -4763,6 +4774,7 @@ mod tests {
     /// do not share one.
     #[test]
     fn wan_dmd_tier_pins_its_solver_and_refuses_a_scheduler_override() {
+        let _env = wan_env_lock();
         use mold_core::Scheduler;
         let previous = std::env::var(SOLVER_ENV).ok();
         let shift_previous = std::env::var(FLOW_SHIFT_ENV).ok();
@@ -4819,10 +4831,7 @@ mod tests {
         }
 
         // Both env knobs are read past for a laddered tier, and both say so:
-        // a silently dropped override reads as a broken variable. Held in ONE
-        // tight window over every tier rather than a window per tier —
-        // `MOLD_WAN_SOLVER` and `MOLD_WAN_SHIFT` are process-wide, and the
-        // solver/shift env tests above run in parallel with this one.
+        // a silently dropped override reads as a broken variable.
         unsafe { std::env::remove_var(SOLVER_ENV) };
         unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
         for (tier, ladder, _) in &ladders {
