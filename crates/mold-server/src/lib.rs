@@ -1230,11 +1230,19 @@ pub async fn run_server(
     // is never starved.
     {
         let warm_state = state.clone();
+        let warm_shutdown = scheduler_shutdown.clone();
         tokio::spawn(async move {
             let models_dir = warm_state.config.read().await.resolved_models_dir();
             let started = std::time::Instant::now();
+            // The runtime joins every blocking thread at teardown, after the
+            // shutdown deadline's own task is gone, so a warm still walking a
+            // large home kept a SIGTERMed server alive for the rest of its
+            // pass. It only fills the in-process fact cache, so shutdown
+            // abandons it between artifacts.
             let warmed = tokio::task::spawn_blocking(move || {
-                crate::execution_plan::warm_installed_artifact_facts(&models_dir)
+                crate::execution_plan::warm_installed_artifact_facts(&models_dir, || {
+                    warm_shutdown.is_cancelled()
+                })
             })
             .await
             .unwrap_or(0);
