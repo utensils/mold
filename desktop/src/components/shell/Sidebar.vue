@@ -71,10 +71,7 @@ function onReset() {
 }
 
 function isActive(path: string): boolean {
-  return (
-    route.path === path ||
-    (path !== "/create" && route.path.startsWith(`${path}/`))
-  );
+  return route.path === path || (path !== "/create" && route.path.startsWith(`${path}/`));
 }
 
 // Trailing readouts: prints developed since the last visit badge My images,

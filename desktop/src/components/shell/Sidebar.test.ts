@@ -77,14 +77,7 @@ describe("Sidebar a11y", () => {
 
   it("shows the MAKE and SETUP destinations plus Settings", async () => {
     const wrapper = await mountAt("/create");
-    for (const label of [
-      "New image",
-      "Queue",
-      "My images",
-      "Styles",
-      "Machines",
-      "Settings",
-    ]) {
+    for (const label of ["New image", "Queue", "My images", "Styles", "Machines", "Settings"]) {
       expect(wrapper.text()).toContain(label);
     }
     // The old lexicon and the folded destinations are gone from the rail.
