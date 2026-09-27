@@ -5887,12 +5887,17 @@ fn engine_fingerprints(
 ) -> (String, String) {
     let load_plan_independent = load_plan_independent_components(components);
     if engine_settles_per_request(&engine_config.family) {
+        let not_an_adapter = |role: &ComponentRole| !matches!(role, ComponentRole::Lora(_));
         let mut engine = load_plan_independent;
-        engine.retain(|role, _| !matches!(role, ComponentRole::Lora(_)));
+        engine.retain(|role, _| not_an_adapter(role));
+        // The authored constraints are derived from the same artifact set, so
+        // an adapter adds a `Lora` role there too.
+        let mut effective = effective.clone();
+        effective.components.retain(|role, _| not_an_adapter(role));
         let identity = execution_fingerprint(
             model,
             device,
-            effective,
+            &effective,
             &engine,
             engine_config,
             &[],
@@ -10148,8 +10153,18 @@ mod tests {
             ("qwen-image:q8", "qwen-image", false),
         ] {
             let config = frozen_config_for_family(family);
+            // The planner derives the authored constraints from the SAME
+            // artifact set (`effective_constraints`), so an adapter also adds
+            // a `Lora` role there.
             let both = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
                         loras: &[PlannedLora]| {
+                let mut effective = effective.clone();
+                for role in components.keys() {
+                    effective
+                        .components
+                        .entry(role.clone())
+                        .or_insert(ResolvedComponentConstraint::Auto);
+                }
                 engine_fingerprints(
                     model, &device, &effective, components, &config, loras, false,
                 )
