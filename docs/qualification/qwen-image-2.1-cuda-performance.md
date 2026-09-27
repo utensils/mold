@@ -150,6 +150,33 @@ Every image was viewed. The three-reference guided render recomputes its
 16.8k-token prefix every step in both branches (the request-only cache rule
 retains nothing past the legacy bound), which is why it costs 4.2 s/step.
 
+#### Prefix KV cache follows the card on the fast path
+
+Upstream always caches the prefix (`pipeline_qwenimage21.py:528`,
+`:750-764`). The request-only 6 GiB rule made the guided three-reference
+render above recompute its ~12k-token prefix in both branches every step. On
+the CUDA fast path `auto` now retains every branch whenever the summed cache
+fits what the card has left beside the weights, the denoise workspace and a
+1 GiB margin; the legacy path, Metal and CPU keep the request-only rule.
+Branch `d249fa19`, binary `mold-c-kv2`, `mold run --local` on GPU 2, cold
+process, 1024² output, each reference 1536x1024:
+
+| Render | Cache decision | Denoise | Peak (MiB) | Result |
+|---|---|---:|---:|---|
+| 3 references, g4 + negative | retained, 12.0 GiB (TE parked) | **44.2 s** (was 167.4 s) | 35,801 | fox, bakery and bicycle composed; lettering exact |
+| 10 references, g1 | recomputed: 19.9 GiB > 16.3 GiB left | 343.7 s | 38,201 | fox before the storefront, lettering exact |
+| 10 references, g4 + negative | recomputed: 39.8 GiB > 16.2 GiB left | 696.5 s | 38,169 | fox before the storefront, lettering exact |
+| 10 references, g1, `MOLD_QWEN_IMAGE21_KV_CACHE=on` | forced | — | — | refused by the planner: ~61.3 GB needed, ~47.2 GB usable |
+| `MOLD_ATTN=math MOLD_CONV=im2col`, 1024² s210001 | request-only (legacy) | 38.2 s | — | PNG `f1fa6bc2…` — identical to v0.32 |
+| fast, 1024² s210001 | retained (text prefix) | 14.9 s | — | gate ≤ 22 s met |
+
+Every image was viewed. The first attempt at this rule sampled the driver's
+free memory and recomputed the three-reference render with ~20 GiB idle:
+after the text encoder parks, candle's stream-ordered pool keeps the freed
+pages reserved, and the driver reports them as used. The engine now
+synchronizes and counts the pool's reserved-but-unused bytes
+(`device::usable_allocatable_vram_bytes`).
+
 ### Batched CFG (A8): not adopted
 
 `official_cuda_cfg_batch_probe` measures the upper bound of batching both

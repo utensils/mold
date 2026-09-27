@@ -240,6 +240,21 @@ transformer memory. Batching both classifier-free-guidance branches into one
 forward was measured and made every size slower on this card, so the engine
 keeps them sequential.
 
+Reference renders on the same card, 1024² output, 40 steps, each reference a
+1536x1024 image:
+
+| References, guidance  | Prefix cache                | Denoise |
+| --------------------- | --------------------------- | ------- |
+| 3, guidance 4 + neg.  | kept (12.0 GiB)             | 44.2 s  |
+| 10, guidance 1        | recomputed (needs 19.9 GiB) | 343.7 s |
+| 10, guidance 4 + neg. | recomputed (needs 39.8 GiB) | 696.5 s |
+
+The three-reference guided render took 167.4 s before the cache followed the
+card's memory. Ten references do not leave room for their cache beside the
+transformer on a 46 GB card, so they recompute their prefix every step and
+say so in a request warning; forcing `MOLD_QWEN_IMAGE21_KV_CACHE=on` there is
+refused by the planner (it would need about 61 GB).
+
 The fast path changes pixels relative to v0.32 for the same seed. To
 reproduce a v0.32 render byte for byte, start the generating server with
 `MOLD_ATTN=math MOLD_CONV=im2col`.
