@@ -1,9 +1,9 @@
-//! Header facts for ordered reference images
+//! Header facts and bounds for ordered reference images
 //! (`GenerateRequest.edit_images`).
 //!
 //! Every surface that sizes something from a reference — the CLI's, MCP's and
 //! Discord's `canvas: last-reference` default, the server's dimension
-//! advisory — reads the reference through
+//! advisory, admission's size bounds — reads the reference through
 //! [`oriented_dimensions`], so they all see the picture the ENGINE sees.
 //!
 //! The engines apply the EXIF `Orientation` tag when they decode a reference
@@ -20,6 +20,75 @@
 
 use std::io::Cursor;
 
+/// Largest reference side the engines resample: the Pillow-compatible resize
+/// (`mold_inference::pillow_resize`) refuses anything above it, so admitting a
+/// larger side would only fail later, after the queue.
+pub const REFERENCE_IMAGE_MAX_SIDE: u32 = 16_384;
+
+/// Largest reference area, in pixels — the figure the durable reference door
+/// already uses (`minimax_h3::MAX_REFERENCE_IMAGE_PIXELS`). A decoded RGBA
+/// reference is four bytes a pixel, so this bounds one decode at ~400 MB.
+pub const REFERENCE_IMAGE_MAX_PIXELS: u64 = 100_000_000;
+
+/// Largest long-to-short side ratio. The Qwen2-VL-family processor refuses
+/// anything above it (`transformers` `image_processing_qwen2_vl.py:74-77`,
+/// `smart_resize`: "absolute aspect ratio must be smaller than 200"), and no
+/// mold reference recipe conditions on a more extreme picture.
+pub const REFERENCE_IMAGE_MAX_ASPECT: u32 = 200;
+
+/// The one decode-limit policy for reference pixels, shared by every engine
+/// decode of a reference and by alpha detection.
+///
+/// The per-side bound is enforced by the decoder itself
+/// (`ImageDecoder::set_limits`). `image` 0.25 does NOT apply `max_alloc` to
+/// `DynamicImage::from_decoder`, so a decoder also checks the area with
+/// [`validate_reference_image_dimensions`] before reading pixels; the
+/// allocation bound here is what the format decoders (PNG, WebP) apply to
+/// their own buffers — eight bytes a pixel, a 16-bit RGBA decode of the
+/// largest admitted area.
+pub fn reference_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(REFERENCE_IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(REFERENCE_IMAGE_MAX_SIDE);
+    limits.max_alloc = Some(REFERENCE_IMAGE_MAX_PIXELS * 8);
+    limits
+}
+
+/// Refuse a reference no engine can condition on, or whose decode alone would
+/// be a denial of service (a few hundred bytes of PNG can declare 60000x60000,
+/// ~14 GB of pixels). `subject` names the reference in the message, as in
+/// "Reference 2". Orientation does not change any of the three bounds, so stored or
+/// upright dimensions answer the same.
+pub fn validate_reference_image_dimensions(
+    subject: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!("{subject} has no pixels ({width}x{height})."));
+    }
+    if width > REFERENCE_IMAGE_MAX_SIDE || height > REFERENCE_IMAGE_MAX_SIDE {
+        return Err(format!(
+            "{subject} is {width}x{height}; each side must be at most \
+             {REFERENCE_IMAGE_MAX_SIDE} pixels. Resize it and try again."
+        ));
+    }
+    if u64::from(width) * u64::from(height) > REFERENCE_IMAGE_MAX_PIXELS {
+        return Err(format!(
+            "{subject} is {width}x{height}; it must be at most \
+             {REFERENCE_IMAGE_MAX_PIXELS} pixels in total. Resize it and try again."
+        ));
+    }
+    let (long, short) = (width.max(height), width.min(height));
+    if u64::from(long) > u64::from(short) * u64::from(REFERENCE_IMAGE_MAX_ASPECT) {
+        return Err(format!(
+            "{subject} is {width}x{height}; its aspect ratio must be at most \
+             {REFERENCE_IMAGE_MAX_ASPECT}:1. Crop it and try again."
+        ));
+    }
+    Ok(())
+}
+
 /// The dimensions an encoded image has once its EXIF orientation is applied,
 /// read from the container header without decoding pixels.
 ///
@@ -31,6 +100,9 @@ pub fn oriented_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| format!("unreadable image: {error}"))?;
+    // Header reads only need the metadata allocation bound; the side bound is
+    // reported by `validate_reference_image_dimensions` with a real sentence
+    // rather than the decoder's generic "limits exceeded".
     reader.limits(image::Limits::default());
     let mut decoder = reader
         .into_decoder()
@@ -161,6 +233,30 @@ mod tests {
                     .unwrap();
             assert_eq!(oriented_dimensions(&bytes), Ok((48, 96)), "{container}");
         }
+    }
+
+    #[test]
+    fn the_bounds_refuse_oversized_and_extreme_references_by_name() {
+        assert!(validate_reference_image_dimensions("Reference 1", 16_384, 6_000).is_ok());
+        assert!(validate_reference_image_dimensions("Reference 1", 2, 400).is_ok());
+        let side = validate_reference_image_dimensions("Reference 2", 16_385, 64).unwrap_err();
+        assert!(
+            side.contains("Reference 2") && side.contains("16384"),
+            "{side}"
+        );
+        let area = validate_reference_image_dimensions("Reference 1", 12_000, 9_000).unwrap_err();
+        assert!(area.contains("100000000"), "{area}");
+        let aspect = validate_reference_image_dimensions("Reference 1", 2, 401).unwrap_err();
+        assert!(aspect.contains("200:1"), "{aspect}");
+        assert!(validate_reference_image_dimensions("Reference 1", 0, 10).is_err());
+    }
+
+    #[test]
+    fn the_decode_limits_bound_every_side_at_the_admitted_maximum() {
+        let limits = reference_decode_limits();
+        assert_eq!(limits.max_image_width, Some(REFERENCE_IMAGE_MAX_SIDE));
+        assert_eq!(limits.max_image_height, Some(REFERENCE_IMAGE_MAX_SIDE));
+        assert_eq!(limits.max_alloc, Some(REFERENCE_IMAGE_MAX_PIXELS * 8));
     }
 
     #[test]
