@@ -146,12 +146,19 @@ comma-separation; no more flipping back to the Civitai page to copy/paste.
 ## LoRA Rules
 
 - Supported families: **FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image
-  (+ Qwen-Image-Edit), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired;
+  (+ Qwen-Image-Edit and Qwen Image 2.1), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired;
   attaching a LoRA there returns a 422 `VALIDATION_ERROR` with the current
   supported-family list.
   (Source of truth: `mold-core::validation::require_lora_capable_family`.)
 - `.safetensors` files, or an LTX-2 `camera-control:` preset id
 - scale must be between `0.0` and `2.0`
+- an adapter must match its model's architecture, not just its name:
+  **Qwen-Image / 2512 LoRAs do not apply to Qwen Image 2.1** (a different
+  transformer). mold refuses such an adapter by name rather than loading it
+  onto the wrong layers, and the LoRA picker lists only `qwen-image21`
+  adapters for a 2.1 model. Qwen Image 2.1 adapters are applied at forward
+  time and never merged, so they work on every tier, the quantized and turbo
+  tiers included — see [Qwen Image 2.1](/models/qwen-image-21#lora).
 - the server resolves the path on the machine doing inference
 
 That last point matters for remote setups. If you call a remote `mold serve`,

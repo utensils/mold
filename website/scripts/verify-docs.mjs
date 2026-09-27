@@ -354,6 +354,23 @@ const ignoredEnvVars = new Set([
   'MOLD_LTX2_ATTN_F32',
   'MOLD_LTX2_INT8',
   'MOLD_LTX2_QMATMUL',
+  // Qwen Image 2.1 tier-render and GGUF-parity harness inputs: every reader
+  // is an ignored, weight-gated test (qwen_image21/tier_renders.rs,
+  // artifact_format.rs tests, encoders/qwen3_vl_gguf_parity.rs), never
+  // runtime configuration. `MOLD_1K_PRESETS` is the tail of the Rust const
+  // `QWEN_IMAGE21_MOLD_1K_PRESETS`, which the scan's regex cannot tell from
+  // an env var.
+  'MOLD_1K_PRESETS',
+  'MOLD_QWEN_IMAGE21_BF16_DIR',
+  'MOLD_QWEN_IMAGE21_SHARED_DIR',
+  'MOLD_QWEN_IMAGE21_TIERS',
+  'MOLD_QWEN_IMAGE21_TIERS_DIR',
+  'MOLD_QWEN_IMAGE21_TIER_RENDER_DIR',
+  'MOLD_QWEN_IMAGE21_TIER_RENDER_REPEAT',
+  'MOLD_QWEN_IMAGE21_TIER_RENDER_SIZE',
+  'MOLD_QWEN_IMAGE21_TIER_RENDER_STEPS',
+  'MOLD_QWEN_IMAGE21_TIER_RENDER_SUFFIX',
+  'MOLD_TEST_QWEN3_FORCE_DMMV',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))

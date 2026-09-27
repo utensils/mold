@@ -39,6 +39,7 @@ prompt expansion for that run.
 | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                                                                                                                                                       |
 | `--format <FMT>`                                                                             | `png`, `jpeg`/`jpg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                                                                                                                                                |
+| `--transparent`                                                                              | Transparent background (models advertising `capabilities.transparency`, today Qwen Image 2.1): the subject is rendered as a cut-out with an alpha channel. PNG or WebP only; `--format jpeg` is refused before anything loads                       |
 | `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                                                                                                                                                   |
 | `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                                                                                                                                            |
 | `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                                                                                                                                                    |
@@ -146,8 +147,9 @@ extension, so stdout keeps whatever container the family resolved.
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 
-`qwen-image-edit-2511:*` treats repeated `--image` flags as ordered
-`edit_images`; non-edit families accept at most one source image.
+`qwen-image-edit-2511:*` and every `qwen-image-2.1` tier treat repeated
+`--image` flags as ordered `edit_images`; other non-edit families accept at most
+one source image.
 
 ### Reference-image editing
 
@@ -171,6 +173,37 @@ from a source image **or** from references, never both in one pass, so
 Qwen-Image-Edit read no source image at all — there the ordered group **is**
 repeated `--image`, and for Qwen-Image-Edit the first image is the one being
 edited. FLUX.2 accepts at most four references per render.
+
+Qwen Image 2.1 takes the same repeated `--image` (or `--reference`, never both)
+as up to ten ordered references — PNG, JPEG or WebP, alpha kept — and none of
+them is a special target. Its block advertises `canvas: last-reference`, so with
+neither `--width` nor `--height` the output takes the **last** reference's
+aspect ratio at the default area on the 32 px grid; any explicit size wins.
+
+```bash
+mold run qwen-image-2.1 "Put the jacket from image 1 on the person in image 2" \
+  --image jacket.png --image person.jpg
+mold run qwen-image-2.1 "Extract the lantern from image 1" --image street.webp \
+  --transparent -o lantern.png
+```
+
+### Transparent backgrounds and WebP stills
+
+`--transparent` asks a model that advertises `capabilities.transparency` for a
+cut-out on a transparent background. Describe the subject alone; the engine
+wraps the prompt in the model's RGBA recipe and the stored prompt stays exactly
+what you typed. Alpha needs PNG (the default) or WebP; `--transparent --format
+jpeg`, and `--transparent` on a model without the block, are refused before any
+weight is read. Without the flag, an RGBA reference still keeps its alpha in a
+PNG or WebP output.
+
+`--format webp` (or `-o out.webp`) writes a single-frame WebP still for every
+image model whose build has the `webp` feature — not an animation.
+
+```bash
+mold run qwen-image-2.1 "A red paper lantern with a gold tassel" --transparent --format webp -o lantern.webp
+mold run flux2-klein "a lighthouse at dusk" -o lighthouse.webp
+```
 
 ### Image prompting (SD 1.5 and SDXL)
 

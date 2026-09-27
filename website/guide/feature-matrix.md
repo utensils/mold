@@ -12,6 +12,8 @@ features today?
 | img2img at 1024 output        | FLUX.1 or SDXL              |
 | broadest feature surface      | SD 1.5 or SDXL              |
 | best prompt-following quality | FLUX.1 or SD 3.5            |
+| transparent (RGBA) output     | Qwen Image 2.1              |
+| many-reference editing        | Qwen Image 2.1              |
 
 ## Source Image Workflows
 
@@ -27,6 +29,7 @@ features today?
 | Wuerstchen v2   | Yes     | Yes        | No                                                    |
 | Qwen-Image      | Yes     | Yes        | No                                                    |
 | Qwen-Image-Edit | No      | No         | Yes                                                   |
+| Qwen Image 2.1  | No      | No         | Up to 10 ordered references                           |
 | LTX Video       | Not yet | Not yet    | Not yet                                               |
 | LTX-2           | Yes     | No         | Keyframes                                             |
 | Wan Video       | N/A     | N/A        | First/last frame on capable checkpoints               |
@@ -46,6 +49,7 @@ features today?
 | SDXL            | sdxl            | No         | Yes  |
 | Qwen-Image      | qwen-image      | No         | Yes  |
 | Qwen-Image-Edit | qwen-image-edit | No         | Yes  |
+| Qwen Image 2.1  | qwen-image21    | No         | Yes  |
 | Z-Image         | z-image         | No         | Yes  |
 | Wuerstchen v2   | wuerstchen      | No         | No   |
 | LTX Video       | ltx-video       | No         | No   |
@@ -70,6 +74,7 @@ They do not enable arbitrary request-time LoRA stacks.
 | Wuerstchen v2   | Yes              | No                 |
 | Qwen-Image      | Yes              | No                 |
 | Qwen-Image-Edit | Yes              | No                 |
+| Qwen Image 2.1  | Yes³             | No                 |
 | LTX Video       | No               | No                 |
 | Wan Video       | Yes              | Yes¹               |
 | MiniMax H3      | No               | No                 |
@@ -77,6 +82,9 @@ They do not enable arbitrary request-time LoRA stacks.
 
 ² Hunyuan3D has no text encoder at all, so neither a prompt nor a negative
 prompt is read. The source image is the entire conditioning.
+
+³ Only when guidance is above 1. Qwen Image 2.1 defaults to guidance 1.0
+(one forward per step), and its turbo tiers pin it there.
 
 ¹ Wan's solver set is disjoint from the UNet schedulers: it takes
 `--sample-solver unipc|euler|dpm++`, which travels in the same `scheduler` wire
@@ -125,6 +133,25 @@ The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
 the full multiscale refinement path.
 
+## Transparent output
+
+| Family         | Transparent background toggle | Alpha kept from an RGBA reference | Formats with alpha |
+| -------------- | ----------------------------- | --------------------------------- | ------------------ |
+| Qwen Image 2.1 | Yes                           | Yes                               | PNG, WebP          |
+| All others     | No                            | No                                | —                  |
+
+The toggle (`--transparent`, `transparent_background: true`) is advertised per
+recipe as `capabilities.transparency`, and every surface reads that block
+rather than a model list. JPEG cannot carry alpha, so JPEG with the toggle on is
+refused before anything loads. An ordinary render stays RGB; the output keeps
+an alpha channel only when the toggle is on or a reference image is itself
+transparent. See
+[Qwen Image 2.1 ▸ Transparent backgrounds](/models/qwen-image-21#transparent-backgrounds).
+
+Still WebP (`--format webp`) is available for every image family whose build
+has the `webp` feature; it is a single-frame lossy picture with lossless alpha,
+not an animation. PNG and WebP keep alpha, JPEG does not.
+
 ## Backend Support
 
 | Family          | CUDA             | Metal                     | CPU              |
@@ -136,6 +163,7 @@ the full multiscale refinement path.
 | Wuerstchen v2   | Yes              | Yes                       | Yes              |
 | Qwen-Image      | Yes              | Yes                       | Yes              |
 | Qwen-Image-Edit | Yes              | Yes                       | Yes              |
+| Qwen Image 2.1  | Yes              | Yes                       | Yes (slow)       |
 | LTX Video       | Yes              | Yes                       | Yes              |
 | **LTX-2**       | Yes              | Yes                       | Correctness-only |
 | Wan Video       | Yes              | Yes                       | Correctness-only |
@@ -201,7 +229,7 @@ complete workflows.
 
 - ControlNet is currently available only for SD 1.5.
 - LoRA-capable families are `flux`, `flux2`, `ltx2`, `sd15`, `sd3`, `sdxl`,
-  `qwen-image`, `qwen-image-edit`, `wan`, and `z-image`. Wuerstchen and LTX
+  `qwen-image`, `qwen-image-edit`, `qwen-image21`, `wan`, and `z-image`. Wuerstchen and LTX
   Video are not wired for LoRA yet.
 - Wan adapters cover low-rank pairs and full-weight `.diff`/`.diff_b` deltas:
   on bf16 safetensors they merge as the weights are read, on GGUF they apply
@@ -219,6 +247,10 @@ complete workflows.
   unset; `/api/models` advertises it per model (`default_negative_prompt`),
   every surface prefills it, and clearing the field (or `--no-negative`)
   sends an explicit empty negative instead.
+- Qwen Image 2.1 reads a negative prompt only when guidance is above 1
+  (classifier-free guidance); its default guidance is 1.0 and the turbo tiers
+  pin it there. Qwen-Image / 2512 LoRAs do not apply to it — see
+  [Qwen Image 2.1](/models/qwen-image-21#lora).
 - `qwen-image-edit` is a distinct edit family, not a standard img2img mode.
 - The CLI and API support multiple ordered input images for `qwen-image-edit`.
 - `qwen-image-edit` can use quantized `--qwen2-variant` language weights while

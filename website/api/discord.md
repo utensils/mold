@@ -29,6 +29,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references |
 | `/mesh`              | Generate a Hunyuan3D GLB from one source image or semantic front/left/back/right multiview attachments                                     |
+| `/transparent`       | Render a subject on a transparent background (PNG or WebP with alpha), optionally cut out of up to three ordered reference images          |
 | `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                        |
 | `/expand`            | Expand a short prompt into detailed generation prompts                                                                                     |
 | `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)               |
@@ -69,6 +70,28 @@ cannot execute it) then the start step against the resolved step count, and
 finally the downloaded bytes. A server advertising no identity-capable model at
 all says so instead of guessing a checkpoint. The result embed carries an
 **Identity** row naming the photo, the strength, and the start step.
+
+### `/transparent`
+
+Transparent-background renders have their own command for the same reason as
+`/identity`: `/generate` is already at Discord's 25-option ceiling. It offers
+only models whose recipe advertises `capabilities.transparency` (today Qwen
+Image 2.1; the model option autocompletes those, downloaded first) and sends
+`transparent_background: true`.
+
+| Option                        | Purpose                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| `prompt`                      | Required. The subject alone — no scenery or backdrop.                               |
+| `model`                       | Transparency-capable model; defaults to one the server advertises.                  |
+| `format`                      | `PNG` (default) or `WebP`. JPEG is not offered because it cannot carry alpha.       |
+| `reference_1` … `reference_3` | Ordered reference images (PNG, JPEG or WebP), e.g. a picture to cut a subject from. |
+| `seed`                        | Seed for reproducibility.                                                           |
+| `width` / `height`            | Output size. Without them the last reference's aspect ratio is used.                |
+| `steps`                       | Inference steps.                                                                    |
+
+The prompt you type is what is stored; the model's RGBA wording is added by
+the engine. `reference_2` needs `reference_1`, and `reference_3` needs both, so
+the order the prompt names ("image 1", "image 2") is never ambiguous.
 
 ### `/mesh`
 
@@ -113,11 +136,19 @@ range, and two or three `keyframe_*` images are spaced across the requested
 frame count for interpolation. These modes are mutually exclusive in one
 command and do not need the `pipeline` option.
 
-MiniMax H3's ordered references are their own pair of attachments,
-`reference_1` and `reference_2`, each an image, an H.264 MP4, or a WAV.
-Ordering is explicit, so `reference_1` must be present before `reference_2`.
-They cannot be combined with `source_image`, `source_video`, `audio_file`,
-the `keyframe_*` images, either retake time, or the `pipeline` option.
+`/generate`'s `reference_1` and `reference_2` attachments are routed by the
+selected model's capability, never its name. On a model that advertises
+`capabilities.reference_images` (FLUX.2, Qwen-Image-Edit, Qwen Image 2.1, and
+the SD 1.5 / SDXL image prompt) they become ordered `edit_images`; for Qwen
+Image 2.1 they may be PNG, JPEG or WebP, and without `width`/`height` the
+output takes the last reference's aspect ratio. Only an image-prompt model
+also keeps `source_image`; everywhere else a source image beside references is
+refused. For MiniMax H3 Ref2VA they are its ordered references, each an image,
+an H.264 MP4, or a WAV, and they cannot be combined with `source_image`,
+`source_video`, `audio_file`, the `keyframe_*` images, either retake time, or
+the `pipeline` option. Any other model refuses them with the server's own
+sentence. Ordering is explicit, so `reference_1` must be present before
+`reference_2`.
 
 Negative prompts: leaving `negative_prompt` unset applies the model's
 advertised default negative (Wan ships a tuned one). To explicitly disable the
