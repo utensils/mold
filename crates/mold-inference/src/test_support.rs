@@ -1,5 +1,44 @@
 //! Test-only helpers shared across this crate's unit tests.
 
+/// One process-wide lock for tests that mutate a shared `MOLD_*` env var.
+///
+/// `cargo test` runs this crate's tests on several threads at once, so two
+/// tests touching the SAME var must serialize even when they live in
+/// different files — `MOLD_DEVICE` (`sd15::pipeline`, `sdxl::pipeline`,
+/// `expand`) and `MOLD_LTX2_GEMMA_DEVICE` / `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`
+/// (`device`, `ltx2::pipeline`) are both read/written from more than one
+/// module. A lock local to one of those files only protects that file's own
+/// tests against each other; it does nothing for a sibling test elsewhere
+/// racing the same variable. Hold this lock for the whole mutate-assert
+/// window and never across an `.await`.
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Set `key` to `value`, restoring whatever `key` held before on drop.
+///
+/// Callers must take [`ENV_LOCK`] before constructing this guard and hold it
+/// until the guard (and anything depending on the env var) is done.
+pub(crate) struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
 /// The inode `ctime` of `path` as `(seconds, nanoseconds)`, for pairing with
 /// [`wait_until_ctime_moves`] around a tamper write.
 #[cfg(unix)]
