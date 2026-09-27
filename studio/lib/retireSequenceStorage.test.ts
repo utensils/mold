@@ -32,6 +32,14 @@ describe("retireSequenceStorage", () => {
       expect(localStorage.getItem(key)).toBeNull();
   });
 
+  it("reclaims the retired Studio draft without touching the main composer", async () => {
+    localStorage.setItem("mold.create.meshWorkflowDraft.v1", "{}");
+    localStorage.setItem("mold.generate.jobs", "keep");
+    const removed = await retireSequenceStorage();
+    expect(removed.keys).toEqual(["mold.create.meshWorkflowDraft.v1"]);
+    expect(localStorage.getItem("mold.generate.jobs")).toBe("keep");
+  });
+
   // The clip and opening-image blobs share the ONE-SHOT composer's database,
   // so they cannot be dropped with the store: they have to be swept by the
   // prefix only sequence media ever used.

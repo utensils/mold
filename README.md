@@ -110,12 +110,9 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   locally derived as qualified FP8/GGUF tiers with `mold quantize`, which
   registers the derived tier on the host that made it. Results are published to the Library as
   binary glTF with a rendered poster tile, exportable as OBJ, an OBJ+PBR ZIP, STL, or PLY, or
-  shared as a turntable GIF, APNG, or WebP. The web and desktop **3-D Studio**
-  also runs durable text-to-3D, supplied-mesh texturing, and Hunyuan3D 2.1
-  mesh-rebuild workflows through the shape VAE: each stage survives app or
-  server restarts and can be resumed from its checkpoint. Its machine picker
-  routes model discovery, workflow history, submission, progress, and results
-  to one explicit connected host, including that host's API key.
+  shared as a turntable GIF, APNG, or WebP. Durable text-to-3D, supplied-mesh texturing, and mesh-rebuild workflows remain
+  available through the API/CLI. Apps generate 3-D objects directly from supplied
+  images in the main generation screen.
   Painted prints expose their base-color, metallic-roughness, and normal maps as
   independent, digest-checked Library downloads on web, desktop, and mobile.
 - **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then

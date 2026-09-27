@@ -13,13 +13,11 @@ import { defineComponent, nextTick } from "vue";
 
 const counters = vi.hoisted(() => ({
   unionOrganization: 0,
-  meshWorkflowIndex: 0,
   /** What the native listing answers; seeded per test before mount. */
   localImages: [] as unknown[],
   mediaMounts: new Map<string, number>(),
   reset() {
     counters.unionOrganization = 0;
-    counters.meshWorkflowIndex = 0;
     counters.mediaMounts.clear();
   },
 }));
@@ -31,21 +29,6 @@ vi.mock("@studio/lib/libraryOrganization", async (importOriginal) => {
     unionOrganization: (...args: Parameters<typeof actual.unionOrganization>) => {
       counters.unionOrganization += 1;
       return actual.unionOrganization(...args);
-    },
-  };
-});
-/*
- * The 3-D run index is the second thing that must run once per data change,
- * not once per tile. The existing guards count `unionOrganization` only and
- * would pass with an O(n·m) path in here.
- */
-vi.mock("@studio/lib/meshWorkflowGroup", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@studio/lib/meshWorkflowGroup")>();
-  return {
-    ...actual,
-    indexMeshWorkflowGroups: (...args: Parameters<typeof actual.indexMeshWorkflowGroups>) => {
-      counters.meshWorkflowIndex += 1;
-      return actual.indexMeshWorkflowGroups(...args);
     },
   };
 });
@@ -229,8 +212,6 @@ describe("Library grid at 2 000 prints", () => {
      * zero-budget guards below being vacuous: a mock that never intercepted
      * would report zero everywhere and pass for the wrong reason.
      */
-    expect(counters.meshWorkflowIndex).toBeGreaterThan(0);
-    expectOpsUnder("mesh workflow index passes at mount", counters.meshWorkflowIndex, 2);
     wrapper.unmount();
   });
 
@@ -261,11 +242,6 @@ describe("Library grid at 2 000 prints", () => {
     );
     // The 3-D run index is cached on the same data, so narrowing must not
     // rebuild it either.
-    expectOpsUnder(
-      "mesh workflow index passes across a scope switch",
-      counters.meshWorkflowIndex,
-      0,
-    );
     // ...and at most one stack badge per rendered tile.
     expectOpsUnder(
       "stack badges in the DOM",
@@ -312,7 +288,6 @@ describe("Library grid at 2 000 prints", () => {
      * the FIRST read of `collectionCounts` still lands on the measured side.
      */
     expect(gallery.organizationIndex).toBeTruthy();
-    expect(gallery.meshWorkflowIndex).toBeTruthy();
     counters.reset();
     const counts = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
 
@@ -324,28 +299,6 @@ describe("Library grid at 2 000 prints", () => {
      */
     expect(counts.reduce((a, b) => a + b, 0)).toBe(PRINTS / 4);
     expectOpsUnder("unionOrganization while counting albums", counters.unionOrganization, 0);
-    expectOpsUnder(
-      "mesh workflow index passes while counting albums",
-      counters.meshWorkflowIndex,
-      0,
-    );
-    wrapper.unmount();
-  });
-
-  /*
-   * Drilling into a run narrows the SAME cached index. Rebuilding it here
-   * would put a gallery-wide pass behind a click.
-   */
-  it("opens a 3-D run without rebuilding the run index", async () => {
-    const { wrapper, gallery } = await mountGrid();
-    counters.reset();
-
-    gallery.workflowId = "run-that-does-not-exist";
-    await nextTick();
-    await flushPromises();
-
-    expectOpsUnder("mesh workflow index passes across a drill-in", counters.meshWorkflowIndex, 0);
-    expectOpsUnder("unionOrganization across a drill-in", counters.unionOrganization, 0);
     wrapper.unmount();
   });
 

@@ -22,6 +22,7 @@ import { deleteDraftMediaByPrefix } from "./draftMediaStore";
  * mobile mode flag, and web's own sequence-rail bookkeeping.
  */
 const RETIRED_LOCAL_STORAGE_KEYS = [
+  "mold.create.meshWorkflowDraft.v1",
   "mold.sequence.draft.v1",
   "mold.chain.draft.v2",
   "mold.composer.mode",

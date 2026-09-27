@@ -54,12 +54,6 @@ export const router = createRouter({
       ],
     },
     {
-      path: "/create/3d",
-      name: "mesh-workflow",
-      meta: { title: "3-D studio" },
-      component: () => import("./views/MeshWorkflowView.vue"),
-    },
-    {
       path: "/settings",
       name: "settings",
       meta: { title: "Settings" },
@@ -70,6 +64,7 @@ export const router = createRouter({
     // during restore runs these redirects too (restoring "/gallery" lands on
     // "/library", "/history" opens the History column in My images).
     { path: "/generate", redirect: "/create" },
+    { path: "/create/3d", redirect: { path: "/create", query: {} } },
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
     // Scene-by-scene authoring is retired, but a persisted last-route or an

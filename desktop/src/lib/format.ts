@@ -105,6 +105,5 @@ export { formatUptime } from "@studio/lib/formatUptime";
 /** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago").
  *
  * Re-exported from `@studio/lib/relativeTime`, which owns it: `studio/` is the
- * lower layer and cannot import from a shell, and the 3-D Studio's Recent list
- * needs exactly these words. Every existing caller keeps importing it here. */
+ * lower layer and cannot import from a shell. Every existing caller keeps importing it here. */
 export { timeAgo } from "@studio/lib/relativeTime";

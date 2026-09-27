@@ -333,66 +333,10 @@ Pausing the job that is already running: an in-flight denoise cannot be
 suspended, so the active card's pause holds the queue after the current
 image and says so.
 
-## 3-D Studio workflows
+## 3-D generation
 
-The 3-D Studio is New image's anatomy, not a variation on it: the desktop
-shell's 40px view toolbar, a full-height result canvas, a composer on the bottom
-edge, and the standard inspector on the right (300px by default, resizable
-280–480px with Generate's shared handle, width setting, keyboard controls, and
-double-click reset). **From words**, **Rebuild**, and **Add texture** are the
-shared segmented control on the toolbar; only workflows supported by the
-connected machines appear.
-
-**The description and Generate live on the composer**, with the ⌘↩ keycap, as
-they do on New image. **3-D style** and **Picture style** are composer chips
-beside them. On the desktop shell ⌘↩ generates HERE rather than leaving for New
-image — every raiser of that intent (the native menu and the ⌘K palette alike)
-stays on this route and lets the view consume it. The web SPA has no keyboard
-Generate on any surface, so the keycap is the desktop composer's. Reuse
-Generate's model picker with filtered candidates, including its search, family
-groups, availability, and friendly labels; do not build a second selector, and
-narrow the candidates through `outputKindForModel` rather than a second
-predicate. The inspector holds the stage settings — texture and its size,
-lighting removal, and for a supplied mesh its file wells and orientation — using
-the shared switches, group labels and inspector typography. The result and its
-stage progress occupy the canvas, without a separate landing-page heading or
-oversized cards.
-
-(This supersedes the original "workflow inputs belong together in the inspector,
-with Generate at its foot". Putting the prompt where every other making-view
-puts it is what makes the surface read as part of the app, and it gives ⌘↩ an
-obvious home.)
-
-**Reuse is a door, not a dropdown.** The desktop rail is **Settings | Recent**,
-the peer of New image's tab strip, with a mono count. A Recent row says what
-was made in the toolbar's own words, what it is doing in the queue's vocabulary
-(the stage and `n/N` while it runs, `Finished` / `Stopped` / `Failed`
-otherwise — never the raw wire state), and carries the accent **Use these
-settings again** line. Clicking restores explicitly rather than through a
-watcher, because the row you are most likely to click is the one already open.
-A workflow's FILES cannot be restored, so a supplied-mesh run says which to
-choose again rather than leaving Generate disabled for no visible reason, and
-opening a run never clears an attachment you already made. **New workflow**
-clears the authored work and keeps the machine and the styles in use.
-
-**The draft belongs to a store, never to the view.** The router lazy-loads this
-surface and nothing keeps it alive, so a component-local ref loses the
-description, both styles, the attachments, the stage settings and the machine
-pin on any trip to the Queue. `studio/stores/meshWorkflowDraft.ts` holds them,
-exactly as `generateForm` does for New image. An attached file is deliberately
-session-scoped: a browser cannot re-open a file handle from a previous session,
-so the well comes back empty rather than promising bytes it cannot read.
-
-The existing **Where it runs** chip is the last toolbar control. **Auto** chooses
-the least-busy eligible machine; **Most capable** chooses its strongest eligible
-GPU. Eligibility covers every selected stage and style on one machine, including
-optional texture and lighting removal. A named machine is a pin, never a hint.
-Routing is resolved when Generate is pressed, before source uploads. The
-accepted job's machine remains visible beside its history selector; inspecting,
-resuming, cancelling, and downloading the result stay attached to that owner.
-
-Routine telemetry and polling must preserve the draft, focus, selected history
-entry, and viewer camera. Only a changed URL or credential refreshes the browsing
-context. Progress polling updates stage state in place, and a result's bytes are
-loaded once per output identity. At narrow widths, toolbar controls may wrap;
-the canvas and inspector retain independent scrolling.
+3-D Studio is retired from every app. New image retains its 3-D object section
+for ordinary image-to-mesh generation, and the Library retains mesh viewing and
+export. Users can generate a source image and then use it for a 3-D render
+manually. Durable mesh workflows remain API/CLI-only. Historical workflow
+prints appear individually; no app links reopen a workflow or hide its stages.

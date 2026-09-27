@@ -844,7 +844,7 @@ export interface OutputMetadata {
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
   /** The durable 3-D workflow that produced this print, and the role it plays
-   * in it. Additive: absent on every print made outside the 3-D Studio and on
+   * in it. Additive: absent on every print made outside a durable mesh workflow and on
    * every host that predates the field — which reads as an ordinary print,
    * never as a refusal. */
   mesh_workflow?: MeshWorkflowProvenance | null;

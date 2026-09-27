@@ -8,10 +8,6 @@
  * filter each had their own list, and the two had already drifted apart
  * (desktop knew `real-esrgan`, web knew `companion` and `control-net`).
  *
- * The 3-D Studio's Picture style picker is what surfaced it: it partitioned by
- * output kind, correctly excluding clip and mesh styles, and then offered
- * "Qwen3-1.7B — prompt expansion LLM" and "Real-ESRGAN x4+ — upscaler" as
- * things to draw a picture with.
  */
 
 /** Families that are never a style. The union of what each surface knew. */

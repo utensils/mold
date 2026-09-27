@@ -37,8 +37,6 @@ import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { meshWorkflowProvenanceOf, meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
-import { meshWorkflowRoleLabel as roleLabel } from "@studio/lib/meshWorkflowGroup";
 import {
   fetchGalleryMediaBytes,
   galleryMediaPath,
@@ -186,18 +184,6 @@ const drillInName = computed(() =>
     ? (openCollection.value?.name ?? gallery.collectionSlug)
     : null,
 );
-/**
- * The 3-D run drilled into, named for its chip.
- *
- * A run has no title of its own, so the chip names the KIND and how much it
- * holds — enough to say where you are, and that there is a way out.
- */
-const openRunName = computed(() => {
-  if (!gallery.openWorkflowId) return null;
-  const count = gallery.filtered.length;
-  return `3-D object · ${count} ${count === 1 ? "picture" : "pictures"}`;
-});
-
 /** The shelf (cards) shows only in Collections with no collection open. */
 const showShelf = computed(() => inCollections.value && !gallery.collectionSlug);
 
@@ -237,9 +223,7 @@ const entryTrashCapable = (entry: MergedPrint) => {
 
 // ── Header labels ────────────────────────────────────────────────────────────
 const scopeCounts = computed(() => ({
-  // The store's own count, which is what the shell's subtitle and the grid
-  // both read: a second inline filter here said "Everything 6" beside three
-  // tiles, because it never applied the 3-D run collapse.
+  // Share the store's count with the shell subtitle and the grid.
   prints: gallery.basePrintCount,
   favorites: favoritesCount.value,
   collections: gallery.mergedCollections.length,
@@ -667,25 +651,6 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 // an author composed it or the host auto-chained one long render, so it
 // restores exactly like any other print — this is the ONLY path that attaches
 // retained source-media authority (`composer.set` invalidates it).
-
-/** Open the 3-D run that made this print, with its inputs restored. */
-function reopenAsWorkflow(entry: MergedPrint) {
-  // The machine rides the link: a durable workflow lives on ONE host, and a
-  // link that only names the id asks whichever machine the studio was last
-  // browsing and is told the workflow does not exist.
-  const route = meshWorkflowRouteFor(entry.item.metadata, workflowHostOf(entry));
-  if (!route) return;
-  lightboxOpen.value = false;
-  void router.push(route);
-}
-
-/** Show the rest of what that run made, in the grid. */
-function showWorkflowAssets(entry: MergedPrint) {
-  const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
-  if (!membership) return;
-  lightboxOpen.value = false;
-  gallery.openWorkflowRun(membership.jobId);
-}
 
 function reuseSettings(entry: MergedPrint) {
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
@@ -1165,54 +1130,6 @@ function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
   return items;
 }
 
-/**
- * The two doors a 3-D run's print opens: the run itself, and the rest of what
- * it made. Absent for every ordinary print and on a host that predates the
- * provenance field, so nothing is offered that cannot be delivered.
- */
-/**
- * Which machine actually ran the workflow behind a print.
- *
- * NOT `sourceKey`: that is whichever copy merged first, and an auto-saved
- * remote output lands in this Mac's gallery under the origin's filename — so a
- * run on plato, mirrored here, resolves "local" and the reopen asks this Mac
- * for a workflow it never ran. The copy that CARRIES the provenance is the one
- * that ran it; `sourceKey` is the fallback for a print with a single copy.
- */
-function workflowHostOf(entry: MergedPrint): string {
-  const copies = entry.copies ?? [];
-  const owner = copies.find((copy) => meshWorkflowProvenanceOf(copy.item.metadata) !== null);
-  return owner?.sourceKey ?? entry.sourceKey;
-}
-
-function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
-  const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
-  if (!membership) return [];
-  // The machine rides the link: a durable workflow lives on ONE host, and a
-  // link that only names the id asks whichever machine the studio was last
-  // browsing and is told the workflow does not exist.
-  const route = meshWorkflowRouteFor(entry.item.metadata, workflowHostOf(entry));
-  const entries: MenuEntry[] = [{ separator: true }];
-  if (membership.memberCount > 1) {
-    // The OPEN run, not the written id: outside Everything the id is inert,
-    // and reading it raw made the menu offer "Back to everything" on a grid
-    // that was never in a run.
-    const open = gallery.openWorkflowId === membership.jobId;
-    entries.push({
-      label: open ? "Back to everything" : `Show the ${membership.memberCount} pictures`,
-      action: () => {
-        gallery.openWorkflowRun(open ? null : membership.jobId);
-      },
-    });
-  }
-  if (route)
-    entries.push({
-      label: "Open the 3-D run",
-      action: () => void router.push(route),
-    });
-  return entries.length > 1 ? entries : [];
-}
-
 function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
@@ -1301,10 +1218,6 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   }
   return [
     { label: "Use these settings", action: () => reuseSettings(entry) },
-    // A print a 3-D workflow made has a second, truer door: the run that made
-    // it, with every input restored. "Use these settings" degrades it to a
-    // one-shot on the mesh style, which is not what the person authored.
-    ...meshWorkflowEntries(entry),
     ...(organize
       ? [
           { separator: true } as MenuEntry,
@@ -1479,7 +1392,6 @@ function clearFilters() {
   // while one is open. Leaving the run out made that button do nothing with no
   // tag and every host shown — a control that lies, which is what the Trash's
   // tag chips were fixed for.
-  gallery.openWorkflowRun(null);
 }
 
 // ── Bulk select mode ───────────────────────────────────────────────────────
@@ -1807,11 +1719,6 @@ interface TileModel {
   /** The mock's word badge: "clip 5s" / "3-D" / "audio", "" for a still. */
   kindBadge: string;
   upscaled: boolean;
-  /** How many prints the 3-D run behind this tile produced, or 0 for an
-   *  ordinary print. Drawn as the stack marker beside the kind badge. */
-  workflowCount: number;
-  /** Which step of the run this print is, drawn only while one is open. */
-  workflowRole: string;
   /** Media bytes are addressed differently for a host bucket and this Mac. */
   mediaPath: string;
   localVideo: boolean;
@@ -1845,8 +1752,6 @@ const tileModels = computed<TileModel[]>(() => {
   const organizeCapable = gallery.organizeCapable;
   // The store built this once for this data change; the loop does one
   // `Map.get` per tile rather than a scan.
-  const workflowIndex = gallery.meshWorkflowIndex;
-  const openRun = gallery.openWorkflowId !== null;
   const trash = inTrash.value;
   const models: TileModel[] = new Array(list.length);
   for (let i = 0; i < list.length; i++) {
@@ -1860,7 +1765,6 @@ const tileModels = computed<TileModel[]>(() => {
     const clip = isClipItem(item);
     const mesh = isMeshItem(item);
     const audio = isAudioItem(item);
-    const workflowMember = workflowIndex.get(item.filename);
     models[i] = {
       entry,
       item,
@@ -1877,17 +1781,6 @@ const tileModels = computed<TileModel[]>(() => {
       mesh,
       kindBadge: mediaKindBadge(item, { clip, audio, mesh }),
       upscaled: isUpscaledImage(item),
-      // The badge is a STACK marker — it says this tile stands for prints that
-      // are NOT drawn — so it belongs only where the collapse actually ran and
-      // only on the tile it ran for. A member is rendered only where its lead
-      // was filtered out, and there it hides nothing; and the Trash is never
-      // collapsed at all, so nothing there hides anything either. The run
-      // index is live-only, which made the Trash safe by accident until one
-      // machine has a print live that another has trashed.
-      workflowCount: !trash && workflowMember?.lead ? workflowMember.memberCount : 0,
-      // Inside a run, the badge names the STEP: three near-identical PNGs are
-      // otherwise indistinguishable from each other.
-      workflowRole: openRun ? (roleLabel(workflowMember?.role ?? "") ?? "") : "",
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
       // from the native cache rather than a <video> element per tile.
@@ -2415,9 +2308,8 @@ const asString = (value: unknown): string | null =>
 let syncingFromRoute = false;
 let openingPrintDeepLink = false;
 watch(
-  () =>
-    [route.query.scope, route.query.c, route.query.tag, route.query.fav, route.query.run] as const,
-  ([scopeParam, c, tag, fav, run]) => {
+  () => [route.query.scope, route.query.c, route.query.tag, route.query.fav] as const,
+  ([scopeParam, c, tag, fav]) => {
     syncingFromRoute = true;
     try {
       const wantScope = asString(scopeParam);
@@ -2425,9 +2317,6 @@ watch(
         gallery.scope = wantScope as LibraryScope;
       }
       if (c !== undefined) gallery.collectionSlug = asString(c);
-      // A drilled-into 3-D run is addressable, so a reload keeps it and a link
-      // can express it — the same contract the open album has.
-      if (run !== undefined) gallery.openWorkflowRun(asString(run) || null);
       if (tag !== undefined) {
         gallery.tagFilter = (asString(tag) ?? "")
           .split(",")
@@ -2443,14 +2332,8 @@ watch(
 );
 
 watch(
-  () =>
-    [
-      gallery.scope,
-      gallery.collectionSlug,
-      gallery.tagFilter.join(","),
-      gallery.workflowId,
-    ] as const,
-  ([scopeValue, slug, tags, run]) => {
+  () => [gallery.scope, gallery.collectionSlug, gallery.tagFilter.join(",")] as const,
+  ([scopeValue, slug, tags]) => {
     if (syncingFromRoute || openingPrintDeepLink || route.path !== "/library") return;
     const query: Record<string, string | undefined> = {
       ...(route.query as Record<string, string | undefined>),
@@ -2462,7 +2345,7 @@ watch(
     set("scope", scopeValue === "prints" ? null : scopeValue);
     set("c", scopeValue === "collections" && slug ? slug : null);
     set("tag", tags.length > 0 ? tags : null);
-    set("run", scopeValue === "prints" && run ? run : null);
+    set("run", null);
     set("fav", null);
     const same = Object.keys({ ...route.query, ...query }).every(
       (key) => (route.query[key] ?? undefined) === (query[key] ?? undefined),
@@ -2540,7 +2423,6 @@ watch(
     gallery.collectionSlug = hiddenCollection?.slug ?? null;
     // A notification click must land on the print, not inside whichever 3-D
     // run the library happened to be drilled into an hour ago.
-    gallery.workflowId = null;
     gallery.tagFilter = [];
     gallery.filter = "all";
     gallery.mediaKind = "all";
@@ -2688,12 +2570,10 @@ onUnmounted(() => {
       :host-chips="gallery.chipCounts"
       :host-filter="gallery.filter"
       :collection-name="drillInName"
-      :run-name="openRunName"
       @toggle-tag="toggleTagFilter"
       @update:host-filter="gallery.filter = $event"
       @clear-filters="clearFilters"
       @exit-collection="exitCollection"
-      @exit-run="gallery.workflowId = null"
     />
 
     <!-- Collections drill-in: crumb bar with Select + Edit. -->
@@ -2874,21 +2754,9 @@ onUnmounted(() => {
                  together to the rising edge code on hover — they live in the
                  tile's bottom margin and must never overlap it.
 
-                 EVERY badge inside must be named in this guard. Listing only
-                 the host chip, Upscaled and the media kind swallowed both of a
-                 3-D run's marks on any tile needing no kind word — which is
-                 every ordinary still, and so every picture a run publishes:
-                 the step names vanished from exactly the near-identical PNGs
-                 they exist to tell apart, and a run led by a picture rather
-                 than a mesh wore no stack mark at all. -->
+                 Every visible badge belongs in the guard below. -->
               <span
-                v-if="
-                  showBadges ||
-                  tile.model.upscaled ||
-                  tile.model.kindBadge ||
-                  tile.model.workflowRole ||
-                  tile.model.workflowCount > 1
-                "
+                v-if="showBadges || tile.model.upscaled || tile.model.kindBadge"
                 class="absolute bottom-1.5 left-1.5 flex max-w-[85%] items-center gap-1 transition-opacity duration-100 group-hover:opacity-0"
               >
                 <span v-if="tile.model.upscaled" data-test="upscaled-badge" class="ms-lib-upscaled">
@@ -2901,26 +2769,6 @@ onUnmounted(() => {
                   :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
                 >
                   {{ tile.model.kindBadge }}
-                </span>
-                <!-- One 3-D run publishes a print per stage. The mesh is the
-                     tile; this says how many came with it. It is a FACT about
-                     the tile, not a control — the tile's own click opens the
-                     Lightbox, as it does everywhere else. -->
-                <span
-                  v-if="tile.model.workflowRole"
-                  data-test="workflow-role-badge"
-                  class="ms-lib-kind"
-                >
-                  {{ tile.model.workflowRole }}
-                </span>
-                <span
-                  v-if="!tile.model.workflowRole && tile.model.workflowCount > 1"
-                  data-test="workflow-stack-badge"
-                  class="ms-lib-kind ms-lib-stack"
-                  :aria-label="`One 3-D run, ${tile.model.workflowCount} pictures`"
-                >
-                  <Icon name="layers" :size="10" aria-hidden="true" />
-                  {{ tile.model.workflowCount }}
                 </span>
                 <span
                   v-if="showBadges"
@@ -3021,14 +2869,6 @@ onUnmounted(() => {
       @remove-tags="(names) => applyTags(selectedEntries, { add: [], remove: names })"
     />
 
-    <!--
-      `workflow-assets` is 0 in the Trash because the Trash offers no run
-      doors: `tileMenu` returns Restore, Copy and Delete forever and nothing
-      else. The run index is LIVE-only, so a name trashed here that another
-      machine still holds live would otherwise be told it had pictures to show
-      — and showing them leaves the Trash outright, since `openWorkflowRun`
-      moves the scope to Everything. Zero closes both doors at once.
-    -->
     <Lightbox
       v-if="lightboxOpen && selectedEntry"
       :item="selectedEntry.item"
@@ -3037,9 +2877,6 @@ onUnmounted(() => {
       :video="isVideo(selectedEntry.item)"
       :audio="isAudio(selectedEntry.item)"
       :mesh="isMesh(selectedEntry.item)"
-      :workflow-assets="
-        inTrash ? 0 : (gallery.meshWorkflowIndex.get(selectedEntry.item.filename)?.memberCount ?? 0)
-      "
       :mesh-export-formats="meshExportFormats"
       :mesh-export-geometry="meshExportGeometry"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
@@ -3061,8 +2898,6 @@ onUnmounted(() => {
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
       @reuse="reuseSettings(selectedEntry!)"
-      @reopen-workflow="reopenAsWorkflow(selectedEntry!)"
-      @show-workflow-assets="showWorkflowAssets(selectedEntry!)"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"
       @tags="(change) => applyTags([selectedEntry!], change)"

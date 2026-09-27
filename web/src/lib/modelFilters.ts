@@ -60,10 +60,7 @@ const VARIANT_RANKS: Record<string, number> = {
 /**
  * Whether a row is a style a person can pick.
  *
- * The list lives in `@studio/lib/generationModels` — this surface and desktop
- * each had their own and they had already drifted (this one knew `companion`
- * and `control-net`, desktop knew `real-esrgan`), which is how the 3-D Studio
- * came to offer the prompt expander as a picture style.
+ * Shared with the other surfaces so support models never appear as styles.
  */
 export function isStandaloneGenerationModel(model: ModelInfoExtended): boolean {
   return isGenerationModel(model);

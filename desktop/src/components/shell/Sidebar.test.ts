@@ -79,7 +79,6 @@ describe("Sidebar a11y", () => {
     const wrapper = await mountAt("/create");
     for (const label of [
       "New image",
-      "3-D studio",
       "Queue",
       "My images",
       "Styles",

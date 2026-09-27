@@ -26,7 +26,7 @@ import type { StyleMenuModel } from "../lib/styleMenu";
  * (`scripts/tests/frontend-architecture.sh`), so the availability tag and the
  * refusal reason are INJECTED by the host. The source glyph is drawn by the
  * menu itself from `modelSource(model)` — `studio/` may import `@ui`
- * (precedent: `MeshWorkflowStudio.vue`, `NotificationsCenter.vue`) — and a
+ * (precedent: `NotificationsCenter.vue`) — and a
  * host may still override it through the `glyph` slot, though none of the
  * three does any more. The rule behind the availability tag is now
  * ONE shared rule,

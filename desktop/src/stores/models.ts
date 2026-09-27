@@ -6,10 +6,7 @@ import type { ModelEntry } from "../lib/api/types";
 /**
  * Whether a row is a style a person can pick.
  *
- * The list lives in `@studio/lib/generationModels` — this surface and web each
- * had their own and they had already drifted (this one knew `real-esrgan`,
- * web knew `companion` and `control-net`), which is how the 3-D Studio came to
- * offer the prompt expander as a picture style.
+ * Shared with the other surfaces so support models never appear as styles.
  */
 export function isGenerationModel(m: ModelEntry): boolean {
   return isGenerationModelShared(m);
