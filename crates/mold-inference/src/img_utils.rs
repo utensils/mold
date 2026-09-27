@@ -260,8 +260,28 @@ where
 /// cutout — the input the docs recommend as the BEST one — indistinguishable
 /// from a full opaque frame, and conditions the vision tower on the whole
 /// canvas including the black transparent pixels.
+///
+/// 8-bit exactly as Pillow converts (see [`pillow_rgba8`]), because Hunyuan3D
+/// 2.1 upstream opens every conditioning image with PIL and converts it to
+/// `"RGBA"` before anything else touches it: `demo.py:25` and
+/// `hy3dshape/minimal_demo.py:24` open the request's source image with
+/// `Image.open(image_path).convert("RGBA")`, the HTTP worker's
+/// `model_worker.py:52` decodes the same way from a base64 payload before
+/// handing it to the pipeline, and the pipeline's own image branch —
+/// `hy3dshape/hy3dshape/preprocessors.py:95-96` (`ImageProcessorV2.load_image`,
+/// taken for every `PIL.Image.Image` input) — converts again defensively.
+/// The `image` crate's own `x / 257` rescale disagrees with Pillow's PNG
+/// plugin on 16-bit RGB/RGBA/LA (`Unpack.c` `unpackRGB16B`/`unpackRGBA16B`
+/// take the HIGH byte) and on 16-bit grayscale (`Convert.c` `I16_RGB` clamps
+/// rather than scales), so a 16-bit source would condition the shape/paint
+/// networks, matting, and delight on the wrong pixels.
 pub fn decode_oriented_srgb_rgba(bytes: &[u8]) -> Result<image::RgbaImage> {
-    decode_oriented_srgb_rgba_with_limits(bytes, image::Limits::no_limits())
+    decode_oriented_srgb_rgba_inner(
+        bytes,
+        image::Limits::no_limits(),
+        |_, _| Ok(()),
+        pillow_rgba8,
+    )
 }
 
 pub fn decode_oriented_srgb_rgba_with_limits(
@@ -810,5 +830,92 @@ mod reference_decode_tests {
             }
         }
         !crc
+    }
+}
+
+#[cfg(test)]
+mod hunyuan3d_decode_tests {
+    use super::*;
+
+    /// Hand-written (not Pillow-written: Pillow's own PNG encoder has no
+    /// 16-bit RGBA save path) 2x2 16-bit RGBA PNG, every pixel
+    /// `(0x80FF, 0x80FF, 0x80FF, 0xFF00)`. Verified against Pillow 12.3.0
+    /// (`tmp/qwen21-venv`): `Image.open(path).convert("RGBA")` reads
+    /// `(128, 128, 128, 255)` -- the high byte of each 16-bit sample, per
+    /// `pillow_rgba8`'s doc comment. The `image` crate's own `x / 257`
+    /// rescale reads the SAME colour by coincidence (33023 / 257 rounds to
+    /// 128 too) but a DIFFERENT alpha: 65280 / 257 rounds to 254, not 255 --
+    /// exactly the divergence `decode_oriented_srgb_rgba` must not have.
+    const SIXTEEN_BIT_RGBA_FIXTURE: &[u8] =
+        include_bytes!("../testdata/hunyuan3d/pillow_16bit_rgba.png");
+
+    #[test]
+    fn hunyuan3d_source_decode_takes_the_pillow_high_byte() {
+        let rgba = decode_oriented_srgb_rgba(SIXTEEN_BIT_RGBA_FIXTURE).unwrap();
+        assert_eq!(rgba.dimensions(), (2, 2));
+        for pixel in rgba.pixels() {
+            assert_eq!(pixel.0, [0x80, 0x80, 0x80, 255], "pixel = {:?}", pixel.0);
+        }
+    }
+
+    /// Same sample matrix as `reference_decode_tests`, measured against
+    /// Pillow 12.3.0 for the SAME conversion (`pillow_rgba8`): the high byte
+    /// for 16-bit RGB/RGBA/LA, a clamp for 16-bit grayscale (`I;16`).
+    /// Hunyuan3D's `decode_oriented_srgb_rgba` must agree with Qwen Image
+    /// 2.1's `decode_reference_rgba` here, because both route every 16-bit
+    /// PNG through the same `pillow_rgba8` conversion.
+    #[test]
+    fn hunyuan3d_source_decode_matches_pillow_across_every_sixteen_bit_mode() {
+        use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
+
+        const SAMPLES: [u16; 10] = [
+            0x0000, 0x00ff, 0x0100, 0x7fff, 0x8000, 0xff00, 0xff7f, 0xff80, 0xfeff, 0xffff,
+        ];
+        const PIL_HIGH_BYTE: [u8; 10] = [0, 0, 1, 127, 128, 255, 255, 255, 254, 255];
+        const PIL_I16_CLAMP: [u8; 10] = [0, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+
+        fn png<P: image::PixelWithColorType>(image: &ImageBuffer<P, Vec<P::Subpixel>>) -> Vec<u8>
+        where
+            [P::Subpixel]: image::EncodableLayout,
+        {
+            let mut bytes = Cursor::new(Vec::new());
+            image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            bytes.into_inner()
+        }
+
+        let rgba = ImageBuffer::from_fn(10, 1, |x, _| Rgba([SAMPLES[x as usize]; 4]));
+        let rgb = ImageBuffer::from_fn(10, 1, |x, _| Rgb([SAMPLES[x as usize]; 3]));
+        let la = ImageBuffer::from_fn(10, 1, |x, _| LumaA([SAMPLES[x as usize]; 2]));
+        let l = ImageBuffer::from_fn(10, 1, |x, _| Luma([SAMPLES[x as usize]]));
+        let channel = |bytes: Vec<u8>, index: usize| -> Vec<u8> {
+            decode_oriented_srgb_rgba(&bytes)
+                .unwrap()
+                .pixels()
+                .map(|pixel| pixel.0[index])
+                .collect()
+        };
+        assert_eq!(channel(png(&rgba), 0), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgba), 3), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgb), 1), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&rgb), 3), [255; 10]);
+        assert_eq!(channel(png(&la), 2), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&la), 3), PIL_HIGH_BYTE);
+        assert_eq!(channel(png(&l), 0), PIL_I16_CLAMP);
+        assert_eq!(channel(png(&l), 3), [255; 10]);
+    }
+
+    #[test]
+    fn hunyuan3d_eight_bit_source_decode_unchanged() {
+        let image = image::RgbaImage::from_fn(6, 4, |x, y| {
+            image::Rgba([x as u8 * 40, y as u8 * 60, 7, 200])
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image.clone())
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            decode_oriented_srgb_rgba(&bytes.into_inner()).unwrap(),
+            image
+        );
     }
 }
