@@ -1,0 +1,504 @@
+{
+  "schema": "mold.qualification.qwen-image-2.1-cuda-performance.v1",
+  "host": {
+    "name": "plato",
+    "gpu": "NVIDIA L40S 46 GB",
+    "cuda_visible_devices": "2",
+    "note": "GPU 1 was retired mid-campaign (fatal PCIe errors); every number here is from GPU 2."
+  },
+  "model": {
+    "name": "qwen-image-2.1:bf16",
+    "snapshot": "790c92633540aa0cb11d9abf19eb46d861714758"
+  },
+  "build": {
+    "harness": "cargo test --profile dev-fast -p mold-ai-inference --features cuda,cudnn,flash-attn",
+    "candle_fork": "bf2cd29a791dbc053df826b4377d092c3809d17f",
+    "cli_baseline_binary": "/nix/store/6w0b2jjzhs8h3df1b8my2ppnpcg3mz5h-mold-0.32.0/bin/mold"
+  },
+  "legacy_byte_identity": {
+    "reference_dir": "/storage/mold/fixtures/qwen_image21/legacy-v032",
+    "cases": [
+      {
+        "case": "1024x1024 g1 seed 210001",
+        "png_sha256": "f1fa6bc2fd69296eecd86cd48f4a91b5f8ad83c5e97b955fc7b1432a57c8e5ae",
+        "rgb_sha256": "a6d45454daf82a40a0c9d56ee1a5ed3781570d711be63c3e7db6577195525df6",
+        "harness_legacy_rgb_sha256": "a6d45454daf82a40a0c9d56ee1a5ed3781570d711be63c3e7db6577195525df6"
+      },
+      {
+        "case": "1024x1024 g1 seed 210002",
+        "png_sha256": "0b0a1d9b51603291b1ea798fd3b0058154fef264d48876e39f46d91184b6f859",
+        "rgb_sha256": "a3a192494ce2db59eed341de0a55aa9da89808327438dcbfaeb8d54ab51a7956"
+      },
+      {
+        "case": "1344x768 g4 + negative seed 7",
+        "png_sha256": "518bd8e7230fe91b5e3ed3de0d9e8f6392902a305b1201c7247ab4da8450e74b",
+        "rgb_sha256": "9868de33fa17b30b6dbfe10caf2e5e42b346fcd5471c77505155f53a54fad4c4",
+        "harness_legacy_rgb_sha256": "9868de33fa17b30b6dbfe10caf2e5e42b346fcd5471c77505155f53a54fad4c4"
+      }
+    ]
+  },
+  "cli_v032_baseline": [
+    {
+      "case": "1024x1024 g1 seed 210001",
+      "denoise_seconds": [
+        38.0,
+        38.2
+      ],
+      "vae_seconds": 1.1,
+      "total_seconds": [
+        39.2,
+        39.4
+      ]
+    },
+    {
+      "case": "1024x1024 g1 seed 210002",
+      "denoise_seconds": [
+        38.3
+      ],
+      "vae_seconds": 1.1,
+      "total_seconds": [
+        39.7
+      ]
+    },
+    {
+      "case": "1344x768 g4 + negative seed 7",
+      "denoise_seconds": [
+        74.4
+      ],
+      "vae_seconds": 1.0,
+      "total_seconds": [
+        75.6
+      ]
+    }
+  ],
+  "harness_legacy": [
+    {
+      "label": "legacy-bf16-1024x1024-g1",
+      "mode": "legacy",
+      "exec_path": {
+        "attention": "Legacy",
+        "cfg_batch": false,
+        "compact_modulation": false,
+        "f32_rope_tables": false,
+        "fused_adaln": false,
+        "fused_projection": false,
+        "label": "legacy"
+      },
+      "tier": "bf16",
+      "width": 1024,
+      "height": 1024,
+      "latent_tokens": 4096,
+      "guidance": 1.0,
+      "negative_prompt": null,
+      "seed": 210001,
+      "prefix_tokens": 81,
+      "negative_prefix_tokens": null,
+      "steps": 40,
+      "first_step_seconds": 1.08961028,
+      "steady_step_median_seconds": 0.967791948,
+      "steady_step_mean_seconds": 0.9684385557692305,
+      "denoise_seconds": 38.872088465,
+      "resident_used_bytes": 14837612544,
+      "denoise_peak_used_bytes": 15743582208,
+      "denoise_peak_increment_bytes": 905969664,
+      "vae_conv_backend": "im2col",
+      "vae_decode_seconds": 2.375893156,
+      "vae_decode_peak_increment_bytes": 12314476544,
+      "cudnn_dispatches": 0,
+      "rgb_sha256": "a6d45454daf82a40a0c9d56ee1a5ed3781570d711be63c3e7db6577195525df6",
+      "flash_compiled": true,
+      "cudnn_compiled": true
+    },
+    {
+      "label": "legacy-bf16-1344x768-g4",
+      "mode": "legacy",
+      "exec_path": {
+        "attention": "Legacy",
+        "cfg_batch": false,
+        "compact_modulation": false,
+        "f32_rope_tables": false,
+        "fused_adaln": false,
+        "fused_projection": false,
+        "label": "legacy"
+      },
+      "tier": "bf16",
+      "width": 1344,
+      "height": 768,
+      "latent_tokens": 4032,
+      "guidance": 4.0,
+      "negative_prompt": "blurry, lowres, watermark",
+      "seed": 7,
+      "prefix_tokens": 33,
+      "negative_prefix_tokens": 15,
+      "steps": 40,
+      "first_step_seconds": 1.9962019130000002,
+      "steady_step_median_seconds": 1.901642987,
+      "steady_step_mean_seconds": 1.9159324945384617,
+      "denoise_seconds": 76.721682918,
+      "resident_used_bytes": 14837612544,
+      "denoise_peak_used_bytes": 15777136640,
+      "denoise_peak_increment_bytes": 939524096,
+      "vae_conv_backend": "im2col",
+      "vae_decode_seconds": 2.374480923,
+      "vae_decode_peak_increment_bytes": 12113149952,
+      "cudnn_dispatches": 0,
+      "rgb_sha256": "9868de33fa17b30b6dbfe10caf2e5e42b346fcd5471c77505155f53a54fad4c4",
+      "flash_compiled": true,
+      "cudnn_compiled": true
+    },
+    {
+      "label": "legacy-bf16-2048x2048-g1",
+      "mode": "legacy",
+      "exec_path": {
+        "attention": "Legacy",
+        "cfg_batch": false,
+        "compact_modulation": false,
+        "f32_rope_tables": false,
+        "fused_adaln": false,
+        "fused_projection": false,
+        "label": "legacy"
+      },
+      "tier": "bf16",
+      "width": 2048,
+      "height": 2048,
+      "latent_tokens": 16384,
+      "guidance": 1.0,
+      "negative_prompt": null,
+      "seed": 210001,
+      "prefix_tokens": 81,
+      "negative_prefix_tokens": null,
+      "steps": 40,
+      "first_step_seconds": 13.200464928,
+      "steady_step_median_seconds": 13.131393994,
+      "steady_step_mean_seconds": 13.136208019897431,
+      "denoise_seconds": 525.516871141,
+      "resident_used_bytes": 14837612544,
+      "denoise_peak_used_bytes": 18528600064,
+      "denoise_peak_increment_bytes": 3690987520,
+      "vae_conv_backend": "im2col",
+      "vae_decode_seconds": 5.791473371,
+      "vae_decode_peak_increment_bytes": 24897388544,
+      "cudnn_dispatches": 0,
+      "rgb_sha256": "651e2308899eb066ec464873cf182792dddceb6c35c88278892bfe269eb696d1",
+      "flash_compiled": true,
+      "cudnn_compiled": true
+    },
+    {
+      "label": "legacy-bf16-2752x1536-g1",
+      "mode": "legacy",
+      "exec_path": {
+        "attention": "Legacy",
+        "cfg_batch": false,
+        "compact_modulation": false,
+        "f32_rope_tables": false,
+        "fused_adaln": false,
+        "fused_projection": false,
+        "label": "legacy"
+      },
+      "tier": "bf16",
+      "width": 2752,
+      "height": 1536,
+      "latent_tokens": 16512,
+      "guidance": 1.0,
+      "negative_prompt": null,
+      "seed": 210001,
+      "prefix_tokens": 81,
+      "negative_prefix_tokens": null,
+      "steps": 40,
+      "first_step_seconds": 13.457253257,
+      "steady_step_median_seconds": 13.40386155,
+      "steady_step_mean_seconds": 13.420755226923076,
+      "denoise_seconds": 536.870900992,
+      "resident_used_bytes": 14837612544,
+      "denoise_peak_used_bytes": 18495045632,
+      "denoise_peak_increment_bytes": 3657433088,
+      "vae_conv_backend": "im2col",
+      "vae_decode_seconds": 5.545822823,
+      "vae_decode_peak_increment_bytes": 25065160704,
+      "cudnn_dispatches": 0,
+      "rgb_sha256": "583da928ff7268982dec3f9176a69c2ca165d92d4ef7bd762e96120614714628",
+      "flash_compiled": true,
+      "cudnn_compiled": true
+    }
+  ],
+  "harness_fast": [],
+  "vae_decode": {
+    "standalone": [
+      {
+        "conv_backend": "cudnn",
+        "height": 1024,
+        "pixels": 1048576,
+        "runs": [
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 6450839552,
+            "rgb_sha256": "15a6854360a6a67d69e27c3696c2750475a072b2e43247b2c5fd6bf07c7de567",
+            "seconds": 8.835259981
+          },
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 6442450944,
+            "rgb_sha256": "15a6854360a6a67d69e27c3696c2750475a072b2e43247b2c5fd6bf07c7de567",
+            "seconds": 0.583330981
+          }
+        ],
+        "width": 1024
+      },
+      {
+        "conv_backend": "im2col",
+        "height": 1024,
+        "pixels": 1048576,
+        "runs": [
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 13186891776,
+            "rgb_sha256": "a47939638ce6af4c0ee684e0e37ab2e1da36df9c8b9aa564f8a6d54b2d61f84b",
+            "seconds": 1.109704767
+          },
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 13522436096,
+            "rgb_sha256": "a47939638ce6af4c0ee684e0e37ab2e1da36df9c8b9aa564f8a6d54b2d61f84b",
+            "seconds": 1.136981616
+          }
+        ],
+        "width": 1024
+      },
+      {
+        "conv_backend": "cudnn",
+        "height": 768,
+        "pixels": 1032192,
+        "runs": [
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 6341787648,
+            "rgb_sha256": "5ec1288a31c691285fddc9bbbf2ef9798a8d75dac52fa3139e1a29e712d957ec",
+            "seconds": 0.583198846
+          },
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 6341787648,
+            "rgb_sha256": "5ec1288a31c691285fddc9bbbf2ef9798a8d75dac52fa3139e1a29e712d957ec",
+            "seconds": 0.574809919
+          }
+        ],
+        "width": 1344
+      },
+      {
+        "conv_backend": "im2col",
+        "height": 768,
+        "pixels": 1032192,
+        "runs": [
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 13321109504,
+            "rgb_sha256": "88b8d0ab6fb12fb14e07574934d4dc47b04d86cca261499c8db9609804c7bb66",
+            "seconds": 1.448616188
+          },
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 13321109504,
+            "rgb_sha256": "88b8d0ab6fb12fb14e07574934d4dc47b04d86cca261499c8db9609804c7bb66",
+            "seconds": 1.090884588
+          }
+        ],
+        "width": 1344
+      },
+      {
+        "conv_backend": "cudnn",
+        "height": 2048,
+        "pixels": 4194304,
+        "runs": [
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 22447915008,
+            "rgb_sha256": "3f60bc3828c64b057882caf46aca1f38274aa96aefb12d758dc72d838fd9fb54",
+            "seconds": 2.327671503
+          },
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 22984785920,
+            "rgb_sha256": "3f60bc3828c64b057882caf46aca1f38274aa96aefb12d758dc72d838fd9fb54",
+            "seconds": 2.68169901
+          }
+        ],
+        "width": 2048
+      },
+      {
+        "conv_backend": "im2col",
+        "height": 2048,
+        "pixels": 4194304,
+        "runs": [
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 21474836480,
+            "rgb_sha256": "8b2bc57b185db548646fa2764a7859e9342a46235354325c0d931832aa446ef0",
+            "seconds": 4.037680024
+          },
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 21474836480,
+            "rgb_sha256": "8b2bc57b185db548646fa2764a7859e9342a46235354325c0d931832aa446ef0",
+            "seconds": 4.756825204
+          }
+        ],
+        "width": 2048
+      },
+      {
+        "conv_backend": "cudnn",
+        "height": 1536,
+        "pixels": 4227072,
+        "runs": [
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 22682796032,
+            "rgb_sha256": "31257a4d62382ae0438ddcafb32f2596a6a8bfadcb02eb3736293cab5ebe7d65",
+            "seconds": 2.37911794
+          },
+          {
+            "cudnn_dispatches": 39,
+            "peak_increment_bytes": 22615687168,
+            "rgb_sha256": "31257a4d62382ae0438ddcafb32f2596a6a8bfadcb02eb3736293cab5ebe7d65",
+            "seconds": 2.365001512
+          }
+        ],
+        "width": 2752
+      },
+      {
+        "conv_backend": "im2col",
+        "height": 1536,
+        "pixels": 4227072,
+        "runs": [
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 22615687168,
+            "rgb_sha256": "95408816675cb26272263152db5e4221320c540714b96e3bdb437b3abac1e38e",
+            "seconds": 4.093460086
+          },
+          {
+            "cudnn_dispatches": 0,
+            "peak_increment_bytes": 22615687168,
+            "rgb_sha256": "95408816675cb26272263152db5e4221320c540714b96e3bdb437b3abac1e38e",
+            "seconds": 4.085512401
+          }
+        ],
+        "width": 2752
+      }
+    ],
+    "in_render": [
+      {
+        "width": 1024,
+        "height": 1024,
+        "conv_backend": "cudnn",
+        "seconds": 1.941461069,
+        "peak_increment_bytes": 5840568320,
+        "cudnn_dispatches": 39
+      },
+      {
+        "width": 1024,
+        "height": 1024,
+        "conv_backend": "im2col",
+        "seconds": 2.412218686,
+        "peak_increment_bytes": 12314476544,
+        "cudnn_dispatches": 0
+      },
+      {
+        "width": 1344,
+        "height": 768,
+        "conv_backend": "cudnn",
+        "seconds": 1.945830565,
+        "peak_increment_bytes": 5739905024,
+        "cudnn_dispatches": 39
+      },
+      {
+        "width": 1344,
+        "height": 768,
+        "conv_backend": "im2col",
+        "seconds": 2.388012438,
+        "peak_increment_bytes": 12146704384,
+        "cudnn_dispatches": 0
+      },
+      {
+        "width": 2048,
+        "height": 2048,
+        "conv_backend": "cudnn",
+        "seconds": 3.981508689,
+        "peak_increment_bytes": 27248295936,
+        "cudnn_dispatches": 39
+      },
+      {
+        "width": 2048,
+        "height": 2048,
+        "conv_backend": "im2col",
+        "seconds": 5.391275332,
+        "peak_increment_bytes": 21474836480,
+        "cudnn_dispatches": 0
+      },
+      {
+        "width": 2752,
+        "height": 1536,
+        "conv_backend": "cudnn",
+        "seconds": 3.909467695,
+        "peak_increment_bytes": 27550285824,
+        "cudnn_dispatches": 39
+      },
+      {
+        "width": 2752,
+        "height": 1536,
+        "conv_backend": "im2col",
+        "seconds": 5.338589019,
+        "peak_increment_bytes": 22615687168,
+        "cudnn_dispatches": 0
+      }
+    ],
+    "peak_function": "mold_inference::device::qwen_image21_vae_decode_peak_bytes"
+  },
+  "adaln_precision": {
+    "kernel": "candle-kernels reduce.cu layernorm: one-pass F32 E[x^2]-mean^2",
+    "gate_max_rel": 0.01,
+    "worst_fused_max_rel": 0.0035971917407156434,
+    "worst_fused_site": "t0.05/block20/norm2/target",
+    "worst_hand_max_rel": 0.006510713342824978,
+    "worst_row_mean_over_std": 0.1075970441001796,
+    "passes": true
+  },
+  "reduced_precision_gemm": [
+    {
+      "k": 4096,
+      "m": 4177,
+      "max_abs_diff": 0.0,
+      "n": 4096,
+      "timings": {
+        "default_ms": 0.82166454,
+        "reduced_ms": 0.83499796
+      }
+    },
+    {
+      "k": 4096,
+      "m": 4177,
+      "max_abs_diff": 0.0,
+      "n": 12288,
+      "timings": {
+        "default_ms": 3.0744101,
+        "reduced_ms": 3.16602778
+      }
+    },
+    {
+      "k": 12288,
+      "m": 4177,
+      "max_abs_diff": 0.0,
+      "n": 4096,
+      "timings": {
+        "default_ms": 2.9040550400000003,
+        "reduced_ms": 2.9738586199999997
+      }
+    }
+  ],
+  "gates": {
+    "1024x1024_g1_denoise_seconds": 22,
+    "1024x1024_g1_stretch": 18.5,
+    "1344x768_g4_negative_denoise_seconds": 42,
+    "2048x2048_g1_denoise_seconds": 85,
+    "2752x1536_g1_denoise_seconds": 90
+  }
+}
