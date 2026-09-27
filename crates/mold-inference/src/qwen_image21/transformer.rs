@@ -2163,5 +2163,5 @@ mod tests {
 #[cfg(test)]
 mod legacy_oracle;
 
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, any(feature = "metal", feature = "cuda")))]
 mod performance_tests;

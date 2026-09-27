@@ -9989,7 +9989,9 @@ mod tests {
         } else {
             SemanticConvBackend::Im2Col
         };
-        for family in ["flux", "flux2"] {
+        // Qwen Image 2.1 joined the FastStill tables; its fingerprint records
+        // the convolution backend for the same reason.
+        for family in ["flux", "flux2", "qwen-image21"] {
             let frozen = frozen_config_for_family(family);
             let semantic = ExecutionSemanticConfig::from_frozen(
                 &frozen,
@@ -10018,7 +10020,7 @@ mod tests {
             );
         }
         // And the attention side agrees with the engine's own family policy.
-        for family in ["flux", "flux2"] {
+        for family in ["flux", "flux2", "qwen-image21"] {
             let frozen = frozen_config_for_family(family);
             assert_eq!(
                 frozen.attention_backend,

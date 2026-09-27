@@ -426,7 +426,17 @@ impl QwenImage21Engine {
         progress.stage_start(label);
         let start = Instant::now();
         let latents = latents.to_device(vae_device)?.to_dtype(vae_dtype)?;
-        let decoded = vae.decode_packed(&latents, latent_height, latent_width)?;
+        // The VAE is the family's only convolution, so the FastStill conv
+        // scope wraps the decode alone (as FLUX does). The dispatch counter,
+        // not the resolved policy, is the receipt of what actually ran.
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
+        let decoded = {
+            let _conv = crate::conv_policy::ConvScope::for_family("qwen-image21");
+            let decoded = vae.decode_packed(&latents, latent_height, latent_width)?;
+            vae_device.synchronize()?;
+            decoded
+        };
+        crate::conv_policy::report_vae_decode_backend("qwen-image21", cudnn_dispatches_before);
         // The checkpoint decodes RGBA (`conv_out` has four channels, V:1137);
         // keep all four here and let the output-alpha rule decide what is
         // published.
