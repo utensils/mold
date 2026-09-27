@@ -62,6 +62,13 @@ pub struct Qwen21TeBudget {
     pub vae_bytes: u64,
     /// Device bytes of the loaded text encoder ([`text_encoder_device_bytes`]).
     pub text_encoder_bytes: u64,
+    /// Device bytes of the reference encoders (vision tower and VAE encoder)
+    /// an eager engine keeps loaded after a reference request — resident
+    /// through every phase ([`Qwen21RenderPhases::reference_encoder_bytes`]).
+    pub reference_encoder_bytes: u64,
+    /// Encode-phase working set above the resident weights (vision attention,
+    /// the multimodal prompt's rows and scores). Gone before the denoise.
+    pub encode_workspace_bytes: u64,
     /// Denoise-phase workspace (activations, prefix KV cache, both CFG
     /// branches).
     pub denoise_workspace_bytes: u64,
@@ -132,11 +139,14 @@ impl Qwen21TeBudget {
         }
     }
 
-    /// Prompt encode: transformer, VAE and the encoder all on the card.
+    /// Prompt encode: transformer, VAE, the encoder and the reference
+    /// encoders all on the card, plus the encode working set.
     fn encode_phase(&self) -> u64 {
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
             .saturating_add(self.text_encoder_bytes)
+            .saturating_add(self.reference_encoder_bytes)
+            .saturating_add(self.encode_workspace_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
@@ -144,6 +154,7 @@ impl Qwen21TeBudget {
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
             .saturating_add(self.te(te))
+            .saturating_add(self.reference_encoder_bytes)
             .saturating_add(self.denoise_workspace_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
@@ -152,12 +163,16 @@ impl Qwen21TeBudget {
         self.transformer(transformer)
             .saturating_add(self.vae_bytes)
             .saturating_add(self.te(te))
+            .saturating_add(self.reference_encoder_bytes)
             .saturating_add(self.decode_peak_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
-    /// Every phase's peak under one placement. With everything resident this
-    /// is `transformer + VAE + TE + max(activation, decode)`.
+    /// Every phase's peak under one placement. The phases run one after
+    /// another — the encode's working set is freed before the denoise
+    /// allocates its own, and the denoise's before the decode — so the
+    /// render needs the LARGEST phase, never their sum; what stays resident
+    /// across phases (weights, a resident encoder) is counted in each.
     fn peak(&self, te: bool, transformer_through_decode: bool) -> u64 {
         self.encode_phase()
             .max(self.denoise_phase(te))
@@ -309,8 +324,8 @@ pub struct Qwen21PlanInputs<'a> {
     pub device: TeDevice,
     /// Free device bytes as if nothing this render loads were resident.
     pub usable_free_bytes: u64,
-    pub denoise_workspace_bytes: u64,
-    pub decode_peak_bytes: u64,
+    /// The request's phase working sets ([`render_phases`]).
+    pub phases: Qwen21RenderPhases,
     pub host_total_bytes: u64,
     pub host_available_bytes: u64,
     pub already_parked_bytes: u64,
@@ -401,8 +416,16 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
         transformer_bytes,
         vae_bytes,
         text_encoder_bytes,
-        denoise_workspace_bytes: inputs.denoise_workspace_bytes,
-        decode_peak_bytes: inputs.decode_peak_bytes,
+        // The vision tower lives on the text encoder's device: a host-placed
+        // encoder puts it on the host with it.
+        reference_encoder_bytes: if choice.on_gpu() {
+            inputs.phases.reference_encoder_bytes
+        } else {
+            inputs.phases.reference_vae_encoder_bytes
+        },
+        encode_workspace_bytes: inputs.phases.encode_workspace_bytes,
+        denoise_workspace_bytes: inputs.phases.denoise_workspace_bytes,
+        decode_peak_bytes: inputs.phases.decode_peak_bytes,
         host_total_bytes: inputs.host_total_bytes,
         host_available_bytes: inputs.host_available_bytes,
         already_parked_bytes: inputs.already_parked_bytes,
@@ -448,6 +471,111 @@ pub fn render_workspace_bytes(
         denoise,
         crate::device::qwen_image21_vae_decode_peak_bytes(width, height, conv, vae_dtype_bytes),
     )
+}
+
+/// One Qwen Image 2.1 request, as the phase sizing reads it.
+#[derive(Clone, Copy, Debug)]
+pub struct Qwen21RenderRequest<'a> {
+    /// The transformer tier ([`transformer_format`]).
+    pub format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    pub width: u32,
+    pub height: u32,
+    pub batch: u32,
+    /// Source dimensions of every reference image, in order.
+    pub references: &'a [(u32, u32)],
+    /// CFG branches that carry a prefix (2 with guidance and a negative).
+    pub branches: usize,
+    /// The VAE's working dtype bytes (2 on CUDA's BF16 VAE, 4 on Metal).
+    pub vae_dtype_bytes: u32,
+}
+
+/// Each phase's working set for one request — the ONE sizing the engine
+/// (`settle_text_encoder_residency`), [`decide`] / [`plan`], mold-server's
+/// `memory_preflight` and `execution_plan` all read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Qwen21RenderPhases {
+    /// Vision tower + VAE encoder weights, resident through every phase once
+    /// a reference request has loaded them.
+    pub reference_encoder_bytes: u64,
+    /// The VAE encoder's share of [`Self::reference_encoder_bytes`] — what
+    /// stays on the card when the text encoder (and with it the vision tower)
+    /// is placed on the host.
+    pub reference_vae_encoder_bytes: u64,
+    /// The encode phase's working set above the resident weights.
+    pub encode_workspace_bytes: u64,
+    /// The denoise phase's working set: activations and the retained prefix
+    /// cache.
+    pub denoise_workspace_bytes: u64,
+    /// The VAE decode's peak.
+    pub decode_peak_bytes: u64,
+}
+
+/// The prefix-cache budget of `request` on a card with `usable_free_bytes`
+/// usable (as if nothing of this render were resident; `None` when no card
+/// is known) holding `transformer_and_vae_bytes` of weights. The cache is
+/// planned beside what the DENOISE holds — the workspace and the resident
+/// reference encoders — and never beside the text encoder, which the
+/// residency decision parks when the cache needs its room: a retained cache
+/// is worth ~8x the denoise, a resident encoder one park per request.
+pub fn prefix_cache_budget(
+    request: &Qwen21RenderRequest<'_>,
+    usable_free_bytes: Option<u64>,
+    transformer_and_vae_bytes: u64,
+) -> super::PrefixCacheBudget {
+    crate::device::qwen_image21_prefix_cache_budget(
+        usable_free_bytes,
+        transformer_and_vae_bytes,
+        crate::device::qwen_image21_planned_denoise_bytes(
+            request.format,
+            request.width,
+            request.height,
+            request.references,
+            request.batch,
+            2,
+        ),
+    )
+}
+
+/// [`Qwen21RenderPhases`] for `request`, with the prefix cache retained under
+/// `cache_budget` ([`prefix_cache_budget`]).
+pub fn render_phases(
+    request: &Qwen21RenderRequest<'_>,
+    cache_budget: super::PrefixCacheBudget,
+) -> Qwen21RenderPhases {
+    let (denoise, decode_peak_bytes) = render_workspace_bytes(
+        request.format,
+        request.width,
+        request.height,
+        request.batch,
+        request.vae_dtype_bytes,
+    );
+    let shape = crate::device::QwenImage21SequenceShape::for_request(
+        request.width,
+        request.height,
+        request.references,
+    );
+    Qwen21RenderPhases {
+        reference_encoder_bytes: crate::device::qwen_image21_reference_encoder_bytes(shape),
+        reference_vae_encoder_bytes: if request.references.is_empty() {
+            0
+        } else {
+            crate::device::QWEN_IMAGE21_VAE_ENCODER_F32_BYTES
+        },
+        encode_workspace_bytes: crate::device::qwen_image21_encode_workspace_bytes(shape, 2),
+        denoise_workspace_bytes: denoise.saturating_add(
+            crate::device::qwen_image21_reference_extra_bytes(
+                request.format,
+                request.width,
+                request.height,
+                request.batch,
+                2,
+                request.references,
+                request.branches,
+                cache_budget,
+            ),
+        ),
+        decode_peak_bytes,
+    }
 }
 
 /// Device bytes the Qwen3-VL language model occupies once loaded from
@@ -532,6 +660,8 @@ mod tests {
             transformer_bytes: 7_256_783_064,
             vae_bytes: 675_509_688,
             text_encoder_bytes: 10_531_655_680,
+            reference_encoder_bytes: 0,
+            encode_workspace_bytes: 0,
             denoise_workspace_bytes: activation,
             decode_peak_bytes: decode_peak(width, height),
             host_total_bytes: 64 * GIB,
@@ -655,6 +785,156 @@ mod tests {
             );
             assert!(decision.eager_peak_bytes <= CARD_40GB, "{width}x{height}");
         }
+    }
+
+    /// A BF16 engine on a `usable` card sized for `references` (source
+    /// dimensions) and `branches`, through the SAME two functions the engine
+    /// and the planner call, on the CUDA fast path's memory-following cache
+    /// rule (asked explicitly so the test does not depend on the build's
+    /// `cuda` feature).
+    fn bf16_reference_engine(
+        usable: u64,
+        width: u32,
+        height: u32,
+        references: &[(u32, u32)],
+        branches: usize,
+    ) -> (Qwen21TeBudget, Qwen21RenderPhases) {
+        let base = bf16_engine(usable, width, height);
+        let request = Qwen21RenderRequest {
+            format: None,
+            width,
+            height,
+            batch: 1,
+            references,
+            branches,
+            vae_dtype_bytes: 2,
+        };
+        let cache_budget =
+            super::super::PrefixCacheBudget::Headroom(super::super::prefix_cache_headroom(
+                usable,
+                base.transformer_bytes + base.vae_bytes,
+                crate::device::qwen_image21_planned_denoise_bytes(
+                    None, width, height, references, 1, 2,
+                ),
+            ));
+        let phases = render_phases(&request, cache_budget);
+        (
+            Qwen21TeBudget {
+                reference_encoder_bytes: phases.reference_encoder_bytes,
+                encode_workspace_bytes: phases.encode_workspace_bytes,
+                denoise_workspace_bytes: phases.denoise_workspace_bytes,
+                // The CUDA build's cuDNN decode curve, as every other case
+                // here reads it (this test build may resolve im2col).
+                ..base
+            },
+            phases,
+        )
+    }
+
+    /// The phases run one after another, so the render needs the largest of
+    /// them — never encode activations PLUS the denoise workspace, which was
+    /// what parked the text encoder for every reference request on a 46 GB
+    /// L40S although the measured peak with it resident was ~37.5 GB.
+    #[test]
+    fn the_budget_is_the_largest_phase_not_the_sum_of_phases() {
+        let budget = Qwen21TeBudget {
+            reference_encoder_bytes: 2 * GIB,
+            encode_workspace_bytes: 8 * GIB,
+            denoise_workspace_bytes: 8 * GIB,
+            decode_peak_bytes: 4 * GIB,
+            ..bf16_engine(CARD_48GB, 1024, 1024)
+        };
+        let resident = budget.transformer_bytes
+            + budget.vae_bytes
+            + budget.text_encoder_bytes
+            + budget.reference_encoder_bytes;
+        assert_eq!(
+            budget.peak(true, true),
+            resident + 8 * GIB + ALLOCATOR_MARGIN_BYTES
+        );
+        let decision = decide(&budget);
+        assert_eq!(
+            decision.residency,
+            Qwen21TeResidency::Resident,
+            "{decision:?}"
+        );
+        // Summing the two working sets would not have fit.
+        assert!(resident + 16 * GIB + ALLOCATOR_MARGIN_BYTES > CARD_48GB);
+    }
+
+    /// 1024² with one reference, and with three under guidance and a negative
+    /// prompt (two retained caches), keeps the BF16 encoder resident on a
+    /// 46/48 GB card AND retains every prefix cache.
+    #[test]
+    fn a_48gb_card_keeps_the_encoder_for_reference_renders_at_1024() {
+        for (references, branches) in [
+            (vec![(1024, 1024)], 1),
+            (vec![(1024, 1024)], 2),
+            (vec![(1024, 1024); 3], 1),
+            (vec![(1344, 768); 3], 1),
+            (vec![(1024, 1024); 2], 2),
+        ] {
+            let (budget, phases) =
+                bf16_reference_engine(CARD_48GB, 1024, 1024, &references, branches);
+            let shape =
+                crate::device::QwenImage21SequenceShape::for_request(1024, 1024, &references);
+            let cache = crate::qwen_image21::prefix_cache_bytes(shape.prefix_tokens(), 1, 2)
+                * branches as u64;
+            assert!(
+                phases.denoise_workspace_bytes > cache,
+                "the cache is retained: {phases:?}"
+            );
+            let decision = decide(&budget);
+            assert_eq!(
+                decision.residency,
+                Qwen21TeResidency::Resident,
+                "{} refs x{branches}: {decision:?} {phases:?}",
+                references.len()
+            );
+            assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+            assert!(decision.eager_peak_bytes <= CARD_48GB);
+        }
+    }
+
+    /// Three 1024² references under guidance and a negative prompt retain
+    /// two ~5 GB prefix caches. Beside them the 15 GB encoder does not fit a
+    /// 46/48 GB card (measured on an L40S: the denoise held ~30 GiB with the
+    /// encoder parked, 45 GiB total), and a retained cache is worth ~8x the
+    /// denoise against one park per request — so the encoder parks and both
+    /// caches stay.
+    #[test]
+    fn a_48gb_card_prefers_both_caches_to_a_resident_encoder_for_three_references() {
+        let references = vec![(1024, 1024); 3];
+        let (budget, phases) = bf16_reference_engine(CARD_48GB, 1024, 1024, &references, 2);
+        let shape = crate::device::QwenImage21SequenceShape::for_request(1024, 1024, &references);
+        let caches = 2 * crate::qwen_image21::prefix_cache_bytes(shape.prefix_tokens(), 1, 2);
+        assert!(phases.denoise_workspace_bytes > caches, "{phases:?}");
+        let decision = decide(&budget);
+        assert_eq!(
+            decision.residency,
+            Qwen21TeResidency::ParkHost,
+            "{decision:?}"
+        );
+        assert!(decision.eager_peak_bytes <= CARD_48GB);
+    }
+
+    /// A 24 GB card still parks for a reference render, and every phase
+    /// still charges the reference encoders the eager engine keeps loaded.
+    #[test]
+    fn a_24gb_card_still_parks_the_encoder_for_a_reference_render() {
+        let (budget, phases) = bf16_reference_engine(CARD_24GB, 1024, 1024, &[(1024, 1024)], 1);
+        assert!(phases.reference_encoder_bytes > 2 * GB);
+        assert!(phases.encode_workspace_bytes > 0);
+        let quantized = Qwen21TeBudget {
+            transformer_bytes: 7_256_783_064,
+            text_encoder_bytes: 10_531_655_680,
+            ..budget
+        };
+        assert_ne!(decide(&quantized).residency, Qwen21TeResidency::Resident);
+        // Text-to-image carries no reference phase at all.
+        let (_, t2i) = bf16_reference_engine(CARD_24GB, 1024, 1024, &[], 1);
+        assert_eq!(t2i.reference_encoder_bytes, 0);
+        assert_eq!(t2i.encode_workspace_bytes, 0);
     }
 
     #[test]

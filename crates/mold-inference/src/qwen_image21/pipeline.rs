@@ -346,6 +346,11 @@ impl QwenImage21Engine {
     /// (`text_encoder_residency::decide`) the planner priced: keep the encoder,
     /// park it in host RAM, or drop it for the denoise. The decision is
     /// returned so the caller applies its transformer-for-decode half too.
+    ///
+    /// `reference_encoders_on_card` is what the loaded vision tower and VAE
+    /// encoder hold on the card right now ([`Self::reference_encoders_on_card`]):
+    /// they are credited back into the usable memory like every other weight
+    /// this render loads, and charged to every phase.
     fn settle_text_encoder_residency(
         progress: &ProgressReporter,
         paths: &ModelPaths,
@@ -353,6 +358,7 @@ impl QwenImage21Engine {
         req: &GenerateRequest,
         ordinal: usize,
         vae_dtype: DType,
+        reference_encoders_on_card: u64,
     ) -> Result<super::text_encoder_residency::Qwen21TeDecision> {
         use super::text_encoder_residency as residency;
         let device = if !text_encoder.on_gpu || text_encoder.device.is_cpu() {
@@ -366,73 +372,85 @@ impl QwenImage21Engine {
         let vae_bytes = std::fs::metadata(&paths.vae).map_or(0, |metadata| metadata.len());
         let text_encoder_bytes =
             residency::text_encoder_device_bytes(text_encoder.encoder_paths()).unwrap_or(0);
-        let resident_now = transformer_bytes.saturating_add(vae_bytes).saturating_add(
-            if text_encoder.model.is_some() {
+        let resident_now = transformer_bytes
+            .saturating_add(vae_bytes)
+            .saturating_add(reference_encoders_on_card)
+            .saturating_add(if text_encoder.model.is_some() {
                 text_encoder_bytes
             } else {
                 0
-            },
-        );
-        let usable_free_bytes = match device {
-            residency::TeDevice::Cuda => crate::device::usable_free_vram_bytes(ordinal)
-                .map_or(0, |free| free.saturating_add(resident_now)),
+            });
+        // Sampled right after the encode, whose freed activations (the vision
+        // tower's attention tiles, the multimodal prompt's rows — ~4 GB for
+        // three references) sit idle in this process's stream-ordered pool,
+        // which the driver reports as USED. The driver's view therefore
+        // charged the encode phase a second time against the denoise and
+        // parked the encoder on a card with room for it; read what this
+        // process can actually allocate, as the denoise-time cache decision
+        // (`denoise_cache_budget`) does.
+        let usable_free_bytes = match text_encoder.device.location() {
+            candle_core::DeviceLocation::Cuda { .. } if device == residency::TeDevice::Cuda => {
+                let _ = text_encoder.device.synchronize();
+                crate::device::usable_allocatable_vram_bytes(ordinal)
+                    .map_or(0, |free| free.saturating_add(resident_now))
+            }
             _ => 0,
         };
-        let (denoise_workspace_bytes, decode_peak_bytes) = residency::render_workspace_bytes(
-            residency::transformer_format(paths),
-            req.width,
-            req.height,
-            1,
-            crate::device::dtype_bytes(vae_dtype),
-        );
-        // References lengthen the joint sequence and add the encode phase;
-        // the planner adds exactly the same bytes. On the CUDA fast path the
-        // prefix cache is charged whenever it fits the card beside the
-        // transformer, the VAE and the workspace — so the plan parks the text
-        // encoder to make room for it rather than recomputing the prefix.
+        // The planner reads the same two functions: the prefix cache is
+        // planned beside the denoise (never the text encoder, which parks to
+        // make room for it), and the phases are sized separately so the
+        // decision charges their MAX, not their sum.
         let references = crate::device::qwen_image21_reference_dimensions(
             req.edit_images.as_deref().unwrap_or_default(),
         );
+        let request = residency::Qwen21RenderRequest {
+            format: residency::transformer_format(paths),
+            width: req.width,
+            height: req.height,
+            batch: 1,
+            references: &references,
+            branches: reference_branches(req),
+            vae_dtype_bytes: crate::device::dtype_bytes(vae_dtype),
+        };
         let cache_budget = match device {
-            residency::TeDevice::Cuda => crate::device::qwen_image21_prefix_cache_budget(
+            residency::TeDevice::Cuda => residency::prefix_cache_budget(
+                &request,
                 Some(usable_free_bytes),
                 transformer_bytes.saturating_add(vae_bytes),
-                crate::device::qwen_image21_planned_denoise_bytes(
-                    residency::transformer_format(paths),
-                    req.width,
-                    req.height,
-                    &references,
-                    1,
-                    2,
-                ),
             ),
             _ => super::PrefixCacheBudget::RequestOnly,
         };
-        let denoise_workspace_bytes = denoise_workspace_bytes.saturating_add(
-            crate::device::qwen_image21_reference_extra_bytes(
-                residency::transformer_format(paths),
-                req.width,
-                req.height,
-                1,
-                2,
-                &references,
-                reference_branches(req),
-                cache_budget,
-            ),
-        );
-        let decision = residency::decide(&residency::Qwen21TeBudget {
+        let phases = residency::render_phases(&request, cache_budget);
+        let budget = residency::Qwen21TeBudget {
             device,
             usable_free_bytes,
             transformer_bytes,
             vae_bytes,
             text_encoder_bytes,
-            denoise_workspace_bytes,
-            decode_peak_bytes,
+            // What is actually loaded — a text-to-image request after a
+            // reference one still has the tower on the card.
+            reference_encoder_bytes: reference_encoders_on_card.max(
+                if device == residency::TeDevice::Cpu {
+                    phases.reference_vae_encoder_bytes
+                } else {
+                    phases.reference_encoder_bytes
+                },
+            ),
+            encode_workspace_bytes: phases.encode_workspace_bytes,
+            denoise_workspace_bytes: phases.denoise_workspace_bytes,
+            decode_peak_bytes: phases.decode_peak_bytes,
             host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
             host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
             already_parked_bytes: text_encoder.parked_bytes(),
             keep_te_ram: crate::device::keep_te_ram_mode(),
-        });
+        };
+        let decision = residency::decide(&budget);
+        tracing::debug!(
+            ?budget,
+            ?cache_budget,
+            ?decision,
+            "Qwen Image 2.1 residency"
+        );
         match decision.residency {
             residency::Qwen21TeResidency::Resident => {}
             residency::Qwen21TeResidency::ParkHost => {
@@ -451,6 +469,23 @@ impl QwenImage21Engine {
             }
         }
         Ok(decision)
+    }
+
+    /// Device bytes the loaded reference encoders hold on a CUDA card (the
+    /// sizing `device::qwen_image21_reference_encoder_bytes` charges).
+    fn reference_encoders_on_card(loaded: &LoadedQwenImage21) -> u64 {
+        const F32: u64 = 4;
+        let vision = if loaded.vision.is_some() && loaded.text_device.is_cuda() {
+            crate::device::QWEN_IMAGE21_VISION_TOWER_BF16_BYTES * F32 / 2
+        } else {
+            0
+        };
+        let vae_encoder = if loaded.vae_encoder.is_some() && loaded.vae_device.is_cuda() {
+            crate::device::QWEN_IMAGE21_VAE_ENCODER_F32_BYTES
+        } else {
+            0
+        };
+        vision.saturating_add(vae_encoder)
     }
 
     fn load_vision(
@@ -1227,6 +1262,7 @@ impl QwenImage21Engine {
             )?;
             self.active_lora = wanted_lora;
         }
+        let reference_encoders_on_card = Self::reference_encoders_on_card(loaded);
         let residency = Self::settle_text_encoder_residency(
             progress,
             &self.base.paths,
@@ -1234,6 +1270,7 @@ impl QwenImage21Engine {
             req,
             self.base.gpu_ordinal,
             loaded.vae_dtype,
+            reference_encoders_on_card,
         )?;
         let transformer_format =
             super::text_encoder_residency::transformer_format(&self.base.paths);

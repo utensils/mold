@@ -2730,14 +2730,27 @@ const STARTUP_WARM_MAX_ARTIFACTS: usize = 4096;
 /// bytes — so this is cheap; the limiter is what keeps it out of the way of a
 /// request that arrives while it runs.
 ///
+/// `cancelled` is polled before every directory entry; once it answers true
+/// the pass stops. The pass only fills the process-local fact cache, so
+/// abandoning it loses nothing a later preparation cannot recompute.
+///
 /// Returns how many artifacts it warmed.
-pub(crate) fn warm_installed_artifact_facts(models_dir: &Path) -> usize {
+pub(crate) fn warm_installed_artifact_facts(
+    models_dir: &Path,
+    cancelled: impl Fn() -> bool,
+) -> usize {
     let mut warmed = 0_usize;
     for entry in walkdir::WalkDir::new(models_dir)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
     {
+        // Asked per directory entry, not per artifact: on a large shared
+        // home the walk itself is part of what a shutdown must not wait for.
+        if cancelled() {
+            tracing::debug!(warmed, "startup artifact warm abandoned for shutdown");
+            break;
+        }
         if warmed >= STARTUP_WARM_MAX_ARTIFACTS {
             break;
         }
@@ -11317,12 +11330,49 @@ mod tests {
             std::fs::write(path, b"bytes").unwrap();
         }
 
-        assert_eq!(warm_installed_artifact_facts(dir.path()), 2);
+        assert_eq!(warm_installed_artifact_facts(dir.path(), || false), 2);
         assert!(artifact_facts_are_cached(&weights));
         assert!(artifact_facts_are_cached(&encoder));
         assert!(
             !artifact_facts_are_cached(&notes),
             "a README is not a generation artifact"
         );
+    }
+
+    /// The startup warm is read-only cache filling on a blocking thread, and
+    /// the runtime waits for every blocking thread at teardown — a SIGTERM
+    /// during a 107 s warm on the shared ZFS home left the process hung after
+    /// its shutdown sequence had finished. Shutdown therefore abandons the
+    /// pass between artifacts; nothing it skipped is recorded as cached.
+    #[test]
+    fn the_startup_warm_pass_stops_between_artifacts_once_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = (0..6)
+            .map(|index| {
+                let path = dir.path().join(format!("shard-{index}.safetensors"));
+                std::fs::write(&path, b"bytes").unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(warm_installed_artifact_facts(dir.path(), || true), 0);
+        assert!(
+            artifacts
+                .iter()
+                .all(|path| !artifact_facts_are_cached(path)),
+            "a pass cancelled before it starts reads nothing"
+        );
+
+        let polls = std::cell::Cell::new(0_usize);
+        let warmed = warm_installed_artifact_facts(dir.path(), || {
+            polls.set(polls.get() + 1);
+            polls.get() > 3
+        });
+        assert!(warmed < artifacts.len(), "warmed {warmed}");
+        let cached = artifacts
+            .iter()
+            .filter(|path| artifact_facts_are_cached(path))
+            .count();
+        assert_eq!(cached, warmed, "only what it warmed is cached");
     }
 }

@@ -6887,7 +6887,7 @@ mod tests {
         assert_eq!(response_body["code"], "VALIDATION_ERROR");
         assert_eq!(
             response_body["error"],
-            "requests[1]: output format 'gif' is not available for this recipe"
+            "output format 'gif' is not available for this recipe"
         );
         assert!(
             journal.list_all().is_empty(),
@@ -6933,7 +6933,7 @@ mod tests {
             let status = response.status();
             let response_body = json_body(response).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response_body}");
-            assert_eq!(response_body["error"], format!("requests[1]: {expected}"));
+            assert_eq!(response_body["error"], expected);
         }
         assert!(journal.list_all().is_empty());
 
@@ -7100,7 +7100,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response_body}");
         assert_eq!(
             response_body["error"],
-            "requests[1]: mesh options are only supported by 3-D families; this model renders raster output"
+            "mesh options are only supported by 3-D families; this model renders raster output"
         );
         assert!(journal.list_all().is_empty());
     }
@@ -13277,7 +13277,7 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
         assert_eq!(
             body["error"],
-            "requests[1]: Qwen Image Edit needs at least one image. Add a Target image and try again."
+            "Qwen Image Edit needs at least one image. Add a Target image and try again."
         );
     }
 
@@ -13297,6 +13297,57 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(resp).await;
         assert_eq!(body["code"], "VALIDATION_ERROR");
+    }
+
+    /// A single request has no sibling to tell apart, so its refusal names
+    /// no child index; a real batch keeps `requests[n]:` so the caller knows
+    /// WHICH child was refused.
+    #[tokio::test]
+    async fn single_request_refusals_carry_no_batch_index_but_batches_do() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let mut single = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "a cat",
+            "flux-dev:q8",
+            1024,
+            1024,
+        ))
+        .unwrap();
+        single["steps"] = serde_json::json!(0);
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let resp = app
+                .clone()
+                .oneshot(json_request("POST", path, single.clone()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            let body = json_body(resp).await;
+            let error = body["error"].as_str().unwrap();
+            assert!(!error.starts_with("requests["), "{path}: {error}");
+            assert!(error.contains("steps"), "{path}: {error}");
+        }
+
+        let valid = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "a dog",
+            "flux-dev:q8",
+            1024,
+            1024,
+        ))
+        .unwrap();
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [valid, single],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        let error = body["error"].as_str().unwrap();
+        assert!(error.starts_with("requests[2]: "), "{error}");
     }
 
     #[tokio::test]

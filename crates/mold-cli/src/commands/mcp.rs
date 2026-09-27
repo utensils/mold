@@ -25,6 +25,12 @@ use crate::commands::durable_generation::{
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Every MCP revision this server can speak, newest first. Nothing mold
+/// answers depends on a revision newer than the client's: tool results carry
+/// their text `content` for every revision, and `structuredContent` is an
+/// extra field a 2024-11-05 or 2025-03-26 client ignores.
+const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &[MCP_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 const MAX_ASYNC_JOBS: usize = 32;
 const RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const RECONCILE_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -3216,6 +3222,24 @@ fn read_resource(uri: &str) -> std::result::Result<Value, String> {
     }))
 }
 
+/// MCP lifecycle, version negotiation: a server that supports the version the
+/// client requested MUST answer with that same version; otherwise it answers
+/// another version it supports, which SHOULD be its latest.
+fn negotiate_protocol_version(message: &Value) -> &'static str {
+    let requested = message
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str);
+    requested
+        .and_then(|requested| {
+            MCP_SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == requested)
+        })
+        .unwrap_or(MCP_PROTOCOL_VERSION)
+}
+
 fn handle_protocol_message(message: Value) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str)?;
@@ -3226,7 +3250,7 @@ fn handle_protocol_message(message: Value) -> Option<Value> {
         ("initialize", Some(id)) => Some(response(
             id,
             json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": negotiate_protocol_version(&message),
                 "capabilities": { "tools": {}, "resources": {} },
                 "serverInfo": {
                     "name": "mold",
@@ -5926,6 +5950,36 @@ mod tests {
         assert_eq!(response["result"]["capabilities"]["tools"], json!({}));
         assert_eq!(response["result"]["capabilities"]["resources"], json!({}));
         assert_eq!(response["result"]["serverInfo"]["name"], "mold");
+    }
+
+    fn negotiated_version(requested: Value) -> Value {
+        let mut message = json!({ "jsonrpc": "2.0", "id": 7, "method": "initialize" });
+        if !requested.is_null() {
+            message["params"] = json!({ "protocolVersion": requested });
+        }
+        handle_protocol_message_for_test(message).expect("initialize should produce a response")
+            ["result"]["protocolVersion"]
+            .clone()
+    }
+
+    #[test]
+    fn initialize_echoes_every_supported_requested_version() {
+        // MCP lifecycle, version negotiation: "If the server supports the
+        // requested protocol version, it MUST respond with the same version."
+        for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+            assert_eq!(negotiated_version(json!(version)), json!(version));
+        }
+    }
+
+    #[test]
+    fn initialize_answers_its_latest_version_for_an_unsupported_or_missing_request() {
+        // "Otherwise, the server MUST respond with another protocol version
+        // it supports. This SHOULD be the latest version supported by the
+        // server."
+        for requested in [json!("2099-01-01"), json!("1.0"), json!(3), Value::Null] {
+            assert_eq!(negotiated_version(requested), json!("2025-06-18"));
+        }
+        assert_eq!(MCP_SUPPORTED_PROTOCOL_VERSIONS[0], MCP_PROTOCOL_VERSION);
     }
 
     #[test]

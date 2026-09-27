@@ -97,6 +97,12 @@ NVIDIA L40S during a server render, with the smaller cards simulated by
 At the 2K presets the encoder is parked in host RAM for the denoise, and the
 transformer is released before the VAE decode when the card cannot hold both.
 Mold makes that decision itself from the free memory; you do not need a flag.
+It budgets each phase on its own — the prompt and reference encode, the
+denoise with its prefix cache, the decode — because they never overlap, so on
+a 46–48 GB card the encoder stays resident for a reference render whose
+denoise leaves room for it (one to three references at 1024² without a
+negative prompt). It still parks when both CFG branches retain a cache beside
+several references, because a retained cache is worth far more than the park.
 
 ## Canvas and 2K presets
 
