@@ -1465,7 +1465,6 @@ pub fn calculate_dimensions_ties_even(target_area: u64, ratio: f64, align: u32) 
     (snap(width), snap(height))
 }
 
-/// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
 /// Identify a still reference image's container from its magic bytes.
 ///
 /// PNG (`\x89PNG`), JPEG (`FF D8`) and WebP (`RIFF....WEBP`). Used for
@@ -1487,6 +1486,8 @@ pub fn sniff_image_input_format(
     }
 }
 
+/// Check whether `data` starts with a recognized image format's magic bytes
+/// (PNG or JPEG).
 pub(crate) fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
     let is_jpeg = data.len() >= 2 && data[..2] == [0xFF, 0xD8];
