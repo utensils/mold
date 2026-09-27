@@ -18,6 +18,8 @@ pub(crate) mod linear;
 pub(crate) mod pipeline;
 pub(crate) mod scheduler;
 pub mod text_encoder_residency;
+#[cfg(test)]
+mod tier_renders;
 pub(crate) mod transformer;
 pub(crate) mod vae;
 pub(crate) mod vae_encoder;
