@@ -33,7 +33,8 @@ struct ImageConditioningWells: View {
                     }
                     if let references = layout.references {
                         ReferenceStrip(
-                            capability: references, draft: $draft,
+                            capability: references, recipe: recipe, draft: $draft,
+                            ordinalBase: layout.ordinalBase, setsCanvas: layout.setsCanvas,
                             caption: WellCaption.references(
                                 max: references.maxCount, parked: layout.parked == .references))
                             .opacity(layout.parked == .references ? Self.parkedOpacity : 1)
@@ -65,9 +66,20 @@ extension ImageConditioningWells {
         let references: ReferenceImagesCapability?
         /// The well the EXCLUSIVE relation has parked, or nil.
         let parked: ExclusiveWell?
-        /// The sentence a parked well renders.
+        /// The sentence a parked well renders -- or, on a `last-reference`
+        /// recipe with pictures staged, the canvas sentence.
         let note: String?
+        /// The strip's LAST picture sets the canvas shape (`stripSetsCanvas`,
+        /// `studio/lib/referenceStrip.ts`): the recipe says `last-reference`
+        /// and the strip is the whole conditioning.
+        var setsCanvas = false
+        /// Pictures the request carries AHEAD of the strip, so tile N is
+        /// numbered the way the prompt addresses it (`referenceOrdinalBase`).
+        var ordinalBase = 0
     }
+
+    /// The strip's canvas sentence (`REFERENCE_CANVAS_NOTE`).
+    static let canvasNote = "The last image sets the canvas shape unless you pick a size."
 
     static func layout(
         recipe: GenerationRecipe, model: Model?, media: DraftMedia
@@ -83,10 +95,16 @@ extension ImageConditioningWells {
                 referenceCount: media.editImages.count,
                 lastWrite: media.lastExclusiveWrite)
             : nil
+        let setsCanvas = mode == .references && references?.canvas == .lastReference
+        let canvasNote = setsCanvas && !media.editImages.isEmpty ? Self.canvasNote : nil
         return Layout(
             showsSourceWell: mode.showsSourceWell && PromptPanel.showsSourceWell(for: recipe),
             references: mode.showsReferenceStrip ? references : nil,
             parked: wells?.parked,
-            note: wells?.parked == nil ? nil : ExclusiveWells.note)
+            note: wells?.parked == nil ? canvasNote : ExclusiveWells.note,
+            setsCanvas: setsCanvas,
+            // Only an ADDITIVE recipe ships `source_image` beside
+            // `edit_images`, and the expander lists the source first.
+            ordinalBase: mode == .singleAndReferences && media.sourceImage != nil ? 1 : 0)
     }
 }

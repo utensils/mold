@@ -17,12 +17,15 @@ enum DraftPictureAttachment {
         draft.media.lastExclusiveWrite = .source
     }
 
+    /// Appends one reference. On a `last-reference` recipe the new LAST
+    /// picture re-derives a canvas that is still the model's own.
     static func addReference(
         _ picked: ImportedPicture, to draft: inout RenderDraft,
-        capability: ReferenceImagesCapability
+        capability: ReferenceImagesCapability, recipe: GenerationRecipe?
     ) {
         guard capability.hasRoom(for: draft.media.editImages.count) else { return }
         draft.media.editImages.append(picked.encoded)
         draft.media.lastExclusiveWrite = .references
+        draft.followLastReference(recipe: recipe)
     }
 }

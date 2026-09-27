@@ -22,10 +22,15 @@ struct LibraryThumbnail: View {
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.medium)
-                        .aspectRatio(contentMode: .fill)
+                    // The picture fills the square, so the board under it is
+                    // the whole tile.
+                    ZStack {
+                        if entry.print.metadata.showsAlphaBed { AlphaBed() }
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.medium)
+                            .aspectRatio(contentMode: .fill)
+                    }
                 } else {
                     // a11y: placeholder inside LibraryCell, which carries the label
                     // The kind's own glyph: `LibraryToken` already names one

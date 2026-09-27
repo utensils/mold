@@ -11,7 +11,14 @@ import SwiftUI
 /// chooses, and a staged one is replaced from the same two doors.
 struct ReferenceStrip: View {
     let capability: ReferenceImagesCapability
+    /// Read by the canvas rule on every add, replace, move and removal
+    /// (`RenderDraft.followLastReference`).
+    let recipe: GenerationRecipe
     @Binding var draft: RenderDraft
+    /// Pictures the request carries before the strip (`Layout.ordinalBase`).
+    var ordinalBase = 0
+    /// The last tile sets the canvas shape (`Layout.setsCanvas`).
+    var setsCanvas = false
     /// What the strip is, under it. Passed in because only
     /// `ImageConditioningWells` knows whether this recipe has PARKED it.
     var caption: String?
@@ -47,13 +54,16 @@ struct ReferenceStrip: View {
         PictureWell(
             rows: itemMenu(index),
             picture: encoded,
+            accepting: Self.accepting(capability),
             size: Self.thumbnailSize,
             opensOnClick: false,
+            alphaBed: true,
             label: label(index),
             pick: { replace($0, at: index) },
             perform: { perform($0, at: index) })
             .overlay(alignment: .topLeading) { badge(index) }
             .overlay(alignment: .topTrailing) { remove(index) }
+            .overlay(alignment: .bottomLeading) { canvasMark(index) }
     }
 
     /// The same three doors the source well offers, on a `+` that says what it
@@ -62,6 +72,7 @@ struct ReferenceStrip: View {
         PictureWell(
             rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
             placeholder: Self.addGlyph,
+            accepting: Self.accepting(capability),
             allowsMultiple: true,
             size: Self.thumbnailSize,
             label: addWellLabel,
@@ -75,8 +86,29 @@ struct ReferenceStrip: View {
             : "Add a reference picture"
     }
 
+    /// `Image N`, the prompt's own name for it, then what it is for.
     private func label(_ index: Int) -> String {
-        guard capability.primaryIsTarget else { return "Reference \(index + 1)" }
-        return index == 0 ? "The picture being edited" : "Reference \(index)"
+        let name = "Image \(Self.ordinal(index: index, base: ordinalBase))"
+        if isTarget(index) { return "\(name), the picture being edited" }
+        if setsCanvas, index == draft.media.editImages.count - 1 {
+            return "\(name), reference, sets the canvas shape"
+        }
+        return "\(name), reference"
+    }
+
+    func isTarget(_ index: Int) -> Bool { capability.primaryIsTarget && index == 0 }
+}
+
+extension ReferenceStrip {
+    /// The 1-based position the prompt and the expander use ("image 2").
+    static func ordinal(index: Int, base: Int) -> Int { base + index + 1 }
+
+    /// What a reference well passes through untouched: the recipe's own
+    /// `formats` (the legacy PNG-and-JPEG pair where it names none). Anything
+    /// else is converted to PNG on the way in, which keeps alpha -- never
+    /// refused after the upload, and an accepted file's bytes are never
+    /// re-encoded or flattened.
+    static func accepting(_ capability: ReferenceImagesCapability) -> Set<String> {
+        Set(capability.acceptedFormats.compactMap(PictureImport.typeIdentifier(forFormat:)))
     }
 }

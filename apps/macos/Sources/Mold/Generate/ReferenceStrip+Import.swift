@@ -9,7 +9,8 @@ import SwiftUI
 // picture.
 extension ReferenceStrip {
     func append(_ picked: ImportedPicture) {
-        DraftPictureAttachment.addReference(picked, to: &draft, capability: capability)
+        DraftPictureAttachment.addReference(
+            picked, to: &draft, capability: capability, recipe: recipe)
     }
 
     /// Replace swaps ONE slot in place, so the strip's order -- and Qwen's
@@ -19,5 +20,6 @@ extension ReferenceStrip {
         guard draft.media.editImages.indices.contains(index) else { return }
         draft.media.editImages[index] = picked.encoded
         draft.media.lastExclusiveWrite = .references
+        draft.followLastReference(recipe: recipe)
     }
 }

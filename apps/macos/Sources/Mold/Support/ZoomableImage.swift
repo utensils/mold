@@ -7,10 +7,14 @@ struct ZoomableImage: View {
     let image: NSImage
     let identity: AnyHashable
     var onClick: (() -> Void)?
+    /// Draws the checkerboard under the picture: a print whose metadata says
+    /// it carries alpha (`OutputMetadata.showsAlphaBed`).
+    var alphaBed = false
     @State private var fitRequest = 0
 
     var body: some View {
-        ImageViewport(image: image, identity: identity, fitRequest: fitRequest, onClick: onClick)
+        ImageViewport(image: image, identity: identity, fitRequest: fitRequest,
+                      alphaBed: alphaBed, onClick: onClick)
             .overlay(alignment: .bottomTrailing) {
                 Button("Fit", systemImage: "arrow.down.right.and.arrow.up.left") { fitRequest += 1 }
                     .help("Fit image to window. Pinch to zoom; drag to pan.")
@@ -23,12 +27,14 @@ private struct ImageViewport: NSViewRepresentable {
     let image: NSImage
     let identity: AnyHashable
     let fitRequest: Int
+    let alphaBed: Bool
     let onClick: (() -> Void)?
 
     func makeNSView(context: Context) -> ImageScrollView { ImageScrollView() }
 
     func updateNSView(_ view: ImageScrollView, context: Context) {
         view.update(image: image, identity: identity, fitRequest: fitRequest, onClick: onClick)
+        view.picture.showsAlphaBed = alphaBed
     }
 }
 

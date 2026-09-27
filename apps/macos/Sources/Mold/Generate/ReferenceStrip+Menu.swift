@@ -37,23 +37,47 @@ extension ReferenceStrip {
         default:
             break
         }
+        // Order is the canvas on a `last-reference` recipe: a move or a
+        // removal that changes the last picture reshapes a default canvas.
+        draft.followLastReference(recipe: recipe)
     }
 
-    @ViewBuilder func badge(_ index: Int) -> some View {
-        if capability.primaryIsTarget {
-            Text(index == 0 ? "Target" : "\(index)")
+    /// Every tile is numbered the way the prompt and the expander address it
+    /// ("image 2"), because order is part of the request; a target-first
+    /// recipe's first picture says Target beside its number.
+    func badge(_ index: Int) -> some View {
+        let ordinal = Self.ordinal(index: index, base: ordinalBase)
+        return Text(isTarget(index) ? "\(ordinal) Target" : "\(ordinal)")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Chrome.badgeBackdrop, in: Capsule())
+            .padding(3)
+            .accessibilityHidden(true)
+    }
+
+    /// The last tile of a `last-reference` strip: this picture's shape is
+    /// the canvas unless a size is picked.
+    // a11y: decoration -- the tile's own label says it sets the canvas.
+    @ViewBuilder func canvasMark(_ index: Int) -> some View {
+        if setsCanvas, index == draft.media.editImages.count - 1 {
+            Image(systemName: "aspectratio")
                 .font(.caption2)
                 .foregroundStyle(.white)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 1)
-                .background(Chrome.badgeBackdrop, in: Capsule())
                 .padding(3)
+                .background(Chrome.badgeBackdrop, in: Circle())
+                .padding(3)
+                .help("Sets the canvas shape")
+                .accessibilityHidden(true)
         }
     }
 
     func remove(_ index: Int) -> some View {
         Button {
+            guard draft.media.editImages.indices.contains(index) else { return }
             draft.media.editImages.remove(at: index)
+            draft.followLastReference(recipe: recipe)
         } label: {
             Image(systemName: "xmark.circle.fill")
         }

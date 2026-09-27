@@ -13,6 +13,7 @@ struct OutputGroup: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             formatSection
+            transparencySection
             upscaleSection
             Toggle("Save to library", isOn: $draft.savesToGallery)
             Text("""
@@ -40,9 +41,17 @@ struct OutputGroup: View {
                 Picker("Format", selection: formatBinding(fallback: defaultFormat)) {
                     ForEach(formats, id: \.self) { format in
                         Text(format.uppercased()).tag(format)
+                            // JPEG has no alpha channel: admission refuses the
+                            // pair rather than flattening the cut-out.
+                            .disabled(draft.transparencyBlocksFormat(format))
                     }
                 }
                 .labelsHidden()
+                if formats.contains(where: draft.transparencyBlocksFormat) {
+                    Text(TransparencyControl.unavailableFormatReason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if output?.audioRequiresMp4 == true {
                     Text("Audio requires MP4. Choosing another format turns audio off.")
                         .font(.caption)
@@ -50,6 +59,29 @@ struct OutputGroup: View {
                 }
             }
         }
+    }
+
+    /// Drawn only where the recipe advertises an ADJUSTABLE block -- an
+    /// older host, a hidden recipe and one with no alpha format all draw
+    /// nothing (`TransparencyCapability.control`). The choice stays on the
+    /// draft either way and travels only while this row is drawn.
+    @ViewBuilder private var transparencySection: some View {
+        if Self.offersTransparency(draft) {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(TransparencyControl.label, isOn: transparencyBinding)
+                Text(TransparencyControl.note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Turning it on moves a JPEG pick to the first alpha format.
+    private var transparencyBinding: Binding<Bool> {
+        Binding(
+            get: { draft.transparentBackground },
+            set: { draft = draft.settingTransparentBackground($0, output: output) }
+        )
     }
 
     @ViewBuilder private var upscaleSection: some View {
@@ -84,6 +116,12 @@ struct OutputGroup: View {
 }
 
 extension OutputGroup {
+    /// Whether the Transparent background row is drawn: the adopted recipe's
+    /// own `transparencyControl`, recorded on the draft by `adopting`.
+    static func offersTransparency(_ draft: RenderDraft) -> Bool {
+        draft.transparency != nil
+    }
+
     /// What the Format row shows, resolved purely from the recipe's own
     /// block -- no view needed to test it.
     enum Row: Equatable {

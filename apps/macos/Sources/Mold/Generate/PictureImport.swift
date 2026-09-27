@@ -33,6 +33,17 @@ nonisolated enum PictureImport {
         UTType.tiff.identifier, UTType.gif.identifier, UTType.bmp.identifier,
     ]
 
+    /// The type a wire image-format name (`ImageInputFormat`) names, or nil
+    /// for one this build does not know.
+    static func typeIdentifier(forFormat format: String) -> String? {
+        switch format.lowercased() {
+        case "png": UTType.png.identifier
+        case "jpeg", "jpg": UTType.jpeg.identifier
+        case "webp": UTType.webP.identifier
+        default: nil
+        }
+    }
+
     /// What the identity path decodes, and nothing else.
     static let identityReadable: Set<String> = [UTType.png.identifier, UTType.jpeg.identifier]
 

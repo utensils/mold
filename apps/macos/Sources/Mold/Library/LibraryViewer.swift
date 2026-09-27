@@ -47,7 +47,8 @@ struct LibraryViewer: View {
             } else if entry.print.isMesh {
                 mesh
             } else if let image = full ?? placeholder {
-                ZoomableImage(image: image, identity: entry.id)
+                ZoomableImage(image: image, identity: entry.id,
+                              alphaBed: entry.print.metadata.showsAlphaBed)
                     .opacity(full == nil ? 0.55 : 1)
             } else {
                 ProgressView()

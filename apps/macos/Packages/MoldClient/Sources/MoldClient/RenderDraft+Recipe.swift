@@ -118,7 +118,7 @@ public extension RenderDraft {
         }
 
         // Recorded, never cleared: the toggle itself is the person's and
-        // parks on a recipe without one (`RenderDraft+Transparency.swift`).
+        // parks on a recipe without one (`Transparency.swift`).
         draft.transparency = recipe.capabilities.transparencyControl
         draft.coerceFormatForTransparency(output: recipe.capabilities.output)
 

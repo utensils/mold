@@ -100,7 +100,8 @@ extension GeneratePane {
                 recipe: recipe, model: selectedModel, media: draft.media)
             guard let capability = layout.references,
                   capability.hasRoom(for: draft.media.editImages.count) else { return }
-            DraftPictureAttachment.addReference(picked, to: &draft, capability: capability)
+            DraftPictureAttachment.addReference(
+                picked, to: &draft, capability: capability, recipe: recipe)
         }
         controller.draft = draft
         reuse.clear()

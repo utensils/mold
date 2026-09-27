@@ -77,3 +77,15 @@ struct GenerateInspectorTests {
         #expect(PromptPanel.showsSourceWell(for: recipe))
     }
 }
+
+/// Transparent background is drawn exactly where the adopted recipe offers
+/// an adjustable block -- the draft carries that answer from `adopting`.
+@MainActor
+struct OutputTransparencyTests {
+    @Test func theToggleIsOnlyOfferedWhereTheRecipeAdvertisesIt() {
+        var draft = RenderDraft()
+        #expect(OutputGroup.offersTransparency(draft) == false)
+        draft.transparency = TransparencyControl(formats: ["png", "webp"], nativeAlpha: true)
+        #expect(OutputGroup.offersTransparency(draft))
+    }
+}

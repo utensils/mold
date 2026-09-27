@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 
 @testable import MoldClient
@@ -117,4 +119,37 @@ private func metadata(_ json: String) throws -> OutputMetadata {
     #expect(try metadata(#"{"transparent_background":true}"#).showsAlphaBed)
     #expect(try metadata(#"{"has_alpha":false,"transparent_background":false}"#).showsAlphaBed == false)
     #expect(try metadata(#"{"prompt":"an opaque print"}"#).showsAlphaBed == false)
+}
+
+// MARK: - A finished result, read from its own bytes
+
+private func png(opaque: Bool, metadata: String? = nil) -> Data {
+    let context = CGContext(
+        data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: (opaque ? CGImageAlphaInfo.noneSkipLast : .premultipliedLast).rawValue)!
+    let data = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+    CGImageDestinationFinalize(destination)
+    guard let metadata else { return data as Data }
+    // A `tEXt` chunk right after IHDR, the way mold embeds `mold:parameters`.
+    var file = data as Data
+    let text = Data("mold:parameters".utf8) + Data([0]) + Data(metadata.utf8)
+    var chunk = Data()
+    withUnsafeBytes(of: UInt32(text.count).bigEndian) { chunk.append(contentsOf: $0) }
+    chunk.append(Data("tEXt".utf8) + text)
+    chunk.append(contentsOf: [0, 0, 0, 0])
+    file.insert(contentsOf: chunk, at: 33)
+    return file
+}
+
+@Test func aResultCarryingAlphaIsDrawnOnTheBed() {
+    #expect(ResultAlpha.showsBed(png(opaque: false), named: "a.png"))
+    #expect(ResultAlpha.showsBed(png(opaque: true), named: "a.png") == false)
+    // The request's own flag, embedded in the file, answers too.
+    #expect(ResultAlpha.showsBed(
+        png(opaque: true, metadata: #"{"prompt":"x","transparent_background":true}"#),
+        named: "a.png"))
+    #expect(ResultAlpha.showsBed(Data("not a picture".utf8), named: "a.png") == false)
 }

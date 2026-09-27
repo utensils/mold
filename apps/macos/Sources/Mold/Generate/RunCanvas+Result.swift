@@ -35,8 +35,9 @@ extension RunCanvas {
         switch result {
         case .loading:
             ProgressView("Fetching what you made…")
-        case let .picture(image):
-            ZoomableImage(image: image, identity: resultFilename ?? "result", onClick: togglePrompt)
+        case let .picture(image, alphaBed):
+            ZoomableImage(image: image, identity: resultFilename ?? "result",
+                          onClick: togglePrompt, alphaBed: alphaBed)
                 // The big picture offers the same menu as its strip tile.
                 .modifier(OptionalResultMenu(result: selectedResult(in: outcome), actions: actions))
         case let .clip(player):
@@ -108,7 +109,7 @@ extension RunCanvas {
                         + "cannot show. It is in the Library."))
                     return
                 }
-                show(.picture(image))
+                show(.picture(image, alphaBed: ResultAlpha.showsBed(data, named: filename)))
             } catch {
                 // Not `reasonSentence`: a refusal with no route is a dead end.
                 show(.unavailable(error.failureSentence))
@@ -135,7 +136,8 @@ extension RunCanvas {
 /// sentence -- never an endless spinner.
 enum RunResultMedia {
     case loading
-    case picture(NSImage)
+    /// `alphaBed`: drawn over the checkerboard (`ResultAlpha`).
+    case picture(NSImage, alphaBed: Bool)
     case clip(AVPlayer)
     /// Drawn by `MeshCanvas`, which fetches the GLB itself: a mesh is bytes
     /// this pane never has to hold, unlike a decoded picture.

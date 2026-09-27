@@ -1,11 +1,32 @@
 import AppKit
+import MoldStyle
 
 /// Preserve Generate's single-click action, without firing it after a pan.
 final class PannableImageView: NSImageView {
     var onClick: (() -> Void)?
+    /// Paints `AlphaBed`'s checkerboard under the picture's own fitted
+    /// rectangle -- never the letterbox around it -- for a print that
+    /// carries alpha.
+    var showsAlphaBed = false {
+        didSet { if showsAlphaBed != oldValue { needsDisplay = true } }
+    }
     private var previousPoint = NSPoint.zero
     private var startPoint = NSPoint.zero
     private var dragged = false
+
+    override func draw(_ dirtyRect: NSRect) {
+        if showsAlphaBed, let image {
+            let picture = AlphaBed.fittedRect(content: image.size, in: bounds)
+            // `labelColor` resolves against this view's appearance while it
+            // draws, exactly as `.primary` does in the SwiftUI board.
+            for square in AlphaBed.squares(in: picture) {
+                NSColor.labelColor.withAlphaComponent(
+                    square.isLight ? AlphaBed.lightOpacity : AlphaBed.darkOpacity).setFill()
+                square.rect.fill()
+            }
+        }
+        super.draw(dirtyRect)
+    }
 
     override func mouseDown(with event: NSEvent) {
         startPoint = event.locationInWindow

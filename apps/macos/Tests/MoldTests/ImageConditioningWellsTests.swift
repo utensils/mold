@@ -109,4 +109,61 @@ struct ImageConditioningWellsTests {
         #expect(layout.references == nil)
         #expect(layout.showsSourceWell)
     }
+
+    // MARK: - Qwen Image 2.1: numbered, and the last one sets the canvas
+
+    private var lastReference: String {
+        #"""
+        {"mode": "adjustable", "required": false, "max_count": 10,
+         "primary_is_target": false, "source_relation": "replaces",
+         "canvas": "last-reference", "formats": ["png", "jpeg", "webp"]}
+        """#
+    }
+
+    @Test func aLastReferenceRecipeSaysTheLastPictureSetsTheCanvas() {
+        var media = DraftMedia()
+        let empty = ImageConditioningWells.layout(
+            recipe: recipe(references: lastReference), model: nil, media: media)
+        #expect(empty.setsCanvas)
+        // Nothing staged, nothing to explain.
+        #expect(empty.note == nil)
+        media.editImages = ["A", "B"]
+        let staged = ImageConditioningWells.layout(
+            recipe: recipe(references: lastReference), model: nil, media: media)
+        #expect(staged.note == ImageConditioningWells.canvasNote)
+    }
+
+    @Test func noOtherRecipeClaimsTheCanvas() {
+        for relation in ["replaces", "exclusive", "combines"] {
+            let layout = ImageConditioningWells.layout(
+                recipe: recipe(references: block(relation)), model: nil, media: DraftMedia())
+            #expect(layout.setsCanvas == false, "\(relation)")
+        }
+    }
+
+    @Test func referencesAreNumberedTheWayThePromptAddressesThem() {
+        #expect(ReferenceStrip.ordinal(index: 0, base: 0) == 1)
+        #expect(ReferenceStrip.ordinal(index: 2, base: 0) == 3)
+        // An additive recipe ships the source first, so its first reference
+        // is image 2 while a source is held.
+        var media = DraftMedia()
+        media.sourceImage = "SRC"
+        let additive = ImageConditioningWells.layout(
+            recipe: recipe(references: block("combines")), model: nil, media: media)
+        #expect(additive.ordinalBase == 1)
+        #expect(ReferenceStrip.ordinal(index: 0, base: additive.ordinalBase) == 2)
+        let exclusive = ImageConditioningWells.layout(
+            recipe: recipe(references: block("exclusive")), model: nil, media: media)
+        #expect(exclusive.ordinalBase == 0)
+    }
+
+    @Test func aReferenceWellTakesOnlyTheContainersTheRecipeReads() throws {
+        let qwen = try #require(recipe(references: lastReference).capabilities.referenceImages)
+        #expect(ReferenceStrip.accepting(qwen) == [
+            "public.png", "public.jpeg", "org.webmproject.webp"])
+        // A recipe that predates the list reads PNG and JPEG; anything else is
+        // converted here (to PNG, which keeps alpha) rather than refused.
+        let older = try #require(recipe(references: block("exclusive")).capabilities.referenceImages)
+        #expect(ReferenceStrip.accepting(older) == ["public.png", "public.jpeg"])
+    }
 }

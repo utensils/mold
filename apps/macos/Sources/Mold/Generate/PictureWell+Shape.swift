@@ -31,6 +31,7 @@ extension PictureWell {
             RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
                 .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
             if let preview {
+                if alphaBed { AlphaBed() }
                 Image(nsImage: preview)
                     .resizable()
                     .aspectRatio(contentMode: .fill)

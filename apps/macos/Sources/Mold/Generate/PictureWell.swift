@@ -46,6 +46,9 @@ struct PictureWell: View {
     /// square carries its own inline controls (a ✕, an order badge) that a
     /// `Menu` label would swallow -- it keeps the contextual menu and the drop.
     var opensOnClick = true
+    /// Draws `AlphaBed` under the picture, so a transparent reference reads
+    /// as transparent rather than as the well's fill.
+    var alphaBed = false
     /// The word under the well saying what it is for, or `nil` where the
     /// caller captions a whole group of wells itself.
     var caption: String?
