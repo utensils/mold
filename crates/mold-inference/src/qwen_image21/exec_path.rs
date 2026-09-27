@@ -22,11 +22,11 @@
 //!   reproduces the v0.32 bytes.
 //! * **CPU stays on the legacy path.** It has no fused kernel to gain from and
 //!   is the reference the unit tests compare against.
-
-// The transformer consumes this value once the joint-layout attention seam
-// (`QwenImage21JointLayout` / `attend_segment`) lands; until then only the
-// CUDA benchmark harness and the tests below read it.
-#![allow(dead_code)]
+//!
+//! `QwenImage21Transformer` resolves it once at load (`Qwen21ExecPath::resolve`
+//! on the device the weights landed on) and applies it to every block through
+//! `set_exec_path`; the CUDA benchmark harness and the tests build other
+//! combinations directly.
 
 use candle_core::Device;
 

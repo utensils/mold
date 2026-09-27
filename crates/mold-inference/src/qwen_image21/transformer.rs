@@ -1015,6 +1015,11 @@ impl QwenImage21Transformer {
         // Resolved from where the weights landed (the text norm is always a
         // dense tensor on the load device).
         let exec = Qwen21ExecPath::resolve(txt_in.text_norm.weight.device());
+        tracing::debug!(
+            exec_path = exec.label(),
+            tier = %source.tier_label(),
+            "qwen-image-2.1 transformer execution path"
+        );
         let mut transformer = Self {
             exec,
             tier: source.tier_label(),
