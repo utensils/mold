@@ -100,10 +100,11 @@ pub(crate) fn transformer_timestep(sigma: f64, dtype: DType) -> f64 {
 
 /// The normalized timestep for the scheduler's current step.
 ///
-/// `round_to_dtype` is `Qwen21ExecPath::round_timestep_to_dtype`: the fast
-/// path follows upstream through [`transformer_timestep`], while the v0.32
-/// path (`MOLD_ATTN=math`, Metal, CPU) keeps the f64 `current_timestep() /
-/// 1000` it has always passed, so its bytes do not move.
+/// `round_to_dtype` is `Qwen21ExecPath::rounds_timestep` for the request:
+/// rounding follows upstream through [`transformer_timestep`], while a render
+/// with archived v0.32 bytes (the legacy path, and Metal's base-tier plain
+/// text-to-image) keeps the f64 `current_timestep() / 1000` it has always
+/// passed, so its bytes do not move.
 pub(crate) fn step_timestep(
     scheduler: &QwenImage21Scheduler,
     dtype: DType,

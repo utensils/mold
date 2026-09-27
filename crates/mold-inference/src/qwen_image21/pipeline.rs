@@ -871,6 +871,11 @@ impl QwenImage21Engine {
         };
 
         let exec_path = transformer.exec_path();
+        // Upstream rounds `t` through the latent dtype (`P:770,775`); only a
+        // request with archived v0.32 bytes on a path that shipped them keeps
+        // the unrounded value (`Qwen21ExecPath::rounds_timestep`).
+        let rounds_timestep =
+            exec_path.rounds_timestep(super::exec_path::Qwen21RequestShape::of(req));
         let total = scheduler.num_steps();
         let label = format!("Denoising ({total} steps)");
         progress.stage_start(&label);
@@ -944,7 +949,7 @@ impl QwenImage21Engine {
             // The diffusion transformer takes normalized `[0, 1]` time. The
             // fast path rounds it through the working dtype exactly as
             // upstream divides it; the v0.32 path keeps its f64 value.
-            let timestep = step_timestep(&scheduler, dtype, exec_path.round_timestep_to_dtype);
+            let timestep = step_timestep(&scheduler, dtype, rounds_timestep);
             let conditional_prediction = prepared[0].forward(&latents, timestep)?;
             let prediction = if let Some(negative) = prepared.get_mut(1) {
                 progress.checkpoint()?;
@@ -1522,10 +1527,18 @@ mod tests {
     #[test]
     fn timestep_rounding_belongs_to_the_exec_path() {
         use crate::qwen_image21::exec_path::Qwen21ExecPath;
-        // v0.32 (legacy, Metal, CPU) keeps the unrounded value; only the
-        // CUDA fast path rounds through the working dtype (BF16: 900 -> 0.8984375).
-        assert!(!Qwen21ExecPath::legacy().round_timestep_to_dtype);
-        assert!(Qwen21ExecPath::cuda_fast().round_timestep_to_dtype);
+        use crate::qwen_image21::exec_path::Qwen21RequestShape;
+        // The legacy path keeps the unrounded value; the CUDA fast path rounds
+        // through the working dtype (BF16: 900 -> 0.8984375); Metal rounds
+        // every request that has no v0.32 bytes to preserve.
+        let plain = Qwen21RequestShape::of(&request());
+        let mut referenced = request();
+        referenced.edit_images = Some(vec![png(255)]);
+        let referenced = Qwen21RequestShape::of(&referenced);
+        assert!(!Qwen21ExecPath::legacy().rounds_timestep(plain));
+        assert!(Qwen21ExecPath::cuda_fast().rounds_timestep(plain));
+        assert!(!Qwen21ExecPath::metal(true).rounds_timestep(plain));
+        assert!(Qwen21ExecPath::metal(true).rounds_timestep(referenced));
         assert_eq!(
             super::super::scheduler::transformer_timestep(0.9, DType::BF16),
             0.8984375
