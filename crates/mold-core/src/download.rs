@@ -1861,22 +1861,57 @@ fn require_download_space(
 /// server-side auto-pull must fail here rather than acquire restricted
 /// weights on the user's behalf. A Mold data root that cannot be resolved
 /// fails closed: unverifiable is not accepted.
+///
+/// Only files the pull would actually FETCH are gated: a file already complete
+/// on disk moves no bytes, so `mold pull` of an installed model (or an
+/// auto-pull that finds everything present) is a no-op success rather than a
+/// demand for consent to a download that never happens. This is the rule the
+/// server's `apply_download_license_acceptances` and the identity/paint
+/// dependency gates already apply; any file that would be downloaded is still
+/// refused until its licence is accepted.
 fn require_manifest_licenses_accepted(manifest: &ModelManifest) -> Result<(), DownloadError> {
-    require_manifest_licenses_accepted_in(manifest, crate::Config::mold_dir().as_deref())
+    require_manifest_licenses_accepted_in(
+        manifest,
+        crate::Config::mold_dir().as_deref(),
+        &models_dir(),
+    )
 }
 
-/// The pure half of the gate: decide against an explicit Mold data root.
+/// The pure half of the gate: decide against an explicit Mold data root and
+/// models directory.
 ///
-/// `None` is a root that could not be resolved, which fails closed —
-/// unverifiable is not accepted.
+/// `mold_home` `None` is a root that could not be resolved, which fails
+/// closed — unverifiable is not accepted.
 fn require_manifest_licenses_accepted_in(
     manifest: &ModelManifest,
     mold_home: Option<&std::path::Path>,
+    models_root: &Path,
 ) -> Result<(), DownloadError> {
     for file in &manifest.files {
+        if manifest_file_is_installed(models_root, manifest, file) {
+            continue;
+        }
         require_license_accepted(&manifest.name, &file.hf_filename, mold_home)?;
     }
     Ok(())
+}
+
+/// Whether a pull would reuse `file` rather than download it — the question
+/// [`find_existing_placed_file`] answers, asked without its migration side
+/// effects so a refused pull changes nothing on disk.
+fn manifest_file_is_installed(
+    models_root: &Path,
+    manifest: &ModelManifest,
+    file: &ModelFile,
+) -> bool {
+    crate::manifest::storage_path_candidates(manifest, file)
+        .into_iter()
+        .any(|candidate| {
+            installed_file_is_complete(&models_root.join(candidate), Some(file.size_bytes))
+        })
+        || cached_file_path_existing_only(models_root, &file.hf_repo, &file.hf_filename, None)
+            .and_then(|path| path.canonicalize().ok())
+            .is_some_and(|path| installed_file_is_complete(&path, Some(file.size_bytes)))
 }
 
 /// Refuse one manifest file whose license the user has not accepted.
@@ -3632,8 +3667,10 @@ mod tests {
         let manifest =
             crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
         let home = tempfile::tempdir().unwrap();
-        let gate =
-            |home: Option<&std::path::Path>| require_manifest_licenses_accepted_in(manifest, home);
+        let models = tempfile::tempdir().unwrap();
+        let gate = |home: Option<&std::path::Path>| {
+            require_manifest_licenses_accepted_in(manifest, home, models.path())
+        };
 
         let error = gate(Some(home.path())).expect_err("an unaccepted license refuses the pull");
         match &error {
@@ -3666,14 +3703,82 @@ mod tests {
         assert!(gate(None).is_err());
     }
 
+    /// Pulling a model whose files are all already installed downloads
+    /// nothing, so it needs no consent: `mold pull qwen-image-2.1:bf16` on a
+    /// complete install (and an auto-pull that finds it present) succeeds
+    /// before the licence is accepted. The same manifest with one file
+    /// missing still refuses, because that file would be fetched. Hunyuan3D
+    /// takes the same seam.
+    #[test]
+    fn an_installed_model_needs_no_license_to_pull_again() {
+        for name in [
+            "qwen-image-2.1:bf16",
+            "qwen-image-2.1-turbo:q8",
+            "hunyuan3d-2.1:fp16",
+        ] {
+            let manifest = crate::manifest::find_manifest(name).unwrap();
+            assert!(
+                !crate::license_acceptance::licenses_for_manifest(manifest).is_empty(),
+                "{name} is licence gated"
+            );
+            let home = tempfile::tempdir().unwrap();
+            let models = tempfile::tempdir().unwrap();
+            let gate = || {
+                require_manifest_licenses_accepted_in(manifest, Some(home.path()), models.path())
+            };
+            assert!(
+                gate().is_err(),
+                "{name}: nothing installed, the pull downloads"
+            );
+
+            let mut placed = Vec::new();
+            for file in &manifest.files {
+                let path = models
+                    .path()
+                    .join(crate::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(file.size_bytes)
+                    .unwrap();
+                placed.push(path);
+            }
+            gate().unwrap_or_else(|error| {
+                panic!("{name}: an installed model moves no bytes: {error}")
+            });
+
+            // One gated file missing again: that file would be fetched.
+            let gated = manifest
+                .files
+                .iter()
+                .position(|file| {
+                    crate::license_acceptance::licenses_for_manifest_file(
+                        &manifest.name,
+                        &file.hf_filename,
+                    )
+                    .next()
+                    .is_some()
+                })
+                .unwrap();
+            std::fs::remove_file(&placed[gated]).unwrap();
+            assert!(
+                gate().is_err(),
+                "{name}: a missing gated file still needs consent"
+            );
+        }
+    }
+
     #[test]
     fn unrestricted_manifests_are_never_license_gated() {
         for name in ["flux2-klein:q8", "controlnet-canny-sd15:fp16"] {
             let manifest = crate::manifest::find_manifest(name).unwrap();
             // Not even an unresolvable data root gates an unrestricted model.
-            require_manifest_licenses_accepted_in(manifest, None).unwrap_or_else(|error| {
-                panic!("{name} must not be license gated: {error}");
-            });
+            let models = tempfile::tempdir().unwrap();
+            require_manifest_licenses_accepted_in(manifest, None, models.path()).unwrap_or_else(
+                |error| {
+                    panic!("{name} must not be license gated: {error}");
+                },
+            );
         }
     }
 
