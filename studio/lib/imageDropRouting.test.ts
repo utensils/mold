@@ -221,3 +221,27 @@ describe("the additive (IP-Adapter) plan", () => {
     ).toEqual({ refused: referenceCountRefusal(1) });
   });
 });
+
+describe("Qwen Image 2.1's ten-image strip", () => {
+  const qwen21: SourceMediaPlan = {
+    kind: "attachments",
+    max: 10,
+    required: false,
+    primary: null,
+  };
+
+  it("APPENDS an unhovered drop to the strip, never a source well it lacks", () => {
+    expect(resolveDropTarget(qwen21, null, state())).toBe("references");
+    expect(resolveDropTarget(qwen21, null, state({ referenceCount: 9 }))).toBe(
+      "references",
+    );
+    // There is no Source well on this recipe, so hovering one is not a route.
+    expect(resolveDropTarget(qwen21, "source", state())).toBe("references");
+  });
+
+  it("refuses the eleventh image by name", () => {
+    expect(
+      resolveDropTarget(qwen21, null, state({ referenceCount: 10 })),
+    ).toEqual({ refused: referenceCountRefusal(10) });
+  });
+});

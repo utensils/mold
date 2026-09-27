@@ -9,6 +9,7 @@ import {
 import type { GenerationRecipeProfile } from "./generationProfile";
 import {
   hunyuan3dRecipe,
+  qwenImage21Recipe,
   sdxlIpAdapterRecipe,
   sdxlRecipe,
 } from "./generationProfile.testFixtures";
@@ -780,5 +781,37 @@ describe("the source-image mode is one projection of source_relation", () => {
         sdxlRecipe(),
       ).referenceImages,
     ).toBeNull();
+  });
+});
+
+describe("Qwen Image 2.1 capabilities", () => {
+  it("offers LoRA to an older host through the legacy family list", () => {
+    // Mirrors `LORA_CAPABLE_FAMILIES` in `mold_core::validation`, which now
+    // carries `qwen-image21`; a host advertising no recipe falls back here.
+    expect(baseGenerationCapabilities("qwen-image21").supportsLora).toBe(true);
+  });
+
+  it("reads the transparency block off the advertised recipe", () => {
+    const caps = baseGenerationCapabilities(
+      "qwen-image21",
+      "qwen-image-2.1:bf16",
+      null,
+      null,
+      null,
+      qwenImage21Recipe(),
+    );
+    expect(caps.transparency).toEqual({
+      mode: "adjustable",
+      default: false,
+      formats: ["png", "webp"],
+      nativeAlpha: true,
+      reason: null,
+    });
+    expect(caps.outputFormats).toEqual(["png", "jpeg", "webp"]);
+    expect(caps.forcesBatchSizeOne).toBe(false);
+  });
+
+  it("reads an absent block as an older server, never a family guess", () => {
+    expect(baseGenerationCapabilities("qwen-image21").transparency).toBeNull();
   });
 });

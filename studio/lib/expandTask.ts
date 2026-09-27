@@ -47,6 +47,10 @@ export interface ExpansionTaskRequest {
    * a face photo does not make a text-to-image print an img2img one — but it
    * IS conditioning media, so `conditioningFingerprint` reads it. */
   id_image?: unknown;
+  /** The transparent-background toggle. Like the identity photo it never
+   * changes the expansion TASK, but the engine wraps the prompt in the RGBA
+   * recipe while it is on, so `conditioningFingerprint` reads it. */
+  transparent_background?: boolean | null;
 }
 
 function presentPath(path: string | null | undefined): boolean {

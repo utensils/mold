@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
-import { coerceOutputFormatForRecipe } from "./outputFormat";
+import {
+  coerceOutputFormatForRecipe,
+  outputFormatOptions,
+} from "./outputFormat";
+import { TRANSPARENCY_UNAVAILABLE_FORMAT_REASON } from "./transparency";
 
 describe("coerceOutputFormatForRecipe", () => {
   it("pins a raster format to glb on a mesh recipe", () => {
@@ -53,5 +57,46 @@ describe("coerceOutputFormatForRecipe", () => {
       coerceOutputFormatForRecipe(null, "sdxl", "glb", ["png", "jpeg"]),
     ).toBe("png");
     expect(coerceOutputFormatForRecipe(null, "ltx2", "gif")).toBe("gif");
+  });
+});
+
+describe("outputFormatOptions", () => {
+  const control = {
+    default: false,
+    formats: ["png", "webp"],
+    nativeAlpha: true,
+  };
+
+  it("lists every advertised format, all enabled, while transparency is off", () => {
+    expect(
+      outputFormatOptions(["png", "jpeg", "webp"], false, control),
+    ).toEqual([
+      { value: "png", label: "PNG", disabled: false, reason: null },
+      { value: "jpeg", label: "JPEG", disabled: false, reason: null },
+      { value: "webp", label: "WEBP", disabled: false, reason: null },
+    ]);
+  });
+
+  it("disables JPEG with its reason while the toggle is on", () => {
+    expect(outputFormatOptions(["png", "jpeg", "webp"], true, control)).toEqual(
+      [
+        { value: "png", label: "PNG", disabled: false, reason: null },
+        {
+          value: "jpeg",
+          label: "JPEG",
+          disabled: true,
+          reason: TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+        },
+        { value: "webp", label: "WEBP", disabled: false, reason: null },
+      ],
+    );
+  });
+
+  it("disables nothing where the toggle is not advertised", () => {
+    expect(
+      outputFormatOptions(["png", "jpeg"], true, null).every(
+        (o) => !o.disabled,
+      ),
+    ).toBe(true);
   });
 });

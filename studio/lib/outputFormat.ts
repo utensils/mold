@@ -10,6 +10,11 @@
  * (a `glb` lingering after switching back to SDXL would be a 422 at the door).
  */
 import { isMeshFamily } from "./legacyRecipeRules";
+import {
+  TRANSPARENCY_UNAVAILABLE_FORMAT_REASON,
+  transparencyActive,
+  type TransparencyControl,
+} from "./transparency";
 
 const MESH_FORMATS: ReadonlySet<string> = new Set(["glb", "obj"]);
 
@@ -72,4 +77,36 @@ export function coerceOutputFormatForRecipe<F extends string>(
     return current === undefined ? undefined : (legacyFormats[0] as F);
   }
   return current;
+}
+
+/** One output-format choice, ready for a segmented control or a select. */
+export interface OutputFormatOption<F extends string = string> {
+  value: F;
+  label: string;
+  disabled: boolean;
+  /** Why a disabled option is unavailable; `null` while it is available. */
+  reason: string | null;
+}
+
+/**
+ * The format picker's options. While the transparent-background toggle is on
+ * (and advertised), a format outside the recipe's alpha list stays VISIBLE
+ * but disabled with its reason, rather than vanishing from under the user —
+ * JPEG has no alpha channel and admission refuses the pair.
+ */
+export function outputFormatOptions<F extends string>(
+  formats: readonly F[],
+  transparentBackground: boolean | null | undefined,
+  control: TransparencyControl | null,
+): OutputFormatOption<F>[] {
+  const restrict = transparencyActive(transparentBackground, control);
+  return formats.map((value) => {
+    const disabled = restrict && !control!.formats.includes(value);
+    return {
+      value,
+      label: value.toUpperCase(),
+      disabled,
+      reason: disabled ? TRANSPARENCY_UNAVAILABLE_FORMAT_REASON : null,
+    };
+  });
 }

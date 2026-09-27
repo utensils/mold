@@ -3,6 +3,7 @@ import { baseGenerationCapabilities } from "./generationCapabilities";
 import {
   conditioningForRequest,
   EXCLUSIVE_WELLS_NOTE,
+  fittedAttachmentRole,
   referencesLockBatchSize,
   requestCarriesReferences,
   requestCarriesSource,
@@ -12,6 +13,7 @@ import {
 import {
   flux2DevRecipe,
   flux2KleinRecipe,
+  qwenImage21Recipe,
   qwenImageEditRecipe,
   sdxlIpAdapterRecipe,
 } from "./generationProfile.testFixtures";
@@ -371,5 +373,58 @@ describe("the additive (IP-Adapter) plan", () => {
     expect(
       referencesLockBatchSize("single", { hasSource: true, referenceCount: 0 }),
     ).toBe(false);
+  });
+});
+
+describe("Qwen Image 2.1's reference strip", () => {
+  const caps = () =>
+    baseGenerationCapabilities(
+      "qwen-image21",
+      "qwen-image-2.1:bf16",
+      null,
+      null,
+      null,
+      qwenImage21Recipe(),
+    );
+
+  it("renders an optional ten-image strip with no target and no source well", () => {
+    expect(sourceMediaPlan(caps())).toEqual({
+      kind: "attachments",
+      max: 10,
+      required: false,
+      primary: null,
+    });
+  });
+
+  it("batches freely as text-to-image and locks only while references are held", () => {
+    // `validate_edit_images_against` refuses batch_size > 1 only for a
+    // request CARRYING references on a `replaces` recipe; a plain 2.1
+    // text-to-image batch is ordinary, so the family never forces one.
+    expect(caps().forcesBatchSizeOne).toBe(false);
+    expect(
+      referencesLockBatchSize(caps().sourceImageMode, {
+        hasSource: false,
+        referenceCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      referencesLockBatchSize(caps().sourceImageMode, {
+        hasSource: false,
+        referenceCount: 1,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("fittedAttachmentRole", () => {
+  it("never fits, flattens or re-encodes an ordered reference", () => {
+    expect(fittedAttachmentRole("references")).toBeNull();
+  });
+
+  it("fits the edit target and every source well", () => {
+    expect(fittedAttachmentRole("qwen-edit")).toBe("target");
+    expect(fittedAttachmentRole("single")).toBe("source");
+    expect(fittedAttachmentRole("single-or-references")).toBe("source");
+    expect(fittedAttachmentRole("single-and-references")).toBe("source");
   });
 });
