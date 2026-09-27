@@ -19,7 +19,7 @@ The user's request is research and a plan, extended explicitly to Android with i
 
 Decision order: current user direction, current desktop behavior and shared capability contracts, then the archive's visual guidance. Where these leave a gap, choose the simplest usable phone interaction and record the reason; routine layout decisions do not need repeated user clarification.
 
-Reviewed the archive's desktop, iPhone, and style-guide sources, and rendered the iPhone storyboard in a browser. Compared these against `docs/design/README.md`, current desktop/mobile source, recent commits, and live GitHub issue/PR state. The architecture graph at `.ua/knowledge-graph.json` predates the redesign (2026-08-28); it was useful for orientation only. Current source wins over its descriptions.
+Reviewed the archive's desktop, iPhone, and style-guide sources, and rendered the iPhone storyboard in a browser. Compared these against `docs/design/README.md`, current desktop/mobile source, recent commits, and live GitHub issue/PR state.
 
 | Recent work                                      | Implication for mobile                                                                                                                      |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |

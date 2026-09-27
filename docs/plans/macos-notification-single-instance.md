@@ -13,7 +13,7 @@
 2. Register the notification delegate in `applicationWillFinishLaunching`. Retain accepted routes until the composition root supplies navigation; preserve arrival order and consume them once. Ignore dismissal/unknown actions.
 3. Apply the selected print or Queue route, reopen/reuse `Window(id: "main")`, and activate the application. Keep window presentation in SwiftUI's existing scene, without launching an executable or creating another window family.
 4. Cover early and warm delivery, dismissal, handler replacement, notification destination/reveal semantics, and the built bundle launch policy. UAT checks duplicate launch refusal, same-PID ordinary reopen, close/reopen, and a real notification click where the local notification service permits it.
-5. Run native lint and tests, obtain a separate implementation review, refresh the scoped knowledge graph and release note, then open and merge a PR after exact-head checks pass.
+5. Run native lint and tests, obtain a separate implementation review, add the release note, then open and merge a PR after exact-head checks pass.
 
 ## Boundaries
 

@@ -18,4 +18,4 @@ Give a Mac user one visible Library toolbar action, **Sync All to This Mac**, to
 
 - Test an unfiltered run across multiple remote hosts with pictures, clip, GLB, and a collection containing them plus an empty collection; test rerun skips without redownloading unchanged media, same-byte prints with different recipes stay distinct, long collision names fit the filesystem, local-only rows stay untouched, and an unreachable host is reported.
 - Test file-backed framing and authenticated download failure; rely on existing server format-validation coverage and verify its refusal text matches the accepted set.
-- Run native macOS tests/build and relevant Rust server tests. Exercise the toolbar in the app if feasible, obtain independent subagent review of the final diff, address findings, refresh Understand Anything graph, then open one PR.
+- Run native macOS tests/build and relevant Rust server tests. Exercise the toolbar in the app if feasible, obtain independent subagent review of the final diff, address findings, then open one PR.

@@ -16,7 +16,7 @@ The native store sends every owning host's filenames as one request. The server 
 
 ## Review and delivery
 
-Have a sub-agent review this plan before implementation. Have a separate sub-agent review the finished diff, address findings, refresh affected Understand Anything graph entries, then open a conventional-commit PR. Inspect automated review and exact-head CI before merging and synchronizing the checkout. Existing production requests may still be running; do not restart or interfere with them during diagnosis.
+Have a sub-agent review this plan before implementation. Have a separate sub-agent review the finished diff, address findings, then open a conventional-commit PR. Inspect automated review and exact-head CI before merging and synchronizing the checkout. Existing production requests may still be running; do not restart or interfere with them during diagnosis.
 
 Plan review completed by an independent GPT-5.6 Sol sub-agent. Incorporated its progress coverage findings. A follow-up review approved optimizing trash authority while retaining safe per-item restore/purge commits: batching those transitions requires a separate durable journal. Copy/Quick Look are capped previews and upscale is single-selection; queued generation has its existing Queue status. Stop never cancels in-flight mutations. Failed HTTP chunks carry unknown outcomes and require both authoritative listings.
 
@@ -27,6 +27,5 @@ Implementation review found and corrected a restored-print race in per-item empt
 - `make -C apps/macos gen`, `lint`, `build` and `test` passed; 969 MoldClient tests, 7 MoldStyle tests and 842 hosted native-app tests passed. The first hosted launch was blocked by a separately running debug app; closing that debug instance and rerunning the full gate passed.
 - Disposable HTTP gallery with 80 synthetic prints: the actual native UI showed “Moving to Trash — 48 of 80 copies · Bulk Test”, allowed sidebar navigation while working, then displayed “80 of 80 copies confirmed. Finished.” No real gallery mutations were performed for UAT. The fixture does not implement complete machine telemetry, so its resource-warning banners are outside this check.
 - Independent implementation review completed with no unresolved correctness findings after the restored-print race, stale-host replies, outbox routing and cache-eviction findings were corrected.
-- Scoped Understand Anything structures and fingerprints refreshed for the changed Swift/Rust files; repository-wide baseline timestamp remains unchanged.
 - `nix develop -c cargo check -p mold-ai-server --lib` passed. `nix develop -c cargo test -p mold-ai-server --lib bulk_trash -- --nocapture` passed 3 focused authority regressions: one durable generation per chunk, stop-at-conflict prefix handling and crash-interrupted unarchived trash recovery.
 - The built server test binary passed the production-route reader fairness regression, dropped-waiter writer-ownership regression, stale Empty/Sweep snapshot revalidation regressions, bulk trash/restore round trip and permanent-delete lifecycle regression. The stale filter covered 27 tests; every scoped run reported zero failures.

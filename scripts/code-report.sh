@@ -70,8 +70,6 @@ git -C "$repo_root" archive "$report_ref" -- . \
   ':(exclude)docs/design/**' \
   ':(exclude)bun.nix' \
   ':(exclude)studio/lib/generated/**' \
-  ':(exclude).understand-anything/**' \
-  ':(exclude).ua/**' \
   | tar -x -C "$snapshot_dir"
 
 tokei "$snapshot_dir" \
@@ -281,7 +279,7 @@ cat > "$output_tmp" <<EOF
   </section>
 
   <footer>
-    <div><strong>$tokei_version via the Mold Nix dev shell.</strong><br>Git snapshot only. Excludes JSON, documentation/design support, generated code, lockfiles, binary assets, build output, caches, downloaded models, and Understand Anything data.</div>
+    <div><strong>$tokei_version via the Mold Nix dev shell.</strong><br>Git snapshot only. Excludes JSON, documentation/design support, generated code, lockfiles, binary assets, build output, caches, and downloaded models.</div>
     <div class="right"><code>$commit_short</code><br>$(commify "$total_text") measured text lines</div>
   </footer>
 </main>

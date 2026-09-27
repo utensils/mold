@@ -3,8 +3,6 @@
 .agents/
 .cache/
 .playwright-mcp/
-.ua/intermediate/
-.ua/diff-overlay.json
 # Claude Code
 .claude/worktrees/
 .claude/scheduled_tasks.lock

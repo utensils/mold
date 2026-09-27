@@ -23,7 +23,7 @@
 
 - Add focused Swift client/app and Rust server tests for metadata, collection mapping, notifications, partial retries, and selection behavior.
 - Run native macOS tests and relevant Rust contracts; perform rendered native UAT with a large fixture if available.
-- Refresh Understand Anything graphs, run Claude review on the final diff, address findings, open one PR, wait for exact-head CI, merge and sync the branch.
+- Run Claude review on the final diff, address findings, open one PR, wait for exact-head CI, merge and sync the branch.
 
 ## Review record
 

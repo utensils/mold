@@ -42,8 +42,7 @@ without NVIDIA hardware, drivers, toolkit or shared libraries.
    release-maintainer rules and a changelog fragment. Explain remote usage with
    MOLD_HOST, automatic selection, forced CPU/CUDA, CPU local-generation limits,
    current Linux x86_64 scope, migration, and rollout (nightly after main build;
-   stable/AUR after the next tag). Refresh relevant knowledge-graph entries
-   without claiming a full graph regeneration.
+   stable/AUR after the next tag).
 
 ## Validation and review gates
 
@@ -87,10 +86,6 @@ Independent GPT-5.6 Sol review completed before implementation. Accepted:
   auto does not attempt to diagnose or install driver/runtime libraries.
 - Old tags remain immutable; missing CPU archives fail with newer-release or
   source-build guidance. AUR checksums are fetched after native publication.
-
-The review reported no graph, but direct verification found the tracked `.ua/`
-graph in this worktree. Its global baseline is stale; scoped source-verified
-updates follow the repository's existing scopedUpdates convention.
 
 ## Implementation review resolution
 
