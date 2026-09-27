@@ -1581,5 +1581,5 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metal"))]
+#[cfg(all(test, any(feature = "metal", feature = "cuda")))]
 mod performance_tests;

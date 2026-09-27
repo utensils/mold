@@ -297,7 +297,7 @@ if wants contracts; then
                   desktop-linuxdeploy-pins windows-toolchain-pins \
                   cuda-distribution-contract \
                   install-cuda-arch install-cpu aur-smoke-script cuda-qualification-contract \
-                  minimax-h3-attention-release-contract bench-qwen-parse \
+                  minimax-h3-attention-release-contract bench-qwen-parse bench-qwen21-parse \
                   regression-matrix-aggregate-failures regression-matrix-concurrency \
                   regression-matrix-family-sizing regression-matrix-source-image \
                   regression-matrix-transient-retry wan-regression-matrix \
