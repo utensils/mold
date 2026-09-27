@@ -302,15 +302,21 @@ fn file_identity(path: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Load an adapter, giving every layer that carries no `.alpha` tensor the
-/// alpha its PEFT metadata names — the only place the Viggle files store it.
+/// Load an adapter, giving every layer the alpha PEFT would scale it by
+/// ([`LoraMetadataScale::layer_alpha`]): a layer's own `.alpha` tensor, else
+/// its metadata `alpha_pattern` / `lora_alpha` — the only place the Viggle
+/// files store it — under rsLoRA's `sqrt(r)` rule when the metadata declares
+/// it. A DoRA adapter is refused before any tensor is read.
 pub(crate) fn load_adapter(path: &Path) -> Result<LoraAdapter> {
+    let header = read_header(path)?;
+    refuse_dora(path, &header)?;
     let mut adapter = LoraAdapter::load(path)?;
-    if let Some(metadata) = LoraMetadataScale::read(path)? {
+    if let Some(metadata) = &header.metadata {
         for (stem, layer) in adapter.layers.iter_mut() {
-            if layer.alpha.is_none() {
-                layer.alpha = metadata.alpha_for(stem);
-            }
+            let rank = layer.a.dim(0)?;
+            layer.alpha = metadata
+                .layer_alpha(stem, rank, layer.alpha)
+                .with_context(|| format!("LoRA {}", path.display()))?;
         }
     }
     Ok(adapter)
@@ -368,97 +374,333 @@ pub(crate) fn build_registry(
     )
 }
 /// PEFT's scale metadata (`LoraConfig` as `peft` serializes it into
-/// `lora_adapter_metadata`).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// `lora_adapter_metadata`, diffusers `loaders/lora_base.py:65`).
+///
+/// Every field is read the way PEFT itself applies it when it builds the
+/// layer (peft 0.21 `tuners/lora/model.py:233-237`, `tuners/lora/layer.py:
+/// 278-281`):
+///
+/// * the layer's alpha is the FIRST `alpha_pattern` key (in the file's own
+///   order) that matches the module name under [`peft_pattern_matches`], else
+///   `lora_alpha`; its rank likewise from `rank_pattern`, else `r`;
+/// * `use_rslora` scales by `alpha / sqrt(r)` instead of `alpha / r`;
+/// * `use_dora` (a `lora_magnitude_vector` per layer) is refused: DoRA
+///   renormalizes the whole adapted weight column by column, which a
+///   forward-time `W x + B (A x)` bypass cannot express, and dropping the
+///   magnitude silently renders a different adapter.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct LoraMetadataScale {
     pub alpha: Option<f64>,
     pub rank: Option<f64>,
-    pub alpha_pattern: Vec<(String, f64)>,
+    pub alpha_pattern: Vec<PeftPattern>,
+    pub rank_pattern: Vec<PeftPattern>,
+    pub use_rslora: bool,
+    pub use_dora: bool,
+}
+
+/// One `alpha_pattern` / `rank_pattern` entry: its key compiled to PEFT's
+/// matcher, and its value.
+#[derive(Debug, Clone)]
+pub(crate) struct PeftPattern {
+    matcher: regex::Regex,
+    pub value: f64,
+}
+
+impl PeftPattern {
+    fn new(key: &str, value: f64) -> Result<Self> {
+        // `get_pattern_key` (peft 0.21 `utils/other.py:1524-1532`):
+        // `re.match(rf"(.*\.)?({key})$", module_name)` — anchored at the start
+        // by `re.match`, at the end by `$`, and the key is a REGEX that may
+        // only be preceded by a whole dotted prefix. So `1.attn.to_q` names
+        // block 1 and never blocks 11, 21 or 31.
+        let matcher = regex::Regex::new(&format!(r"^(?:.*\.)?(?:{key})$")).with_context(|| {
+            format!(
+                "LoRA metadata pattern `{key}` is not a regular expression this engine can \
+                 evaluate the way PEFT does"
+            )
+        })?;
+        Ok(Self { matcher, value })
+    }
+}
+
+/// Whether PEFT would pick `pattern` for `module_name`.
+pub(crate) fn peft_pattern_matches(pattern: &PeftPattern, module_name: &str) -> bool {
+    pattern.matcher.is_match(module_name)
+}
+
+/// The first pattern (in file order, as Python's dict iteration yields
+/// them) that matches `module_name`.
+fn first_match<'a>(patterns: &'a [PeftPattern], module_name: &str) -> Option<&'a PeftPattern> {
+    patterns
+        .iter()
+        .find(|pattern| peft_pattern_matches(pattern, module_name))
+}
+
+/// JSON parsed with object keys in FILE order. `serde_json::Value` sorts keys
+/// unless the `preserve_order` feature happens to be unified in, and PEFT's
+/// "first matching pattern" depends on the order the trainer wrote. Only
+/// what the scale reads is kept; strings, arrays and nulls parse to `Other`.
+#[derive(Debug, Clone)]
+enum OrderedJson {
+    Bool(bool),
+    Number(f64),
+    Object(Vec<(String, OrderedJson)>),
+    Other,
+}
+
+impl OrderedJson {
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_object(&self) -> Option<&[(String, OrderedJson)]> {
+        match self {
+            Self::Object(entries) => Some(entries),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OrderedJson {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = OrderedJson;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+            fn visit_unit<E>(self) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Other)
+            }
+            fn visit_none<E>(self) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Other)
+            }
+            fn visit_bool<E>(self, value: bool) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Bool(value))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Number(value as f64))
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Number(value as f64))
+            }
+            fn visit_f64<E>(self, value: f64) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Number(value))
+            }
+            fn visit_str<E>(self, _: &str) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Other)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<OrderedJson, A::Error> {
+                while seq.next_element::<OrderedJson>()?.is_some() {}
+                Ok(OrderedJson::Other)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<OrderedJson, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = map.next_entry::<String, OrderedJson>()? {
+                    entries.push(entry);
+                }
+                Ok(OrderedJson::Object(entries))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// The module name PEFT matched its patterns against: the stem without the
+/// component prefix diffusers adds (`transformer.`) or any other dotted
+/// trainer prefix.
+fn peft_module_name(stem: &str) -> &str {
+    let mut key = stem;
+    while let Some(rest) = PREFIXES.iter().find_map(|prefix| key.strip_prefix(prefix)) {
+        key = rest;
+    }
+    key
 }
 
 impl LoraMetadataScale {
     /// Parse the `lora_adapter_metadata` JSON. Keys may be bare (`lora_alpha`)
     /// or component-prefixed (`transformer.lora_alpha`, the Viggle files).
     pub(crate) fn parse(json: &str) -> Result<Self> {
-        let value: serde_json::Value =
+        let value: OrderedJson =
             serde_json::from_str(json).context("lora_adapter_metadata is not JSON")?;
         let object = value
             .as_object()
             .context("lora_adapter_metadata is not an object")?;
         let field = |name: &str| {
+            let prefixed = format!("transformer.{name}");
             object
-                .get(name)
-                .or_else(|| object.get(&format!("transformer.{name}")))
+                .iter()
+                .find(|(key, _)| key == name)
+                .or_else(|| object.iter().find(|(key, _)| *key == prefixed))
+                .map(|(_, value)| value)
         };
-        let alpha_pattern = field("alpha_pattern")
-            .and_then(|value| value.as_object())
-            .map(|pattern| {
-                pattern
-                    .iter()
-                    .filter_map(|(key, value)| value.as_f64().map(|alpha| (key.clone(), alpha)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let patterns = |name: &str| -> Result<Vec<PeftPattern>> {
+            let Some(entries) = field(name).and_then(OrderedJson::as_object) else {
+                return Ok(Vec::new());
+            };
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    let value = value.as_f64().with_context(|| {
+                        format!("LoRA metadata {name} entry `{key}` is not a number")
+                    })?;
+                    PeftPattern::new(key, value)
+                })
+                .collect()
+        };
         Ok(Self {
-            alpha: field("lora_alpha").and_then(serde_json::Value::as_f64),
-            rank: field("r").and_then(serde_json::Value::as_f64),
-            alpha_pattern,
+            alpha: field("lora_alpha").and_then(OrderedJson::as_f64),
+            rank: field("r").and_then(OrderedJson::as_f64),
+            alpha_pattern: patterns("alpha_pattern")?,
+            rank_pattern: patterns("rank_pattern")?,
+            use_rslora: field("use_rslora")
+                .and_then(OrderedJson::as_bool)
+                .unwrap_or(false),
+            use_dora: field("use_dora")
+                .and_then(OrderedJson::as_bool)
+                .unwrap_or(false),
         })
     }
 
-    /// Read it from a safetensors file's `__metadata__`, if present. Only the
-    /// header is read, never the tensors.
+    /// Read it from a safetensors file's `__metadata__`, if present. Only
+    /// the header is read, never the tensors ([`load_adapter`] reads the
+    /// header itself; this is the tests' door).
+    #[cfg(test)]
     pub(crate) fn read(path: &Path) -> Result<Option<Self>> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)
-            .with_context(|| format!("failed to open LoRA {}", path.display()))?;
-        let mut length = [0u8; 8];
-        file.read_exact(&mut length)
-            .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
-        let length = u64::from_le_bytes(length);
-        if length > 100 << 20 {
-            bail!("LoRA header of {} claims {length} bytes", path.display());
-        }
-        let mut header = vec![0u8; length as usize];
-        file.read_exact(&mut header)
-            .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
-        let header: serde_json::Value = serde_json::from_slice(&header)
-            .with_context(|| format!("LoRA header of {} is not JSON", path.display()))?;
-        header
-            .get("__metadata__")
-            .and_then(|metadata| metadata.get("lora_adapter_metadata"))
-            .and_then(serde_json::Value::as_str)
-            .map(Self::parse)
-            .transpose()
+        Ok(read_header(path)?.metadata)
     }
 
-    /// The alpha for one layer stem: an `alpha_pattern` entry whose key the
-    /// stem ends with (PEFT matches by module-name suffix), else the global
-    /// `lora_alpha`.
+    /// The alpha PEFT gives the layer at `stem`: the first matching
+    /// `alpha_pattern` key, else the global `lora_alpha`.
     pub(crate) fn alpha_for(&self, stem: &str) -> Option<f64> {
-        self.alpha_pattern
-            .iter()
-            .filter(|(pattern, _)| stem.ends_with(pattern.as_str()))
-            .max_by_key(|(pattern, _)| pattern.len())
-            .map(|(_, alpha)| *alpha)
+        first_match(&self.alpha_pattern, peft_module_name(stem))
+            .map(|pattern| pattern.value)
             .or(self.alpha)
+    }
+
+    /// The rank PEFT builds the layer at `stem` with: the first matching
+    /// `rank_pattern` key, else the global `r`.
+    pub(crate) fn rank_for(&self, stem: &str) -> Option<f64> {
+        first_match(&self.rank_pattern, peft_module_name(stem))
+            .map(|pattern| pattern.value)
+            .or(self.rank)
+    }
+
+    /// The alpha to hand the shared bypass registry for the layer at `stem`,
+    /// whose `down` matrix has `tensor_rank` rows and which may carry its own
+    /// `.alpha` tensor. The registry scales by `alpha / tensor_rank`
+    /// (`flux::lora_bypass::build_registry_with`), so rsLoRA's `alpha /
+    /// sqrt(r)` is expressed as the alpha `alpha · sqrt(r)`.
+    ///
+    /// A metadata rank that disagrees with the tensors is refused: PEFT builds
+    /// the layer at the metadata rank and would fail to load those tensors
+    /// into it, so there is no scale it would have used.
+    pub(crate) fn layer_alpha(
+        &self,
+        stem: &str,
+        tensor_rank: usize,
+        tensor_alpha: Option<f64>,
+    ) -> Result<Option<f64>> {
+        if let Some(rank) = self.rank_for(stem) {
+            anyhow::ensure!(
+                rank == tensor_rank as f64,
+                "LoRA layer `{stem}` has rank {tensor_rank} but its PEFT metadata says {rank}"
+            );
+        }
+        let alpha = tensor_alpha.or_else(|| self.alpha_for(stem));
+        Ok(match alpha {
+            Some(alpha) if self.use_rslora => Some(alpha * (tensor_rank as f64).sqrt()),
+            alpha => alpha,
+        })
     }
 }
 
-/// `user_scale · alpha / rank` for a layer whose `down` matrix has `rank`
-/// rows. A per-layer `.alpha` tensor wins, then the metadata, then no alpha
-/// (scale 1 per unit of `user_scale`, PEFT's `alpha = r` default).
-#[cfg(test)]
-pub(crate) fn effective_scale(
-    user_scale: f64,
-    rank: usize,
-    tensor_alpha: Option<f64>,
-    metadata_alpha: Option<f64>,
-) -> f64 {
-    match tensor_alpha.or(metadata_alpha) {
-        Some(alpha) if rank > 0 => user_scale * alpha / rank as f64,
-        _ => user_scale,
+/// What [`read_header`] reads out of a safetensors header.
+struct AdapterHeader {
+    metadata: Option<LoraMetadataScale>,
+    tensor_names: Vec<String>,
+}
+
+/// Read a safetensors header: its PEFT metadata and its tensor names.
+fn read_header(path: &Path) -> Result<AdapterHeader> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open LoRA {}", path.display()))?;
+    let mut length = [0u8; 8];
+    file.read_exact(&mut length)
+        .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
+    let length = u64::from_le_bytes(length);
+    if length > 100 << 20 {
+        bail!("LoRA header of {} claims {length} bytes", path.display());
     }
+    let mut header = vec![0u8; length as usize];
+    file.read_exact(&mut header)
+        .with_context(|| format!("failed to read LoRA header {}", path.display()))?;
+    let header: serde_json::Value = serde_json::from_slice(&header)
+        .with_context(|| format!("LoRA header of {} is not JSON", path.display()))?;
+    let metadata = header
+        .get("__metadata__")
+        .and_then(|metadata| metadata.get("lora_adapter_metadata"))
+        .and_then(serde_json::Value::as_str)
+        .map(LoraMetadataScale::parse)
+        .transpose()?;
+    let tensor_names = header
+        .as_object()
+        .map(|object| {
+            object
+                .keys()
+                .filter(|key| *key != "__metadata__")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(AdapterHeader {
+        metadata,
+        tensor_names,
+    })
+}
+
+/// Refuse a DoRA adapter by name. PEFT stores the per-column magnitude as
+/// `<layer>.lora_magnitude_vector` (peft 0.21 `tuners/lora/layer.py:115,
+/// 145`) and flags the config `use_dora`; Kohya/LyCORIS exports carry it as
+/// `<layer>.dora_scale` (ComfyUI `comfy/weight_adapter/lora.py:153-210`).
+fn refuse_dora(path: &Path, header: &AdapterHeader) -> Result<()> {
+    let declared = header
+        .metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.use_dora);
+    let magnitude = header
+        .tensor_names
+        .iter()
+        .find(|name| name.contains("lora_magnitude_vector") || name.contains("dora_scale"));
+    if declared || magnitude.is_some() {
+        bail!(
+            "LoRA {} is a DoRA adapter{}; Qwen Image 2.1 applies adapters as a forward-time \
+             bypass, which cannot apply DoRA's weight renormalization — export it as a plain LoRA",
+            path.display(),
+            magnitude
+                .map(|name| format!(" (`{name}`)"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -665,8 +907,13 @@ mod tests {
             }
             let scale = LoraMetadataScale::parse(&file.metadata["lora_adapter_metadata"]).unwrap();
             assert_eq!(scale.alpha, scale.rank, "{name}");
+            assert!(!scale.use_rslora && !scale.use_dora, "{name}");
             let rank = scale.rank.unwrap() as usize;
-            assert_eq!(effective_scale(1.0, rank, None, scale.alpha), 1.0);
+            // alpha / rank = 1: the registry divides what `layer_alpha` hands it.
+            let alpha = scale
+                .layer_alpha("transformer.transformer_blocks.5.attn.to_q", rank, None)
+                .unwrap();
+            assert_eq!(alpha, Some(rank as f64), "{name}");
         }
     }
 
@@ -703,26 +950,240 @@ mod tests {
     }
 
     #[test]
-    fn scale_prefers_tensor_alpha_then_metadata_then_none() {
-        assert_eq!(effective_scale(0.5, 16, Some(8.0), Some(32.0)), 0.25);
-        assert_eq!(effective_scale(0.5, 16, None, Some(32.0)), 1.0);
-        assert_eq!(effective_scale(0.5, 16, None, None), 0.5);
-        let scale = LoraMetadataScale::parse(
-            r#"{"lora_alpha": 16, "r": 32, "alpha_pattern": {"attn.to_q": 64, "to_q": 8}}"#,
-        )
-        .unwrap();
+    fn layer_alpha_prefers_the_tensor_then_the_metadata() {
+        let scale = LoraMetadataScale::parse(r#"{"lora_alpha": 16, "r": 32}"#).unwrap();
         assert_eq!(scale.alpha, Some(16.0));
         assert_eq!(scale.rank, Some(32.0));
-        // The longest matching pattern wins.
+        let stem = "transformer.transformer_blocks.0.attn.to_q";
+        assert_eq!(scale.layer_alpha(stem, 32, Some(8.0)).unwrap(), Some(8.0));
+        assert_eq!(scale.layer_alpha(stem, 32, None).unwrap(), Some(16.0));
+        let bare = LoraMetadataScale::parse("{}").unwrap();
+        assert_eq!(bare.layer_alpha(stem, 32, None).unwrap(), None);
+        assert!(LoraMetadataScale::parse("not json").is_err());
+    }
+
+    /// PEFT's `get_pattern_key` (peft 0.21 `utils/other.py:1524-1532`) is
+    /// `re.match(rf"(.*\.)?({key})$", name)`: the key may only be preceded by
+    /// a whole dotted prefix, so `1.attn.to_q` is block 1 and never block 11,
+    /// 21 or 31 — which a suffix test (`ends_with`) got wrong.
+    #[test]
+    fn peft_patterns_match_only_at_a_module_boundary() {
+        let scale = LoraMetadataScale::parse(
+            r#"{"lora_alpha": 16, "r": 32, "alpha_pattern": {"1.attn.to_q": 4}}"#,
+        )
+        .unwrap();
+        for stem in [
+            "transformer.transformer_blocks.1.attn.to_q",
+            "transformer_blocks.1.attn.to_q",
+            "base_model.model.transformer_blocks.1.attn.to_q",
+        ] {
+            assert_eq!(scale.alpha_for(stem), Some(4.0), "{stem}");
+        }
+        for block in [11, 21, 31] {
+            let stem = format!("transformer.transformer_blocks.{block}.attn.to_q");
+            assert_eq!(scale.alpha_for(&stem), Some(16.0), "{stem}");
+        }
         assert_eq!(
-            scale.alpha_for("transformer_blocks.0.attn.to_q"),
-            Some(64.0)
-        );
-        assert_eq!(
-            scale.alpha_for("transformer_blocks.0.attn.to_k"),
+            scale.alpha_for("transformer.transformer_blocks.1.attn.to_k"),
             Some(16.0)
         );
-        assert!(LoraMetadataScale::parse("not json").is_err());
+    }
+
+    /// The keys are REGULAR EXPRESSIONS ("layer names or regexp expression",
+    /// peft 0.21 `tuners/lora/config.py:524-529`).
+    #[test]
+    fn peft_patterns_are_regular_expressions() {
+        let scale = LoraMetadataScale::parse(
+            r#"{"lora_alpha": 16, "r": 8,
+                "alpha_pattern": {"transformer_blocks\\.(1|2)\\.attn\\.to_[qk]": 32,
+                                  "^img_in": 2}}"#,
+        )
+        .unwrap();
+        for (stem, alpha) in [
+            ("transformer.transformer_blocks.1.attn.to_q", 32.0),
+            ("transformer.transformer_blocks.2.attn.to_k", 32.0),
+            ("transformer.transformer_blocks.2.attn.to_v", 16.0),
+            ("transformer.transformer_blocks.12.attn.to_q", 16.0),
+            // `^` inside the group anchors the key at the start of the name.
+            ("transformer.img_in", 2.0),
+            ("transformer.transformer_blocks.0.img_in", 16.0),
+        ] {
+            assert_eq!(scale.alpha_for(stem), Some(alpha), "{stem}");
+        }
+        // A key this engine cannot evaluate the way Python's `re` would is
+        // refused, never silently skipped.
+        assert!(LoraMetadataScale::parse(r#"{"alpha_pattern": {"(?<=x)to_q": 1}}"#).is_err());
+    }
+
+    /// PEFT takes the FIRST matching key in the dict's order, not the most
+    /// specific one — and the file's order survives parsing.
+    #[test]
+    fn the_first_matching_pattern_in_file_order_wins() {
+        let first_general = LoraMetadataScale::parse(
+            r#"{"lora_alpha": 16, "alpha_pattern": {"to_q": 8, "attn.to_q": 64}}"#,
+        )
+        .unwrap();
+        let first_specific = LoraMetadataScale::parse(
+            r#"{"lora_alpha": 16, "alpha_pattern": {"attn.to_q": 64, "to_q": 8}}"#,
+        )
+        .unwrap();
+        let stem = "transformer.transformer_blocks.0.attn.to_q";
+        assert_eq!(first_general.alpha_for(stem), Some(8.0));
+        assert_eq!(first_specific.alpha_for(stem), Some(64.0));
+    }
+
+    /// `rank_pattern` resolves the same way, and a layer whose tensors
+    /// disagree with the rank PEFT would have built it at is refused (PEFT
+    /// itself could not load those tensors into the layer).
+    #[test]
+    fn rank_pattern_resolves_like_peft_and_must_agree_with_the_tensors() {
+        let scale = LoraMetadataScale::parse(
+            r#"{"lora_alpha": 16, "r": 32, "rank_pattern": {"attn.to_v": 16}}"#,
+        )
+        .unwrap();
+        let to_v = "transformer.transformer_blocks.3.attn.to_v";
+        let to_q = "transformer.transformer_blocks.3.attn.to_q";
+        assert_eq!(scale.rank_for(to_v), Some(16.0));
+        assert_eq!(scale.rank_for(to_q), Some(32.0));
+        assert_eq!(scale.layer_alpha(to_v, 16, None).unwrap(), Some(16.0));
+        assert!(scale.layer_alpha(to_v, 32, None).is_err());
+        assert!(scale.layer_alpha(to_q, 16, None).is_err());
+    }
+
+    /// rsLoRA scales by `alpha / sqrt(r)` (peft 0.21 `tuners/lora/layer.py:
+    /// 278-281`); the registry divides by the rank, so the alpha it is handed
+    /// is `alpha · sqrt(r)`.
+    #[test]
+    fn rslora_scales_by_the_square_root_of_the_rank() {
+        let scale =
+            LoraMetadataScale::parse(r#"{"lora_alpha": 16, "r": 64, "use_rslora": true}"#).unwrap();
+        assert!(scale.use_rslora);
+        let alpha = scale
+            .layer_alpha("transformer.transformer_blocks.0.attn.to_q", 64, None)
+            .unwrap()
+            .unwrap();
+        assert!((alpha / 64.0 - 16.0 / 8.0).abs() < 1e-12, "{alpha}");
+        let prefixed = LoraMetadataScale::parse(
+            r#"{"transformer.lora_alpha": 16, "transformer.r": 64, "transformer.use_rslora": true}"#,
+        )
+        .unwrap();
+        assert!(prefixed.use_rslora);
+    }
+}
+
+/// Synthetic adapter files, and the production scale arithmetic read back
+/// from the registry the engine installs (`build_registry` →
+/// `flux::lora_bypass::build_registry_with`'s `alpha / rank`).
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Write a safetensors file of F32 tensors with an optional
+    /// `lora_adapter_metadata` JSON string in its `__metadata__`.
+    pub(super) fn write_adapter(
+        path: &Path,
+        tensors: &[(&str, Vec<usize>)],
+        metadata: Option<&str>,
+    ) {
+        let mut header = serde_json::Map::new();
+        if let Some(metadata) = metadata {
+            header.insert(
+                "__metadata__".into(),
+                serde_json::json!({ "lora_adapter_metadata": metadata }),
+            );
+        }
+        let mut data = Vec::new();
+        for (index, (name, shape)) in tensors.iter().enumerate() {
+            let count: usize = shape.iter().product();
+            let start = data.len();
+            for i in 0..count {
+                let value = ((i + 7 * index) % 13) as f32 / 13.0 - 0.4;
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+            header.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": shape,
+                    "data_offsets": [start, data.len()],
+                }),
+            );
+        }
+        let mut header = serde_json::to_vec(&header).unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header);
+        bytes.extend(data);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn registry_for(path: &Path, scale: f64) -> Result<LoraRegistry> {
+        build_registry(
+            &[Qwen21LoraEntry {
+                path: path.to_path_buf(),
+                scale,
+            }],
+            &Device::Cpu,
+            DType::F32,
+        )
+    }
+
+    /// A DoRA adapter is refused by name — declared in its metadata or
+    /// carrying a magnitude vector — instead of rendering its LoRA half alone.
+    #[test]
+    fn dora_adapters_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = "transformer.transformer_blocks.0.attn.to_q";
+        let pair = [
+            (format!("{q}.lora_A.weight"), vec![4, 8]),
+            (format!("{q}.lora_B.weight"), vec![8, 4]),
+        ];
+        let declared = dir.path().join("declared.safetensors");
+        let tensors: Vec<(&str, Vec<usize>)> = pair
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape.clone()))
+            .collect();
+        write_adapter(
+            &declared,
+            &tensors,
+            Some(r#"{"lora_alpha": 4, "r": 4, "use_dora": true}"#),
+        );
+        let error = format!("{:#}", registry_for(&declared, 1.0).unwrap_err());
+        assert!(error.contains("DoRA"), "{error}");
+
+        let magnitude_name = format!("{q}.lora_magnitude_vector.weight");
+        let mut tensors = tensors.clone();
+        tensors.push((magnitude_name.as_str(), vec![8]));
+        let magnitude = dir.path().join("magnitude.safetensors");
+        write_adapter(&magnitude, &tensors, None);
+        let error = format!("{:#}", registry_for(&magnitude, 1.0).unwrap_err());
+        assert!(
+            error.contains("DoRA") && error.contains("lora_magnitude_vector"),
+            "{error}"
+        );
+
+        let kohya = dir.path().join("kohya.safetensors");
+        write_adapter(
+            &kohya,
+            &[
+                (
+                    "lora_unet_transformer_blocks_0_attn_to_q.lora_down.weight",
+                    vec![4, 8],
+                ),
+                (
+                    "lora_unet_transformer_blocks_0_attn_to_q.lora_up.weight",
+                    vec![8, 4],
+                ),
+                (
+                    "lora_unet_transformer_blocks_0_attn_to_q.dora_scale",
+                    vec![1, 8],
+                ),
+            ],
+            None,
+        );
+        assert!(registry_for(&kohya, 1.0).is_err());
     }
 }
 #[cfg(test)]
@@ -753,8 +1214,8 @@ mod viggle_file_tests {
                 assert!(layer.alpha.is_none());
                 let rank = layer.a.dim(0).unwrap();
                 assert_eq!(
-                    effective_scale(1.0, rank, layer.alpha, scale.alpha_for(stem)),
-                    1.0
+                    scale.layer_alpha(stem, rank, layer.alpha).unwrap(),
+                    Some(rank as f64)
                 );
             }
         }
