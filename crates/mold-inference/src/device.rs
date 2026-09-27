@@ -936,7 +936,10 @@ pub fn activation_bytes(
         // when CFG is active, so this factor covers per-batch overhead.
         ActivationFamily::SdxlUnet => 173.0,
         // Qwen-Image dit: similar dual-stream structure to SDXL.
-        ActivationFamily::QwenImageDit | ActivationFamily::QwenImage21Dit => 173.0,
+        ActivationFamily::QwenImageDit => 173.0,
+        // Qwen Image 2.1 is priced per joint token instead (below); this
+        // factor is never read for it.
+        ActivationFamily::QwenImage21Dit => 173.0,
         // Wuerstchen v2: cascade Stage B has a chunky conv stack — ~67%
         // above FLUX.
         ActivationFamily::Wuerstchen => 217.0,
@@ -963,16 +966,82 @@ pub fn activation_bytes(
         // until a bespoke wan admission model lands with the 14B tier.
         ActivationFamily::WanVideo => 130.0,
     };
+    if family == ActivationFamily::QwenImage21Dit {
+        // Canvas-only callers know no prompt, so the joint sequence carries
+        // the legacy retained-prefix length, and the retained K/V of both
+        // CFG branches is charged on top exactly as before.
+        let joint = area / QWEN_IMAGE21_PIXELS_PER_TOKEN
+            + crate::qwen_image21::LEGACY_PREFIX_CACHE_TOKENS as u64;
+        return qwen_image21_activation_bytes(
+            joint,
+            batch,
+            dtype_bytes,
+            crate::attention::AttentionBackend::resolve_effective_for(
+                crate::attention::AttentionPolicy::FastStill,
+            ),
+        )
+        .saturating_add(crate::qwen_image21::prefix_cache_budget_bytes(batch));
+    }
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
-    /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
-    /// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
-    const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
-    let prefix_cache = if family == ActivationFamily::QwenImage21Dit {
-        crate::qwen_image21::prefix_cache_budget_bytes(batch)
-    } else {
-        0
+    raw.max(ACTIVATION_FLOOR_BYTES)
+}
+
+/// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
+/// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
+const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
+
+/// One Qwen Image 2.1 latent token is a 16x16 pixel cell.
+const QWEN_IMAGE21_PIXELS_PER_TOKEN: u64 = 256;
+
+/// Qwen Image 2.1 denoise workspace per joint token (text prefix, condition
+/// images and target together) in BF16, above the resident weights, with no
+/// score matrix: the 12,288-wide SwiGLU intermediates, Q/K/V and the F32
+/// LayerNorm and RoPE copies of one block. Fitted to the peak increments the
+/// CUDA harness sampled on an L40S under FlashAttention (0.91 GB at 1024²,
+/// 0.94 GB at 1344x768 with CFG, 3.52 GB at 2048², 3.56 GB at 2752x1536;
+/// `docs/qualification/qwen-image-2.1-cuda-performance.md`).
+const QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN: u64 = 235_000;
+
+/// Query rows per chunk of the CUDA math attention
+/// (`attention::cuda_query_chunk_rows` for these sequence lengths).
+const QWEN_IMAGE21_ATTENTION_QUERY_CHUNK: u64 = 512;
+
+/// Peak denoise workspace of a Qwen Image 2.1 forward over `joint_tokens`
+/// (prefix + target) for `batch` rows in one forward, at `dtype_bytes` per
+/// element, under the attention backend that will actually run
+/// ([`AttentionBackend::resolve_effective_for`]). Math attention adds one
+/// query chunk's score tile over every key; FlashAttention materializes none.
+/// The retained prefix cache is NOT included — callers add
+/// `qwen_image21::prefix_cache_bytes` for the prefix they retain.
+pub fn qwen_image21_activation_bytes(
+    joint_tokens: u64,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    use crate::attention::AttentionBackend;
+    let batch = u64::from(batch.max(1));
+    let dtype = u64::from(dtype_bytes.max(1));
+    let tokens = QWEN_IMAGE21_ACTIVATION_BYTES_PER_TOKEN
+        .saturating_mul(joint_tokens)
+        .saturating_mul(dtype)
+        / 2;
+    let score_tile = match backend {
+        AttentionBackend::Flash => 0,
+        AttentionBackend::Math => {
+            let heads = crate::qwen_image21::transformer::QwenImage21TransformerConfig::official()
+                .num_attention_heads as u64;
+            QWEN_IMAGE21_ATTENTION_QUERY_CHUNK
+                .min(joint_tokens)
+                .saturating_mul(heads)
+                .saturating_mul(joint_tokens)
+                .saturating_mul(dtype)
+        }
     };
-    raw.max(ACTIVATION_FLOOR_BYTES).saturating_add(prefix_cache)
+    tokens
+        .saturating_add(score_tile)
+        .saturating_mul(batch)
+        .max(ACTIVATION_FLOOR_BYTES)
 }
 
 /// Scale a FLUX.2 activation budget by how much longer the sequence becomes
@@ -7717,6 +7786,67 @@ mod tests {
         assert!(
             auto.same_device(&resolved),
             "create_device vs resolve_gpu_ordinal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod qwen_image21_activation_tests {
+    use super::qwen_image21_activation_bytes;
+    use crate::attention::AttentionBackend;
+
+    /// Peak denoise increments above the resident transformer sampled by
+    /// `official_cuda_mode_benchmark` on an L40S (BF16, one row per forward,
+    /// prefix cached): `(joint tokens, backend, measured)`. The estimate must
+    /// cover each; FlashAttention within 15%, math (whose score tile partly
+    /// reuses freed MLP buffers) within 25%.
+    const MEASURED: [(u64, AttentionBackend, u64); 8] = [
+        (4096 + 81, AttentionBackend::Flash, 905_969_664),
+        (4032 + 33, AttentionBackend::Flash, 939_524_096),
+        (16384 + 81, AttentionBackend::Flash, 3_523_215_360),
+        (16512 + 81, AttentionBackend::Flash, 3_556_769_792),
+        (4096 + 81, AttentionBackend::Math, 905_969_664),
+        (4032 + 33, AttentionBackend::Math, 939_524_096),
+        (16384 + 81, AttentionBackend::Math, 3_690_987_520),
+        (16512 + 81, AttentionBackend::Math, 3_657_433_088),
+    ];
+
+    #[test]
+    fn the_token_estimate_covers_every_measured_denoise() {
+        for (tokens, backend, measured) in MEASURED {
+            let estimate = qwen_image21_activation_bytes(tokens, 1, 2, backend);
+            assert!(
+                estimate >= measured,
+                "{tokens} {backend:?}: {estimate} < {measured}"
+            );
+            let slack = match backend {
+                AttentionBackend::Flash => 1.15,
+                AttentionBackend::Math => 1.25,
+            };
+            assert!(
+                estimate as f64 <= measured as f64 * slack,
+                "{tokens} {backend:?}: {estimate} is loose against {measured}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_and_dtype_scale_and_flash_drops_the_score_tile() {
+        let one = qwen_image21_activation_bytes(16593, 1, 2, AttentionBackend::Flash);
+        assert_eq!(
+            qwen_image21_activation_bytes(16593, 2, 2, AttentionBackend::Flash),
+            2 * one
+        );
+        assert_eq!(
+            qwen_image21_activation_bytes(16593, 1, 4, AttentionBackend::Flash),
+            2 * one
+        );
+        let math = qwen_image21_activation_bytes(16593, 1, 2, AttentionBackend::Math);
+        assert_eq!(math - one, 512 * 32 * 16593 * 2);
+        // Condition images lengthen the joint sequence, and the price follows.
+        assert!(
+            qwen_image21_activation_bytes(4177 + 4 * 4096, 1, 2, AttentionBackend::Flash)
+                > 4 * qwen_image21_activation_bytes(4177, 1, 2, AttentionBackend::Flash)
         );
     }
 }

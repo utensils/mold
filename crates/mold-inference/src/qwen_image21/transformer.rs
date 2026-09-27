@@ -1261,27 +1261,27 @@ mod tests {
     }
     #[test]
     fn prefix_cache_budget_is_additive_and_bounds_both_float32_cfg_branches() {
-        use crate::device::{activation_bytes, ActivationFamily};
+        use crate::device::{activation_bytes, qwen_image21_activation_bytes, ActivationFamily};
         let bound = super::super::prefix_cache_budget_bytes(1);
         assert_eq!(bound, 1_073_741_824);
-        for size in [32, 1024, 2048] {
+        let backend = crate::attention::AttentionBackend::resolve_effective_for(
+            crate::attention::AttentionPolicy::FastStill,
+        );
+        for size in [32u32, 1024, 2048] {
             for dtype_bytes in [2, 4] {
                 for batch in [1, 2] {
-                    let before = activation_bytes(
-                        size,
-                        size,
-                        batch,
-                        dtype_bytes,
-                        ActivationFamily::QwenImageDit,
-                    );
-                    let after = activation_bytes(
+                    let joint = u64::from(size) * u64::from(size) / 256
+                        + super::super::LEGACY_PREFIX_CACHE_TOKENS as u64;
+                    let workspace =
+                        qwen_image21_activation_bytes(joint, batch, dtype_bytes, backend);
+                    let total = activation_bytes(
                         size,
                         size,
                         batch,
                         dtype_bytes,
                         ActivationFamily::QwenImage21Dit,
                     );
-                    assert_eq!(after - before, bound * u64::from(batch));
+                    assert_eq!(total - workspace, bound * u64::from(batch));
                 }
             }
         }

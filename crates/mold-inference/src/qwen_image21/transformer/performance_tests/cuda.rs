@@ -169,17 +169,22 @@ pub(super) fn bench_mode(name: &str) -> Result<BenchMode> {
     })
 }
 
-/// Put `mode` into effect on a loaded transformer. The v0.32 transformer
-/// carries only Metal-gated fast booleans, so on CUDA the one path it can run
-/// is legacy; any other mode is refused by name rather than silently measured
-/// as legacy.
+/// Put `mode` into effect on a loaded transformer. The attention dispatch is
+/// wired through the joint-layout seam; the elementwise knobs are not yet, so
+/// a mode that needs them is refused by name rather than silently measured
+/// as something else.
 pub(super) fn install_mode(
     transformer: &mut QwenImage21Transformer,
     mode: &BenchMode,
 ) -> Result<()> {
+    let attention_only = super::super::super::exec_path::Qwen21ExecPath {
+        attention: mode.path.attention,
+        round_timestep_to_dtype: mode.path.round_timestep_to_dtype,
+        ..super::super::super::exec_path::Qwen21ExecPath::legacy()
+    };
     anyhow::ensure!(
-        mode.path.is_legacy() && !mode.cfg_batch,
-        "mode {} needs the transformer's Qwen21ExecPath wiring; this build runs only `legacy` on CUDA",
+        mode.path == attention_only && !mode.cfg_batch,
+        "mode {} needs the transformer's elementwise Qwen21ExecPath wiring; this build runs `legacy` and `flash` on CUDA",
         mode.name
     );
     transformer.compact_modulation = false;
