@@ -1186,7 +1186,9 @@ fn decode_endpoint(bytes: &[u8]) -> Result<RgbImage> {
     limits.max_image_width = Some(MAX_REFERENCE_DIMENSION);
     limits.max_image_height = Some(MAX_REFERENCE_DIMENSION);
     limits.max_alloc = Some(MAX_REFERENCE_IMAGE_PIXELS.saturating_mul(4));
-    crate::img_utils::decode_oriented_srgb_with_limits(bytes, limits)
+    // PIL's `convert("RGB")` reduction, as upstream loads the endpoint
+    // (`img_utils::decode_oriented_srgb_pillow_with_limits`).
+    crate::img_utils::decode_oriented_srgb_pillow_with_limits(bytes, limits)
         .context("endpoint image decode failed")
 }
 
@@ -1772,6 +1774,22 @@ mod tests {
         let bytes = include_bytes!("../ltx2/testdata/preprocess/portrait_exif6.jpg");
         let decoded = decode_endpoint(bytes).unwrap();
         assert_eq!(decoded.dimensions(), (64, 96));
+    }
+
+    /// Upstream opens an FL2VA endpoint with PIL and converts it to RGB
+    /// (`inference_minimax_h3.py:601-603`; diffusers `load_image`,
+    /// `loading_utils.py:47-52`): a 16-bit sample keeps its HIGH byte, so
+    /// `0x00ff` is 0 and `0xff00` 255, not the `image` crate's rounded
+    /// `x / 257` (1 and 254).
+    #[test]
+    fn endpoint_decoder_reduces_sixteen_bit_samples_as_pillow_does() {
+        let source = image::ImageBuffer::from_pixel(2, 2, Rgb([0x00ffu16, 0xff00, 0x8000]));
+        let mut bytes = Cursor::new(Vec::new());
+        source.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        let decoded = decode_endpoint(bytes.get_ref()).unwrap();
+        for pixel in decoded.pixels() {
+            assert_eq!(pixel.0, [0, 255, 128], "pixel = {:?}", pixel.0);
+        }
     }
 
     fn png(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {

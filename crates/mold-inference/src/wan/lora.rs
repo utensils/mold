@@ -1592,6 +1592,62 @@ mod tests {
             .collect()
     }
 
+    /// Replace `VarMap`'s random initialization with a SEEDED draw from the
+    /// same distributions, so a fixture built through `from_var_builder` is
+    /// the same network on every run.
+    ///
+    /// `VarMap` initializes through the CPU's unseeded `rand::thread_rng`, and
+    /// candle cannot seed the CPU device (`set_seed` is unsupported there), so
+    /// every run of a test that bounds a RATIO of two error magnitudes
+    /// otherwise draws a fresh network — and a fresh value of that ratio. The
+    /// draws mirror candle's own initializers (`candle-nn` `linear.rs:84-94`,
+    /// `init.rs:105-109`): Kaiming-normal (ReLU gain, fan-in) for every
+    /// rank >= 2 weight, and `U(-1/sqrt(fan_in), 1/sqrt(fan_in))` for a
+    /// non-constant rank-1 bias, with `fan_in` read off its sibling weight.
+    /// Constant initializations (norm scales, zeros) are already deterministic
+    /// and stay as they are.
+    fn seed_varmap(varmap: &VarMap, seed: u64) {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        use rand_distr::{Distribution, StandardNormal};
+
+        let data = varmap.data().lock().unwrap();
+        let mut names: Vec<&String> = data.keys().collect();
+        names.sort();
+        let fan_in = |dims: &[usize]| dims[1..].iter().product::<usize>().max(1);
+        let mut rng = StdRng::seed_from_u64(seed);
+        for name in names {
+            let var = &data[name];
+            let dims = var.as_tensor().dims().to_vec();
+            let values: Vec<f32> = var.as_tensor().flatten_all().unwrap().to_vec1().unwrap();
+            if values.iter().all(|value| *value == values[0]) {
+                continue;
+            }
+            let fresh: Vec<f32> = if dims.len() >= 2 {
+                let std = (2.0 / fan_in(&dims) as f64).sqrt() as f32;
+                (0..values.len())
+                    .map(|_| {
+                        let z: f32 = StandardNormal.sample(&mut rng);
+                        std * z
+                    })
+                    .collect()
+            } else {
+                let weight = name
+                    .strip_suffix("bias")
+                    .map(|stem| format!("{stem}weight"))
+                    .and_then(|weight| data.get(&weight))
+                    .map(|weight| fan_in(weight.as_tensor().dims()))
+                    .unwrap_or(values.len());
+                let bound = 1.0 / (weight as f32).sqrt();
+                (0..values.len())
+                    .map(|_| rng.gen_range(-bound..bound))
+                    .collect()
+            };
+            var.set(&Tensor::from_vec(fresh, dims, var.as_tensor().device()).unwrap())
+                .unwrap();
+        }
+    }
+
     /// Every projection the shipped distills target, for one block.
     fn block_projections(
         config: &WanTransformerConfig,
@@ -1905,6 +1961,9 @@ mod tests {
             config.clone(),
         )
         .unwrap();
+        // The bound below is on a RATIO whose value depends on the network, so
+        // the network must be the same one on every run and every build.
+        seed_varmap(&varmap, 1892);
 
         let gguf_path = dir.path().join("kquant.gguf");
         write_gguf(&gguf_path, &varmap, |name| {
@@ -1993,18 +2052,48 @@ mod tests {
         // base and travels through the block's non-linearities, so it cannot be
         // compared exactly — but it must arrive at full strength. An attenuated
         // contribution is precisely what merge-and-requantize produces, and
-        // because the base's own quantization error (3.09e-1 here) is larger
+        // because the base's own quantization error (3.22e-1 here) is larger
         // than the adapter's effect, an absolute-error bound would pass on a
         // loader that dropped the adapter outright — it did, until this was
-        // mutation-tested. Measured on this fixture: plain 1.73e-1, quantized
-        // 2.24e-1, ratio 1.30; the spread over 1.0 is the base error and the
-        // block's non-linearities, not attenuation.
+        // mutation-tested. Measured on this seeded fixture (identically in the
+        // default and the `cuda,cudnn,flash-attn` builds — the forward is on
+        // the CPU either way): plain 2.83e-1, quantized 3.11e-1, ratio 1.10;
+        // the spread over 1.0 is the base error and the block's
+        // non-linearities, not attenuation. The same adapter applied TWICE on
+        // the quantized side reads 2.23 (asserted below), a dropped one 0.
+        //
+        // The bound once failed at 2.03 on a CUDA run. That was not CUDA: the
+        // fixture's weights came from `VarMap`'s unseeded initializer, so every
+        // run was a different network (200 draws: ratio 0.87–1.75, median
+        // 1.10; the same draw gives the same ratio bit for bit in both
+        // builds), and a tail draw crossed 2.0. `seed_varmap` makes it one
+        // network.
         let ratio = quantized_effect / plain_effect;
         assert!(
             (0.5..2.0).contains(&ratio),
             "the adapter moved the quantized forward by {quantized_effect:e} against \
              {plain_effect:e} on the plain one (ratio {ratio}) — it is arriving attenuated \
              or not at all, with the base's own error at {base_error:e}"
+        );
+        // The upper edge still discriminates: the adapter applied at twice its
+        // strength on the quantized side (what a loader that both merged and
+        // branched it would do) falls outside the band.
+        let doubled = WanLoraRegistry::load(&[lora(&adapter, 2.0)]).unwrap();
+        let doubled_effect = peak(
+            &(run(&WanTransformer::from_gguf_with_loras(
+                &gguf_path,
+                WanTransformerConfig::tiny(256, 2, 1),
+                &device,
+                &doubled,
+            )
+            .unwrap())
+                - &quantized_bare)
+                .unwrap(),
+        );
+        assert!(
+            doubled_effect / plain_effect >= 2.0,
+            "a doubled adapter reads ratio {} and would pass the band",
+            doubled_effect / plain_effect
         );
     }
 
