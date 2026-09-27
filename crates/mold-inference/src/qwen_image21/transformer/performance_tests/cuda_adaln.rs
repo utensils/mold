@@ -451,7 +451,7 @@ fn adaln_error_is_zero_for_an_exact_candidate() {
     let input = [1.0f32, 2.0, 3.0, 4.0, -1.0, 0.0, 1.0, 2.0];
     let alpha = [1.0f32, 2.0, 0.5, 1.0];
     let mut exact = Vec::new();
-    for row in input.chunks_exact(4) {
+    for row in input.as_chunks::<4>().0 {
         let mean = row.iter().sum::<f32>() / 4.0;
         let var = row.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / 4.0;
         for (x, a) in row.iter().zip(alpha) {

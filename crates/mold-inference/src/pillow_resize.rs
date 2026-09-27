@@ -280,7 +280,9 @@ pub(crate) fn resize_rgba_premultiplied(
     }
     let premultiplied: Vec<u8> = source
         .as_raw()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| {
             let alpha = pixel[3];
             [
@@ -299,7 +301,7 @@ pub(crate) fn resize_rgba_premultiplied(
         filter,
         checkpoint,
     )?;
-    for pixel in resized.chunks_exact_mut(4) {
+    for pixel in resized.as_chunks_mut::<4>().0 {
         let alpha = u32::from(pixel[3]);
         if alpha != 0 && alpha != 255 {
             for channel in &mut pixel[..3] {
@@ -328,7 +330,9 @@ pub(crate) fn composite_over_white(source: &RgbaImage) -> RgbImage {
     let (width, height) = source.dimensions();
     let bytes = source
         .as_raw()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| {
             let alpha = u32::from(pixel[3]);
             let blend = |channel: u8| {
