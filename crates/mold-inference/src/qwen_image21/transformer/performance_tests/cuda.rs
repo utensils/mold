@@ -781,3 +781,114 @@ fn official_cuda_reduced_precision_gemm_benchmark() -> Result<()> {
     )?;
     Ok(())
 }
+/// A8 measured gate: the UPPER BOUND of batched CFG on this card. Both rows
+/// of one batch-2 forward carry the same prompt, so the batch needs no key
+/// padding at all — the cheapest a real batched guided step could ever be —
+/// and its cached decode time is compared against two batch-1 decodes. A
+/// real negative prompt of another length would add varlen packing on top.
+#[test]
+#[ignore = "requires installed Qwen Image 2.1 weights and an idle, exclusive CUDA GPU"]
+fn official_cuda_cfg_batch_probe() -> Result<()> {
+    let root = PathBuf::from(std::env::var("QWEN_IMAGE21_MODEL_ROOT")?);
+    let output = PathBuf::from(std::env::var("QWEN_IMAGE21_BENCH_OUTPUT")?);
+    std::fs::create_dir_all(&output)?;
+    let sizes = std::env::var("QWEN_IMAGE21_BENCH_SIZES")
+        .unwrap_or_else(|_| "1024x1024,1344x768,2048x2048".into());
+    let device = Device::new_cuda(0)?;
+    let dtype = crate::engine::gpu_dtype(&device);
+    let progress = ProgressReporter::default();
+    let shared = root.join("shared/qwen-image21");
+    let conditioning = {
+        let text_paths = (1..=4)
+            .map(|i| shared.join(format!("text_encoder/model-{i:05}-of-00004.safetensors")))
+            .collect::<Vec<_>>();
+        let mut encoder = crate::encoders::qwen3::Qwen3Encoder::load_bf16(
+            &text_paths,
+            &shared.join("processor/tokenizer.json"),
+            &device,
+            dtype,
+            &crate::encoders::qwen3_bf16::Qwen3BF16Config::qwen3_image_21_text_encoder(),
+            &progress,
+        )?;
+        encode_t2i_prompts(&mut encoder, &[DEFAULT_PROMPT.to_string()])?
+            .to_device_dtype(&device, dtype)?
+    };
+    let doubled = QwenImage21TextConditioning {
+        embeddings: Tensor::cat(&[&conditioning.embeddings, &conditioning.embeddings], 0)?,
+        valid_tokens: [
+            conditioning.valid_tokens.clone(),
+            conditioning.valid_tokens.clone(),
+        ]
+        .concat(),
+        image_slots: [
+            conditioning.image_slots.clone(),
+            conditioning.image_slots.clone(),
+        ]
+        .concat(),
+    };
+    let transformer = QwenImage21Transformer::load(
+        &transformer_paths(&root, "bf16")?,
+        &device,
+        crate::qwen_image21::transformer_dtype(&device),
+        &progress,
+    )?;
+    let retain = crate::qwen_image21::PrefixCacheDecision::Retain;
+    let mut cells = Vec::new();
+    for size in sizes.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (width, height) = size
+            .split_once('x')
+            .ok_or_else(|| anyhow::anyhow!("size {size} is not WxH"))?;
+        let (lh, lw) = (
+            height.parse::<usize>()? / QWEN_IMAGE_21_VAE_SCALE_FACTOR,
+            width.parse::<usize>()? / QWEN_IMAGE_21_VAE_SCALE_FACTOR,
+        );
+        let latents = crate::engine::seeded_randn(
+            210001,
+            &[1, lh * lw, QWEN_IMAGE_21_LATENT_CHANNELS],
+            &device,
+            dtype,
+        )?;
+        let pair = Tensor::cat(&[&latents, &latents], 0)?;
+        let time = |forward: &mut dyn FnMut() -> Result<Tensor>| -> Result<f64> {
+            forward()?; // prefill and warm-up
+            forward()?;
+            device.synchronize()?;
+            let mut samples = Vec::new();
+            for _ in 0..6 {
+                let started = Instant::now();
+                forward()?;
+                device.synchronize()?;
+                samples.push(started.elapsed().as_secs_f64());
+            }
+            Ok(median(&samples).expect("six samples"))
+        };
+        let mut single = transformer.prepare_t2i(&conditioning, lh, lw, retain)?;
+        let mut negative = transformer.prepare_t2i(&conditioning, lh, lw, retain)?;
+        let sequential = time(&mut || {
+            single.forward(&latents, 0.5)?;
+            negative.forward(&latents, 0.5)
+        })?;
+        drop((single, negative));
+        let mut batched_branch = transformer.prepare_t2i(&doubled, lh, lw, retain)?;
+        let batched = time(&mut || batched_branch.forward(&pair, 0.5))?;
+        drop(batched_branch);
+        let gain = 1.0 - batched / sequential;
+        eprintln!(
+            "cfg batch {size}: two B=1 {sequential:.4}s, one B=2 {batched:.4}s, gain {gain:.3}"
+        );
+        cells.push(json!({
+            "canvas": size,
+            "two_batch1_seconds": sequential,
+            "one_batch2_seconds": batched,
+            "gain": gain,
+        }));
+    }
+    std::fs::write(
+        output.join("receipt-cfg-batch-probe.json"),
+        serde_json::to_vec_pretty(&json!({
+            "exec_path": transformer.exec_path().label(),
+            "cells": cells,
+        }))?,
+    )?;
+    Ok(())
+}
