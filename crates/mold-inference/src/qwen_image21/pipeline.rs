@@ -224,14 +224,16 @@ impl QwenImage21Engine {
 
     /// After an eager encode, apply the ONE residency decision
     /// (`text_encoder_residency::decide`) the planner priced: keep the encoder,
-    /// park it in host RAM, or drop it for the denoise.
+    /// park it in host RAM, or drop it for the denoise. The decision is
+    /// returned so the caller applies its transformer-for-decode half too.
     fn settle_text_encoder_residency(
         progress: &ProgressReporter,
         paths: &ModelPaths,
         text_encoder: &mut Qwen3Encoder,
         req: &GenerateRequest,
         ordinal: usize,
-    ) -> Result<()> {
+        vae_dtype: DType,
+    ) -> Result<super::text_encoder_residency::Qwen21TeDecision> {
         use super::text_encoder_residency as residency;
         let device = if !text_encoder.on_gpu || text_encoder.device.is_cpu() {
             residency::TeDevice::Cpu
@@ -256,8 +258,12 @@ impl QwenImage21Engine {
                 .map_or(0, |free| free.saturating_add(resident_now)),
             _ => 0,
         };
-        let (denoise_workspace_bytes, decode_peak_bytes) =
-            residency::render_workspace_bytes(req.width, req.height, 1);
+        let (denoise_workspace_bytes, decode_peak_bytes) = residency::render_workspace_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(vae_dtype),
+        );
         let decision = residency::decide(&residency::Qwen21TeBudget {
             device,
             usable_free_bytes,
@@ -288,7 +294,7 @@ impl QwenImage21Engine {
                 text_encoder.drop_weights();
             }
         }
-        Ok(())
+        Ok(decision)
     }
 
     /// Load all components for the eager path.
@@ -740,12 +746,13 @@ impl QwenImage21Engine {
             &loaded.device,
             loaded.dtype,
         )?;
-        Self::settle_text_encoder_residency(
+        let residency = Self::settle_text_encoder_residency(
             progress,
             &self.base.paths,
             &mut loaded.text_encoder,
             req,
             self.base.gpu_ordinal,
+            loaded.vae_dtype,
         )?;
         let (latents, latent_height, latent_width) = Self::denoise(
             progress,
@@ -757,7 +764,56 @@ impl QwenImage21Engine {
             seed,
             initial_latents,
         )?;
-        let image = Self::decode_rgba(
+        // The decode's peak may not fit beside the transformer (2K): park it
+        // to host RAM for the decode and restore it after, or release it and
+        // let the next request reload — the decision's second half.
+        use super::text_encoder_residency::TransformerDecode;
+        match residency.transformer_decode {
+            TransformerDecode::Resident => {}
+            TransformerDecode::ParkHost => {
+                progress.info(&format!(
+                    "Parking Qwen Image 2.1 transformer: {}",
+                    residency.reason
+                ));
+                loaded.transformer.move_to_device(&Device::Cpu)?;
+                loaded.device.synchronize()?;
+            }
+            TransformerDecode::Drop => {
+                progress.info(&format!(
+                    "Releasing Qwen Image 2.1 transformer: {}",
+                    residency.reason
+                ));
+            }
+        }
+        if residency.transformer_decode == TransformerDecode::Drop {
+            // Nothing survives this request: the next one loads afresh.
+            let loaded = self
+                .base
+                .loaded
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Qwen Image 2.1 was not loaded"))?;
+            let LoadedQwenImage21 {
+                transformer,
+                vae,
+                vae_device,
+                vae_dtype,
+                device,
+                ..
+            } = loaded;
+            drop(transformer);
+            device.synchronize()?;
+            let image = Self::decode_rgba(
+                &self.base.progress,
+                &vae,
+                &latents,
+                latent_height,
+                latent_width,
+                &vae_device,
+                vae_dtype,
+            )?;
+            return Self::response(req, &image, seed, started);
+        }
+        let decoded = Self::decode_rgba(
             progress,
             &loaded.vae,
             &latents,
@@ -765,7 +821,12 @@ impl QwenImage21Engine {
             latent_width,
             &loaded.vae_device,
             loaded.vae_dtype,
-        )?;
+        );
+        if residency.transformer_decode == TransformerDecode::ParkHost {
+            // Restore even when the decode failed, so the engine stays usable.
+            loaded.transformer.move_to_device(&loaded.device)?;
+        }
+        let image = decoded?;
         Self::response(req, &image, seed, started)
     }
 }

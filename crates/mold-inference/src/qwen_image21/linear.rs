@@ -210,6 +210,51 @@ impl Q21Linear {
         }
     }
 
+    /// This linear with its base weight on `device`; the adapter stack moves
+    /// with it. The arm is preserved (see `QuantizedLinear::to_device`).
+    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        let weight = match &self.weight {
+            Q21Weight::Dense(linear) => Q21Weight::Dense(candle_nn::Linear::new(
+                linear.weight().to_device(device)?,
+                linear.bias().map(|b| b.to_device(device)).transpose()?,
+            )),
+            Q21Weight::Quant(linear) => Q21Weight::Quant(linear.to_device(device)?),
+            Q21Weight::Int8 { linear, bias } => Q21Weight::Int8 {
+                linear: Arc::new(ComfyInt8ConvRotLinear::new_on_device(
+                    linear.weight().to_device(device)?,
+                    linear.weight_scale().to_device(device)?,
+                )?),
+                bias: bias.as_ref().map(|b| b.to_device(device)).transpose()?,
+            },
+            Q21Weight::Fp8 {
+                weight,
+                row_scale,
+                bias,
+            } => Q21Weight::Fp8 {
+                weight: weight.to_device(device)?,
+                row_scale: row_scale.to_device(device)?,
+                bias: bias.as_ref().map(|b| b.to_device(device)).transpose()?,
+            },
+        };
+        let adapters = self
+            .adapters
+            .iter()
+            .map(|adapter| {
+                Ok(LinearLoraAdapter {
+                    down: adapter.down.to_device(device)?,
+                    up: adapter.up.to_device(device)?,
+                    ..adapter.clone()
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            weight,
+            in_features: self.in_features,
+            out_features: self.out_features,
+            adapters,
+        })
+    }
+
     /// The installed bypass stack.
     #[allow(dead_code)] // the LoRA installer (qwen_image21::lora) calls it
     pub(crate) fn adapters(&self) -> &[LinearLoraAdapter] {
@@ -358,6 +403,19 @@ impl Q21GateUp {
             Self::Split { gate, .. } => gate.out_features(),
             Self::Fused { hidden, .. } => *hidden,
         }
+    }
+
+    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(match self {
+            Self::Split { gate, proj } => Self::Split {
+                gate: gate.to_device(device)?,
+                proj: proj.to_device(device)?,
+            },
+            Self::Fused { gate_up, hidden } => Self::Fused {
+                gate_up: gate_up.to_device(device)?,
+                hidden: *hidden,
+            },
+        })
     }
 
     /// `(gate_layer(x), proj(x))` — diffusers' names for the two halves.

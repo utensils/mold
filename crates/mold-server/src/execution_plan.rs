@@ -3798,6 +3798,29 @@ fn build_plan(
             )
         })
         .flatten();
+    // A transformer parked to host RAM for a 2K VAE decode is a host
+    // allocation made and released on EVERY such request, charged on the
+    // first transformer component.
+    let qwen21_transformer_park = qwen21_te_plan.as_ref().and_then(|plan| {
+        use mold_inference::qwen_image21::text_encoder_residency::TransformerDecode;
+        (plan.decision.transformer_decode == TransformerDecode::ParkHost).then(|| {
+            (
+                context
+                    .artifacts
+                    .keys()
+                    .find(|role| {
+                        matches!(
+                            role,
+                            ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                        )
+                    })
+                    .cloned(),
+                mold_inference::qwen_image21::text_encoder_residency::transformer_device_bytes(
+                    context.paths,
+                ),
+            )
+        })
+    });
     let qwen21_te_anchor = qwen21_te_plan.as_ref().and_then(|_| {
         context
             .artifacts
@@ -3927,6 +3950,13 @@ fn build_plan(
                     .as_ref()
                     .filter(|plan| plan.decision.residency == Qwen21TeResidency::ParkHost)
                     .map_or(0, |plan| plan.text_encoder_bytes)
+            } else if let Some((Some(anchor), bytes)) = qwen21_transformer_park.as_ref() {
+                if anchor == role {
+                    recurring_host_bytes_by_path.insert(path.clone(), *bytes);
+                    *bytes
+                } else {
+                    0
+                }
             } else {
                 0
             };

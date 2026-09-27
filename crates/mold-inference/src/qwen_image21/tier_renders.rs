@@ -13,6 +13,7 @@
 //!   processor)
 //! - `MOLD_QWEN_IMAGE21_TIER_RENDER_DIR`: where the PNGs go
 //! - `MOLD_QWEN_IMAGE21_TIERS` (optional): comma-separated tier names
+//! - `MOLD_QWEN_IMAGE21_TIER_RENDER_SIZE` (optional): `WxH`, default 1024x1024
 
 use std::path::PathBuf;
 
@@ -85,6 +86,13 @@ fn every_tier_renders_through_the_engine() {
     let out = env_dir("MOLD_QWEN_IMAGE21_TIER_RENDER_DIR");
     std::fs::create_dir_all(&out).unwrap();
     let selected = std::env::var("MOLD_QWEN_IMAGE21_TIERS").ok();
+    let (width, height) = std::env::var("MOLD_QWEN_IMAGE21_TIER_RENDER_SIZE")
+        .ok()
+        .and_then(|size| {
+            let (w, h) = size.split_once('x')?;
+            Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
+        })
+        .unwrap_or((1024, 1024));
     for (tier, transformer) in tiers() {
         if selected
             .as_deref()
@@ -99,8 +107,8 @@ fn every_tier_renders_through_the_engine() {
             "prompt": "A red fox curled asleep on a mossy stone in a misty pine forest at dawn, \
                        soft golden light, a hand-painted wooden sign reading \"MOON CAFE\"",
             "model": model,
-            "width": 1024,
-            "height": 1024,
+            "width": width,
+            "height": height,
             "steps": 40,
             "guidance": 1.0,
             "seed": 210001,
@@ -117,8 +125,8 @@ fn every_tier_renders_through_the_engine() {
             .generate(&request)
             .unwrap_or_else(|error| panic!("{tier}: {error:#}"));
         let image = &response.images[0];
-        assert_eq!((image.width, image.height), (1024, 1024), "{tier}");
-        let path = out.join(format!("qwen-image-2.1-{tier}-1024.png"));
+        assert_eq!((image.width, image.height), (width, height), "{tier}");
+        let path = out.join(format!("qwen-image-2.1-{tier}-{width}x{height}.png"));
         std::fs::write(&path, &image.data).unwrap();
         eprintln!(
             "TIER-RENDER {tier}: load {load_secs:.1}s, render {:.1}s -> {}",

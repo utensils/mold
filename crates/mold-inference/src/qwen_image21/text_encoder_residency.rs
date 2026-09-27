@@ -65,7 +65,7 @@ pub struct Qwen21TeBudget {
     /// Denoise-phase workspace (activations, prefix KV cache, both CFG
     /// branches).
     pub denoise_workspace_bytes: u64,
-    /// VAE-decode peak ([`vae_decode_peak_bytes`]).
+    /// VAE-decode peak (`device::qwen_image21_vae_decode_peak_bytes`).
     pub decode_peak_bytes: u64,
     /// Host RAM, total and available now (`MemAvailable` plus any credit the
     /// caller's ledger applies). Zero total means unmeasurable.
@@ -85,19 +85,54 @@ pub enum Qwen21TeResidency {
     Drop,
 }
 
+/// Where the transformer lives while the VAE decodes.
+///
+/// At 2K the decode alone peaks at ~27.6 GB under cuDNN
+/// (`device::qwen_image21_vae_decode_peak_bytes`), which with the 14.8 GB BF16
+/// transformer does not fit a 46 GB card. Parking the transformer to host RAM
+/// for the decode and restoring it afterwards keeps the eager engine's speed
+/// (a device↔host copy, no reload from disk).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransformerDecode {
+    /// The transformer stays on the card through the decode.
+    Resident,
+    /// Park to host RAM before the decode, restore after.
+    ParkHost,
+    /// The host cannot hold it either: release it (the engine reloads on the
+    /// next request).
+    Drop,
+}
+
 /// The decision and the reason a log line names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen21TeDecision {
     pub residency: Qwen21TeResidency,
+    pub transformer_decode: TransformerDecode,
     pub reason: &'static str,
-    /// Device bytes the eager render needs under this decision: the larger of
-    /// the encode phase (transformer + VAE + TE) and the denoise/decode phase
-    /// (transformer + VAE + workspace, plus the TE when it stays), plus the
-    /// allocator margin. This is what `memory_preflight` prices eager at.
+    /// Device bytes the eager render needs under this decision — the largest
+    /// of its phases (encode, denoise, decode) with the allocator margin.
+    /// This is what `memory_preflight` prices eager at.
     pub eager_peak_bytes: u64,
 }
 
 impl Qwen21TeBudget {
+    fn te(&self, on_device: bool) -> u64 {
+        if on_device {
+            self.text_encoder_bytes
+        } else {
+            0
+        }
+    }
+
+    fn transformer(&self, on_device: bool) -> u64 {
+        if on_device {
+            self.transformer_bytes
+        } else {
+            0
+        }
+    }
+
+    /// Prompt encode: transformer, VAE and the encoder all on the card.
     fn encode_phase(&self) -> u64 {
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
@@ -105,80 +140,163 @@ impl Qwen21TeBudget {
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
-    /// Denoise and decode, with or without the TE on the device. The two
-    /// workspaces are SUMMED, not maxed: the decision is made once and must
-    /// hold for both phases, and a decode that OOMs on its first conv beside
-    /// the denoise's cached pool is #276's record.
-    fn render_phase(&self, with_te: bool) -> u64 {
+    fn denoise_phase(&self, te: bool) -> u64 {
         self.transformer_bytes
             .saturating_add(self.vae_bytes)
-            .saturating_add(if with_te { self.text_encoder_bytes } else { 0 })
+            .saturating_add(self.te(te))
             .saturating_add(self.denoise_workspace_bytes)
+            .saturating_add(ALLOCATOR_MARGIN_BYTES)
+    }
+
+    fn decode_phase(&self, te: bool, transformer: bool) -> u64 {
+        self.transformer(transformer)
+            .saturating_add(self.vae_bytes)
+            .saturating_add(self.te(te))
             .saturating_add(self.decode_peak_bytes)
             .saturating_add(ALLOCATOR_MARGIN_BYTES)
     }
 
-    fn peak(&self, with_te: bool) -> u64 {
-        self.encode_phase().max(self.render_phase(with_te))
+    /// Every phase's peak under one placement. With everything resident this
+    /// is `transformer + VAE + TE + max(activation, decode)`.
+    fn peak(&self, te: bool, transformer_through_decode: bool) -> u64 {
+        self.encode_phase()
+            .max(self.denoise_phase(te))
+            .max(self.decode_phase(te, transformer_through_decode))
+    }
+
+    fn host_floor(&self) -> u64 {
+        host_safety_floor_bytes(self.host_total_bytes)
+    }
+
+    fn host_room(&self) -> u64 {
+        self.host_available_bytes
+            .saturating_add(self.already_parked_bytes)
     }
 
     /// Whether the host can hold a park of the TE, by the same floor rule the
     /// FLUX.2 decision uses (`Force` asks only for the TE's own room; `Auto`
     /// also leaves the transformer's page-cache room).
-    fn host_can_park(&self) -> bool {
+    fn host_can_park_te(&self) -> bool {
         if self.host_total_bytes == 0 || self.text_encoder_bytes == 0 {
             return false;
         }
-        let floor = host_safety_floor_bytes(self.host_total_bytes);
         let required = match self.keep_te_ram {
             KeepTeRamMode::Never => return false,
-            KeepTeRamMode::Force => self.text_encoder_bytes.saturating_add(floor),
+            KeepTeRamMode::Force => self.text_encoder_bytes.saturating_add(self.host_floor()),
             KeepTeRamMode::Auto => self
                 .text_encoder_bytes
                 .saturating_add(self.transformer_bytes)
-                .saturating_add(floor),
+                .saturating_add(self.host_floor()),
         };
-        self.host_available_bytes
-            .saturating_add(self.already_parked_bytes)
-            >= required
+        self.host_room() >= required
+    }
+
+    /// Whether the host can take the transformer for the decode on top of a
+    /// parked encoder, above the floor.
+    fn host_can_park_transformer(&self, te_parked: bool) -> bool {
+        self.host_total_bytes > 0
+            && self.host_room()
+                >= self
+                    .transformer_bytes
+                    .saturating_add(if te_parked {
+                        self.text_encoder_bytes
+                    } else {
+                        0
+                    })
+                    .saturating_add(self.host_floor())
     }
 }
 
-/// The one Qwen Image 2.1 text-encoder residency decision.
+/// The one Qwen Image 2.1 residency decision for an eager engine: where the
+/// text encoder lives between encodes, and where the transformer lives while
+/// the VAE decodes.
+///
+/// 1. Everything resident when `transformer + VAE + TE + max(activation,
+///    decode)` (and the encode phase) fits.
+/// 2. Otherwise the encoder leaves the card after encoding — parked in host
+///    RAM when the host has room, dropped otherwise.
+/// 3. If the decode still does not fit beside the transformer, the
+///    transformer is parked to host RAM for the decode and restored after
+///    (dropped, and reloaded next request, if the host cannot take it).
 pub fn decide(budget: &Qwen21TeBudget) -> Qwen21TeDecision {
+    // A host-placed encoder never occupies the card; only the transformer's
+    // decode placement is still a question for it.
+    let on_host = Qwen21TeBudget {
+        text_encoder_bytes: 0,
+        ..*budget
+    };
+    let budget = if budget.device == TeDevice::Cpu {
+        &on_host
+    } else {
+        budget
+    };
     let resident = |reason| Qwen21TeDecision {
         residency: Qwen21TeResidency::Resident,
+        transformer_decode: TransformerDecode::Resident,
         reason,
-        eager_peak_bytes: budget.peak(true),
+        eager_peak_bytes: budget.peak(true, true),
     };
-    match budget.device {
-        TeDevice::Metal => return resident("unified memory: a park copies nothing"),
-        TeDevice::Cpu => return resident("the encoder is placed on the host"),
-        TeDevice::Cuda => {}
+    if budget.device == TeDevice::Metal {
+        return resident("unified memory: a park copies nothing");
     }
     if budget.usable_free_bytes == 0 {
         return resident("the card could not be measured");
     }
-    if budget.peak(true) <= budget.usable_free_bytes {
-        return resident("weights, encoder and workspace fit the card");
+    if budget.peak(true, true) <= budget.usable_free_bytes {
+        return resident(if budget.device == TeDevice::Cpu {
+            "the encoder is placed on the host; weights and workspace fit the card"
+        } else {
+            "weights, encoder and workspace fit the card"
+        });
     }
-    let off_device_peak = budget.peak(false);
-    if budget.host_can_park() {
-        Qwen21TeDecision {
-            residency: Qwen21TeResidency::ParkHost,
-            reason: "the encoder leaves the card for denoise; the host holds it",
-            eager_peak_bytes: off_device_peak,
-        }
+    if budget.device == TeDevice::Cpu {
+        let transformer_parks = budget.host_can_park_transformer(false);
+        return Qwen21TeDecision {
+            residency: Qwen21TeResidency::Resident,
+            transformer_decode: if transformer_parks {
+                TransformerDecode::ParkHost
+            } else {
+                TransformerDecode::Drop
+            },
+            reason:
+                "the encoder is on the host; the transformer leaves the card for the VAE decode",
+            eager_peak_bytes: budget.peak(true, false),
+        };
+    }
+    let te_parks = budget.host_can_park_te();
+    let residency = if te_parks {
+        Qwen21TeResidency::ParkHost
     } else {
-        Qwen21TeDecision {
-            residency: Qwen21TeResidency::Drop,
-            reason: if budget.keep_te_ram == KeepTeRamMode::Never {
+        Qwen21TeResidency::Drop
+    };
+    if budget.peak(false, true) <= budget.usable_free_bytes {
+        return Qwen21TeDecision {
+            residency,
+            transformer_decode: TransformerDecode::Resident,
+            reason: if te_parks {
+                "the encoder leaves the card for denoise; the host holds it"
+            } else if budget.keep_te_ram == KeepTeRamMode::Never {
                 "the encoder leaves the card for denoise; MOLD_KEEP_TE_RAM=0 forbids a park"
             } else {
                 "the encoder leaves the card for denoise; the host has no room to park it"
             },
-            eager_peak_bytes: off_device_peak,
-        }
+            eager_peak_bytes: budget.peak(false, true),
+        };
+    }
+    let transformer_parks = budget.host_can_park_transformer(te_parks);
+    Qwen21TeDecision {
+        residency,
+        transformer_decode: if transformer_parks {
+            TransformerDecode::ParkHost
+        } else {
+            TransformerDecode::Drop
+        },
+        reason: if transformer_parks {
+            "the encoder leaves the card, and the transformer is parked to host for the VAE decode"
+        } else {
+            "the encoder leaves the card, and the transformer is released for the VAE decode"
+        },
+        eager_peak_bytes: budget.peak(false, false),
     }
 }
 
@@ -286,9 +404,15 @@ pub fn plan(inputs: &Qwen21PlanInputs<'_>) -> anyhow::Result<Qwen21TePlan> {
 
 /// The render workspace both sides charge at `width`x`height`: the denoise
 /// activation estimate (`device::activation_bytes`, which carries the prefix
-/// KV cache) and the VAE-decode peak under the conv backend the family
-/// resolves to.
-pub fn render_workspace_bytes(width: u32, height: u32, batch: u32) -> (u64, u64) {
+/// KV cache) and the measured VAE-decode peak
+/// (`device::qwen_image21_vae_decode_peak_bytes`) under the conv backend the
+/// family resolves to, at the VAE's `vae_dtype_bytes` (2 on CUDA's BF16 VAE).
+pub fn render_workspace_bytes(
+    width: u32,
+    height: u32,
+    batch: u32,
+    vae_dtype_bytes: u32,
+) -> (u64, u64) {
     let denoise = crate::device::activation_bytes(
         width,
         height,
@@ -296,30 +420,12 @@ pub fn render_workspace_bytes(width: u32, height: u32, batch: u32) -> (u64, u64)
         2,
         crate::device::ActivationFamily::QwenImage21Dit,
     );
-    let cudnn =
-        crate::conv_policy::resolve_for(crate::conv_policy::policy_for_family("qwen-image21"))
-            == crate::conv_policy::ConvBackend::Cudnn;
-    (denoise, vae_decode_peak_bytes(width, height, 2, cudnn))
-}
-/// The VAE-decode peak on the device at `width`x`height`, `dtype_bytes` per
-/// element.
-///
-/// The decoder's last up-block runs at full resolution with 288 then 144
-/// channels (`autoencoder_kl_qwenimage21.py` decoder, `block_out_channels`
-/// reversed); its 3x3 convs hold the 288-channel input, the output and the
-/// residual branch at once. Under im2col each conv additionally materializes
-/// a `C·9·H·W` column buffer (5.4 GB at 1024² in BF16 for the 288-channel
-/// conv); cuDNN's implicit GEMM needs no such buffer.
-pub fn vae_decode_peak_bytes(width: u32, height: u32, dtype_bytes: u64, cudnn: bool) -> u64 {
-    const FULL_RES_CHANNELS: u64 = 288;
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
-    let tensors = 3 * FULL_RES_CHANNELS * pixels * dtype_bytes;
-    let columns = if cudnn {
-        0
-    } else {
-        FULL_RES_CHANNELS * 9 * pixels * dtype_bytes
-    };
-    tensors.saturating_add(columns)
+    let conv =
+        crate::conv_policy::resolve_for(crate::conv_policy::policy_for_family("qwen-image21"));
+    (
+        denoise,
+        crate::device::qwen_image21_vae_decode_peak_bytes(width, height, conv, vae_dtype_bytes),
+    )
 }
 
 /// Device bytes the Qwen3-VL language model occupies once loaded from
@@ -377,9 +483,19 @@ mod tests {
     const GB: u64 = 1_000_000_000;
     const GIB: u64 = 1 << 30;
 
+    fn decode_peak(width: u32, height: u32) -> u64 {
+        crate::device::qwen_image21_vae_decode_peak_bytes(
+            width,
+            height,
+            crate::conv_policy::ConvBackend::Cudnn,
+            2,
+        )
+    }
+
     /// A realistic int8-conv + q8 text encoder engine: the transformer at rest
-    /// (7.26 GB), the Qwen3-VL-8B Q8_0 LM on the device (8.71 GB file with
-    /// its 1.3 GB quantized embedding replaced by 2.49 GB of F32), the VAE.
+    /// (7.26 GB), the Qwen3-VL-8B Q8_0 LM on the device (10.53 GB measured:
+    /// the 8.71 GB file with its quantized embedding replaced by F32), the VAE,
+    /// and the calibrated cuDNN decode peak.
     fn quantized_engine(usable: u64, width: u32, height: u32) -> Qwen21TeBudget {
         let activation = crate::device::activation_bytes(
             width,
@@ -393,13 +509,23 @@ mod tests {
             usable_free_bytes: usable,
             transformer_bytes: 7_256_783_064,
             vae_bytes: 675_509_688,
-            text_encoder_bytes: 10_500_000_000,
+            text_encoder_bytes: 10_531_655_680,
             denoise_workspace_bytes: activation,
-            decode_peak_bytes: vae_decode_peak_bytes(width, height, 2, true),
+            decode_peak_bytes: decode_peak(width, height),
             host_total_bytes: 64 * GIB,
             host_available_bytes: 48 * GIB,
             already_parked_bytes: 0,
             keep_te_ram: KeepTeRamMode::Auto,
+        }
+    }
+
+    fn bf16_engine(usable: u64, width: u32, height: u32) -> Qwen21TeBudget {
+        Qwen21TeBudget {
+            transformer_bytes: 14_230_280_616,
+            text_encoder_bytes: 15_136_811_008,
+            host_total_bytes: 256 * GIB,
+            host_available_bytes: 200 * GIB,
+            ..quantized_engine(usable, width, height)
         }
     }
 
@@ -408,47 +534,104 @@ mod tests {
     /// An L40S / 48 GB card (~44 GiB usable).
     const CARD_48GB: u64 = 44 * GIB;
 
+    /// A 40 GB card (A100-40GB class, ~40 GiB usable).
+    const CARD_40GB: u64 = 40 * GIB;
+    /// A 32 GB card (~30 GiB usable).
+    const CARD_32GB: u64 = 30 * GIB;
+
+    /// 24 GB, 1024²: the q8 encoder (10.5 GB) beside a quantized transformer
+    /// and the measured ~7.2 GB 1024² decode peak does not fit, so the encoder
+    /// parks; the transformer stays through the decode and eager fits. A
+    /// 32 GB card keeps everything resident.
     #[test]
-    fn a_24gb_card_keeps_the_quantized_encoder_resident_at_1024() {
-        let decision = decide(&quantized_engine(CARD_24GB, 1024, 1024));
+    fn a_24gb_card_at_1024_parks_the_encoder_and_keeps_the_transformer() {
+        for transformer_bytes in [7_256_783_064, 4_197_494_816] {
+            let budget = Qwen21TeBudget {
+                transformer_bytes,
+                ..quantized_engine(CARD_24GB, 1024, 1024)
+            };
+            let decision = decide(&budget);
+            assert_eq!(
+                decision.residency,
+                Qwen21TeResidency::ParkHost,
+                "{decision:?}"
+            );
+            assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+            assert!(decision.eager_peak_bytes <= CARD_24GB);
+        }
+        let decision = decide(&quantized_engine(CARD_32GB, 1024, 1024));
         assert_eq!(
             decision.residency,
             Qwen21TeResidency::Resident,
             "{decision:?}"
         );
-        assert!(decision.eager_peak_bytes <= CARD_24GB);
+        assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
     }
 
+    /// 24 GB at 2K: the encoder parks, and the ~27.5 GB decode cannot fit the
+    /// card even with the transformer parked, so the eager peak honestly
+    /// exceeds the card and the planner does not choose Eager.
     #[test]
-    fn a_24gb_card_parks_the_quantized_encoder_at_2k() {
+    fn a_24gb_card_at_2k_parks_everything_and_is_not_eager_feasible() {
         for (width, height) in [(2048, 2048), (2752, 1536), (2400, 1792)] {
-            let budget = quantized_engine(CARD_24GB, width, height);
+            let decision = decide(&quantized_engine(CARD_24GB, width, height));
+            assert_eq!(
+                decision.residency,
+                Qwen21TeResidency::ParkHost,
+                "{width}x{height}: {decision:?}"
+            );
+            assert_eq!(decision.transformer_decode, TransformerDecode::ParkHost);
+            assert!(decision.eager_peak_bytes > CARD_24GB, "{width}x{height}");
+        }
+    }
+
+    /// 48 GB BF16 at 1024²: 14.2 + 15.1 + 0.7 + max(activation, 7.2) + 1 GB
+    /// fits, so nothing moves.
+    #[test]
+    fn a_48gb_card_keeps_bf16_everything_resident_at_1024() {
+        let decision = decide(&bf16_engine(CARD_48GB, 1024, 1024));
+        assert_eq!(
+            decision.residency,
+            Qwen21TeResidency::Resident,
+            "{decision:?}"
+        );
+        assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+    }
+
+    /// 48 GB BF16 at 2K: transformer + encoder + the ~27.5 GB decode is ~59 GB,
+    /// so the encoder parks; the transformer (14.2 GB) still fits beside the
+    /// decode on an L40S and stays.
+    #[test]
+    fn a_48gb_card_at_2k_parks_the_encoder_only() {
+        for (width, height) in [(2048, 2048), (2752, 1536)] {
+            let budget = bf16_engine(CARD_48GB, width, height);
+            assert!(budget.peak(true, true) > CARD_48GB);
             let decision = decide(&budget);
             assert_eq!(
                 decision.residency,
                 Qwen21TeResidency::ParkHost,
                 "{width}x{height}: {decision:?}"
             );
-            // Parking is what makes eager fit: the peak it prices is the
-            // off-device one, and that fits the card.
-            assert!(decision.eager_peak_bytes <= CARD_24GB, "{width}x{height}");
-            assert!(budget.peak(true) > CARD_24GB);
+            assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+            assert!(decision.eager_peak_bytes <= CARD_48GB, "{width}x{height}");
         }
     }
 
+    /// 40 GB BF16 at 2K: the transformer does not fit beside the decode
+    /// either, so it parks to host for the decode and eager still fits.
     #[test]
-    fn a_48gb_card_keeps_bf16_everything_resident_at_1024_and_2k() {
-        for (width, height) in [(1024, 1024), (2048, 2048), (2752, 1536)] {
-            let budget = Qwen21TeBudget {
-                transformer_bytes: 14_230_280_616,
-                text_encoder_bytes: 16_400_000_000,
-                ..quantized_engine(CARD_48GB, width, height)
-            };
+    fn a_40gb_card_at_2k_also_parks_the_transformer_for_decode() {
+        for (width, height) in [(2048, 2048), (2752, 1536)] {
+            let budget = bf16_engine(CARD_40GB, width, height);
+            assert!(budget.peak(false, true) > CARD_40GB);
+            let decision = decide(&budget);
+            assert_eq!(decision.residency, Qwen21TeResidency::ParkHost);
             assert_eq!(
-                decide(&budget).residency,
-                Qwen21TeResidency::Resident,
-                "{width}x{height}"
+                decision.transformer_decode,
+                TransformerDecode::ParkHost,
+                "{width}x{height}: {decision:?}"
             );
+            assert!(decision.eager_peak_bytes <= CARD_40GB, "{width}x{height}");
         }
     }
 
@@ -457,7 +640,7 @@ mod tests {
         let tight_host = Qwen21TeBudget {
             host_total_bytes: 32 * GIB,
             host_available_bytes: 12 * GIB,
-            ..quantized_engine(CARD_24GB, 2048, 2048)
+            ..quantized_engine(CARD_24GB, 1024, 1024)
         };
         assert_eq!(decide(&tight_host).residency, Qwen21TeResidency::Drop);
         // Force asks only for the encoder's own room above the floor.
@@ -469,11 +652,20 @@ mod tests {
         assert_eq!(decide(&forced).residency, Qwen21TeResidency::ParkHost);
         let never = Qwen21TeBudget {
             keep_te_ram: KeepTeRamMode::Never,
-            ..quantized_engine(CARD_24GB, 2048, 2048)
+            ..quantized_engine(CARD_24GB, 1024, 1024)
         };
         let decision = decide(&never);
         assert_eq!(decision.residency, Qwen21TeResidency::Drop);
         assert!(decision.reason.contains("MOLD_KEEP_TE_RAM=0"));
+        // A host that cannot take the transformer either releases it.
+        let no_room = Qwen21TeBudget {
+            host_total_bytes: 32 * GIB,
+            host_available_bytes: 10 * GIB,
+            ..bf16_engine(CARD_40GB, 2048, 2048)
+        };
+        let decision = decide(&no_room);
+        assert_eq!(decision.residency, Qwen21TeResidency::Drop);
+        assert_eq!(decision.transformer_decode, TransformerDecode::Drop);
     }
 
     #[test]
@@ -481,7 +673,7 @@ mod tests {
         let cold = Qwen21TeBudget {
             host_total_bytes: 48 * GIB,
             host_available_bytes: 26 * GIB,
-            ..quantized_engine(CARD_24GB, 2048, 2048)
+            ..quantized_engine(CARD_24GB, 1024, 1024)
         };
         assert_eq!(decide(&cold).residency, Qwen21TeResidency::ParkHost);
         // The park now holds ~10.5 GB, which MemAvailable no longer shows.
@@ -495,27 +687,39 @@ mod tests {
 
     #[test]
     fn metal_cpu_and_unmeasurable_cards_keep_todays_behaviour() {
-        for device in [TeDevice::Metal, TeDevice::Cpu] {
-            let budget = Qwen21TeBudget {
-                device,
-                ..quantized_engine(8 * GIB, 2048, 2048)
-            };
-            assert_eq!(decide(&budget).residency, Qwen21TeResidency::Resident);
-        }
+        let metal = Qwen21TeBudget {
+            device: TeDevice::Metal,
+            ..quantized_engine(8 * GIB, 2048, 2048)
+        };
+        let decision = decide(&metal);
+        assert_eq!(decision.residency, Qwen21TeResidency::Resident);
+        assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+        // A host-placed encoder is not charged to the card at all.
+        let cpu = Qwen21TeBudget {
+            device: TeDevice::Cpu,
+            ..quantized_engine(CARD_24GB, 1024, 1024)
+        };
+        let decision = decide(&cpu);
+        assert_eq!(decision.residency, Qwen21TeResidency::Resident);
+        assert_eq!(decision.transformer_decode, TransformerDecode::Resident);
+        assert!(decision.eager_peak_bytes < cpu.peak(true, true));
         assert_eq!(
             decide(&quantized_engine(0, 2048, 2048)).residency,
             Qwen21TeResidency::Resident
         );
     }
 
+    /// The workspace both sides charge reads C's calibrated decode curve.
     #[test]
-    fn the_decode_peak_charges_the_im2col_columns_only_without_cudnn() {
-        let cudnn = vae_decode_peak_bytes(1024, 1024, 2, true);
-        let im2col = vae_decode_peak_bytes(1024, 1024, 2, false);
-        // 288·9·1024²·2 bytes: the 5.4 GB column buffer the design measured.
-        assert_eq!(im2col - cudnn, 288 * 9 * 1024 * 1024 * 2);
-        assert!((5 * GB..6 * GB).contains(&(im2col - cudnn)));
-        assert_eq!(vae_decode_peak_bytes(2048, 2048, 2, true), 4 * cudnn);
+    fn the_render_workspace_uses_the_calibrated_decode_peak() {
+        let (_, decode) = render_workspace_bytes(2048, 2048, 1, 2);
+        let conv =
+            crate::conv_policy::resolve_for(crate::conv_policy::policy_for_family("qwen-image21"));
+        assert_eq!(
+            decode,
+            crate::device::qwen_image21_vae_decode_peak_bytes(2048, 2048, conv, 2)
+        );
+        assert!(decode > 20 * GB);
     }
 
     #[test]

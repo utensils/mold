@@ -1676,8 +1676,9 @@ fn authoritative_cuda_available(
 /// encoder PARKED when it does not fit beside the denoise workspace — the
 /// engine's own `text_encoder_residency::plan`, asked with this host's memory
 /// and the process's `MOLD_QWEN3_VARIANT` / `MOLD_KEEP_TE_RAM`. `Some` only
-/// when that eager peak clears the 90% cap every other family's eager/
-/// sequential choice uses, so a 24 GB card with a quantized tier stays Eager
+/// when the chosen language model lands on the card and that eager peak
+/// (allocator margin and measured decode peak included) fits it, so a 24 GB
+/// card with a quantized tier stays Eager
 /// (the TE parks at 2K) rather than falling to Sequential, which reloads the
 /// encoder and the transformer on every request.
 pub(crate) fn qwen_image21_eager_plan(
@@ -1705,7 +1706,9 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
     use mold_inference::qwen_image21::text_encoder_residency as residency;
     let hint = hint.filter(|h| h.family == ActivationFamily::QwenImage21Dit)?;
     let available = available_bytes.filter(|bytes| *bytes > 0)?;
-    let (denoise, decode) = residency::render_workspace_bytes(hint.width, hint.height, hint.batch);
+    let vae_dtype_bytes = if cfg!(feature = "metal") { 4 } else { 2 };
+    let (denoise, decode) =
+        residency::render_workspace_bytes(hint.width, hint.height, hint.batch, vae_dtype_bytes);
     let variant = mold_inference::runtime_env::value("MOLD_QWEN3_VARIANT");
     let plan = residency::plan(&residency::Qwen21PlanInputs {
         paths,
@@ -1726,7 +1729,13 @@ pub(crate) fn qwen_image21_eager_plan_with_host(
         keep_te_ram: mold_inference::device::keep_te_ram_mode(),
     })
     .ok()?;
-    (plan.decision.eager_peak_bytes <= available.saturating_mul(9) / 10).then_some(plan)
+    // The decision already carries its allocator margin and the measured
+    // decode peak, so it is held to the card itself — the same comparison
+    // the engine makes — rather than the generic 90% cap.
+    // An encoder that would only fit on the host makes every eager request a
+    // CPU encode of an 8B model; Sequential (encoder alone on the card, then
+    // the transformer) is the faster plan there.
+    (plan.choice.on_gpu() && plan.decision.eager_peak_bytes <= available).then_some(plan)
 }
 
 pub(crate) fn select_server_load_strategy_for_budget(
@@ -5401,7 +5410,7 @@ mod qwen_image21_residency_tests {
             plan.choice,
             mold_inference::qwen_image21::text_encoder_residency::Qwen3Choice::Gguf { .. }
         ));
-        assert!(plan.decision.eager_peak_bytes <= 22 * GIB * 9 / 10);
+        assert!(plan.decision.eager_peak_bytes <= 22 * GIB);
         assert_eq!(
             select_server_load_strategy_for_budget(&paths, Some(22 * GIB), hint(1024, 1024)),
             mold_inference::LoadStrategy::Eager

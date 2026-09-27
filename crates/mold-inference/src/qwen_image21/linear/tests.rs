@@ -844,3 +844,48 @@ fn every_staged_tiers_linear_arms_compute_with_their_weights() {
         }
     }
 }
+/// A device move keeps every arm's numbers: the transformer's host park for a
+/// 2K decode and its restore must render exactly what never moved.
+#[test]
+fn every_arm_survives_a_device_round_trip_unchanged() {
+    let weight = tensor(8, DIM, 1.0);
+    let packed: Vec<u8> = (0..8 * DIM)
+        .map(|i| (((i * 7 + 3) % 251) as i32 - 125) as i8 as u8)
+        .collect();
+    let arms = [
+        Q21Linear::dense(candle_nn::Linear::new(weight.clone(), None)).unwrap(),
+        Q21Linear::fp8(
+            weight.to_dtype(DType::F8E4M3).unwrap(),
+            Tensor::full(0.5f32, (8, 1), &cpu()).unwrap(),
+            None,
+        )
+        .unwrap(),
+        Q21Linear::quantized(
+            Arc::new(QTensor::quantize(&weight, GgmlDType::Q4K).unwrap()),
+            &cpu(),
+            DType::F32,
+            false,
+        )
+        .unwrap(),
+        Q21Linear::int8(
+            Tensor::from_vec(packed, (8, DIM), &cpu()).unwrap(),
+            Tensor::full(0.01f32, (8, 1), &cpu()).unwrap(),
+            None,
+        )
+        .unwrap(),
+    ];
+    let x = input(3, DIM);
+    for mut arm in arms {
+        arm.set_adapters(vec![adapter(8, 2.0, 0.3)]).unwrap();
+        let before = arm.forward(&x).unwrap();
+        let moved = arm.to_device(&cpu()).unwrap();
+        assert_eq!(moved.kind(), arm.kind());
+        assert_eq!(moved.adapters().len(), 1);
+        assert_eq!(
+            max_abs(&moved.forward(&x).unwrap(), &before),
+            0.0,
+            "{:?}",
+            arm.kind()
+        );
+    }
+}

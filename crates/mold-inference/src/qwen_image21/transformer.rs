@@ -738,6 +738,34 @@ impl QwenImage21Transformer {
         Ok(transformer)
     }
 
+    /// Move every weight to `device` in place — the transformer's park to
+    /// host RAM for a 2K VAE decode and its restore afterwards
+    /// (`text_encoder_residency::TransformerDecode::ParkHost`). No reload
+    /// from disk: quantized storage makes a byte-exact round trip.
+    pub(crate) fn move_to_device(&mut self, device: &Device) -> Result<()> {
+        self.img_in = self.img_in.to_device(device)?;
+        self.time_text_embed.linear_1 = self.time_text_embed.linear_1.to_device(device)?;
+        self.time_text_embed.linear_2 = self.time_text_embed.linear_2.to_device(device)?;
+        self.txt_in.text_norm.weight = self.txt_in.text_norm.weight.to_device(device)?;
+        self.txt_in.in_layer = self.txt_in.in_layer.to_device(device)?;
+        self.txt_in.out_layer = self.txt_in.out_layer.to_device(device)?;
+        self.modulation = self.modulation.to_device(device)?;
+        for block in &mut self.blocks {
+            let attn = &mut block.attn;
+            attn.to_q = attn.to_q.to_device(device)?;
+            attn.to_k = attn.to_k.to_device(device)?;
+            attn.to_v = attn.to_v.to_device(device)?;
+            attn.to_out = attn.to_out.to_device(device)?;
+            attn.norm_q = attn.norm_q.to_device(device)?;
+            attn.norm_k = attn.norm_k.to_device(device)?;
+            block.mlp.gate_up = block.mlp.gate_up.to_device(device)?;
+            block.mlp.out = block.mlp.out.to_device(device)?;
+        }
+        self.norm_out.linear = self.norm_out.linear.to_device(device)?;
+        self.proj_out = self.proj_out.to_device(device)?;
+        Ok(())
+    }
+
     /// Fail a denoise step whose prediction is not finite, naming this
     /// checkpoint's tier and whether the QMatMul switch shaped it.
     pub(crate) fn ensure_finite(&self, prediction: &Tensor, step: usize) -> Result<()> {
