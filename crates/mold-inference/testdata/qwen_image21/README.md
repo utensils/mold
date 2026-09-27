@@ -148,7 +148,7 @@ and are pinned by SHA-256 below. Parity tests read that directory from
 | `calculate_dimensions.json` | U1: `calculate_dimensions` rows, including exact `.5` ties both ways (15.5→16, 20.5→20, 31.5→32, 33.5→34, 40.5→40) |
 | `templates.json` | U2: the exact strings the pipeline hands the processor for 0–3 references, their UTF-8 bytes and token ids, and what `apply_chat_template` would have produced instead |
 | `hf_configs.json` | U14: `model_index`, scheduler, transformer, VAE, text-encoder, and processor configs at `b3179ad`, verbatim, each with its SHA-256 |
-| `schedules.json` | U11: sigmas, timesteps, and `mu` for base (40/4 steps at 512²–2752×1536) and turbo (6 steps, `shift_terminal: null`) |
+| `schedules.json` | U11: sigmas, timesteps, and `mu` for base (40/4 steps at 512²–2752×1536) and turbo (6 steps, `shift_terminal: null`), plus `transformer_timesteps_bf16` (`t.to(bfloat16) / 1000`, what the bf16 transformer receives) |
 | `pillow_resize.safetensors` | U8: Pillow 12.3.0 LANCZOS resizes (up/down/odd) of small RGBA and RGB inputs, and their white composites, as `uint8 HxWxC` |
 | `p1_processor_ids.safetensors` | P1: `input_ids`, `attention_mask`, `mm_token_type_ids`, `image_grid_thw` for the two references |
 | `p3_*_image_pad_mask.safetensors` | P3: `image_pad_mask` after the system-prompt drop, per case |
@@ -237,7 +237,7 @@ Generated from `manifest.json` (the authority; `large` = `/storage/mold/fixtures
 | committed | `ref_opaque.png` | 20613 | `803d81c457de3fc530484d8c30bdbdf22543514780eec927cce4d6199a068dbd` |
 | committed | `ref_rgba.png` | 42518 | `7489f9a36012b5c90d00dac49c318faa6b4ecf7e72ef119786c35b1467789b87` |
 | committed | `run_capture.sh` | 1364 | `fb53590eaf06cdce7aa2da08e11209a416079efbd716e35321ca1afd0d4ec8ac` |
-| committed | `schedules.json` | 16557 | `a3b194dbaeb82d02400ab8cd6906ca2f9c29603099ebb71c25bd1b9ccf89bfc6` |
+| committed | `schedules.json` | 20300 | `19b8e12bdf27225285f1be3a2ac795c392609c452be6fef9425916e51ba32146` |
 | committed | `templates.json` | 11187 | `7386049ae273acd37239a42dbed7d2ccef2b05b45c78104d487d0d19328e35d1` |
 | committed | `viggle_lora_layout.json` | 7943 | `c0c953630b1e6e502d5a549127d1b1de8eb914470c086d3372b26661a3cad030` |
 | large | `alpha_t2i_bakery.png` | 2207460 | `2fc7da38f3ddc1a5ee793fddd640886f4bb8a58a2269660f48f0aecb4ce62676` |

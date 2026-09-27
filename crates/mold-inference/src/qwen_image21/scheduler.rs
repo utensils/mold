@@ -158,6 +158,9 @@ mod tests {
         mu: f64,
         sigmas: Vec<f64>,
         timesteps: Vec<f64>,
+        /// Upstream's bf16 `t.to(bfloat16) / 1000` for every step
+        /// (`pipeline_qwenimage21.py:769,773`), captured with torch.
+        transformer_timesteps_bf16: Vec<f64>,
     }
 
     fn fixture() -> Fixture {
@@ -230,6 +233,39 @@ mod tests {
         let (other, warning) = scheduler_for(turbo_kind, 8, 4096);
         assert_eq!(other.sigmas.len(), 9);
         assert!(warning.unwrap().contains("6 steps"));
+    }
+
+    /// Every step of every captured trajectory: the bf16 timestep mold hands
+    /// the transformer is upstream's bf16 `t / 1000`, exactly.
+    #[test]
+    fn bf16_transformer_timesteps_match_upstream_at_every_step() {
+        for case in &fixture().cases {
+            assert_eq!(
+                case.transformer_timesteps_bf16.len(),
+                case.steps,
+                "{}",
+                case.name
+            );
+            let kind = if case.name.starts_with("turbo") {
+                ScheduleKind::for_model("qwen-image-2.1-turbo:bf16")
+            } else {
+                ScheduleKind::Base
+            };
+            let (mut scheduler, _) = scheduler_for(kind, case.steps, case.target_tokens);
+            let latents =
+                candle_core::Tensor::zeros((1, 4, 64), DType::F32, &candle_core::Device::Cpu)
+                    .unwrap();
+            for (index, expected) in case.transformer_timesteps_bf16.iter().enumerate() {
+                let actual = step_timestep(&scheduler, DType::BF16, true);
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{} step {index}: {actual} vs upstream {expected}",
+                    case.name
+                );
+                scheduler.step(&latents, &latents).unwrap();
+            }
+        }
     }
 
     #[test]

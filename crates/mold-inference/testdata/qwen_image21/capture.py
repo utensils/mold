@@ -361,6 +361,11 @@ def stage_cpu(args):
                 "sigmas": [float(s) for s in sched.sigmas.tolist()],
                 "timesteps": [float(s) for s in sched.timesteps.tolist()],
                 "sigmas_dtype": str(sched.sigmas.dtype),
+                # What the bf16 transformer receives: t cast to the latent
+                # dtype, then divided by 1000 (pipeline_qwenimage21.py:769,773).
+                "transformer_timesteps_bf16": [
+                    float(x) for x in (sched.timesteps.to(torch.bfloat16) / 1000).float().tolist()
+                ],
             }
         )
     save_json(args.committed / "schedules.json", out)
@@ -1154,7 +1159,7 @@ DESCRIPTIONS = {
     "ref_rgba.png": "640x800 RGBA reference with soft alpha, translucent pane, magenta under alpha 0 (make_rgba_reference)",
     "pillow_resize.safetensors": "U8: Pillow LANCZOS resize of small RGBA/RGB inputs (premultiplied) + white composite, uint8",
     "calculate_dimensions.json": "U1: calculate_dimensions rows incl. half-to-even ties",
-    "schedules.json": "U11: FlowMatchEuler sigmas/timesteps/mu for base and turbo (shift_terminal None) cases",
+    "schedules.json": "U11: FlowMatchEuler sigmas/timesteps/mu for base and turbo (shift_terminal None) cases, plus the bf16 transformer timesteps t.to(bf16)/1000",
     "templates.json": "U2: exact template strings, bytes, token ids for 0-3 references; apply_chat_template contrast",
     "p1_processor_ids.safetensors": "P1: processor input_ids/attention_mask/mm_token_type_ids/image_grid_thw for 2 references",
     "p3_p6_pos_image_pad_mask.safetensors": "P3: image_pad_mask after drop_idx, 2 refs, positive prompt",
