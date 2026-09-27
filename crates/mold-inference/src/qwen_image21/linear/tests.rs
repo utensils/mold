@@ -654,11 +654,11 @@ fn an_unsloth_style_gguf_source_strips_the_prefix_and_mixes_block_types() {
 /// full-checkpoint maxima (see the qualification record) with headroom.
 fn tier_bound(file: &str) -> f64 {
     match file {
-        f if f.contains("int8") => 0.03,
-        f if f.contains("FP8") => 0.06,
-        f if f.contains("Q8_0") => 0.01,
-        f if f.contains("Q6_K") => 0.03,
-        f if f.contains("Q5_0") => 0.05,
+        f if f.contains("int8") => 0.013,
+        f if f.contains("FP8") => 0.035,
+        f if f.contains("Q8_0") => 0.009,
+        f if f.contains("Q6_K") => 0.028,
+        f if f.contains("Q5_0") => 0.07,
         f if f.contains("Q4_K") => 0.10,
         f if f.contains("Q3_K") => 0.20,
         f if f.contains("Q2_K") => 0.35,

@@ -28,6 +28,11 @@
 //! checkpoint fused — one GEMM, one dequant — and [`split_gate_up`] is the one
 //! place the halves are named.
 
+// The transformer takes its linears from `Q21WeightSource` once the tier
+// loader is wired into `transformer.rs` (which the layout-seam work owns this
+// wave); until then the weight-gated parity tests are the only constructors.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -787,7 +792,8 @@ pub(crate) fn ensure_finite_prediction(
     tier: &str,
     qmatmul: bool,
 ) -> Result<()> {
-    let probe = (prediction - prediction)?
+    let probe = prediction
+        .broadcast_sub(prediction)?
         .to_dtype(DType::F32)?
         .sum_all()?
         .to_scalar::<f32>()?;

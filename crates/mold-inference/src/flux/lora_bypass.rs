@@ -407,6 +407,7 @@ pub(crate) enum BypassTarget {
     /// linears (`comfy/lora.py:331-333`: `(0, half)` to the gate, `(half,
     /// half)` to proj — gate rows first), and a split LoRA landing on a fused
     /// `gate_up` linear (whole `up`, `out_offset` 0 or `half`).
+    #[allow(dead_code)] // Qwen Image 2.1's LoRA mapper; FLUX never needs it
     Rows {
         candle_key: String,
         up_rows: Option<(usize, usize)>,
