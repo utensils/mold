@@ -1092,6 +1092,20 @@ mod tests {
         .unwrap()
     }
 
+    /// A config frozen for `model` but constructed as `family`, the way the
+    /// server freezes a config-declared family: the attention backend is the
+    /// FAMILY's policy. Overwriting only `family` on a config resolved for an
+    /// unregistered model name keeps the `flux` fallback's backend, which in
+    /// a FlashAttention build is the fast-still default and not the image one.
+    fn frozen_for_family(model: &str, family: &str) -> FrozenEngineConfig {
+        let mut frozen = FrozenEngineConfig::resolve(model, &Config::default());
+        frozen.family = family.to_string();
+        frozen.attention_backend = crate::attention::AttentionBackend::resolve_for(
+            crate::attention::policy_for_family(family),
+        );
+        frozen
+    }
+
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
             low_noise_transformer: None,
@@ -1118,8 +1132,7 @@ mod tests {
     fn every_advertised_production_family_and_alias_constructs_through_frozen_factory() {
         for entry in crate::production_batch_capabilities() {
             for family in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
-                let mut frozen = FrozenEngineConfig::resolve(family, &Config::default());
-                frozen.family = family.to_string();
+                let frozen = frozen_for_family(family, family);
                 let engine = create_engine_with_frozen_config(
                     family.to_string(),
                     dummy_paths(),
@@ -1368,7 +1381,10 @@ mod tests {
         let artifact_root = PathBuf::from("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
         let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
         frozen.artifact_root = artifact_root.clone();
-        frozen.attention_backend = match crate::attention::AttentionBackend::resolve() {
+        // Flip the backend this config actually froze: `flux` is FastStill,
+        // so flipping the image default instead produced no mismatch at all
+        // in a FlashAttention build.
+        frozen.attention_backend = match frozen.attention_backend {
             crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
             crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
         };
@@ -1441,8 +1457,7 @@ mod tests {
         let missing = root.path().join("planned-qwen3-bf16.safetensors");
         let mut paths = dummy_paths();
         paths.text_encoder_files = vec![missing.clone()];
-        let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
-        frozen.family = "z-image".into();
+        let mut frozen = frozen_for_family("z-image:bf16", "z-image");
         frozen.qwen3_variant = Some("bf16".into());
         frozen.selected_qwen3_paths = vec![missing];
 
@@ -1474,8 +1489,7 @@ mod tests {
             path
         };
         let missing_parser = root.path().join("parsing_bisenet.pth");
-        let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
-        frozen.family = "z-image".into();
+        let mut frozen = frozen_for_family("z-image:bf16", "z-image");
         frozen.identity_assets = Some(mold_core::pulid_assets::PulidPaths {
             family: mold_core::identity::IdentityFamily::Flux,
             adapter: present("pulid_flux_v0.9.1.safetensors"),

@@ -700,6 +700,13 @@ pub fn production_family_capability_for_family(
         .find(|entry| entry.family == family || entry.aliases.contains(&family))
 }
 
+/// The registry's own family name for `family`, resolving a registered alias
+/// (`flux.2` -> `flux2`, `ltx2.3` -> `ltx2`). An unregistered name is returned
+/// unchanged, so a caller's own fallback applies to it.
+pub fn canonical_production_family(family: &str) -> &str {
+    production_family_capability_for_family(family).map_or(family, |entry| entry.family)
+}
+
 pub fn batch_execution_capability_for_family(family: &str) -> Option<BatchExecutionCapability> {
     production_family_capability_for_family(family).map(|entry| entry.execution)
 }
