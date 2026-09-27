@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import SourceMediaPanel from "./SourceMediaPanel.vue";
 import {
   flux2KleinRecipe,
+  qwenImage21Recipe,
   sdxlIpAdapterRecipe,
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
@@ -710,6 +711,211 @@ describe("SourceMediaPanel — an additive (IP-Adapter) recipe", () => {
   it("hides the strength until a reference is actually attached", () => {
     expect(ipAdapter().find("[data-test='reference-weight']").exists()).toBe(
       false,
+    );
+  });
+});
+
+/**
+ * Order is part of the request — `edit_images` ships in strip order and the
+ * prompt names the pictures "image 1", "image 2" — so every reference is its
+ * own numbered thumbnail with per-picture remove and reorder, never a
+ * "name +N more" summary (Qwen Image 2.1 UAT, item 9).
+ */
+describe("SourceMediaPanel — ordered reference thumbnails", () => {
+  const upload = (filename: string, base64 = "iVBORw0KGgo=") => ({
+    kind: "upload" as const,
+    filename,
+    base64,
+  });
+  const three = [upload("cat.png"), upload("jacket.png"), upload("beach.png")];
+
+  function profiled(
+    name: string,
+    family: string,
+    profileId: string,
+    recipe: unknown,
+  ): ModelInfoExtended {
+    return {
+      name,
+      family,
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 20,
+      default_guidance: 4,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: profileId,
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelInfoExtended;
+  }
+
+  function qwen21(overrides: Partial<GenerateFormState> = {}) {
+    return factory(
+      "qwen-image21",
+      {
+        model: "qwen-image-2.1:bf16",
+        modelFamily: "qwen-image21",
+        imageAttachments: three,
+        ...overrides,
+      },
+      {
+        models: [
+          profiled(
+            "qwen-image-2.1:bf16",
+            "qwen-image21",
+            "qwen-image21",
+            qwenImage21Recipe(),
+          ),
+        ],
+      },
+    );
+  }
+
+  function lastEmitted(wrapper: ReturnType<typeof factory>) {
+    return (
+      wrapper.emitted("update:modelValue")!.at(-1) as [GenerateFormState]
+    )[0];
+  }
+
+  it("draws each reference as a numbered thumbnail in order", () => {
+    const wrapper = qwen21();
+    expect(wrapper.findAll("[data-test^='reference-tile-']")).toHaveLength(3);
+    expect(
+      [0, 1, 2].map((i) =>
+        wrapper.get(`[data-test='reference-label-${i}']`).text(),
+      ),
+    ).toEqual(["Image 1", "Image 2", "Image 3"]);
+    expect(wrapper.get("[data-test='reference-tile-2']").text()).toContain(
+      "beach.png",
+    );
+    for (const thumb of wrapper.findAll("[data-test^='reference-thumb-']"))
+      expect(thumb.classes()).toContain("ms-alpha-bed");
+    expect(wrapper.text()).not.toMatch(/\+\d+ more/);
+  });
+
+  it("marks the last reference as the one that sets the canvas", () => {
+    const wrapper = qwen21();
+    expect(
+      wrapper
+        .get("[data-test='reference-tile-2']")
+        .find("[data-test='reference-sets-canvas']")
+        .exists(),
+    ).toBe(true);
+    expect(wrapper.findAll("[data-test='reference-sets-canvas']")).toHaveLength(
+      1,
+    );
+    expect(wrapper.text()).toContain("The last image sets the canvas");
+  });
+
+  it("carries no canvas mark on a recipe without the rule (FLUX.2 [dev])", () => {
+    const wrapper = factory("flux2", {
+      model: "flux2-dev",
+      imageAttachments: three,
+    });
+    expect(wrapper.findAll("[data-test^='reference-tile-']")).toHaveLength(3);
+    expect(wrapper.find("[data-test='reference-sets-canvas']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("removes one reference, keeping the rest in order", async () => {
+    const wrapper = qwen21();
+    await wrapper.get("[data-test='reference-remove-1']").trigger("click");
+    expect(
+      lastEmitted(wrapper).imageAttachments.map((m) => m.filename),
+    ).toEqual(["cat.png", "beach.png"]);
+  });
+
+  it("reorders with the earlier/later buttons", async () => {
+    const wrapper = qwen21();
+    await wrapper.get("[data-test='reference-later-0']").trigger("click");
+    expect(
+      lastEmitted(wrapper).imageAttachments.map((m) => m.filename),
+    ).toEqual(["jacket.png", "cat.png", "beach.png"]);
+  });
+
+  it("opens the picker from the add tile, and the empty strip says what it takes", async () => {
+    const wrapper = qwen21({ imageAttachments: [] });
+    const add = wrapper.get("[data-test='reference-add']");
+    expect(add.text()).toContain("Attach references");
+    await add.trigger("click");
+    expect(wrapper.emitted("open-picker")).toHaveLength(1);
+  });
+
+  it("numbers Qwen edit's Target as image 1 and lets a reference be promoted", async () => {
+    const wrapper = factory("qwen-image-edit", {
+      model: "qwen-image-edit:q4",
+      imageAttachments: three,
+    });
+    expect(wrapper.get("[data-test='reference-role-0']").text()).toBe("Target");
+    expect(wrapper.get("[data-test='reference-label-0']").text()).toBe(
+      "Image 1",
+    );
+    expect(wrapper.get("[data-test='reference-role-1']").text()).toBe(
+      "Reference",
+    );
+    await wrapper.get("[data-test='reference-earlier-1']").trigger("click");
+    expect(
+      lastEmitted(wrapper).imageAttachments.map((m) => m.filename),
+    ).toEqual(["jacket.png", "cat.png", "beach.png"]);
+  });
+
+  it("gives Klein's reference well the same thumbnails", async () => {
+    const wrapper = factory(
+      "flux2",
+      {
+        model: "flux2-klein:bf16",
+        modelFamily: "flux2",
+        referenceImages: three,
+        exclusiveWell: "references",
+      },
+      {
+        models: [
+          profiled(
+            "flux2-klein:bf16",
+            "flux2",
+            "flux2-klein",
+            flux2KleinRecipe(),
+          ),
+        ],
+      },
+    );
+    expect(wrapper.findAll("[data-test^='reference-tile-']")).toHaveLength(3);
+    await wrapper.get("[data-test='reference-later-1']").trigger("click");
+    expect(
+      lastEmitted(wrapper).referenceImages?.map((m) => m.filename),
+    ).toEqual(["cat.png", "beach.png", "jacket.png"]);
+    await wrapper.setProps({
+      modelValue: { ...lastEmitted(wrapper), referenceImages: [three[0]!] },
+    });
+    await wrapper.get("[data-test='reference-remove-0']").trigger("click");
+    const next = lastEmitted(wrapper);
+    expect(next.referenceImages).toEqual([]);
+    // Emptying the strip hands the conditioning back to the parked source.
+    expect(next.exclusiveWell).toBe("source");
+  });
+
+  it("numbers an additive reference after the source it ships beside", () => {
+    const wrapper = factory(
+      "sdxl",
+      {
+        model: "sdxl-base:fp16",
+        modelFamily: "sdxl",
+        imageAttachments: [upload("source.png")],
+        referenceImages: [upload("ref.png")],
+      },
+      {
+        models: [
+          profiled("sdxl-base:fp16", "sdxl", "sdxl", sdxlIpAdapterRecipe()),
+        ],
+      },
+    );
+    expect(wrapper.get("[data-test='reference-label-0']").text()).toBe(
+      "Image 2",
     );
   });
 });

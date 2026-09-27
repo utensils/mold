@@ -421,7 +421,6 @@ describe("mobile safe areas", () => {
       ".mobile-section-head > button",
       ".mobile-disclosure-button",
       ".mobile-generate-stepper-button",
-      ".mobile-media-tile-action",
       ".mobile-token-list button",
       ".mobile-template-actions button",
       "button.mobile-generate-disclosure",

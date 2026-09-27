@@ -7,6 +7,14 @@ import SourceMediaWells, {
 } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import NamedViewsPanel from "@studio/components/NamedViewsPanel.vue";
+import ReferenceImageStrip, {
+  type ReferenceStripImage,
+} from "@studio/components/ReferenceImageStrip.vue";
+import {
+  referenceOrdinalBase,
+  reorderReference,
+  stripSetsCanvas,
+} from "@studio/lib/referenceStrip";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { resolveExclusiveWells } from "@studio/lib/sourceMediaPlan";
@@ -285,25 +293,66 @@ async function onNamedViewFile(role: NamedViewRole, file: File) {
     }),
   });
 }
-/** Drop the exclusive strip; the parked source becomes active again. */
-function clearReferences() {
-  patch({ referenceImages: [], exclusiveWell: "source" });
+// ── The ordered reference strip ───────────────────────────────────────
+// One thumbnail per reference, in request order (`ReferenceImageStrip`). A
+// two-well recipe keeps its references in `referenceImages`; every other
+// strip IS `imageAttachments` (Qwen edit's Target included, as image 1).
+function stripImage(image: SourceImageState): ReferenceStripImage {
+  return { data: image.base64, mimeType: image.mime, filename: image.filename };
+}
+function currentStrip(): SourceImageState[] {
+  return twoWells.value
+    ? referenceImages.value
+    : props.modelValue.imageAttachments;
+}
+const stripImages = computed(() => currentStrip().map(stripImage));
+/** The last picture sets the canvas on a `canvas: last-reference` recipe. */
+const stripCanvas = computed(() =>
+  stripSetsCanvas(
+    caps.value.sourceImageMode,
+    caps.value.referenceImages?.canvas,
+  ),
+);
+/** An additive reference ships after the source, so it is image 2. */
+const stripOrdinalBase = computed(() =>
+  referenceOrdinalBase(caps.value.sourceImageMode, hasSource.value),
+);
+function setStrip(next: SourceImageState[]) {
+  if (!twoWells.value) {
+    patch({ imageAttachments: next });
+    return;
+  }
+  // Emptying the strip hands the conditioning back to the parked source.
+  patch(
+    next.length === 0
+      ? { referenceImages: next, exclusiveWell: "source" }
+      : { referenceImages: next },
+  );
+}
+function onStripMove(from: number, to: number) {
+  const list = currentStrip();
+  const next = reorderReference(list, from, to);
+  if (next !== list) setStrip(next);
+}
+function onStripRemove(index: number) {
+  const next = currentStrip().slice();
+  next.splice(index, 1);
+  setStrip(next);
 }
 
 /**
  * The References strip is a DROP TARGET in its own right.
  *
- * It renders `data-drop-target="references"` so a shell that hit-tests the
- * cursor (`elementFromPoint(...).closest(…)`) can name it, and it handles the
- * HTML5 drop itself — which both writes through the SAME fields the strip's
- * picker writes and marks the event handled, so `CreatePage.vue`'s
- * window-level listener (`event.defaultPrevented`) leaves it alone. Without
- * this a file dragged onto the strip fell through to the window and landed on
- * the SOURCE well, which on an exclusive (Klein) recipe parks the very strip
- * the user was adding to.
+ * `ReferenceImageStrip` renders `data-drop-target="references"` so a shell
+ * that hit-tests the cursor (`elementFromPoint(...).closest(…)`) can name it,
+ * and handles the HTML5 drop itself — it marks the event handled, so
+ * `CreatePage.vue`'s window-level listener (`event.defaultPrevented`) leaves
+ * it alone, and hands the files here to write through the SAME fields the
+ * strip's picker writes. Without this a file dragged onto the strip fell
+ * through to the window and landed on the SOURCE well, which on an exclusive
+ * (Klein) recipe parks the very strip the user was adding to.
  */
-async function onStripDrop(event: DragEvent) {
-  const files = Array.from(event.dataTransfer?.files ?? []);
+async function onStripFiles(files: File[]) {
   if (files.length === 0) return;
   const images: SourceImageState[] = [];
   for (const file of files) {
@@ -486,69 +535,31 @@ function clearControl() {
         @gallery="onWellGallery"
         @clear="onWellClear"
       />
-      <!-- The strip is its own drop target: a file dragged here appends to the
-           references, and the handled event keeps the window listener off it. -->
-      <div
-        class="smp__strip"
-        data-test="reference-strip"
-        data-drop-target="references"
-        @dragover.prevent
-        @drop.prevent="onStripDrop"
+      <p
+        v-if="plan.required && plan.primary === null"
+        class="smp__required"
+        data-test="source-required-badge"
       >
-        <p
-          v-if="plan.required && plan.primary === null"
-          class="smp__required"
-          data-test="source-required-badge"
-        >
-          Required — this checkpoint renders from an image.
-        </p>
-        <button
-          v-if="!hasSource && plan.primary === null"
-          type="button"
-          class="smp__dropzone"
-          data-test="source-attach"
-          :aria-required="plan.required || undefined"
-          @click="emit('open-picker')"
-        >
-          {{ referencesOnly ? "Attach references or " : "Attach images or "
-          }}<span class="smp__accent">browse</span>
-        </button>
-        <div v-else-if="plan.primary === null">
-          <div class="smp__source-row">
-            <span class="smp__source-name">
-              {{ modelValue.imageAttachments[0]?.filename }}
-              <template v-if="modelValue.imageAttachments.length > 1">
-                +{{ modelValue.imageAttachments.length - 1 }} more
-              </template>
-            </span>
-            <button
-              type="button"
-              class="smp__remove"
-              data-test="source-remove"
-              @click="emit('clear-source')"
-            >
-              Remove
-            </button>
-          </div>
-          <button
-            type="button"
-            class="smp__dropzone smp__dropzone--compact"
-            data-test="source-attach-more"
-            @click="emit('open-picker')"
-          >
-            Add more or <span class="smp__accent">browse</span>
-          </button>
-        </div>
-        <button
-          v-else-if="hasSource"
-          type="button"
-          class="smp__dropzone smp__dropzone--compact"
-          data-test="source-attach-more"
-          @click="emit('open-picker')"
-        >
-          Add references or <span class="smp__accent">browse</span>
-        </button>
-      </div>
+        Required — this checkpoint renders from an image.
+      </p>
+      <!-- One numbered thumbnail per picture, in request order. The strip is
+           its own drop target: a file dragged here APPENDS, and the handled
+           event keeps the window listener off it. Qwen edit's Target well
+           takes the first picture, so its strip appears once there is one. -->
+      <ReferenceImageStrip
+        v-if="plan.primary === null || hasSource"
+        :images="stripImages"
+        :first-is-target="plan.primary === 'target'"
+        :sets-canvas="stripCanvas"
+        :max="referenceMax"
+        :required="plan.required"
+        :empty-label="referencesOnly ? 'Attach references' : 'Attach images'"
+        :add-label="referencesOnly ? 'Add' : 'Add reference'"
+        @move="onStripMove"
+        @remove="onStripRemove"
+        @add="emit('open-picker')"
+        @files="onStripFiles"
+      />
       <div v-if="plan.primary === 'target' && hasSource" class="smp__field">
         <label class="smp__label">Fit to canvas</label>
         <SegmentedControl
@@ -607,50 +618,18 @@ function clearControl() {
 
       <!-- The second well: the SAME strip and picker the strip-only layouts
            use, driven by the plan. -->
-      <div
-        v-if="twoWells"
-        class="smp__strip"
-        data-test="reference-strip"
-        data-drop-target="references"
-        @dragover.prevent
-        @drop.prevent="onStripDrop"
-      >
+      <div v-if="twoWells" class="smp__refs">
         <div class="smp__subhead">References</div>
-        <button
-          v-if="referenceImages.length === 0"
-          type="button"
-          class="smp__dropzone smp__dropzone--compact"
-          data-test="reference-attach"
-          @click="emit('open-reference-picker')"
-        >
-          Attach references or <span class="smp__accent">browse</span>
-        </button>
-        <div v-else>
-          <div class="smp__source-row">
-            <span class="smp__source-name" data-test="reference-names">
-              {{ referenceImages[0]?.filename }}
-              <template v-if="referenceImages.length > 1">
-                +{{ referenceImages.length - 1 }} more
-              </template>
-            </span>
-            <button
-              type="button"
-              class="smp__remove"
-              data-test="reference-remove"
-              @click="clearReferences"
-            >
-              Remove
-            </button>
-          </div>
-          <button
-            type="button"
-            class="smp__dropzone smp__dropzone--compact"
-            data-test="reference-attach-more"
-            @click="emit('open-reference-picker')"
-          >
-            Add more or <span class="smp__accent">browse</span>
-          </button>
-        </div>
+        <ReferenceImageStrip
+          :images="stripImages"
+          :max="referenceMax"
+          :ordinal-base="stripOrdinalBase"
+          empty-label="Attach references"
+          @move="onStripMove"
+          @remove="onStripRemove"
+          @add="emit('open-reference-picker')"
+          @files="onStripFiles"
+        />
         <p
           v-if="exclusive?.parked === 'references'"
           class="smp__hint"
@@ -847,20 +826,6 @@ function clearControl() {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ink-3);
-}
-.smp__dropzone {
-  width: 100%;
-  border: 1.5px dashed var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: var(--radius-card);
-  padding: 26px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.smp__dropzone--compact {
-  margin-top: 10px;
-  padding: 12px;
 }
 .smp__accent {
   color: var(--safelight);

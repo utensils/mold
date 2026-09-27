@@ -3,13 +3,13 @@ import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
-import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../../lib/image";
+import { fileToBase64, isStillImageFile } from "../../lib/image";
+import ReferenceImageStrip from "@studio/components/ReferenceImageStrip.vue";
 import {
-  attachmentRoleLabel,
-  attachmentTitleLabel,
-  moveAttachment,
-  reorderAttachment,
-} from "../../lib/editAttachments";
+  referenceOrdinalBase,
+  reorderReference,
+  stripSetsCanvas,
+} from "@studio/lib/referenceStrip";
 import { buildControlNetOptions } from "../../lib/controlNetOptions";
 import { sourceConditioningValidationError } from "../../lib/generateValidation";
 import { fetchCatalogInstalled } from "../../lib/api/catalog";
@@ -292,7 +292,16 @@ function onNamedViewPicked(picked: PickedImage[]) {
 
 const editPickerOpen = ref(false);
 const targetPickerOpen = ref(false);
-const dragIndex = ref<number | null>(null);
+/** The strip's thumbnails, numbered the way the prompt addresses them. */
+const stripImages = computed(() => props.form.imageAttachments.map((data) => ({ data })));
+/** The last picture sets the canvas on a `canvas: last-reference` recipe. */
+const stripCanvas = computed(() =>
+  stripSetsCanvas(caps.value.sourceImageMode, caps.value.referenceImages?.canvas),
+);
+/** An additive reference ships after the source, so it is image 2. */
+const stripOrdinalBase = computed(() =>
+  referenceOrdinalBase(caps.value.sourceImageMode, Boolean(props.form.sourceImage)),
+);
 
 function onEditPicked(picked: PickedImage[]) {
   if (picked.length === 0) return;
@@ -338,20 +347,30 @@ function removeAttachmentAt(index: number) {
   next.splice(index, 1);
   props.form.imageAttachments = next;
 }
-function moveAttachmentBy(index: number, delta: -1 | 1) {
-  props.form.imageAttachments = moveAttachment(props.form.imageAttachments, index, delta);
+/**
+ * An HTML5 file drop on the strip (the browser dev surface; the packaged app's
+ * OS drags arrive through `applyDropToForm` instead). It APPENDS through the
+ * picker's own path, gated on the recipe's advertised containers.
+ */
+async function onStripFiles(files: File[]) {
+  const picked: PickedImage[] = [];
+  for (const file of files) {
+    try {
+      const base64 = await fileToBase64(file);
+      if (!imageDimensionsFromBase64(base64, referenceFormats.value)) {
+        toasts.push("That picture's format isn't one this style takes.", "error");
+        return;
+      }
+      picked.push({ filename: file.name, base64 });
+    } catch {
+      toasts.push("Couldn't read the image.", "error");
+      return;
+    }
+  }
+  onEditPicked(picked);
 }
-function onTileDragStart(index: number, event: DragEvent) {
-  dragIndex.value = index;
-  event.dataTransfer?.setData("text/plain", String(index));
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-}
-function onTileDrop(index: number, event: DragEvent) {
-  const raw = event.dataTransfer?.getData("text/plain");
-  const from = raw && !Number.isNaN(Number(raw)) ? Number(raw) : dragIndex.value;
-  dragIndex.value = null;
-  if (from == null) return;
-  props.form.imageAttachments = reorderAttachment(props.form.imageAttachments, from, index);
+function moveAttachmentTo(from: number, to: number) {
+  props.form.imageAttachments = reorderReference(props.form.imageAttachments, from, to);
 }
 
 // ── ControlNet model picker ─────────────────────────────────────────────────
@@ -659,82 +678,23 @@ function setSourceFitMode(e: Event) {
       <div class="border-border h-px flex-1 border-t" />
     </div>
 
-    <div
+    <!-- One numbered thumbnail per picture, in request order (the shared
+         strip web and the phone render). Its container is the references
+         drop target the Tauri bridge hit-tests. -->
+    <ReferenceImageStrip
       v-if="referenceStrip"
-      class="flex gap-2 overflow-x-auto pb-1"
-      data-test="attachment-strip"
-      data-drop-target="references"
-    >
-      <div
-        v-for="(image, index) in form.imageAttachments"
-        :key="`${index}-${image.slice(0, 16)}`"
-        class="relative w-20 shrink-0 overflow-hidden rounded-inner border border-border-control bg-bg-deep"
-        draggable="true"
-        :data-test="`attachment-card-${index}`"
-        @dragstart="onTileDragStart(index, $event)"
-        @dragend="dragIndex = null"
-        @dragover.prevent
-        @drop.prevent="onTileDrop(index, $event)"
-      >
-        <!-- The alpha bed sits under every reference: a transparent PNG or
-             WebP (Qwen Image 2.1) shows exactly which pixels are empty. -->
-        <img
-          :src="base64ToDataUrl(image)"
-          class="ms-alpha-bed h-12 w-20 object-cover"
-          :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
-        />
-        <div class="px-1.5 py-1 leading-tight">
-          <div
-            class="font-mono text-micro text-fg-dim whitespace-nowrap"
-            :data-test="`attachment-role-${index}`"
-          >
-            {{ referencesOnly ? `Reference ${index + 1}` : attachmentRoleLabel(index) }}
-          </div>
-          <div class="truncate text-micro text-fg" :data-test="`attachment-title-${index}`">
-            {{ attachmentTitleLabel(index) }}
-          </div>
-        </div>
-        <button
-          v-if="index > 0"
-          type="button"
-          class="absolute top-1 left-1 h-5 w-5 rounded-control bg-bg-deep/90 text-micro text-fg-2 hover:text-fg"
-          :aria-label="`Move ${attachmentTitleLabel(index)} left`"
-          :data-test="`move-attachment-up-${index}`"
-          @click="moveAttachmentBy(index, -1)"
-        >
-          ‹
-        </button>
-        <button
-          v-if="index < form.imageAttachments.length - 1"
-          type="button"
-          class="absolute top-1 left-7 h-5 w-5 rounded-control bg-bg-deep/90 text-micro text-fg-2 hover:text-fg"
-          :aria-label="`Move ${attachmentTitleLabel(index)} right`"
-          :data-test="`move-attachment-down-${index}`"
-          @click="moveAttachmentBy(index, 1)"
-        >
-          ›
-        </button>
-        <button
-          type="button"
-          class="border-border absolute top-1 right-1 h-5 w-5 rounded-control border bg-bg-deep text-fg-2 hover:text-error"
-          :aria-label="`Remove ${attachmentTitleLabel(index)}`"
-          :data-test="`remove-attachment-${index}`"
-          @click="removeAttachmentAt(index)"
-        >
-          ✕
-        </button>
-      </div>
-
-      <button
-        type="button"
-        class="flex h-[4.75rem] w-20 shrink-0 cursor-pointer items-center justify-center rounded-inner border border-dashed border-border-control text-base text-fg-dim transition-colors hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-accent"
-        data-test="add-edit-image"
-        aria-label="Add pictures"
-        @click="editPickerOpen = true"
-      >
-        ＋
-      </button>
-    </div>
+      :images="stripImages"
+      :first-is-target="targetLayout"
+      :sets-canvas="stripCanvas"
+      :ordinal-base="stripOrdinalBase"
+      :max="referenceMax"
+      :add-label="referencesOnly ? 'Add references' : 'Add pictures'"
+      strip-test-id="attachment-strip"
+      @move="moveAttachmentTo"
+      @remove="removeAttachmentAt"
+      @add="editPickerOpen = true"
+      @files="onStripFiles"
+    />
     <p v-if="referenceStrip" class="mt-1 text-micro text-fg-dim">
       {{
         referencesOnly

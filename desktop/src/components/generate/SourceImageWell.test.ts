@@ -8,7 +8,11 @@ import MaskEditorModal from "./MaskEditorModal.vue";
 import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
-import { sdxlIpAdapterRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  qwenImage21Recipe,
+  sdxlIpAdapterRecipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/api/client", () => ({
@@ -211,22 +215,22 @@ describe("SourceImageWell", () => {
       expect(wrapper.find("[data-test='source-choose-gallery']").exists()).toBe(false);
     });
 
-    it("labels the first tile Target and the rest Reference, titled Picture N", () => {
+    it("labels the first tile Target and the rest Reference, titled Image N (the prompt's own ordinal)", () => {
       const form = formFor("qwen-image-edit");
       form.imageAttachments = ["T", "R1", "R2"];
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
-      expect(wrapper.get("[data-test='attachment-role-0']").text()).toBe("Target");
-      expect(wrapper.get("[data-test='attachment-role-1']").text()).toBe("Reference");
-      expect(wrapper.get("[data-test='attachment-role-2']").text()).toBe("Reference");
-      expect(wrapper.get("[data-test='attachment-title-0']").text()).toBe("Picture 1");
-      expect(wrapper.get("[data-test='attachment-title-2']").text()).toBe("Picture 3");
+      expect(wrapper.get("[data-test='reference-role-0']").text()).toBe("Target");
+      expect(wrapper.get("[data-test='reference-role-1']").text()).toBe("Reference");
+      expect(wrapper.get("[data-test='reference-role-2']").text()).toBe("Reference");
+      expect(wrapper.get("[data-test='reference-label-0']").text()).toBe("Image 1");
+      expect(wrapper.get("[data-test='reference-label-2']").text()).toBe("Image 3");
     });
 
     it("appends picks from the multi-select picker in order", async () => {
       const form = formFor("qwen-image-edit");
       form.sourceFit = { mode: "pad-fit" };
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
-      await wrapper.get("[data-test='add-edit-image']").trigger("click");
+      await wrapper.get("[data-test='reference-add']").trigger("click");
       const picker = wrapper
         .findAllComponents(ImagePickerModal)
         .find((candidate) => candidate.props("multiple") === true)!;
@@ -244,7 +248,7 @@ describe("SourceImageWell", () => {
       const form = formFor("qwen-image-edit");
       form.imageAttachments = ["T", "R1", "R2"];
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
-      await wrapper.get("[data-test='remove-attachment-1']").trigger("click");
+      await wrapper.get("[data-test='reference-remove-1']").trigger("click");
       expect(form.imageAttachments).toEqual(["T", "R2"]);
     });
 
@@ -252,9 +256,9 @@ describe("SourceImageWell", () => {
       const form = formFor("qwen-image-edit");
       form.imageAttachments = ["T", "R1", "R2"];
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
-      await wrapper.get("[data-test='move-attachment-up-1']").trigger("click");
+      await wrapper.get("[data-test='reference-earlier-1']").trigger("click");
       expect(form.imageAttachments).toEqual(["R1", "T", "R2"]);
-      await wrapper.get("[data-test='move-attachment-down-1']").trigger("click");
+      await wrapper.get("[data-test='reference-later-1']").trigger("click");
       expect(form.imageAttachments).toEqual(["R1", "R2", "T"]);
     });
   });
@@ -638,5 +642,120 @@ describe("SourceImageWell — an additive recipe", () => {
 
   it("hides the strength until a reference is attached", () => {
     expect(mountWell(ipAdapterForm()).find("[data-test='reference-weight']").exists()).toBe(false);
+  });
+});
+
+/**
+ * The shared ordered strip on desktop: numbered like the prompt, a canvas
+ * mark on Qwen Image 2.1's last reference, and the same reorder/remove the
+ * web and the phone use (`ReferenceImageStrip`).
+ */
+describe("SourceImageWell — ordered reference thumbnails", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => (document.body.innerHTML = ""));
+
+  function profiled(name: string, family: string, recipe: unknown) {
+    return {
+      name,
+      family,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: family,
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function qwen21(attachments: string[]) {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "qwen-image21",
+      model: "qwen-image-2.1:bf16",
+    });
+    form.imageAttachments = attachments;
+    const wrapper = mount(SourceImageWell, {
+      props: {
+        form,
+        selectedModel: profiled("qwen-image-2.1:bf16", "qwen-image21", qwenImage21Recipe()),
+      },
+      attachTo: document.body,
+    });
+    return { form, wrapper };
+  }
+
+  it("draws each reference numbered, on the checkerboard, with the last setting the canvas", () => {
+    const { wrapper } = qwen21(["iVBORA", "UklGRgAAAABXRUJQ", "iVBORC"]);
+    expect(wrapper.get("[data-test='attachment-strip']").attributes("data-drop-target")).toBe(
+      "references",
+    );
+    expect([0, 1, 2].map((i) => wrapper.get(`[data-test='reference-label-${i}']`).text())).toEqual([
+      "Image 1",
+      "Image 2",
+      "Image 3",
+    ]);
+    expect(wrapper.get("[data-test='reference-thumb-1']").classes()).toContain("ms-alpha-bed");
+    // A WebP reference is labelled WebP, from its own first bytes.
+    expect(wrapper.get("[data-test='reference-thumb-1']").attributes("src")).toMatch(
+      /^data:image\/webp;base64,/,
+    );
+    const marks = wrapper.findAll("[data-test='reference-sets-canvas']");
+    expect(marks).toHaveLength(1);
+    expect(
+      wrapper
+        .get("[data-test='reference-tile-2']")
+        .find("[data-test='reference-sets-canvas']")
+        .exists(),
+    ).toBe(true);
+    expect(wrapper.text()).toContain("The last image sets the canvas");
+  });
+
+  it("moves the canvas mark with the order", async () => {
+    const { form, wrapper } = qwen21(["iVBORA", "iVBORB"]);
+    await wrapper.get("[data-test='reference-later-0']").trigger("click");
+    expect(form.imageAttachments).toEqual(["iVBORB", "iVBORA"]);
+    expect(
+      wrapper
+        .get("[data-test='reference-tile-1']")
+        .find("[data-test='reference-sets-canvas']")
+        .exists(),
+    ).toBe(true);
+  });
+
+  it("reorders by dragging one tile onto another", async () => {
+    const { form, wrapper } = qwen21(["iVBORA", "iVBORB", "iVBORC"]);
+    const store = new Map<string, string>();
+    const dataTransfer = {
+      setData: (type: string, value: string) => store.set(type, value),
+      getData: (type: string) => store.get(type) ?? "",
+      types: [] as string[],
+      files: [] as File[],
+      effectAllowed: "",
+    };
+    await wrapper.get("[data-test='reference-tile-0']").trigger("dragstart", { dataTransfer });
+    dataTransfer.types = [...store.keys()];
+    await wrapper.get("[data-test='reference-tile-2']").trigger("drop", { dataTransfer });
+    expect(form.imageAttachments).toEqual(["iVBORB", "iVBORC", "iVBORA"]);
+  });
+
+  it("carries no canvas mark on FLUX.2 [dev]", () => {
+    const form = formFor("flux2");
+    form.model = "flux2-dev:q8";
+    form.imageAttachments = ["iVBORA", "iVBORB"];
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+    expect(wrapper.findAll("[data-test^='reference-tile-']")).toHaveLength(2);
+    expect(wrapper.find("[data-test='reference-sets-canvas']").exists()).toBe(false);
+  });
+
+  it("numbers an additive reference after the source it ships beside", () => {
+    const form = reactive({ ...newGenerateForm(), family: "sdxl", model: "sdxl-base:fp16" });
+    form.sourceImage = "SRC";
+    form.imageAttachments = ["REF"];
+    const wrapper = mount(SourceImageWell, {
+      props: { form, selectedModel: profiled("sdxl-base:fp16", "sdxl", sdxlIpAdapterRecipe()) },
+      attachTo: document.body,
+    });
+    expect(wrapper.get("[data-test='reference-label-0']").text()).toBe("Image 2");
   });
 });
