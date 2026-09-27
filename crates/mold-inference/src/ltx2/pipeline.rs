@@ -2995,36 +2995,41 @@ mod tests {
 
     #[test]
     fn generate_runs_native_runtime_without_bridge_process() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let gemma_dir = temp_dir.path().join("gemma");
-        fs::create_dir_all(&gemma_dir).unwrap();
-        write_test_gemma_assets(&gemma_dir);
-        let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
-        fs::write(&paths.transformer, []).unwrap();
-        write_minimal_ltx2_checkpoint(&paths.vae, true);
+        // Whether the session survives reads `MOLD_LTX2_KEEP_SESSION`, which
+        // sibling tests set under `with_keep_session_env`'s lock; reading it
+        // unlocked made this test fail whenever one of them held `0`.
+        with_keep_session_env(None, || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let gemma_dir = temp_dir.path().join("gemma");
+            fs::create_dir_all(&gemma_dir).unwrap();
+            write_test_gemma_assets(&gemma_dir);
+            let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
+            fs::write(&paths.transformer, []).unwrap();
+            write_minimal_ltx2_checkpoint(&paths.vae, true);
 
-        let mut engine = Ltx2Engine::with_runtime_session(
-            "ltx-2-19b-distilled:fp8".to_string(),
-            paths,
-            runtime_session(),
-        );
-        let response = engine
-            .generate(&request(OutputFormat::Gif, Some(false)))
-            .unwrap();
-        let video = response.video.unwrap();
+            let mut engine = Ltx2Engine::with_runtime_session(
+                "ltx-2-19b-distilled:fp8".to_string(),
+                paths,
+                runtime_session(),
+            );
+            let response = engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .unwrap();
+            let video = response.video.unwrap();
 
-        assert_eq!(&video.data[..6], b"GIF89a");
-        assert_eq!(&video.thumbnail[..8], b"\x89PNG\r\n\x1a\n");
-        assert_eq!(&video.gif_preview[..6], b"GIF89a");
-        assert_eq!(video.width, 960);
-        assert_eq!(video.height, 576);
-        assert_eq!(video.frames, 17);
-        assert_eq!(video.fps, 12);
-        assert!(!video.has_audio);
-        // #1099: the session outlives the generation so the next job can
-        // serve its prompt from the session cache instead of reloading the
-        // ~24 GB Gemma encoder. This assertion used to pin the opposite.
-        assert!(engine.native_runtime.is_some());
+            assert_eq!(&video.data[..6], b"GIF89a");
+            assert_eq!(&video.thumbnail[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(&video.gif_preview[..6], b"GIF89a");
+            assert_eq!(video.width, 960);
+            assert_eq!(video.height, 576);
+            assert_eq!(video.frames, 17);
+            assert_eq!(video.fps, 12);
+            assert!(!video.has_audio);
+            // #1099: the session outlives the generation so the next job can
+            // serve its prompt from the session cache instead of reloading the
+            // ~24 GB Gemma encoder. This assertion used to pin the opposite.
+            assert!(engine.native_runtime.is_some());
+        });
     }
 
     /// Take the env lock, set `MOLD_LTX2_KEEP_SESSION`, run `body`, restore.
