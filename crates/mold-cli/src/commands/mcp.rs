@@ -542,6 +542,11 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
+        // An older server drops `transparent_background` and renders
+        // opaque RGB; its own listing decides (`capabilities.transparency`).
+        crate::commands::generate::require_remote_transparency_contract(&self.client, &req)
+            .await
+            .map_err(|error| error.to_string())?;
         let CanonicalOutput { response, .. } = generate_canonically(&self.client, req).await?;
         let image = response
             .images
@@ -644,6 +649,11 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
+        // An older server drops `transparent_background` and renders
+        // opaque RGB; its own listing decides (`capabilities.transparency`).
+        crate::commands::generate::require_remote_transparency_contract(&self.client, &req)
+            .await
+            .map_err(|error| error.to_string())?;
         let job_id = self.jobs.create(&req).await?;
         let client = self.client.clone();
         let jobs = self.jobs.clone();
