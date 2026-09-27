@@ -220,6 +220,8 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         id_image_sha256s: None,
         true_cfg: None,
         cfg_start_step: None,
+        has_alpha: None,
+        transparent_background: None,
     }
 }
 
@@ -336,7 +338,21 @@ pub fn is_probably_solid_black(path: &Path, format: OutputFormat, size_bytes: u6
     let Ok(img) = image::open(path) else {
         return false;
     };
-    let thumb = img.thumbnail(SAMPLE_DIM, SAMPLE_DIM).to_rgb8();
+    let thumb = img.thumbnail(SAMPLE_DIM, SAMPLE_DIM);
+    // Transparency is content, not a failed render: a cut-out whose clear
+    // pixels are RGB 0 compresses under the suspect size and reads as black
+    // through `to_rgb8`, which discards alpha. Any sampled pixel below full
+    // opacity (beyond the same ceiling) therefore clears the image; an
+    // RGBA container that is opaque everywhere falls through to the RGB test.
+    if img.color().has_alpha()
+        && thumb
+            .to_rgba8()
+            .pixels()
+            .any(|pixel| pixel.0[3] < u8::MAX - CHANNEL_CEILING)
+    {
+        return false;
+    }
+    let thumb = thumb.to_rgb8();
     let mut max_channel: u8 = 0;
     for pixel in thumb.pixels() {
         let m = pixel.0[0].max(pixel.0[1]).max(pixel.0[2]);
@@ -791,6 +807,90 @@ mod tests {
         std::fs::write(&wrong, vec![0u8; 4096]).unwrap();
         assert!(!has_riff_wave_header(&wrong));
         assert!(!is_valid_gallery_file(&wrong, OutputFormat::Wav, 4096));
+    }
+
+    /// A small cut-out: a coloured square on a fully transparent field
+    /// whose transparent pixels are RGB 0 — which compresses far below the
+    /// suspect-size ceilings and, read through `to_rgb8`, is mostly black.
+    fn transparent_cutout() -> image::RgbaImage {
+        image::RgbaImage::from_fn(64, 64, |x, y| {
+            if (28..36).contains(&x) && (28..36).contains(&y) {
+                image::Rgba([10, 10, 12, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        })
+    }
+
+    #[test]
+    fn a_transparent_png_is_not_solid_black() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("cutout.png");
+        transparent_cutout().save(&path).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size <= 8 * 1024,
+            "the fixture must be inside the suspect size"
+        );
+        assert!(!is_probably_solid_black(&path, OutputFormat::Png, size));
+        assert!(is_valid_gallery_file(&path, OutputFormat::Png, size));
+
+        // A FULLY transparent image is content too, never a failed render.
+        let clear = td.path().join("clear.png");
+        image::RgbaImage::new(64, 64).save(&clear).unwrap();
+        let size = std::fs::metadata(&clear).unwrap().len();
+        assert!(!is_probably_solid_black(&clear, OutputFormat::Png, size));
+    }
+
+    #[test]
+    fn an_opaque_black_png_is_still_solid_black() {
+        let td = tempfile::tempdir().unwrap();
+        let rgb = td.path().join("black.png");
+        image::RgbImage::new(64, 64).save(&rgb).unwrap();
+        let size = std::fs::metadata(&rgb).unwrap().len();
+        assert!(is_probably_solid_black(&rgb, OutputFormat::Png, size));
+
+        // An RGBA container whose every pixel is opaque black is the same
+        // failed render; the alpha channel alone is not content.
+        let rgba = td.path().join("black-rgba.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]))
+            .save(&rgba)
+            .unwrap();
+        let size = std::fs::metadata(&rgba).unwrap().len();
+        assert!(is_probably_solid_black(&rgba, OutputFormat::Png, size));
+    }
+
+    #[test]
+    fn a_small_webp_still_with_alpha_is_a_valid_gallery_file() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("cutout.webp");
+        let file = std::fs::File::create(&path).unwrap();
+        // A dark subject with some texture, so the lossless still is a
+        // realistic (above-minimum) size while staying under the ceiling.
+        let image = image::RgbaImage::from_fn(64, 64, |x, y| {
+            if (16..48).contains(&x) && (16..48).contains(&y) {
+                let v = ((x * 7 + y * 13) % 16) as u8;
+                image::Rgba([v, v / 2, 16 - v, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        image::codecs::webp::WebPEncoder::new_lossless(file)
+            .encode(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size <= 4 * 1024,
+            "the fixture must be inside the suspect size"
+        );
+        assert!(size >= min_valid_size(OutputFormat::Webp));
+        assert!(!is_probably_solid_black(&path, OutputFormat::Webp, size));
+        assert!(is_valid_gallery_file(&path, OutputFormat::Webp, size));
     }
 
     #[test]

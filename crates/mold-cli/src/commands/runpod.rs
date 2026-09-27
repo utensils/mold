@@ -1848,6 +1848,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         id_image_names: None,
         true_cfg: None,
         cfg_start_step: None,
+        transparent_background: None,
     };
     let http = mold_core::MoldClient::new(&mold_host);
 

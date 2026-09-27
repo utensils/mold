@@ -1685,6 +1685,7 @@ pub async fn run(
                 Some(&family),
                 has_visual_conditioning,
             )),
+            transparent_background: None,
         })
     };
 

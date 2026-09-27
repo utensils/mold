@@ -1367,7 +1367,7 @@ async fn ensure_legacy_post_upscale_model_downloaded(
 }
 
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
-    metadata.apply_output_dimensions(img.width, img.height);
+    metadata.apply_still_output(img);
 }
 
 pub(crate) fn apply_upscale_response_to_image_generation(
@@ -5038,6 +5038,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 

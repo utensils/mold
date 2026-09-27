@@ -47,7 +47,7 @@ cudnn = ["cuda", "candle-core/cudnn", "mold-candle/cudnn"]
 # global attention default and is intentionally not forwarded by mold-ai.
 h3-attention-rc = ["cuda", "mold-candle/h3-flash-attn-rc"]
 expand = []
-webp = ["webp-animation"]
+webp = ["webp-animation", "dep:libwebp-sys2"]
 mp4 = ["dep:fdk-aac"]
 dev-bins = []
 # Public compact MiniMax H3 runtime. MP4 audio muxing and the public core
@@ -202,6 +202,10 @@ candle-onnx = { git = "https://github.com/utensils/candle.git", rev = "bf2cd29a7
 prost = { version = "0.14", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
+# libwebp's simple still API (`WebPEncodeRGB`/`WebPEncodeRGBA`) for
+# non-animated WebP stills (`webp_still.rs`). The same crate and version
+# webp-animation already links, so no new native code enters the build.
+libwebp-sys2 = { version = "0.2", features = ["static"], optional = true }
 image = "0.25"
 moxcms = "0.8"
 half = "2"

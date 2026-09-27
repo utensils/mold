@@ -169,6 +169,8 @@ impl VideoMetadata {
             id_image_sha256s: None,
             true_cfg: None,
             cfg_start_step: None,
+            has_alpha: None,
+            transparent_background: None,
         }
     }
 }

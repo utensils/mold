@@ -135,11 +135,37 @@ pub const TENCENT_HUNYUAN3D_2_1: ThirdPartyLicense = ThirdPartyLicense {
     summary: "Tencent Hunyuan 3D 2.1 weights: the licence does NOT apply in the European Union, the United Kingdom or South Korea, and a separate Tencent licence is required above 1 million monthly active users. Tencent claims no rights in the meshes you generate.",
 };
 
+/// The Qwen Research License Agreement (2026-09-20) that Qwen Image 2.1 is
+/// published under — "FOR NON-COMMERCIAL PURPOSES ONLY" (§2a), a commercial
+/// licence being a separate request to Qwen (§2b).
+///
+/// It covers the WHOLE family, not only the turbo adapter: the base
+/// repository's own model card declares `license_name: qwen-research`, the
+/// community tiers mold pins (Comfy-Org's INT8, unsloth's FP8, leejet's GGUF)
+/// are conversions of those weights and carry the same card licence, and
+/// Viggle's turbo LoRA ships a `LICENSE` byte-identical to the base's. One
+/// document, so one acceptance unblocks every tier. The gate is on
+/// ACQUISITION like every licence here: files already installed keep running.
+///
+/// Pinned to `Qwen/Qwen-Image-2.1` revision
+/// `b3179ad355be050328e483a9dfdd9e60cd62adfa`, fetched and verified on
+/// 2026-09-26 (identical bytes at `790c926` and in Viggle's repository at
+/// `bb26a0f`).
+pub const QWEN_RESEARCH: ThirdPartyLicense = ThirdPartyLicense {
+    id: "qwen-research",
+    name: "Qwen Research License Agreement",
+    url: "https://huggingface.co/Qwen/Qwen-Image-2.1/raw/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE",
+    sha256: "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+    canonical: "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+    summary: "Qwen Image 2.1 weights (every tier, and the Viggle turbo LoRA) are licensed for non-commercial research and evaluation only; commercial use needs a separate licence from Qwen.",
+};
+
 /// Every license mold knows how to gate on.
 pub const THIRD_PARTY_LICENSES: &[&ThirdPartyLicense] = &[
     &INSIGHTFACE_ANTELOPEV2,
     &TENCENT_HUNYUAN3D_2_0,
     &TENCENT_HUNYUAN3D_2_1,
+    &QWEN_RESEARCH,
 ];
 
 /// Resolve a license by its stable id.
@@ -184,6 +210,14 @@ fn license_covers_manifest_file(
     }
     if license.id == TENCENT_HUNYUAN3D_2_1.id {
         return crate::manifest::hunyuan3d_uses_21_license(manifest_name);
+    }
+    // Every file of every Qwen Image 2.1 manifest — base, quantized and turbo
+    // tiers alike — is Qwen Research material (see [`QWEN_RESEARCH`]).
+    if license.id == QWEN_RESEARCH.id {
+        return matches!(
+            crate::manifest::model_base_name(manifest_name),
+            "qwen-image-2.1" | "qwen-image-2.1-turbo"
+        );
     }
 
     false
@@ -881,5 +915,46 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::write(acceptance_path(home.path()), b"{not json").unwrap();
         assert!(!is_accepted(home.path(), &INSIGHTFACE_ANTELOPEV2));
+    }
+}
+
+#[cfg(test)]
+mod qwen_research_tests {
+    use super::*;
+
+    /// One document covers the family: every tier's files and the turbo
+    /// adapter ask for the same acceptance, and nothing outside it does.
+    #[test]
+    fn the_qwen_research_licence_gates_every_qwen_image21_download() {
+        for manifest in crate::manifest::known_manifests() {
+            let licenses = licenses_for_manifest(manifest);
+            let gated = licenses
+                .iter()
+                .any(|license| license.id == QWEN_RESEARCH.id);
+            assert_eq!(
+                gated,
+                manifest.family == "qwen-image21",
+                "{} ({})",
+                manifest.name,
+                manifest.family
+            );
+        }
+        let turbo = crate::manifest::find_manifest("qwen-image-2.1-turbo:q8").unwrap();
+        let adapter = turbo
+            .files
+            .iter()
+            .find(|file| file.component == crate::manifest::ModelComponent::DistilledLora)
+            .unwrap();
+        assert!(
+            licenses_for_manifest_file(&turbo.name, &adapter.hf_filename)
+                .any(|license| license.id == QWEN_RESEARCH.id)
+        );
+        assert!(
+            manifests_requiring(&QWEN_RESEARCH).contains(&"qwen-image-2.1-turbo:bf16".to_string())
+        );
+        assert_eq!(license_by_id("qwen-research"), Some(&QWEN_RESEARCH));
+        assert!(QWEN_RESEARCH
+            .url
+            .contains("b3179ad355be050328e483a9dfdd9e60cd62adfa"));
     }
 }

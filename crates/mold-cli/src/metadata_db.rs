@@ -104,6 +104,14 @@ pub fn record_local_save_metadata(
     if let Some((w, h)) = actual_dims {
         metadata.apply_output_dimensions(w, h);
     }
+    // `has_alpha` describes the stored file, so a still is read back from
+    // its own container header — the same answer the server records.
+    if matches!(format, OutputFormat::Png | OutputFormat::Webp) && metadata.frames.is_none() {
+        if let Ok(bytes) = std::fs::read(&abs) {
+            metadata.has_alpha =
+                mold_core::still_image::encoded_still_has_alpha(&bytes).then_some(true);
+        }
+    }
     mold_db::persist::record_saved_output(
         db,
         output_dir,

@@ -107,6 +107,11 @@ fn every_tier_renders_through_the_engine() {
             "output_format": "png"
         }))
         .unwrap();
+        let load_started = std::time::Instant::now();
+        engine
+            .load()
+            .unwrap_or_else(|error| panic!("{tier} load: {error:#}"));
+        let load_secs = load_started.elapsed().as_secs_f64();
         let started = std::time::Instant::now();
         let response = engine
             .generate(&request)
@@ -116,7 +121,7 @@ fn every_tier_renders_through_the_engine() {
         let path = out.join(format!("qwen-image-2.1-{tier}-1024.png"));
         std::fs::write(&path, &image.data).unwrap();
         eprintln!(
-            "TIER-RENDER {tier}: {:.1}s -> {}",
+            "TIER-RENDER {tier}: load {load_secs:.1}s, render {:.1}s -> {}",
             started.elapsed().as_secs_f64(),
             path.display()
         );

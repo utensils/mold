@@ -16,7 +16,10 @@ import { describe, expect, it } from "vitest";
 import { baseGenerationCapabilities } from "./generationCapabilities";
 import type { ReferenceImagesProfile } from "./referenceImagesProfile";
 import { sourceMediaPlan } from "./sourceMediaPlan";
-import { sdxlRecipe } from "./generationProfile.testFixtures";
+import {
+  qwenImage21Recipe,
+  sdxlRecipe,
+} from "./generationProfile.testFixtures";
 import type { GenerationRecipeProfile } from "./generationProfile";
 
 const FIXTURE_RELATIVE = "tests/fixtures/flux2/reference-parity-v1.json";
@@ -119,6 +122,23 @@ describe("flux2 reference parity fixture", () => {
       "flux2-klein-base-9b:q8": "single-or-references",
       "qwen-image-edit-2511:q4": "qwen-edit",
       "flux-dev:q4": "single",
+      // Qwen Image 2.1's references replace the source on every tier.
+      ...Object.fromEntries(
+        [
+          "qwen-image-2.1:bf16",
+          "qwen-image-2.1:int8-conv",
+          "qwen-image-2.1:fp8",
+          "qwen-image-2.1:q8",
+          "qwen-image-2.1:q6",
+          "qwen-image-2.1:q5",
+          "qwen-image-2.1:q4",
+          "qwen-image-2.1:q3",
+          "qwen-image-2.1:q2",
+          "qwen-image-2.1-turbo:bf16",
+          "qwen-image-2.1-turbo:int8-conv",
+          "qwen-image-2.1-turbo:q8",
+        ].map((model) => [model, "references"]),
+      ),
     });
   });
 
@@ -135,6 +155,26 @@ describe("flux2 reference parity fixture", () => {
     expect(sourceMediaPlan(capsFor(dev))).toEqual({
       kind: "attachments",
       max: 4,
+      required: false,
+      primary: null,
+    });
+  });
+
+  it("gives Qwen Image 2.1's advertised recipe a ten-image reference strip", () => {
+    const caps = baseGenerationCapabilities(
+      "qwen-image21",
+      "qwen-image-2.1:bf16",
+      null,
+      null,
+      null,
+      qwenImage21Recipe(),
+    );
+    expect(caps.sourceImageMode).toBe("references");
+    expect(caps.referenceImages?.max).toBe(10);
+    expect(caps.referenceImages?.primaryIsTarget).toBe(false);
+    expect(sourceMediaPlan(caps)).toEqual({
+      kind: "attachments",
+      max: 10,
       required: false,
       primary: null,
     });

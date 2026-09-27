@@ -638,8 +638,9 @@ fn save_durable_batch_download(
     }
     // `bytes` is the artifact, and only a raster artifact can be previewed in
     // a terminal. A mesh and an audio print each have a sidecar tile, which
-    // their own save paths preview instead.
-    if preview && !format.is_video() && !format.is_audio() && !format.is_mesh() {
+    // their own save paths preview instead. The media kind is read off the
+    // bytes: a WebP still previews, an animated WebP is a video.
+    if preview && !format.is_video_artifact(bytes) && !format.is_audio() && !format.is_mesh() {
         preview_image(bytes);
     }
     Ok(())
@@ -1531,6 +1532,7 @@ pub async fn run(
                         id_image_names: None,
                         true_cfg: None,
                         cfg_start_step: None,
+                        transparent_background: None,
                     };
                     materialize_local_builtin_control(&mut probe_req, &config).await?;
                     let control_loras = probe_req.loras.take().unwrap_or_default();
@@ -1721,6 +1723,7 @@ pub async fn run(
         true_cfg: identity.true_cfg,
         cfg_start_step: identity.cfg_start_step,
         save_to_gallery: filing.save_to_gallery(),
+        transparent_background: None,
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the

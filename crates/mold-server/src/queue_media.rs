@@ -684,6 +684,7 @@ fn extract_request_fields(
         cfg_start_step,
         edit_images,
         reference_weight,
+        transparent_background,
         references,
         strength,
         mask_image,
@@ -872,6 +873,9 @@ fn extract_request_fields(
         // it would render the same picture at a different weight and say
         // nothing.
         reference_weight,
+        // A plain setting retained like `reference_weight`: it carries no
+        // media, and a replayed job must render the same transparent cut-out.
+        transparent_background,
         references,
         strength,
         mask_image: None,

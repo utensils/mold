@@ -27,12 +27,14 @@
 //!   `website/models/wan.md`). `MOLD_ATTN=math` is the escape hatch.
 //! * [`AttentionPolicy::FastStill`] — a still whose family chose throughput
 //!   over archived-seed byte stability: `Flash` wherever the kernel is
-//!   compiled in, `Math` otherwise. FLUX.1 and FLUX.2 take it. The #736
-//!   argument is unchanged for every other still family; what changed is that
-//!   for these two the math path costs ~700 GB of score-matrix traffic per
-//!   step at 1024^2, measured against a stable-diffusion.cpp oracle reading
-//!   the same GGUF files at 2.6x mold's rate. `MOLD_ATTN=math` is the escape
-//!   hatch and remains the cross-build determinism contract going forward.
+//!   compiled in, `Math` otherwise. FLUX.1, FLUX.2 and Qwen Image 2.1 take
+//!   it. The #736 argument is unchanged for every other still family; what
+//!   changed is that for FLUX the math path costs ~700 GB of score-matrix
+//!   traffic per step at 1024^2, measured against a stable-diffusion.cpp
+//!   oracle reading the same GGUF files at 2.6x mold's rate, and Qwen Image
+//!   2.1's 32-block single stream is bound the same way (0.92 s/step at
+//!   1024^2 on an L40S). `MOLD_ATTN=math` is the escape hatch and remains the
+//!   cross-build determinism contract going forward.
 //!
 //! [`attention_with_bias`] adds an optional additive `[B, H, Q, K]` bias for
 //! callers that must mask keys (Qwen-Image's joint stream when the two batched
@@ -73,8 +75,9 @@ pub enum AttentionPolicy {
     /// stability: `Flash` wherever the kernel is compiled in, `Math`
     /// otherwise.
     ///
-    /// FLUX.1 and FLUX.2 only. This is not a relaxation of #736 — it is the
-    /// same trade the video arm makes, taken for two families where the math
+    /// FLUX.1, FLUX.2 and Qwen Image 2.1 only. This is not a relaxation of
+    /// #736 — it is the same trade the video arm makes, taken for families
+    /// where the math
     /// score matrix dominates the render rather than being a rounding error
     /// next to the weights. The math path these families fall back to also
     /// folds the softmax scale into K ([`ScaleOn::Keys`]) rather than
@@ -192,9 +195,10 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 ///
 /// The families listed here are exactly the ones whose call sites pass a
 /// non-`Image` policy — the Wan DiT and LTX-2's BF16 dispatch under `Video`,
-/// FLUX.1 and FLUX.2 under `FastStill`. Anything else, known or not, keeps
-/// `Image`, which is the conservative direction: a family that renders under
-/// `Math` and is frozen as `Math` is consistent, while the reverse is not.
+/// FLUX.1, FLUX.2 and Qwen Image 2.1 under `FastStill`. Anything else, known
+/// or not, keeps `Image`, which is the conservative direction: a family that
+/// renders under `Math` and is frozen as `Math` is consistent, while the
+/// reverse is not.
 ///
 /// This exists because `FrozenEngineConfig` records the backend a plan will
 /// execute under, and its fingerprint is what execution-plan equivalence is
@@ -203,9 +207,14 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 pub fn policy_for_family(family: &str) -> AttentionPolicy {
     match family {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
-        // FLUX.1 and FLUX.2 only. See `AttentionPolicy::FastStill`; the
-        // convolution side mirrors this list in `conv_policy::policy_for_family`.
-        "flux" | "flux2" => AttentionPolicy::FastStill,
+        // FLUX.1, FLUX.2 and Qwen Image 2.1. See `AttentionPolicy::FastStill`;
+        // the convolution side mirrors this list in
+        // `conv_policy::policy_for_family`. Qwen Image 2.1 joined because its
+        // 32-block single stream spends most of a step in the math score
+        // matrix and elementwise passes (0.92 s/step at 1024^2 on an L40S);
+        // `MOLD_ATTN=math MOLD_CONV=im2col` restores its v0.32 bytes. The
+        // older Qwen-Image 2512 family is NOT in this list.
+        "flux" | "flux2" | "qwen-image21" => AttentionPolicy::FastStill,
         // Hunyuan3D takes the image policy on purpose, not by falling through:
         // its DiT runs 3072 unordered tokens at head dim 64, which is the
         // image families' regime, and its shape VAE cross-attends short query
@@ -244,6 +253,14 @@ fn parse_backend_env(raw: Option<&str>) -> Option<AttentionBackend> {
         }
         _ => None,
     }
+}
+
+/// The operator's process-frozen `MOLD_ATTN` request (`None` when unset or
+/// unparseable). Family execution paths that resolve more than a backend —
+/// Qwen Image 2.1's `exec_path` — read the same cached request rather than
+/// re-parsing the variable.
+pub(crate) fn requested_backend() -> Option<AttentionBackend> {
+    requested_backend_env()
 }
 
 /// Metal families that opt into fused attention paths honor the shared override
@@ -408,6 +425,34 @@ pub fn attention_with_bias(
     }
     let bias = bias.expect("bias_forces_math is true exactly when the bias is Some");
     math_attention_biased_impl(q, k, v, scale, bias, math_attention_chunk_size(q))
+}
+
+/// [`attention_with_bias`] under an explicit family policy.
+///
+/// An unbiased call is exactly [`attention_for`] under `policy` — flash
+/// wherever the policy and the build take it. A biased call stays on math
+/// (FA2 has no additive-bias entry point), but honours the policy's
+/// [`ScaleOn`], so a `FastStill` family's masked and unmasked segments agree
+/// on where the softmax scale is applied. Under [`AttentionPolicy::Image`]
+/// this is byte-for-byte [`attention_with_bias`].
+pub fn attention_with_bias_for(
+    policy: AttentionPolicy,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    bias: Option<&Tensor>,
+) -> Result<Tensor> {
+    let Some(bias) = bias else {
+        return attention_for(policy, q, k, v, scale);
+    };
+    let chunk = math_attention_chunk_size(q);
+    match scale_on_for(policy) {
+        ScaleOn::Scores => math_attention_biased_impl(q, k, v, scale, bias, chunk),
+        ScaleOn::Keys => {
+            math_attention_biased_impl(q, &(k * f64::from(scale))?, v, 1.0, bias, chunk)
+        }
+    }
 }
 
 /// Pure predicate so the dispatch is testable without a GPU.
@@ -1020,6 +1065,67 @@ mod tests {
 
     /// A `None` bias must be byte-for-byte the existing dispatch, so nothing
     /// that does not pad text changes behaviour.
+    /// `attention_with_bias_for` is the policy-carrying twin of
+    /// [`attention_with_bias`]. Unbiased calls must be exactly
+    /// [`attention_for`] under the same policy (flash wherever the policy and
+    /// the build take it); biased calls stay on math, but under the policy's
+    /// own scale placement, so a `FastStill` family's masked prefix folds the
+    /// scale into K exactly like its unmasked target does.
+    #[test]
+    fn attention_with_bias_for_follows_the_policy() {
+        let dev = cpu();
+        let (q, k, v) = rand_qkv((1, 2, 9, 16));
+        let scale = 1.0 / (16f32).sqrt();
+        for policy in [
+            AttentionPolicy::Image,
+            AttentionPolicy::Video,
+            AttentionPolicy::FastStill,
+        ] {
+            let plain = attention_for(policy, &q, &k, &v, scale).unwrap();
+            let unbiased = attention_with_bias_for(policy, &q, &k, &v, scale, None).unwrap();
+            assert_eq!(
+                max_abs_diff(&plain, &unbiased),
+                0.0,
+                "{policy:?}: an unbiased call must be attention_for itself"
+            );
+        }
+
+        let mut causal = Vec::with_capacity(9 * 9);
+        for query in 0..9 {
+            for key in 0..9 {
+                causal.push(if key <= query {
+                    0.0f32
+                } else {
+                    f32::NEG_INFINITY
+                });
+            }
+        }
+        let bias = Tensor::from_vec(causal, (1, 1, 9, 9), &dev).unwrap();
+        // The Image policy's biased arm is byte-for-byte today's
+        // `attention_with_bias`, which is what keeps every legacy caller
+        // (and Metal's biased prefix) unmoved.
+        let legacy = attention_with_bias(&q, &k, &v, scale, Some(&bias)).unwrap();
+        let image = attention_with_bias_for(AttentionPolicy::Image, &q, &k, &v, scale, Some(&bias))
+            .unwrap();
+        assert_eq!(max_abs_diff(&legacy, &image), 0.0);
+        // FastStill's biased arm is the same attention with the scale folded
+        // into K: equal within rounding, and exactly the Keys arithmetic.
+        let fast =
+            attention_with_bias_for(AttentionPolicy::FastStill, &q, &k, &v, scale, Some(&bias))
+                .unwrap();
+        assert!(max_abs_diff(&legacy, &fast) < 1e-5);
+        let keys = math_attention_biased_impl(
+            &q,
+            &(&k * f64::from(scale)).unwrap(),
+            &v,
+            1.0,
+            &bias,
+            math_attention_chunk_size(&q),
+        )
+        .unwrap();
+        assert_eq!(max_abs_diff(&keys, &fast), 0.0);
+    }
+
     #[test]
     fn attention_with_no_bias_matches_plain_attention() {
         let (q, k, v) = rand_qkv((1, 2, 8, 16));
@@ -1121,6 +1227,137 @@ mod tests {
             0.0,
             "a transposed view must give the kernel exactly what the copy did"
         );
+    }
+
+    /// The Qwen Image 2.1 segment-dispatch contract, pinned against the fork's
+    /// kernel: `flash_attn_windowed(q, k, v, scale, None, Some(0))` with
+    /// `q_len < kv_len` is BOTTOM-RIGHT causal — query row `i` sees keys
+    /// `0..=i + kv_len - q_len` (`kernels/mask.h`:
+    /// `row + max_seqlen_k - max_seqlen_q`) — which is "a text segment
+    /// `[s, e)` attends every key up to its own absolute position" when it is
+    /// called with `q[s..e]` against `k[0..e]`. Also pins `flash_attn_varlen`
+    /// (packed `[total, H, D]`, U32 cumulative lengths) against per-sample
+    /// dense calls, which is how padded CFG batches are dispatched. Skips
+    /// without a CUDA device (CI has none).
+    #[test]
+    #[cfg(feature = "flash-attn")]
+    fn flash_windowed_causal_is_bottom_right_and_varlen_matches_dense() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (heads, d) = (4usize, 128usize);
+        let scale = 1.0 / (d as f32).sqrt();
+        let bf16 = |shape: (usize, usize, usize, usize)| {
+            Tensor::randn(0f32, 1.0, shape, &device)
+                .and_then(|t| t.to_dtype(DType::BF16))
+                .unwrap()
+        };
+        // A text segment [s, e) = [37, 101) of a 101-key prefix.
+        let (start, end) = (37usize, 101usize);
+        let q_all = bf16((1, heads, end, d));
+        let k = bf16((1, heads, end, d));
+        let v = bf16((1, heads, end, d));
+        let q = q_all
+            .narrow(2, start, end - start)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+
+        let flash = candle_flash_attn::flash_attn_windowed(
+            &to_flash_layout(&q).unwrap(),
+            &to_flash_layout(&k).unwrap(),
+            &to_flash_layout(&v).unwrap(),
+            scale,
+            None,
+            Some(0),
+        )
+        .unwrap()
+        .transpose(1, 2)
+        .unwrap();
+
+        // Math reference in F32 with an explicit absolute-position mask.
+        let q_len = end - start;
+        let mut mask = Vec::with_capacity(q_len * end);
+        for row in 0..q_len {
+            for key in 0..end {
+                mask.push(if key <= start + row {
+                    0f32
+                } else {
+                    f32::NEG_INFINITY
+                });
+            }
+        }
+        let bias = Tensor::from_vec(mask, (1, 1, q_len, end), &device).unwrap();
+        let f32 = |t: &Tensor| t.to_dtype(DType::F32).unwrap();
+        let reference =
+            math_attention_biased_impl(&f32(&q), &f32(&k), &f32(&v), scale, &bias, None).unwrap();
+        let err = max_abs_diff(&f32(&flash), &reference);
+        assert!(err < 2e-2, "bottom-right causal flash diverged by {err}");
+        // And it is NOT top-left causal: the first query row sees 38 keys.
+        let top_left = candle_flash_attn::flash_attn_windowed(
+            &to_flash_layout(&q).unwrap(),
+            &to_flash_layout(&k.narrow(2, 0, q_len).unwrap().contiguous().unwrap()).unwrap(),
+            &to_flash_layout(&v.narrow(2, 0, q_len).unwrap().contiguous().unwrap()).unwrap(),
+            scale,
+            None,
+            Some(0),
+        )
+        .unwrap()
+        .transpose(1, 2)
+        .unwrap();
+        assert!(max_abs_diff(&f32(&top_left), &reference) > 1e-1);
+
+        // Varlen: two samples with different key lengths, packed.
+        let (q_lens, k_lens) = ([48usize, 64], [80usize, 112]);
+        let qs: Vec<Tensor> = q_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let ks: Vec<Tensor> = k_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let vs: Vec<Tensor> = k_lens.iter().map(|&n| bf16((1, heads, n, d))).collect();
+        let pack = |ts: &[Tensor]| {
+            let rows: Vec<Tensor> = ts
+                .iter()
+                .map(|t| t.squeeze(0).unwrap().transpose(0, 1).unwrap())
+                .collect();
+            Tensor::cat(&rows, 0).unwrap().contiguous().unwrap()
+        };
+        let cu = |lens: &[usize]| {
+            let mut acc = vec![0u32];
+            for &n in lens {
+                acc.push(acc.last().unwrap() + n as u32);
+            }
+            Tensor::from_vec(acc, lens.len() + 1, &device).unwrap()
+        };
+        let packed = candle_flash_attn::flash_attn_varlen(
+            &pack(&qs),
+            &pack(&ks),
+            &pack(&vs),
+            &cu(&q_lens),
+            &cu(&k_lens),
+            64,
+            112,
+            scale,
+            false,
+        )
+        .unwrap();
+        let mut offset = 0;
+        for i in 0..2 {
+            let dense = candle_flash_attn::flash_attn(
+                &to_flash_layout(&qs[i]).unwrap(),
+                &to_flash_layout(&ks[i]).unwrap(),
+                &to_flash_layout(&vs[i]).unwrap(),
+                scale,
+                false,
+            )
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+            let slice = packed.narrow(0, offset, q_lens[i]).unwrap();
+            assert_eq!(
+                max_abs_diff(&f32(&slice), &f32(&dense)),
+                0.0,
+                "varlen sample {i} must equal its dense call"
+            );
+            offset += q_lens[i];
+        }
     }
 
     /// FA2 rejects a head dim that is not a multiple of 8, or above 512.
@@ -1398,7 +1635,7 @@ mod tests {
     /// arithmetic from the one that runs.
     #[test]
     fn flux_families_take_the_fast_still_policy() {
-        for family in ["flux", "flux2"] {
+        for family in ["flux", "flux2", "qwen-image21"] {
             assert_eq!(
                 policy_for_family(family),
                 AttentionPolicy::FastStill,
