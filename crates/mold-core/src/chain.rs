@@ -937,6 +937,7 @@ impl ChainRequest {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            transparent_background: None,
         }
     }
 

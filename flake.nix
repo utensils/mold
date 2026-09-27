@@ -1343,8 +1343,10 @@
               pkgs.lld
               pkgs.wget
               pkgs.xdg-utils
-              pkgs.cudaPackages.cuda_nvcc
-              pkgs.cudaPackages.cuda_cudart
+              # The merged toolkit, not `cuda_nvcc` and `cuda_cudart` side by
+              # side: both ship a top-level `LICENSE`, and the devshell's
+              # `buildEnv` refuses that collision where `symlinkJoin` does not.
+              cudaToolkit
               pkgs.cudaPackages.libcublas.lib
               pkgs.cudaPackages.cuda_nvtx.lib
               pkgs.cudaPackages.cuda_nvrtc.lib

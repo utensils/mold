@@ -1,6 +1,6 @@
 {
   "schema": "mold.flux2.reference-parity.v1",
-  "comment": "Shared reference-image (edit_images) expectations per model tier. The Rust test `flux2_reference_parity_fixture_pins_every_surface` in crates/mold-core/src/generation_profile.rs and the browser test studio/lib/flux2ReferenceParity.test.ts both read this file, so a drift between the server's advertised `capabilities.reference_images` and any client's presentation fails CI. Additive: new tiers join as new rows; new per-row keys join without touching existing ones. Mirrors the wan surface-parity fixture precedent (#806).",
+  "comment": "Shared reference-image (edit_images) expectations per model tier. The Rust test `flux2_reference_parity_fixture_pins_every_surface` in crates/mold-core/src/generation_profile.rs and the browser test studio/lib/flux2ReferenceParity.test.ts both read this file, so a drift between the server's advertised `capabilities.reference_images` and any client's presentation fails CI. Additive: new tiers join as new rows; new per-row keys join without touching existing ones (`canvas` and `formats` are optional per row and, when present, pinned exactly). Mirrors the wan surface-parity fixture precedent (#806).",
   "source_relation_meaning": {
     "replaces": "References replace the source image; `source_image`, `mask_image`, and ControlNet inputs are refused whether or not references are attached.",
     "exclusive": "The recipe renders from a source image OR from references, never both in one pass; the img2img fields are refused only once references are attached.",
@@ -56,6 +56,198 @@
       "primary_is_target": false,
       "source_relation": "replaces",
       "comment": "FLUX.1 [dev] has no reference protocol today (Kontext is a separate checkpoint, filed as its own PR). A hidden block is the control's absence with a sentence attached, never a client-side guess."
+    },
+    {
+      "model": "qwen-image-2.1:bf16",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Qwen Image 2.1: one image-conditioned path for edit and multi-reference, up to 10 ordered references (model card). No image is special and the canvas is a picked size; the LAST reference only sets a client's default aspect (canvas: last-reference). The only recipe accepting WebP references, and references are never flattened. The contract is the family's, so every quantized and turbo tier carries it unchanged."
+    },
+    {
+      "model": "qwen-image-2.1:int8-conv",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:fp8",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q8",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q6",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q5",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q4",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q3",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1:q2",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1-turbo:bf16",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1-turbo:int8-conv",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
+    },
+    {
+      "model": "qwen-image-2.1-turbo:q8",
+      "family": "qwen-image21",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 10,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "canvas": "last-reference",
+      "formats": [
+        "png",
+        "jpeg",
+        "webp"
+      ],
+      "comment": "Same family contract as qwen-image-2.1:bf16 — the tier changes the transformer's storage, never the reference protocol."
     }
   ]
 }

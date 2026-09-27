@@ -60,6 +60,7 @@ fn save_tensors(path: &Path, tensors: &[OwnedF32]) -> Result<()> {
 
 /// Opt-in, real-checkpoint Metal qualification harness. It writes benchmark
 /// artifacts only beneath QWEN_IMAGE21_BENCH_OUTPUT and never downloads data.
+#[cfg(feature = "metal")]
 #[test]
 #[ignore = "requires installed Qwen Image 2.1 weights and an idle Metal GPU"]
 fn official_metal_mode_benchmark() -> Result<()> {
@@ -273,3 +274,8 @@ fn official_metal_mode_benchmark() -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+mod cuda;
+#[cfg(feature = "cuda")]
+mod cuda_adaln;

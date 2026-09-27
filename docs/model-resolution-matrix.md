@@ -34,17 +34,17 @@ Candidates: `1328x1328`, `1664x928`, `928x1664`, `1472x1104`, `1104x1472`, `1584
 
 ### `qwen-image21`
 
-Status: qualified `true`. Evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery`.
+Status: qualified `true`. Evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery; the seven 2K presets are the pinned README's Supported Aspect Ratios table, admitted by the family's 2400x1792 / 2752 px ceilings, with CUDA renders recorded in docs/qualification/qwen-image-2.1-cuda-performance.json`.
 
-Pinned source: [https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`.
+Pinned source: [https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/README.md](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/README.md) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`.
 
-Candidates: `1024x1024`.
+Candidates: `1024x1024`, `2048x2048`, `2400x1792`, `1792x2400`, `2528x1696`, `1696x2528`, `2752x1536`, `1536x2752`.
 
 ## `flux`
 
 ### Profile `flux.flux-dev`
 
-Schema 1 · hash `bf32344cec3ad67332eed9b1e5bb11622e2ed2ae7072d196406aa6a299f7caf3` · default recipe `default`
+Schema 1 · hash `4740de82d34c3bdcaa23168784c6ee6e5fcebe99154f42024a070951b73682e8` · default recipe `default`
 
 Models: `flux-dev:bf16`, `flux-dev:q4`, `flux-dev:q6`, `flux-dev:q8`.
 
@@ -66,7 +66,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux.flux-krea`
 
-Schema 1 · hash `83374ae9ef8e53ad85707ff87a23fc149c54266e2dcd4eea58e92804d13601a5` · default recipe `default`
+Schema 1 · hash `4714842c109eafab97fada4e6dad4279b8ad9f30faab047df5c070cc34ccda5b` · default recipe `default`
 
 Models: `flux-krea:fp8`, `flux-krea:q4`, `flux-krea:q6`, `flux-krea:q8`.
 
@@ -88,7 +88,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux.flux-schnell`
 
-Schema 1 · hash `c0dd8ba4e2134d9d0f0b5b4b0f41e4e8f4f3a52fd048d8c7f635af3584076244` · default recipe `default`
+Schema 1 · hash `50aefca74a84d2a75ae693eba4d6488beaf9e92e77c886250d94aaf53960d799` · default recipe `default`
 
 Models: `flux-schnell:bf16`, `flux-schnell:q4`, `flux-schnell:q6`, `flux-schnell:q8`.
 
@@ -110,7 +110,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `iniverse-mix:fp8`
 
-Schema 1 · hash `c611fcf75dc4c8f8ec6dfc580958e14a2ca7766c9e013e3f706d78276a826523` · default recipe `default`
+Schema 1 · hash `70019dc5913e1064364dd90146eb39bad63111ad2e0d7486d40ac0a0cab01f50` · default recipe `default`
 
 Models: `iniverse-mix:fp8`.
 
@@ -132,7 +132,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux.jibmix-flux`
 
-Schema 1 · hash `14aebd1e2e861690bc6ca7e4e64ed0d91dddbcb5c93cef3bcd42fbddd671809d` · default recipe `default`
+Schema 1 · hash `3baf2af99220ba380bfc93c217bdb712feb4d3b644d202f5f0c5af564553c4e7` · default recipe `default`
 
 Models: `jibmix-flux:fp8`, `jibmix-flux:q3`, `jibmix-flux:q4`, `jibmix-flux:q5`.
 
@@ -154,7 +154,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `ultrareal-v2:bf16`
 
-Schema 1 · hash `5666c347a30caa7be933739f557e69daf4eb55859d5b24f474f384b621dc72e7` · default recipe `default`
+Schema 1 · hash `4269d8b1a656183f11828a777be2dfd4991c2e0b6f41e6467d7e1031f37a5d81` · default recipe `default`
 
 Models: `ultrareal-v2:bf16`.
 
@@ -176,7 +176,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux.ultrareal-v3`
 
-Schema 1 · hash `353987b796225a5ff8237fb2d45487a2b23a6648f9b6b28f88577cce1de593c0` · default recipe `default`
+Schema 1 · hash `90f17885f5d8a48c9cdb28a2f108e0829e1187d3afaa06e4328e18afb320a12c` · default recipe `default`
 
 Models: `ultrareal-v3:q4`, `ultrareal-v3:q6`, `ultrareal-v3:q8`.
 
@@ -198,7 +198,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux.ultrareal-v4`
 
-Schema 1 · hash `a46d97161803b30558fc27b05685afcd83a0bd37755bbebc3999aea4e5801c85` · default recipe `default`
+Schema 1 · hash `f3b26cbcc0ad55bc7d32457a59419223b65340345885eb14ca44bc62e64e186e` · default recipe `default`
 
 Models: `ultrareal-v4:q4`, `ultrareal-v4:q5`, `ultrareal-v4:q8`.
 
@@ -222,7 +222,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux2.flux2-dev`
 
-Schema 1 · hash `2324515924d1a28c495a763b5aa6f1989d214c57adc9571f164e49c0999c6820` · default recipe `default`
+Schema 1 · hash `70ed3e3a5f49dbb40aac5c607b9efe06b809ffc307ea2f19b84c9637982b8bfa` · default recipe `default`
 
 Models: `flux2-dev:bf16`, `flux2-dev:fp8`, `flux2-dev:q4`, `flux2-dev:q6`, `flux2-dev:q8`.
 
@@ -244,7 +244,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux2.flux2-klein-9b`
 
-Schema 1 · hash `8308f50ffb56027ce8ba31a79c46fa2b7e5cea413f2de8098ad3a6e4a6bc7889` · default recipe `default`
+Schema 1 · hash `a4f312cc0f1fb14a50c5f0714e05f025e754c561dd0878b7629090dea2b880ae` · default recipe `default`
 
 Models: `flux2-klein-9b:bf16`, `flux2-klein-9b:q4`, `flux2-klein-9b:q6`, `flux2-klein-9b:q8`.
 
@@ -266,7 +266,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `flux2-klein-9b:fp8`
 
-Schema 1 · hash `30ed4cf5c6bfbe97a7633b11bcf9d921882c70f525615d693e9120bf48abadec` · default recipe `default`
+Schema 1 · hash `c997c746f8b56154e63e880019b88013933c00f79280d45303b8b9b44fa28577` · default recipe `default`
 
 Models: `flux2-klein-9b:fp8`.
 
@@ -288,7 +288,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux2.flux2-klein-base-9b`
 
-Schema 1 · hash `c60cbf75a3d8951ffb65bab1d0f9de0055b88646dbb6608e2e5905d3b821d5d5` · default recipe `default`
+Schema 1 · hash `e681480a14356ae7fffe4ebf15a4b198a93c498335bef955efb1089a44d98bfb` · default recipe `default`
 
 Models: `flux2-klein-base-9b:bf16`, `flux2-klein-base-9b:q4`, `flux2-klein-base-9b:q6`, `flux2-klein-base-9b:q8`.
 
@@ -310,7 +310,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux2.flux2-klein-base`
 
-Schema 1 · hash `eaba3e104ff20100f1807b2a084971eac7da1e4d257e94116e5160c63888653b` · default recipe `default`
+Schema 1 · hash `9de1bb315044679c0883cf3727ea4a8ca24bded52184f1d5290c3901248b7ada` · default recipe `default`
 
 Models: `flux2-klein-base:bf16`, `flux2-klein-base:q4`, `flux2-klein-base:q6`, `flux2-klein-base:q8`.
 
@@ -332,7 +332,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `flux2.flux2-klein`
 
-Schema 1 · hash `cd7699689e9e0a0795b29b256392f08f71f810a1ac05df9750e57ac6ca477e8f` · default recipe `default`
+Schema 1 · hash `e2bcb1c9d4db20e0603be690baf765388fcaa84f260449b6e0765bc527d36ef7` · default recipe `default`
 
 Models: `flux2-klein:bf16`, `flux2-klein:q4`, `flux2-klein:q6`, `flux2-klein:q8`.
 
@@ -354,7 +354,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `flux2-klein:fp8`
 
-Schema 1 · hash `a18fdb5e1de1880244c118ffad9be8f9c977f277413bbbe123eaa83089f01d5a` · default recipe `default`
+Schema 1 · hash `9289ed9e303ff4683819cfd6f1371dec5151ac08f4751a36ac175a29bb1508db` · default recipe `default`
 
 Models: `flux2-klein:fp8`.
 
@@ -378,7 +378,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-2.1:fp16`
 
-Schema 1 · hash `c5157f1c3eaacc6f3c1fbd5bd882c51a49ed0abbaf037b0ff47192795e57c3e9` · default recipe `default`
+Schema 1 · hash `025f1e4251c9286efca3a9651389b9b3792e0f9b6dd26f1c05998938c29eb98c` · default recipe `default`
 
 Models: `hunyuan3d-2.1:fp16`.
 
@@ -393,7 +393,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-2mv-turbo:fp16`
 
-Schema 1 · hash `80d8ec97568c9e0a92b82331845edaa9ca9a4bad420bb638251c2277c0b78f10` · default recipe `default`
+Schema 1 · hash `9be5cd3bd03cc237a2f1f2c579247503a0af4c5286592a5d9bcb79ae0f9606da` · default recipe `default`
 
 Models: `hunyuan3d-2mv-turbo:fp16`.
 
@@ -408,7 +408,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-2mv:fp16`
 
-Schema 1 · hash `d2af81f2d152f61cf42f499114c07856c1b6deaa65143db87378c380a45bfa0f` · default recipe `default`
+Schema 1 · hash `c0b49ff8e689abaa8ea8db8117ede84919edadcce4a65ad28daf5ff14fa4210d` · default recipe `default`
 
 Models: `hunyuan3d-2mv:fp16`.
 
@@ -423,7 +423,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-mini-turbo:fp16`
 
-Schema 1 · hash `c8dbfa11c17b2bfb9b693c0b48b0b6a327b08cbd0ce714029638a4e61d361b4f` · default recipe `default`
+Schema 1 · hash `689694b850dd79be21e296fe115566a5421b483cb8bddfe9f6570d10aa588690` · default recipe `default`
 
 Models: `hunyuan3d-mini-turbo:fp16`.
 
@@ -438,7 +438,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-turbo:fp16`
 
-Schema 1 · hash `23d1bf719b0815f720ec83053bb120f1ae8e39f2b60db44ca78450168f053c37` · default recipe `default`
+Schema 1 · hash `4644c9a2528e394fbe1c260aa49a00e9f9fa4abcda8fa2aa605f769e85637158` · default recipe `default`
 
 Models: `hunyuan3d-turbo:fp16`.
 
@@ -453,7 +453,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d:fp16`
 
-Schema 1 · hash `4d4203ac44acd60dd226af6499e6e498c47e1c74ccacd223223cc4afb3cb7314` · default recipe `default`
+Schema 1 · hash `964cb19926ff179d465c9299fa20405ca36d4b924ffc5bd664c79cece5cbb0e4` · default recipe `default`
 
 Models: `hunyuan3d:fp16`.
 
@@ -470,7 +470,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-delight:fp16`
 
-Schema 1 · hash `5d08077eb9856705a70d112416f74081a2fe595ab28a26deefffdd20cd6bf1dc` · default recipe `default`
+Schema 1 · hash `5e06bdc4acaca8c9b36b0322c99f12c49d3cd693e980055bc245e31a9927abae` · default recipe `default`
 
 Models: `hunyuan3d-delight:fp16` (policy-hidden).
 
@@ -487,7 +487,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `hunyuan3d-matting.hunyuan3d-matting`
 
-Schema 1 · hash `a5bb98788a3138c7bab8fd03f403e43a954f9cabf2ad16cddb7013dececb0643` · default recipe `default`
+Schema 1 · hash `dc45567d418511e6e70211826edbe52d6332dae53e5cfd31e01d15adf698a894` · default recipe `default`
 
 Models: `hunyuan3d-matting` (policy-hidden), `hunyuan3d-matting:on` (policy-hidden).
 
@@ -504,7 +504,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `ltx-video-0.9.6-distilled:bf16`
 
-Schema 1 · hash `b6bc4dc2d9563cea26f38a5d85f9d1ec319caaf37167788b07cb845d74445aee` · default recipe `default`
+Schema 1 · hash `dbd96f4279382be496c95aa0e36a0abe9cdd8352ca3bdc7250e5dd683732a633` · default recipe `default`
 
 Models: `ltx-video-0.9.6-distilled:bf16`.
 
@@ -529,7 +529,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.6:bf16`
 
-Schema 1 · hash `b986e64a1c2742b924bf3f8317c9e5cc225a4bda95bbfca7b3a349d93aa30c3c` · default recipe `default`
+Schema 1 · hash `d58f2d716ca7b5efc143765b5badc8def41e97e308457866c8bc9e450b5ddb47` · default recipe `default`
 
 Models: `ltx-video-0.9.6:bf16`.
 
@@ -554,7 +554,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-13b-dev:bf16`
 
-Schema 1 · hash `d3c901e30af58f749842cf477cd3b10d62ea59d4b13da7585ae56e535d89e021` · default recipe `default`
+Schema 1 · hash `5104d0c05ca8b2810a554e78ae5352b0ca8fbf256519bb7cb49c05f0179f162b` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-dev:bf16`.
 
@@ -579,7 +579,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-13b-distilled:bf16`
 
-Schema 1 · hash `039225151a728ca3d82ee16eec13bb685ae27c5e7f66189ebedac76c93498bde` · default recipe `default`
+Schema 1 · hash `063973b6ddaf0b143e514a9d0ea2879320460f96daa92d234f1330884ec92793` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 
@@ -604,7 +604,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-2b-distilled:bf16`
 
-Schema 1 · hash `74cd653522d9a0825a4d643a524ecf95e5be084bb49f8f57a62e812e71e20e4c` · default recipe `default`
+Schema 1 · hash `e8b57fdcaa70a5ca197adb51d4a1d9b1e8fd122809cc9aebd563be0f20980056` · default recipe `default`
 
 Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 
@@ -631,7 +631,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-2-19b-dev:fp8`
 
-Schema 1 · hash `d2ac373ed246cc0ebb1d2d717eb489d054ce3ce09126e1f25d971e343786b7ef` · default recipe `auto`
+Schema 1 · hash `29da7e4fb5bd9806a8d46602a1aecf5abef2022fefbf3693aef81a51f0810f8f` · default recipe `auto`
 
 Models: `ltx-2-19b-dev:fp8`.
 
@@ -874,7 +874,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### `ltx-2-19b-distilled:fp8`
 
-Schema 1 · hash `11b56709f2ea08b827799c742a64a465d01983859b0078b874a0406ba0506115` · default recipe `auto`
+Schema 1 · hash `4821fb2db46c9233a7c3474eaa7aed565f4cefdbe0e56aae9d65c2ee211a6f6e` · default recipe `auto`
 
 Models: `ltx-2-19b-distilled:fp8`.
 
@@ -1117,7 +1117,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.3-22b-dev`
 
-Schema 1 · hash `27ff09887e8583af4ac905e1a9ada22b4d12794b44a2832d724467c92acac0d6` · default recipe `auto`
+Schema 1 · hash `52024aebfa32e9e44c5d7e5145fd4bf7325a83face413dd0b3d5c5c3ca2d09d4` · default recipe `auto`
 
 Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 
@@ -1360,7 +1360,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.3-22b-distilled`
 
-Schema 1 · hash `82c4c882bf10dece624b6bcd83dfa1b7519af23f4a5f6513006a83f198060c51` · default recipe `auto`
+Schema 1 · hash `ca33f2bb29875ac5615dc8757f9d3543037da78c50f8e0d6cefca16830e72b10` · default recipe `auto`
 
 Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 
@@ -1603,7 +1603,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.5-22b-dev`
 
-Schema 1 · hash `a3dd42b26b8147d3bd38b7c4455ceb01dae1c1cede2f056d0a67baaac3210ed5` · default recipe `auto`
+Schema 1 · hash `c429f1171cdda8d16264725510f38cb783e9b3848493b837264b67bec1b55b5e` · default recipe `auto`
 
 Models: `ltx-2.5-22b-dev:bf16`, `ltx-2.5-22b-dev:bf16-conv`, `ltx-2.5-22b-dev:int8-conv`.
 
@@ -1846,7 +1846,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.5-22b-distilled`
 
-Schema 1 · hash `1b016169f4c558dc8f622ad33085eaa790fba914fe0b9f7ec6220a6f63d19336` · default recipe `auto`
+Schema 1 · hash `760a451c3f2cc3400236b5733950bb53b1711d9d70daca034d872c43e580826f` · default recipe `auto`
 
 Models: `ltx-2.5-22b-distilled:bf16`, `ltx-2.5-22b-distilled:bf16-conv`, `ltx-2.5-22b-distilled:int8-conv`, `ltx-2.5-22b-distilled:q3`, `ltx-2.5-22b-distilled:q3-k-s`, `ltx-2.5-22b-distilled:q4`, `ltx-2.5-22b-distilled:q4-k-s`, `ltx-2.5-22b-distilled:q5`, `ltx-2.5-22b-distilled:q6`, `ltx-2.5-22b-distilled:q8`.
 
@@ -2091,7 +2091,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `e163794620e6bace740cbe0dd7396686146edb27bdda420ab437570195ee1115` · default recipe `default`
+Schema 1 · hash `de703b5969b2b7891bb9d65bdab5fa4c7543b578ff9475dd65663d953c3421fd` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
@@ -2115,7 +2115,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `ed62c7cb4525ab8aa35e23840fce6cdd1c4f4b6267b65b3e8d42d367b11f5584` · default recipe `default`
+Schema 1 · hash `42da523dd42783792cd0221f3ffaadb9803e77e8ce772cfc13bd6a9709a14c77` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
 
@@ -2139,7 +2139,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `c47b4d7d8d293c191b2090a804b926fe940bdbc6210f95a0ef9ee44c1a5d9a0b` · default recipe `default`
+Schema 1 · hash `20442d12e6519fd2b450050ca2f1ff83e57f8f57216fccc7a0fe2b5802465201` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
 
@@ -2163,7 +2163,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:official-bf16`
 
-Schema 1 · hash `a3c888a5261321d0d939a657af6a8b269f849da70f5990b64545f47b7afa3f43` · default recipe `default`
+Schema 1 · hash `38c99ca8527c9b23728efb12eacc2fe9d13afa88ce6d2945df9fd2c71724c5b0` · default recipe `default`
 
 Models: `minimax-h3-fl2va:official-bf16`.
 
@@ -2187,7 +2187,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `ec901ef5d0cc36f87e744d9fc4d8fe370b36251f73632410de1f20095a17ec2e` · default recipe `default`
+Schema 1 · hash `c64e7c65771474603efd72e6b0944323f125b88217694cedc3ec0b08965d625a` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
@@ -2211,7 +2211,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `b53f9d167a425c2a2d717e5cfc44f8603245446cef0bce747c41e9d988514773` · default recipe `default`
+Schema 1 · hash `753edfd5f713556b3a49cb31b87e922164f36701c16424d781283e2cafb35848` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`.
 
@@ -2235,7 +2235,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-ref2va:official-bf16`
 
-Schema 1 · hash `cb892cc3de0257c757ea0586ed7e14c55c30af538a378f79201c994e27147e76` · default recipe `default`
+Schema 1 · hash `2a11dcba11625af781cef18551d9fbe7ede66828b815805b49f4545cfd901f26` · default recipe `default`
 
 Models: `minimax-h3-ref2va:official-bf16`.
 
@@ -2261,7 +2261,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `qwen-image.qwen-image-2512`
 
-Schema 1 · hash `d83c09a779ac1332903df37630c38b0e9b49e0bde8b516b562615e41805a7c27` · default recipe `default`
+Schema 1 · hash `687222646fc530ef2afa2f5b0c0984a1b0bced91a2163c5d9c24a5586de6bf82` · default recipe `default`
 
 Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwen-image-2512:q4`, `qwen-image-2512:q5`, `qwen-image-2512:q6`, `qwen-image-2512:q8`.
 
@@ -2285,7 +2285,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### Profile `qwen-image.qwen-image-distill`
 
-Schema 1 · hash `a3156684b23fc06bab3966298c4b250381757e1ebcf1976b4e4a2e4c44ee7875` · default recipe `default`
+Schema 1 · hash `e6182657f4422686d1505dea6e214a6b6675adda6915c44970255b2654d2228e` · default recipe `default`
 
 Models: `qwen-image-distill:q4`, `qwen-image-distill:q8`.
 
@@ -2309,7 +2309,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### Profile `qwen-image.qwen-image-flash`
 
-Schema 1 · hash `d97504c49ff5f84f14516bad7545c4c9bf84613e8f1b3970f4110474b717c08d` · default recipe `default`
+Schema 1 · hash `3bfbd891309287fb467f0dbe1bb32f5fd385f52accc907b0d1b4d06ac01387fa` · default recipe `default`
 
 Models: `qwen-image-flash:q4`, `qwen-image-flash:q8`.
 
@@ -2333,7 +2333,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### `qwen-image-lightning:fp8`
 
-Schema 1 · hash `a1509f329ca4837364d8b34cddcbc4cced88ecbe8fe7f3e15d72dc7fd39e954b` · default recipe `default`
+Schema 1 · hash `dd914498cea5c387c9e52dc98194c8ae81ca2363536892c90deb0eca0b6480c8` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8`.
 
@@ -2357,7 +2357,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### `qwen-image-lightning:fp8-8step`
 
-Schema 1 · hash `259bbe90a946bf8d047da560f80dae565463c79c6ac3400c735c3d0ae288a8c6` · default recipe `default`
+Schema 1 · hash `33b6f405b5f73ad05fb6df8d23f9bc280fdff6f17a03befb9ec8427501cf6af9` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8-8step`.
 
@@ -2381,7 +2381,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### Profile `qwen-image.qwen-image`
 
-Schema 1 · hash `c9b0aee0d4f3e8cfc1d42b6305cc2612618889fafb8eb66e955786ab2dcce3b5` · default recipe `default`
+Schema 1 · hash `0591695103fefd1b326034272e4275fd80f9a300a3786c6b92cd25ec806153de` · default recipe `default`
 
 Models: `qwen-image:bf16`, `qwen-image:fp8`, `qwen-image:q2`, `qwen-image:q3`, `qwen-image:q4`, `qwen-image:q5`, `qwen-image:q6`, `qwen-image:q8`.
 
@@ -2407,7 +2407,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### Profile `qwen-image-edit.qwen-image-edit-2511`
 
-Schema 1 · hash `df0905ecfd061f42d4acc14bc12b87dfafdc4818910820bd151e920d0459051d` · default recipe `default`
+Schema 1 · hash `2ef299d14ad1cfa555dcf93a9bd1230237e369b59dc62a548d7e7990897ec7d5` · default recipe `default`
 
 Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit-2511:q3`, `qwen-image-edit-2511:q4`, `qwen-image-edit-2511:q5`, `qwen-image-edit-2511:q6`, `qwen-image-edit-2511:q8`.
 
@@ -2432,7 +2432,7 @@ Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified:
 
 ### `qwen-image-edit-lightning:fp8`
 
-Schema 1 · hash `369011e632c7ac4343a4b6e89eb2d1ebc3060c2dfd8652f3b02b2fcab3ee9bb0` · default recipe `default`
+Schema 1 · hash `52d886af8018a447770a3a8e062abae86ff42a046c13120744048cd5d0157e37` · default recipe `default`
 
 Models: `qwen-image-edit-lightning:fp8`.
 
@@ -2457,29 +2457,59 @@ Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified:
 
 ## `qwen-image21`
 
-### `qwen-image-2.1:bf16`
+### Profile `qwen-image21.qwen-image-2.1-turbo`
 
-Schema 1 · hash `2a8d20c0be7a116109db8e1514ee510a141a5dc3ad38c9979d5e199ed2a85f0a` · default recipe `default`
+Schema 1 · hash `2d1566c339757e2941b046c002b6b0cd9a606795aafbdb7bdba4709540afdd2e` · default recipe `default`
 
-Models: `qwen-image-2.1:bf16`.
+Models: `qwen-image-2.1-turbo:bf16`, `qwen-image-2.1-turbo:int8-conv`, `qwen-image-2.1-turbo:q8`.
 
 #### Default (`default`)
 
-- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `4300800` pixels; axis limit `2752`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 6 steps, guidance 1.
+- Steps: 6–6 by 1; guidance: 1–1 by 0.1 (Fixed).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `1024x1024` (recommended), `2048x2048` (recommended) |
+| `4:3` | `1184x896` (recommended), `2400x1792` (recommended) |
+| `3:4` | `896x1184` (recommended), `1792x2400` (recommended) |
+| `3:2` | `1248x832` (recommended), `2528x1696` (recommended) |
+| `2:3` | `832x1248` (recommended), `1696x2528` (recommended) |
+| `16:9` | `1376x768` (recommended), `2752x1536` (recommended) |
+| `9:16` | `768x1376` (recommended), `1536x2752` (recommended) |
+
+Provenance: [Upstream](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/README.md) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`, qualified: `true`, evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery; the seven 2K presets are the pinned README's Supported Aspect Ratios table, admitted by the family's 2400x1792 / 2752 px ceilings, with CUDA renders recorded in docs/qualification/qwen-image-2.1-cuda-performance.json`; MoldPolicy `Mold ~1 MP Qwen Image 2.1 aspect presets`, qualified: `true`, evidence: `6 Mold-chosen ~1 MP presets (1184x896, 896x1184, 1248x832, 832x1248, 1376x768, 768x1376) keep the 2K table's aspects at the default area on the 32 px grid; not published upstream`.
+
+### Profile `qwen-image21.qwen-image-2.1`
+
+Schema 1 · hash `2748fc83dd51586a31203943f80786af085e9e11f2efe5f5cc1397a0cc3f7615` · default recipe `default`
+
+Models: `qwen-image-2.1:bf16`, `qwen-image-2.1:fp8`, `qwen-image-2.1:int8-conv`, `qwen-image-2.1:q2`, `qwen-image-2.1:q3`, `qwen-image-2.1:q4`, `qwen-image-2.1:q5`, `qwen-image-2.1:q6`, `qwen-image-2.1:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `4300800` pixels; axis limit `2752`; aspect range `unbounded`.
 - Defaults: `1024x1024`, 40 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
 
 | Exact ratio | Qualified presets |
 |---|---|
-| `1:1` | `1024x1024` (recommended) |
+| `1:1` | `1024x1024` (recommended), `2048x2048` (recommended) |
+| `4:3` | `1184x896` (recommended), `2400x1792` (recommended) |
+| `3:4` | `896x1184` (recommended), `1792x2400` (recommended) |
+| `3:2` | `1248x832` (recommended), `2528x1696` (recommended) |
+| `2:3` | `832x1248` (recommended), `1696x2528` (recommended) |
+| `16:9` | `1376x768` (recommended), `2752x1536` (recommended) |
+| `9:16` | `768x1376` (recommended), `1536x2752` (recommended) |
 
-Provenance: [Upstream](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`, qualified: `true`, evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery`.
+Provenance: [Upstream](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/README.md) at `b3179ad355be050328e483a9dfdd9e60cd62adfa`, qualified: `true`, evidence: `docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery; the seven 2K presets are the pinned README's Supported Aspect Ratios table, admitted by the family's 2400x1792 / 2752 px ceilings, with CUDA renders recorded in docs/qualification/qwen-image-2.1-cuda-performance.json`; MoldPolicy `Mold ~1 MP Qwen Image 2.1 aspect presets`, qualified: `true`, evidence: `6 Mold-chosen ~1 MP presets (1184x896, 896x1184, 1248x832, 832x1248, 1376x768, 768x1376) keep the 2K table's aspects at the default area on the 32 px grid; not published upstream`.
 
 ## `sd15`
 
 ### `dreamshaper-v8:fp16`
 
-Schema 1 · hash `5807024a48d7eaa5f2cc7d492069d529102efec9a403075a6710f68c1edabe5f` · default recipe `default`
+Schema 1 · hash `8f24875c04ac3ffc29898b0678d8d09f43982ddfb06ab6d40a50d660ecc46c95` · default recipe `default`
 
 Models: `dreamshaper-v8:fp16`.
 
@@ -2501,7 +2531,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realistic-vision-v5:fp16`
 
-Schema 1 · hash `abfc6032f8723f6f684bdd3147270535f9ce3a9871ba21d0bd0a64e8a93c01e4` · default recipe `default`
+Schema 1 · hash `1bff0556b06b85fddde9c432cac4837e38c68f8b004d1b193b096242ff1fcf1f` · default recipe `default`
 
 Models: `realistic-vision-v5:fp16`.
 
@@ -2523,7 +2553,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sd15:fp16`
 
-Schema 1 · hash `f84d8c84eaa9c4327f1076dd504bdcc07e708b9476a3e6bda8aa9513b055ca5b` · default recipe `default`
+Schema 1 · hash `4be701f043b322a482c839caaf8315c48ace39128c39ace3e57572c5370011aa` · default recipe `default`
 
 Models: `sd15:fp16`.
 
@@ -2547,7 +2577,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sd3.5-large-turbo:q8`
 
-Schema 1 · hash `aa8a252bef8cd2e079ea9ead7eb196254b9003bfaa1f0c638a69d94ae504e8b9` · default recipe `default`
+Schema 1 · hash `e3c86f9efd89413a5c3d3600f8c13f4dcc2e50a9f42880c986210c7663a5c304` · default recipe `default`
 
 Models: `sd3.5-large-turbo:q8`.
 
@@ -2571,7 +2601,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `sd3.sd3.5-large`
 
-Schema 1 · hash `ae072b88e0d7a9e1a26b8090ed2d1cc9007b47ed76bc6157d45308902fc0e694` · default recipe `default`
+Schema 1 · hash `04223f82561bc98605f0a5855d36412c53b756799eafec20b138a1aa5b8d8fb5` · default recipe `default`
 
 Models: `sd3.5-large:q4`, `sd3.5-large:q8`.
 
@@ -2595,7 +2625,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sd3.5-medium:q8`
 
-Schema 1 · hash `b7525a5248112bc1e3e02251b67d64f5c2a6ff16b0e331788835f003460339ea` · default recipe `default`
+Schema 1 · hash `ea9d96739d6cd59ac38c6774bc021c0e3bd0e9e814545fd3469cb821142c065d` · default recipe `default`
 
 Models: `sd3.5-medium:q8`.
 
@@ -2621,7 +2651,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `cyberrealistic-pony:fp16`
 
-Schema 1 · hash `af7f20014a68bd1cea8ba4078ed72f9104c5f63247e3162efd90352f08402e7c` · default recipe `default`
+Schema 1 · hash `452c8251f653802c6fcab34ec5a1fac7a33ed641cceb29410d42d263529d41fe` · default recipe `default`
 
 Models: `cyberrealistic-pony:fp16`.
 
@@ -2647,7 +2677,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `dreamshaper-xl:fp16`
 
-Schema 1 · hash `ea918dd6672426793a43b84dbc5df2cb9ca5db4cd05f9205ec97f8be4a053993` · default recipe `default`
+Schema 1 · hash `789afa7889482f80fbe40cb9abe84e4e5b4f05b15826c135f82bd2d39830b4a6` · default recipe `default`
 
 Models: `dreamshaper-xl:fp16`.
 
@@ -2673,7 +2703,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `juggernaut-xl:fp16`
 
-Schema 1 · hash `2c38f6a3ca50576b3b913f89c0cbffca4ae2e84ab4ad58d2521895b898ef96c7` · default recipe `default`
+Schema 1 · hash `fe7db28f59c86d508ca326e7fb651f93cf634328e7dda0318e868e60d0e1ba4f` · default recipe `default`
 
 Models: `juggernaut-xl:fp16`.
 
@@ -2699,7 +2729,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `playground-v2.5:fp16`
 
-Schema 1 · hash `29499fdf098ebeeccfddedfcd3093fc69777ca2e9ed8bf69f754a82fe50789e9` · default recipe `default`
+Schema 1 · hash `6f2339c5ff2202a1bbf08c0312a831a33d9f2d1f01fe6330b8ccd69b51a2a093` · default recipe `default`
 
 Models: `playground-v2.5:fp16`.
 
@@ -2725,7 +2755,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `pony-v6:fp16`
 
-Schema 1 · hash `2ecd13634ad16216e91e4ed17278f8294a1908d09abce78900b6df6dc7e5fe6c` · default recipe `default`
+Schema 1 · hash `71e81a38bda1e83a3d08e5d34f74ef468ad7a30de5d73e62b5dfcf3b5b1dfea1` · default recipe `default`
 
 Models: `pony-v6:fp16`.
 
@@ -2751,7 +2781,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realvis-xl:fp16`
 
-Schema 1 · hash `4f2b72e818647128159692aae6d9d08c681522a11332b605682dc6b4ea8fc81e` · default recipe `default`
+Schema 1 · hash `de529b0673949e8de28e73bc1439fa3dfe641c52d5ccccf6961e8baeb95a0430` · default recipe `default`
 
 Models: `realvis-xl:fp16`.
 
@@ -2777,7 +2807,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-base:fp16`
 
-Schema 1 · hash `812f7c97f4911dcb6426fa634bee56b5a3c5f314291c6c0e49c26d2c814415d0` · default recipe `default`
+Schema 1 · hash `b258c21bb78b371735fbbcb6347e2d7da3aa556b04b470d7c3ebd0bed840a28c` · default recipe `default`
 
 Models: `sdxl-base:fp16`.
 
@@ -2803,7 +2833,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-turbo:fp16`
 
-Schema 1 · hash `ddcd315e999906f1637125e75e82ce0096a341e25ffe4860678b0cb7427ba73a` · default recipe `default`
+Schema 1 · hash `1416787aa874fc34cca029cca17c63d4dcd3dd80a6194320e62c1b7174dedd59` · default recipe `default`
 
 Models: `sdxl-turbo:fp16`.
 
@@ -2831,7 +2861,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `wan21-t2v-1.3b:bf16`
 
-Schema 1 · hash `4cfb4f9333bd5892046b5d65ab936b5e4b1ec0703bbed5a5aa582475fd7c1181` · default recipe `default`
+Schema 1 · hash `84db3b3a813bdadc8a149d5a866b2d091d45d9deb511b99d911992e86bf88104` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:bf16`.
 
@@ -2851,7 +2881,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan21-t2v-1.3b:turbo`
 
-Schema 1 · hash `6a34e683559a8aa9655960335f3b521c1b2a7db82b9112fbe23cf264f5b5756b` · default recipe `default`
+Schema 1 · hash `dcb6e41e026a3f5f71092d1ad943fc9ac69bb13ed965bf8d60a65b48e62fb421` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:turbo`.
 
@@ -2871,7 +2901,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan21-t2v-14b`
 
-Schema 1 · hash `0f971c6056ad290d731319293447651d9eca678d280fc43bdd18498b4048e8f2` · default recipe `default`
+Schema 1 · hash `2659cbc3250df292f1e05d0ca239c9fefb8f34e9ae5df4393772a950d9247ab8` · default recipe `default`
 
 Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 
@@ -2893,7 +2923,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:fp8`
 
-Schema 1 · hash `748d6625d53bbf152112a80e2197485a5b5566634c215bd390f845f2a936c661` · default recipe `default`
+Schema 1 · hash `f5023b6eb0671c05238283ff9a1b69011c66fa1d45d19343d1f4cfe80cc4c44d` · default recipe `default`
 
 Models: `wan22-i2v-a14b:fp8`.
 
@@ -2915,7 +2945,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `3dd6fa01fdf3dfef3a21a87db48ea7534e0c6ce307a165b5c9bb4a5a58fc94cb` · default recipe `default`
+Schema 1 · hash `e69a2c79b8d6c0bca85211be26ae4f531886e6cc5cec543c2ecc60c76bc9cc8c` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 
@@ -2937,7 +2967,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:q8`
 
-Schema 1 · hash `014125e4f2b5969c3e0ec72170913d2ed41501d31038f23c17d9255561e72dff` · default recipe `default`
+Schema 1 · hash `986c284c1073c67036dfb9c42bc1bf1d18d9c3b00ab3bed58a229bdc405ecf21` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q8`.
 
@@ -2959,7 +2989,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:fp8`
 
-Schema 1 · hash `79b2a9b5e4352153963c3d9f26b5cf894b8e358c28b34489999ef2017e27b163` · default recipe `default`
+Schema 1 · hash `baf569efaccc73e81a3db664068cf222fce3421b7822423c31e53ada80cc4f92` · default recipe `default`
 
 Models: `wan22-t2v-a14b:fp8`.
 
@@ -2981,7 +3011,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-t2v-a14b`
 
-Schema 1 · hash `35834b8eaab81b4584aef4c86a89446e51ce9eaf8fad37b540bcd071ea7c7802` · default recipe `default`
+Schema 1 · hash `83751e174ec59d4e8461f71a8903d8b4b748df6ae08d338f7c1436981a749116` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 
@@ -3003,7 +3033,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:q8`
 
-Schema 1 · hash `934a69e747144b6c961d0b7403c045b4b97308afdde8558a904647ba348544f1` · default recipe `default`
+Schema 1 · hash `640662c2d4f8b6c5f5b7e719d065a824fda1a28b991d6488a3fda95adcc1db9e` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q8`.
 
@@ -3025,7 +3055,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-ti2v-5b:dmd`
 
-Schema 1 · hash `955f67035bb790309077448abac02a429ca41e602dfc2e11fc8ffc72daf05b52` · default recipe `default`
+Schema 1 · hash `705fe02a3b747324441b054f580fa2e51b06121875a8f32f3365bba11e976275` · default recipe `default`
 
 Models: `wan22-ti2v-5b:dmd`.
 
@@ -3045,7 +3075,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-ti2v-5b`
 
-Schema 1 · hash `8b0aab36305f1c9917568cf98f9dfdf106cc1ada190acd9ab887f1bdece01298` · default recipe `default`
+Schema 1 · hash `a708a287b1da5ccdca01e105bc3666052c9ad7ceb3429374a516ebc106a53372` · default recipe `default`
 
 Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 
@@ -3065,7 +3095,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-ti2v-5b:turbo`
 
-Schema 1 · hash `c42016b1ea5136f1067a43d1807e526a8feeb82fbfa1fc5c264e94302993f1ab` · default recipe `default`
+Schema 1 · hash `aa9603f21226738dbe5684ce4ad2ac2495bc2e3a49b277c16bf26cfeb0586fb2` · default recipe `default`
 
 Models: `wan22-ti2v-5b:turbo`.
 
@@ -3087,7 +3117,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wuerstchen-v2:fp16`
 
-Schema 1 · hash `157249cf8325dde21c43ff0eac2601fba025fda5b0dac8d315e2b7f22716ec2a` · default recipe `default`
+Schema 1 · hash `a82b64eb677ec47eb4fefb9f71230b4c5f097c08e2f42072a18db7092ba4d873` · default recipe `default`
 
 Models: `wuerstchen-v2:fp16`.
 
@@ -3107,7 +3137,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `z-image.z-image-turbo`
 
-Schema 1 · hash `5a18b895634bb5285a5f26dc478c47d72205b0adc720839f6cc636ce1b532e3f` · default recipe `default`
+Schema 1 · hash `9ca3dde4a573cf61e7fdd44900d5c4b7c184785f893028b8670a2b30ea17af22` · default recipe `default`
 
 Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-turbo:q8`.
 

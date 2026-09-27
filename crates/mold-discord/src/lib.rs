@@ -40,6 +40,22 @@ fn load_daily_quota() -> Option<u32> {
         .and_then(|v| v.parse::<u32>().ok())
 }
 
+/// Every slash command the bot registers, in registration order.
+pub fn slash_commands() -> Vec<poise::Command<state::BotState, anyhow::Error>> {
+    vec![
+        commands::generate::generate(),
+        commands::identity::identity(),
+        commands::transparent::transparent(),
+        commands::mesh::mesh(),
+        commands::expand::expand(),
+        commands::remix::remix(),
+        commands::models::models(),
+        commands::status::status(),
+        commands::quota::quota(),
+        commands::admin::admin(),
+    ]
+}
+
 /// Start the Discord bot.
 ///
 /// Reads configuration from environment variables:
@@ -70,17 +86,7 @@ pub async fn run() -> Result<()> {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::generate::generate(),
-                commands::identity::identity(),
-                commands::mesh::mesh(),
-                commands::expand::expand(),
-                commands::remix::remix(),
-                commands::models::models(),
-                commands::status::status(),
-                commands::quota::quota(),
-                commands::admin::admin(),
-            ],
+            commands: slash_commands(),
             on_error: |error| {
                 Box::pin(async move {
                     tracing::error!("Framework error: {:?}", error);
@@ -112,4 +118,42 @@ pub async fn run() -> Result<()> {
     serenity_client.start().await.context("Bot crashed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Discord rejects registration of a chat-input command with more than
+    /// 25 options, or a description (command or option) over 100
+    /// characters — and it rejects the WHOLE global registration, so one
+    /// oversized command would take every command offline.
+    #[test]
+    fn every_command_fits_discords_registration_limits() {
+        let commands = super::slash_commands();
+        assert!(commands.iter().any(|command| command.name == "transparent"));
+        for command in &commands {
+            assert!(
+                command.parameters.len() <= 25,
+                "/{} has {} options",
+                command.name,
+                command.parameters.len()
+            );
+            let description = command.description.as_deref().unwrap_or_default();
+            assert!(
+                !description.is_empty() && description.chars().count() <= 100,
+                "/{} description is {} characters",
+                command.name,
+                description.chars().count()
+            );
+            for parameter in &command.parameters {
+                let description = parameter.description.as_deref().unwrap_or_default();
+                assert!(
+                    !description.is_empty() && description.chars().count() <= 100,
+                    "/{} option {} description is {} characters",
+                    command.name,
+                    parameter.name,
+                    description.chars().count()
+                );
+            }
+        }
+    }
 }

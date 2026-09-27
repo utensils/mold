@@ -1425,3 +1425,24 @@ pub(crate) fn sidecar_to_wire(
 #[cfg(test)]
 #[path = "catalog_live_test.rs"]
 mod catalog_live_test;
+
+#[cfg(test)]
+mod lora_family_isolation_tests {
+    use super::compatible_lora_families;
+
+    /// Qwen Image 2.1 is its own architecture: a Qwen-Image / 2512 / Edit
+    /// adapter never applies to it, and a 2.1 adapter never applies to them.
+    #[test]
+    fn qwen_image21_loras_are_isolated_from_the_older_qwen_families() {
+        assert_eq!(
+            compatible_lora_families("qwen-image21"),
+            vec!["qwen-image21"]
+        );
+        for family in ["qwen-image", "qwen-image-edit"] {
+            assert!(
+                !compatible_lora_families(family).contains(&"qwen-image21".to_string()),
+                "{family}"
+            );
+        }
+    }
+}

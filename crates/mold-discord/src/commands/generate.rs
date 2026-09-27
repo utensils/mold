@@ -271,6 +271,15 @@ pub struct BuildParams<'a> {
     pub id_image_name: Option<String>,
     pub id_weight: Option<f64>,
     pub id_start_step: Option<u32>,
+    /// Ordered reference images (`edit_images`) for a recipe whose
+    /// `capabilities.reference_images` is adjustable — see [`route_references`].
+    pub edit_images: Option<Vec<Vec<u8>>>,
+    /// `/transparent`: `Some(true)` only; anything else stays off the wire.
+    pub transparent_background: Option<bool>,
+    /// The container for a still render. `None` keeps PNG; `/transparent`
+    /// offers WebP. Video and mesh families ignore it — their container is
+    /// decided above.
+    pub still_format: Option<OutputFormat>,
 }
 
 /// Concrete video timing plus an optional user-facing disclosure. `notice`
@@ -543,7 +552,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
             .map(VideoFormat::to_output_format)
             .unwrap_or(OutputFormat::Mp4)
     } else {
-        OutputFormat::Png
+        params.still_format.unwrap_or(OutputFormat::Png)
     };
 
     // Match the model defaults advertised by `/api/models`, which are also the
@@ -651,7 +660,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         embed_metadata: None,
         scheduler: None,
         cfg_plus: None,
-        edit_images: None,
+        edit_images: params.edit_images.filter(|images| !images.is_empty()),
         reference_weight: None,
         references: if is_h3
             && mold_core::minimax_h3::task_for_model(params.model)
@@ -722,7 +731,171 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
             .as_ref()
             .and_then(|_| params.id_image_name.clone()),
         id_image: params.id_image,
+        transparent_background: (params.transparent_background == Some(true)).then_some(true),
     }
+}
+
+/// The reference-image contract for one model, as the bot can best know it:
+/// the server's advertised `capabilities.reference_images` first, else the
+/// shared `mold-core` decision for the family — which answers while the model
+/// cache is cold and for a server that predates the block (absence means an
+/// OLDER server, never a refusal). `None` when neither is knowable.
+pub(crate) fn reference_images_contract(
+    entry: Option<&ModelInfoExtended>,
+    family: Option<&str>,
+    model: &str,
+) -> Option<mold_core::ReferenceImagesProfile> {
+    entry
+        .and_then(|entry| entry.generation_profile.as_ref())
+        .and_then(|profile| profile.default_recipe())
+        .and_then(|recipe| recipe.capabilities.reference_images.clone())
+        .or_else(|| {
+            family.map(|family| {
+                mold_core::generation_profile::reference_images_for_recipe(family, model)
+            })
+        })
+}
+
+/// Where a command's ordered `reference_*` attachments go.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ReferenceRoute {
+    /// Ordered `edit_images`, under this contract.
+    EditImages(mold_core::ReferenceImagesProfile),
+    /// MiniMax H3 Ref2VA authoring (`references`, streamed uploads).
+    H3Ref2va,
+    /// Refused with the recipe's own sentence.
+    Refused(String),
+}
+
+/// Route ordered references by capability, never by model name: a recipe
+/// whose reference contract is adjustable reads them as `edit_images`; MiniMax
+/// H3 Ref2VA reads them as its authoring references; anything else is refused
+/// with the recipe's `reason` (`REFERENCE_IMAGES_UNSUPPORTED_REASON`).
+pub(crate) fn route_references(
+    entry: Option<&ModelInfoExtended>,
+    family: Option<&str>,
+    model: &str,
+) -> ReferenceRoute {
+    let contract = reference_images_contract(entry, family, model);
+    match contract {
+        Some(profile) if profile.mode != mold_core::ControlMode::Hidden => {
+            ReferenceRoute::EditImages(profile)
+        }
+        _ if mold_core::minimax_h3::task_for_model(model)
+            == Some(mold_core::minimax_h3::Task::Ref2va) =>
+        {
+            ReferenceRoute::H3Ref2va
+        }
+        Some(profile) => ReferenceRoute::Refused(
+            profile
+                .reason
+                .unwrap_or_else(|| mold_core::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()),
+        ),
+        None => ReferenceRoute::Refused(mold_core::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()),
+    }
+}
+
+/// Refuse what an `edit_images` contract rules out before anything is
+/// downloaded: more references than the family takes, and a source image
+/// beside them on a recipe whose references replace it or exclude it. Only
+/// a `combines` recipe (SD1.5/SDXL image prompting) keeps its source. The
+/// sentences are the CLI's and the server's.
+pub(crate) fn validate_edit_reference_request(
+    profile: &mold_core::ReferenceImagesProfile,
+    family: Option<&str>,
+    model: &str,
+    count: usize,
+    has_source_image: bool,
+) -> Result<(), String> {
+    let subject =
+        mold_core::generation_profile::reference_subject_label(family.unwrap_or_default(), model);
+    if let Some(max) = profile.max_count {
+        if count > max as usize {
+            return Err(format!(
+                "{subject} supports at most {max} ordered reference images"
+            ));
+        }
+    }
+    if has_source_image && profile.source_relation != mold_core::ReferenceSourceRelation::Combines {
+        return Err(format!(
+            "{subject} uses edit_images instead of source_image"
+        ));
+    }
+    Ok(())
+}
+
+/// Download one ordered reference and check its container against the
+/// contract's accepted formats (PNG/JPEG unless the recipe lists more, e.g.
+/// Qwen Image 2.1's WebP). The bytes are passed through untouched — alpha is
+/// never flattened.
+pub(crate) async fn fetch_reference_image(
+    att: &serenity::Attachment,
+    position: usize,
+    profile: &mold_core::ReferenceImagesProfile,
+) -> Result<Vec<u8>, String> {
+    if att.size as u64 > MAX_SOURCE_IMAGE_BYTES {
+        return Err(format!(
+            "Reference {position} is too large ({:.1} MiB). Keep it under {} MiB.",
+            att.size as f64 / (1024.0 * 1024.0),
+            MAX_SOURCE_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = att
+        .download()
+        .await
+        .map_err(|e| format!("Failed to download reference {position}: {e}"))?;
+    check_reference_bytes(&bytes, position, profile)?;
+    Ok(bytes)
+}
+
+fn check_reference_bytes(
+    bytes: &[u8],
+    position: usize,
+    profile: &mold_core::ReferenceImagesProfile,
+) -> Result<(), String> {
+    let accepted = profile.accepted_formats();
+    let format = mold_core::validation::sniff_image_input_format(bytes);
+    if format.is_some_and(|format| accepted.contains(&format)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Reference {position} must be a {} image for this model.",
+            mold_core::generation_profile::image_input_format_list(accepted)
+        ))
+    }
+}
+
+/// The default canvas a `last-reference` recipe (Qwen Image 2.1) takes when
+/// the user chose neither width nor height: the LAST reference's aspect at
+/// the model's default area on its grid, halves rounded to even exactly as
+/// upstream's `calculate_dimensions`. The same rule `mold run` and MCP apply.
+pub(crate) fn last_reference_canvas(
+    profile: &mold_core::ReferenceImagesProfile,
+    references: &[Vec<u8>],
+    defaults: Option<&mold_core::ModelDefaults>,
+    family: Option<&str>,
+    model: &str,
+) -> Option<(u32, u32)> {
+    if profile.canvas != Some(mold_core::ReferenceCanvasRule::LastReference) {
+        return None;
+    }
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(references.last()?))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    let (default_w, default_h) = defaults
+        .map(|d| (d.default_width, d.default_height))
+        .unwrap_or((1024, 1024));
+    let align = defaults
+        .and_then(|d| d.dimension_alignment)
+        .unwrap_or_else(|| mold_core::dimension_alignment_for_model(model, family));
+    Some(mold_core::validation::fit_to_target_area_ties_even(
+        width,
+        height,
+        u64::from(default_w) * u64::from(default_h),
+        align,
+    ))
 }
 
 /// Resolve the default model name from the cached model list.
@@ -1014,6 +1187,12 @@ fn conditioning_before_defer(
     .is_conditioned()
 }
 
+/// The refusal for `reference_2` without `reference_1`. Family-neutral: the
+/// order matters to every reference recipe ("image 1", "image 2" in the
+/// prompt), not only to MiniMax H3.
+pub(crate) const REFERENCE_ORDER_GAP: &str =
+    "Add reference_1 before reference_2 so the reference order is unambiguous.";
+
 /// The refusal for a blank prompt the request has nothing to stand in for.
 /// It names every well that would have made the prompt optional.
 const PROMPT_NEEDED_WITHOUT_CONDITIONING: &str =
@@ -1090,17 +1269,17 @@ pub async fn generate(
     #[description = "Optional third image for LTX-2 keyframe interpolation"] keyframe_3: Option<
         serenity::Attachment,
     >,
-    #[description = "First ordered H3 reference (image, H.264 MP4, or WAV)"] reference_1: Option<
+    #[description = "Ordered reference 1 (image; H3 also MP4/WAV)"] reference_1: Option<
         serenity::Attachment,
     >,
-    #[description = "Second ordered H3 reference (image, H.264 MP4, or WAV)"] reference_2: Option<
+    #[description = "Ordered reference 2 (image; H3 also MP4/WAV)"] reference_2: Option<
         serenity::Attachment,
     >,
 ) -> Result<()> {
     if reference_1.is_none() && reference_2.is_some() {
         ctx.send(
             poise::CreateReply::default()
-                .content("Add reference_1 before reference_2 so H3 ordering is unambiguous.")
+                .content(REFERENCE_ORDER_GAP)
                 .ephemeral(true),
         )
         .await?;
@@ -1119,8 +1298,7 @@ pub async fn generate(
         .flatten()
         .collect::<Vec<_>>();
     if !reference_attachments.is_empty()
-        && (source_image.is_some()
-            || audio_file.is_some()
+        && (audio_file.is_some()
             || source_video.is_some()
             || !keyframe_attachments.is_empty()
             || retake_start.is_some()
@@ -1130,7 +1308,7 @@ pub async fn generate(
         ctx.send(
             poise::CreateReply::default()
                 .content(
-                    "Ordered H3 references cannot be combined with source, retake, keyframe, audio, or pipeline inputs.",
+                    "Ordered references cannot be combined with retake, keyframe, audio, or pipeline inputs.",
                 )
                 .ephemeral(true),
         )
@@ -1208,6 +1386,35 @@ pub async fn generate(
         });
     let h3_task = mold_core::minimax_h3::task_for_model(&model_name);
 
+    // Route the ordered references by capability BEFORE deferring, so a model
+    // that cannot read them never costs a quota slot.
+    let reference_route = (!reference_attachments.is_empty())
+        .then(|| route_references(model_entry, family, &model_name));
+    let reference_refusal = match &reference_route {
+        Some(ReferenceRoute::Refused(reason)) => Some(reason.clone()),
+        Some(ReferenceRoute::H3Ref2va) if source_image.is_some() => {
+            Some("MiniMax H3 Ref2VA references cannot be combined with a source image.".to_string())
+        }
+        Some(ReferenceRoute::EditImages(profile)) => validate_edit_reference_request(
+            profile,
+            family,
+            &model_name,
+            reference_attachments.len(),
+            source_image.is_some(),
+        )
+        .err(),
+        _ => None,
+    };
+    if let Some(message) = reference_refusal {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(message)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
     // A mesh model is refused for the thing it actually lacks. Its prompt is
     // never read, so "Prompt cannot be empty" would send the user off to
     // write one and fail again; the image is the whole conditioning.
@@ -1253,15 +1460,6 @@ pub async fn generate(
     // Defer the response (shows "Bot is thinking...")
     ctx.defer().await?;
 
-    if !reference_attachments.is_empty() && h3_task != Some(mold_core::minimax_h3::Task::Ref2va) {
-        ctx.data().quotas.refund(user_id);
-        handler::send_error(
-            ctx,
-            "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model.",
-        )
-        .await?;
-        return Ok(());
-    }
     if h3_task == Some(mold_core::minimax_h3::Task::Ref2va) && reference_attachments.is_empty() {
         ctx.data().quotas.refund(user_id);
         handler::send_error(
@@ -1313,7 +1511,7 @@ pub async fn generate(
         return Ok(());
     }
 
-    let prepared_references = if reference_attachments.is_empty() {
+    let prepared_references = if !matches!(reference_route, Some(ReferenceRoute::H3Ref2va)) {
         None
     } else {
         match crate::h3_references::prepare_attachments(&ctx.data().client, &reference_attachments)
@@ -1371,6 +1569,20 @@ pub async fn generate(
     } else {
         None
     };
+    // Ordered `edit_images`, downloaded in the order given.
+    let mut edit_images = Vec::new();
+    if let Some(ReferenceRoute::EditImages(profile)) = &reference_route {
+        for (index, attachment) in reference_attachments.iter().enumerate() {
+            match fetch_reference_image(attachment, index + 1, profile).await {
+                Ok(bytes) => edit_images.push(bytes),
+                Err(message) => {
+                    ctx.data().quotas.refund(user_id);
+                    handler::send_error(ctx, &message).await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
     let mut keyframe_images = Vec::with_capacity(keyframe_attachments.len());
     for attachment in keyframe_attachments {
         match fetch_source_image(attachment).await {
@@ -1387,21 +1599,28 @@ pub async fn generate(
     // use the attachment's reported width/height (snapped to multiples of 16)
     // instead of falling through to the model's square default. Without this
     // landscape/portrait photos get `resize_exact`'d to 1024x1024.
-    let (effective_width, effective_height) =
-        if source_bytes.is_some() && width.is_none() && height.is_none() {
-            match (
-                source_image.as_ref().and_then(|a| a.width),
-                source_image.as_ref().and_then(|a| a.height),
-            ) {
-                (Some(w), Some(h)) => {
-                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults, family, &model_name);
-                    (Some(sw), Some(sh))
-                }
-                _ => (width, height),
+    let reference_canvas = match &reference_route {
+        Some(ReferenceRoute::EditImages(profile)) if width.is_none() && height.is_none() => {
+            last_reference_canvas(profile, &edit_images, model_defaults, family, &model_name)
+        }
+        _ => None,
+    };
+    let (effective_width, effective_height) = if let Some((w, h)) = reference_canvas {
+        (Some(w), Some(h))
+    } else if source_bytes.is_some() && width.is_none() && height.is_none() {
+        match (
+            source_image.as_ref().and_then(|a| a.width),
+            source_image.as_ref().and_then(|a| a.height),
+        ) {
+            (Some(w), Some(h)) => {
+                let (sw, sh) = fit_attachment_dims(w, h, model_defaults, family, &model_name);
+                (Some(sw), Some(sh))
             }
-        } else {
-            (width, height)
-        };
+            _ => (width, height),
+        }
+    } else {
+        (width, height)
+    };
 
     let requested_frames = resolved_frames.unwrap_or(25);
     let keyframes =
@@ -1447,6 +1666,9 @@ pub async fn generate(
         id_image_name: None,
         id_weight: None,
         id_start_step: None,
+        edit_images: (!edit_images.is_empty()).then_some(edit_images),
+        transparent_background: None,
+        still_format: None,
     });
 
     let mut reference_session = if let Some(prepared) = prepared_references {
@@ -2418,6 +2640,201 @@ mod tests {
             keyframes.iter().map(|item| item.frame).collect::<Vec<_>>(),
             [0, 24, 48]
         );
+    }
+
+    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height))
+            .write_to(&mut bytes, format)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    /// `reference_*` is routed by the model's reference capability, never
+    /// by its name: an adjustable contract reads them as ordered
+    /// `edit_images`, MiniMax H3 Ref2VA keeps its authoring references, and
+    /// anything else is refused with the recipe's own sentence.
+    #[test]
+    fn references_route_by_capability() {
+        for (family, model) in [
+            ("qwen-image21", "qwen-image-2.1:bf16"),
+            ("qwen-image21", "qwen-image-2.1-turbo:bf16"),
+            ("flux2", "flux2-klein:q8"),
+            ("flux2", "flux2-dev:bf16"),
+            ("sdxl", "sdxl-base:fp16"),
+        ] {
+            assert!(
+                matches!(
+                    route_references(None, Some(family), model),
+                    ReferenceRoute::EditImages(_)
+                ),
+                "{model}"
+            );
+        }
+        assert_eq!(
+            route_references(None, Some("flux"), "flux-dev:q8"),
+            ReferenceRoute::Refused(mold_core::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string())
+        );
+        assert_eq!(
+            route_references(
+                None,
+                Some(mold_core::minimax_h3::FAMILY),
+                mold_core::minimax_h3::REF2VA_COMFY
+            ),
+            ReferenceRoute::H3Ref2va
+        );
+        // An unknown model with no family is refused, not guessed.
+        assert!(matches!(
+            route_references(None, None, "cv:1"),
+            ReferenceRoute::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn edit_references_keep_the_contracts_count_and_source_rules() {
+        let qwen =
+            reference_images_contract(None, Some("qwen-image21"), "qwen-image-2.1:bf16").unwrap();
+        validate_edit_reference_request(
+            &qwen,
+            Some("qwen-image21"),
+            "qwen-image-2.1:bf16",
+            2,
+            false,
+        )
+        .unwrap();
+        // References REPLACE the source on 2.1 — the server's sentence.
+        let error = validate_edit_reference_request(
+            &qwen,
+            Some("qwen-image21"),
+            "qwen-image-2.1:bf16",
+            1,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            error.ends_with("uses edit_images instead of source_image"),
+            "{error}"
+        );
+        let klein = reference_images_contract(None, Some("flux2"), "flux2-klein:q8").unwrap();
+        assert!(
+            validate_edit_reference_request(&klein, Some("flux2"), "flux2-klein:q8", 5, false)
+                .unwrap_err()
+                .contains("at most 4")
+        );
+        // SD image prompting COMBINES with a source image.
+        let sdxl = reference_images_contract(None, Some("sdxl"), "sdxl-base:fp16").unwrap();
+        validate_edit_reference_request(&sdxl, Some("sdxl"), "sdxl-base:fp16", 1, true).unwrap();
+    }
+
+    #[test]
+    fn reference_containers_follow_the_contracts_formats() {
+        let qwen =
+            reference_images_contract(None, Some("qwen-image21"), "qwen-image-2.1:bf16").unwrap();
+        let klein = reference_images_contract(None, Some("flux2"), "flux2-klein:q8").unwrap();
+        let webp = encoded(8, 8, image::ImageFormat::WebP);
+        let png = encoded(8, 8, image::ImageFormat::Png);
+        check_reference_bytes(&webp, 1, &qwen).unwrap();
+        check_reference_bytes(&png, 2, &qwen).unwrap();
+        check_reference_bytes(&png, 1, &klein).unwrap();
+        assert_eq!(
+            check_reference_bytes(&webp, 2, &klein).unwrap_err(),
+            "Reference 2 must be a PNG or JPEG image for this model."
+        );
+        assert_eq!(
+            check_reference_bytes(b"GIF89a", 1, &qwen).unwrap_err(),
+            "Reference 1 must be a PNG, JPEG, or WebP image for this model."
+        );
+    }
+
+    /// With no size chosen, Qwen Image 2.1's canvas follows the LAST
+    /// reference; a recipe without the rule keeps its defaults.
+    #[test]
+    fn a_last_reference_recipe_sizes_the_canvas_from_the_last_reference() {
+        let qwen =
+            reference_images_contract(None, Some("qwen-image21"), "qwen-image-2.1:bf16").unwrap();
+        let references = vec![
+            encoded(64, 64, image::ImageFormat::Png),
+            encoded(1920, 1080, image::ImageFormat::WebP),
+        ];
+        let defaults = mold_core::ModelDefaults {
+            default_width: 1024,
+            default_height: 1024,
+            dimension_alignment: Some(32),
+            ..defaults()
+        };
+        assert_eq!(
+            last_reference_canvas(
+                &qwen,
+                &references,
+                Some(&defaults),
+                Some("qwen-image21"),
+                "qwen-image-2.1:bf16"
+            ),
+            Some(mold_core::validation::fit_to_target_area_ties_even(
+                1920,
+                1080,
+                1024 * 1024,
+                32
+            ))
+        );
+        let klein = reference_images_contract(None, Some("flux2"), "flux2-klein:q8").unwrap();
+        assert_eq!(
+            last_reference_canvas(
+                &klein,
+                &references,
+                Some(&defaults),
+                Some("flux2"),
+                "flux2-klein:q8"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn edit_images_and_the_toggle_reach_the_wire_only_when_set() {
+        let references = vec![vec![0x89, b'P', b'N', b'G'], vec![0xFF, 0xD8]];
+        let req = build_generate_request(BuildParams {
+            family: Some("qwen-image21"),
+            edit_images: Some(references.clone()),
+            ..base_params("a lantern", "qwen-image-2.1:bf16")
+        });
+        assert_eq!(req.edit_images, Some(references));
+        assert_eq!(req.transparent_background, None);
+        assert_eq!(req.output_format, Some(OutputFormat::Png));
+        assert!(req.references.is_none());
+
+        let req = build_generate_request(BuildParams {
+            family: Some("qwen-image21"),
+            edit_images: Some(Vec::new()),
+            transparent_background: Some(false),
+            ..base_params("a lantern", "qwen-image-2.1:bf16")
+        });
+        assert_eq!(req.edit_images, None, "an empty group is no group");
+        assert_eq!(
+            req.transparent_background, None,
+            "false never reaches the wire"
+        );
+    }
+
+    #[test]
+    fn the_reference_order_message_is_family_neutral() {
+        assert!(!REFERENCE_ORDER_GAP.contains("H3"));
+        let command = generate();
+        for name in ["reference_1", "reference_2"] {
+            let parameter = command
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .unwrap();
+            assert!(
+                parameter
+                    .description
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("Ordered reference"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

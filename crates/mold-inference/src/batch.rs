@@ -374,10 +374,14 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         determinism: EXACT,
         seed_contract: CPU_SEED,
         media: MediaKind::Image,
+        // Up to ten ordered references through the one image-conditioned
+        // path (`generation_profile::reference_images_for_recipe`), and LoRA
+        // as forward-time bypass on every tier. There is no img2img source:
+        // references REPLACE it.
         workflows: WorkflowCapabilities {
             source: false,
-            edit_references: false,
-            lora: false,
+            edit_references: true,
+            lora: true,
             generated_audio: false,
             chain: false,
         },

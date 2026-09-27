@@ -427,6 +427,62 @@ pub enum ReferenceSourceRelation {
     Combines,
 }
 
+/// How a client derives the default output canvas from a request's ordered
+/// references, when the user has not chosen a size.
+///
+/// A CLIENT rule, never an admission rewrite: `GenerateRequest.width` and
+/// `height` are required, so the server cannot tell a chosen size from a
+/// default one and admission stays exact.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReferenceCanvasRule {
+    /// Take the LAST reference's aspect ratio at the recipe's default pixel
+    /// area and alignment: `validation::fit_to_target_area(last_w, last_h,
+    /// default_w * default_h, alignment)`. Qwen Image 2.1's
+    /// `calculate_dimensions` sizes the output from the last condition image
+    /// (diffusers `pipeline_qwenimage21.py`).
+    LastReference,
+}
+
+/// A still-image container a recipe accepts as an ordered reference.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageInputFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl ImageInputFormat {
+    /// The formats a profile with an empty `formats` list (every recipe
+    /// before the field existed, and every older server) accepts.
+    pub const LEGACY: &'static [ImageInputFormat] =
+        &[ImageInputFormat::Png, ImageInputFormat::Jpeg];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageInputFormat::Png => "PNG",
+            ImageInputFormat::Jpeg => "JPEG",
+            ImageInputFormat::Webp => "WebP",
+        }
+    }
+}
+
+/// "PNG or JPEG", "PNG, JPEG, or WebP": the list a refusal names.
+pub fn image_input_format_list(formats: &[ImageInputFormat]) -> String {
+    let labels: Vec<&str> = formats.iter().map(|format| format.label()).collect();
+    match labels.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [first, second] => format!("{first} or {second}"),
+        [init @ .., last] => format!("{}, or {last}", init.join(", ")),
+    }
+}
+
 /// The ordered reference-image (`GenerateRequest.edit_images`) contract.
 ///
 /// The SINGLE authority for "does this model do reference editing, how many
@@ -482,6 +538,27 @@ pub struct ReferenceImagesProfile {
     /// to set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<FloatControl>,
+    /// How a client sizes the default canvas from the references. `None`
+    /// means no rule (the canvas is the recipe default) — or an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<ReferenceCanvasRule>,
+    /// Still containers accepted as references. EMPTY means
+    /// [`ImageInputFormat::LEGACY`] (PNG and JPEG): every recipe that
+    /// predates the field, and every older server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<ImageInputFormat>,
+}
+
+impl ReferenceImagesProfile {
+    /// The accepted reference containers, with an empty list read as the
+    /// legacy PNG/JPEG pair.
+    pub fn accepted_formats(&self) -> &[ImageInputFormat] {
+        if self.formats.is_empty() {
+            ImageInputFormat::LEGACY
+        } else {
+            &self.formats
+        }
+    }
 }
 
 /// The sentence a recipe with no reference protocol shows and refuses with.
@@ -491,6 +568,116 @@ pub struct ReferenceImagesProfile {
 /// go stale the moment Klein gained references.
 pub const REFERENCE_IMAGES_UNSUPPORTED_REASON: &str =
     "This model does not accept reference images (edit_images).";
+
+/// The transparent-background contract (`GenerateRequest.transparent_background`).
+///
+/// One decision function, [`transparency_for_recipe`], and one validator,
+/// [`validate_transparency_against`], which both admission doors call so a
+/// refusal reads the same from either. Absent on the wire means an OLDER
+/// SERVER: a client hides the toggle (there is no older behaviour to fall
+/// back to).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct TransparencyCapabilitiesProfile {
+    /// `Adjustable` where the recipe renders a transparent background on
+    /// request; `Hidden` everywhere else.
+    pub mode: ControlMode,
+    /// The toggle's default position. Always `false` today.
+    pub default: bool,
+    /// Output containers that carry alpha and may be chosen while the toggle
+    /// is on. Narrowed to what the binary can encode
+    /// ([`qualify_generation_profile_delivery`]).
+    pub formats: Vec<OutputFormat>,
+    /// Whether an alpha-carrying REFERENCE keeps alpha in the output even
+    /// with the toggle off (Qwen Image 2.1's four-channel VAE: editing a
+    /// transparent layer returns a transparent layer). With neither the
+    /// toggle nor such a reference, the render is delivered as RGB.
+    pub native_alpha: bool,
+    /// The sentence a `Hidden` recipe shows and refuses the toggle with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The sentence a recipe without transparent rendering shows and refuses with.
+pub const TRANSPARENCY_UNSUPPORTED_REASON: &str =
+    "This model does not render transparent backgrounds (transparent_background).";
+
+/// The ONE decision for a recipe's transparency contract.
+///
+/// Qwen Image 2.1 (every tier, turbo included) renders RGBA natively through
+/// its four-channel VAE and follows the model card's RGBA prompt recipe
+/// (`crate::transparency`), so it is `Adjustable` with PNG and WebP as the
+/// alpha-carrying containers. Every other recipe is `Hidden`.
+pub fn transparency_for_recipe(family: &str, _model: &str) -> TransparencyCapabilitiesProfile {
+    match canonical_family(family) {
+        "qwen-image21" => TransparencyCapabilitiesProfile {
+            mode: ControlMode::Adjustable,
+            default: false,
+            formats: vec![OutputFormat::Png, OutputFormat::Webp],
+            native_alpha: true,
+            reason: None,
+        },
+        _ => TransparencyCapabilitiesProfile {
+            mode: ControlMode::Hidden,
+            default: false,
+            formats: Vec::new(),
+            native_alpha: false,
+            reason: Some(TRANSPARENCY_UNSUPPORTED_REASON.to_string()),
+        },
+    }
+}
+
+/// Validate a request's `transparent_background` against ONE recipe's
+/// transparency contract.
+///
+/// Called by BOTH admission doors — family validation and
+/// [`validate_request_against_recipe`] — and by durable admission, so the
+/// sentence is identical whichever refuses. Only `Some(true)` asks for
+/// anything; `Some(false)` is accepted everywhere (admission normalizes it to
+/// `None`). The format checked is the one the render will use: the explicit
+/// `output_format`, else the still default (PNG).
+pub fn validate_transparency_against(
+    profile: &TransparencyCapabilitiesProfile,
+    request: &crate::GenerateRequest,
+) -> Result<(), String> {
+    validate_transparency_choice(
+        profile,
+        request.transparent_background,
+        request.resolved_output_format(),
+    )
+}
+
+/// [`validate_transparency_against`] on the two facts it reads, for a client
+/// preflight that has not built a whole request yet (`mold run --transparent`
+/// resolves its container long before the request exists). Same sentences,
+/// because it IS the same check.
+pub fn validate_transparency_choice(
+    profile: &TransparencyCapabilitiesProfile,
+    transparent_background: Option<bool>,
+    format: OutputFormat,
+) -> Result<(), String> {
+    if transparent_background != Some(true) {
+        return Ok(());
+    }
+    if matches!(profile.mode, ControlMode::Hidden) {
+        return Err(profile
+            .reason
+            .clone()
+            .unwrap_or_else(|| TRANSPARENCY_UNSUPPORTED_REASON.to_string()));
+    }
+    if !profile.formats.contains(&format) {
+        let alpha = profile
+            .formats
+            .iter()
+            .map(|format| format.extension())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(format!(
+            "transparent_background needs a format with an alpha channel; use {alpha} instead of {}",
+            format.extension()
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct OutputCapabilitiesProfile {
@@ -581,6 +768,11 @@ pub struct GenerationCapabilitiesProfile {
     /// build emits carries `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_images: Option<ReferenceImagesProfile>,
+    /// The transparent-background contract, or `None` on an OLDER SERVER
+    /// (clients hide the toggle). Every recipe this build emits carries
+    /// `Some`; see [`transparency_for_recipe`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<TransparencyCapabilitiesProfile>,
     /// 3-D controls. Present only on a mesh recipe; its absence means
     /// `GenerateRequest.mesh` is refused here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -680,6 +872,14 @@ pub fn qualify_generation_profile_delivery(
             if let Some(format) = recipe.capabilities.output.formats.first().copied() {
                 recipe.capabilities.output.default_format = format;
             }
+        }
+        // The toggle's alpha containers are narrowed by the same encoders: a
+        // build without WebP must not offer a transparent WebP.
+        if let Some(transparency) = recipe.capabilities.transparency.as_mut() {
+            transparency.formats.retain(|format| match format {
+                OutputFormat::Webp => delivery.webp,
+                _ => true,
+            });
         }
         if recipe.capabilities.output.audio_requires_mp4 && !delivery.mp4 {
             recipe.capabilities.supports_audio = false;
@@ -866,6 +1066,33 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             // The references ARE the conditioning; there is no adapter to
             // dial down.
             weight: None,
+            canvas: None,
+            formats: Vec::new(),
+        },
+        // Qwen Image 2.1's one image-conditioned path serves edit and
+        // multi-reference alike (diffusers `pipeline_qwenimage21.py`): every
+        // image is a condition, none is special, and the output canvas is a
+        // picked size — the LAST condition image only sets the default
+        // aspect (`canvas: LastReference`). Up to 10 per the model card
+        // ("Support up to 10 reference images"); each is resized to a ~1024²
+        // area. PNG, JPEG and WebP are all accepted and never flattened: an
+        // RGBA reference is read with its alpha.
+        "qwen-image21" => ReferenceImagesProfile {
+            mode: ControlMode::Adjustable,
+            required: false,
+            max_count: Some(validation::QWEN_IMAGE21_MAX_REFERENCE_IMAGES),
+            primary_is_target: false,
+            source_relation: ReferenceSourceRelation::Replaces,
+            max_pixels_single: Some(validation::QWEN_IMAGE21_REFERENCE_MAX_PIXELS),
+            max_pixels_multi: Some(validation::QWEN_IMAGE21_REFERENCE_MAX_PIXELS),
+            reason: None,
+            weight: None,
+            canvas: Some(ReferenceCanvasRule::LastReference),
+            formats: vec![
+                ImageInputFormat::Png,
+                ImageInputFormat::Jpeg,
+                ImageInputFormat::Webp,
+            ],
         },
         "flux2" => ReferenceImagesProfile {
             mode: ControlMode::Adjustable,
@@ -886,6 +1113,8 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             // References are packed as extra transformer tokens, not injected
             // through an adapter, so there is no strength to set.
             weight: None,
+            canvas: None,
+            formats: Vec::new(),
         },
         // IP-Adapter image prompting. The FIRST recipe to advertise
         // `Combines`: the reference is an image PROMPT injected as a second
@@ -918,6 +1147,8 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
                 mode: ControlMode::Adjustable,
                 note: None,
             }),
+            canvas: None,
+            formats: Vec::new(),
         },
         _ => ReferenceImagesProfile {
             mode: ControlMode::Hidden,
@@ -929,6 +1160,8 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             max_pixels_multi: None,
             reason: Some(REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()),
             weight: None,
+            canvas: None,
+            formats: Vec::new(),
         },
     }
 }
@@ -1043,11 +1276,18 @@ pub fn validate_edit_images_against(
                 ));
             }
         }
-        if images
-            .iter()
-            .any(|image| !crate::validation::is_valid_image_format(image))
-        {
-            return Err("edit_images must contain only PNG or JPEG images".to_string());
+        // Sniffed, then checked against the recipe's own list, so WebP is
+        // accepted exactly where it is advertised and every other recipe
+        // keeps the historical PNG/JPEG sentence byte for byte.
+        let accepted = profile.accepted_formats();
+        if images.iter().any(|image| {
+            !crate::validation::sniff_image_input_format(image)
+                .is_some_and(|format| accepted.contains(&format))
+        }) {
+            return Err(format!(
+                "edit_images must contain only {} images",
+                image_input_format_list(accepted)
+            ));
         }
     }
     // `Replaces` never reads `source_image`, so the img2img fields are refused
@@ -1226,6 +1466,9 @@ pub fn validate_request_against_recipe(
             &request.model,
         );
         validate_edit_images_against(reference_images, &subject, request)?;
+    }
+    if let Some(transparency) = recipe.capabilities.transparency.as_ref() {
+        validate_transparency_against(transparency, request)?;
     }
 
     let resolution = &recipe.resolution;
@@ -1554,10 +1797,53 @@ const QWEN_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1584, 1056),
     (1056, 1584),
 ];
-/// Qwen Image 2.1's published text-to-image default canvas. Unlike the older
-/// Qwen Image ratio list, the 2.1 model card only pins this default; Mold still
-/// admits any safe canvas on its checkpoint-required 32px grid.
-const QWEN_IMAGE21_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[(1024, 1024)];
+/// Qwen Image 2.1's upstream canvases: Mold's qualified 1024x1024 default
+/// plus the model card's native 2K "Supported Aspect Ratios" table
+/// (`Qwen/Qwen-Image-2.1` README at `b3179ad` lines 111-121, 1:1, 4:3, 3:4, 3:2, 2:3, 16:9,
+/// 9:16 in that order). Every size is on the family's 32 px grid; the largest
+/// area (2400x1792) and longest side (2752) are the family ceilings
+/// `validation::QWEN_IMAGE21_MAX_PIXELS` / `QWEN_IMAGE21_MAX_AXIS`.
+const QWEN_IMAGE21_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
+    (1024, 1024),
+    (2048, 2048),
+    (2400, 1792),
+    (1792, 2400),
+    (2528, 1696),
+    (1696, 2528),
+    (2752, 1536),
+    (1536, 2752),
+];
+/// Mold's own ~1 MP aspect presets for Qwen Image 2.1 — NOT upstream's (the
+/// card publishes only the 2K table). Each keeps the 2K preset's aspect at
+/// roughly the default 1024² area, on the 32 px grid, so a user can pick a
+/// non-square shape without paying a 4 MP render. Recorded with
+/// `MoldPolicy` provenance beside the upstream record.
+const QWEN_IMAGE21_MOLD_1K_PRESETS: &[(u32, u32)] = &[
+    (1184, 896),
+    (896, 1184),
+    (1248, 832),
+    (832, 1248),
+    (1376, 768),
+    (768, 1376),
+];
+/// Every canvas the 2.1 profile recommends: the upstream candidates plus
+/// Mold's 1K aspect presets.
+const QWEN_IMAGE21_PRESETS: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1184, 896),
+    (896, 1184),
+    (1248, 832),
+    (832, 1248),
+    (1376, 768),
+    (768, 1376),
+    (2048, 2048),
+    (2400, 1792),
+    (1792, 2400),
+    (2528, 1696),
+    (1696, 2528),
+    (2752, 1536),
+    (1536, 2752),
+];
 const WUERSTCHEN: &[(u32, u32)] = &[(1024, 1024)];
 const LTX_VIDEO: &[(u32, u32)] = &[
     (704, 480),
@@ -1625,10 +1911,10 @@ const QWEN_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
 const QWEN_IMAGE21_QUALIFICATION: ResolutionQualificationRecord =
     ResolutionQualificationRecord {
         family: "qwen-image21",
-        source: "https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa",
+        source: "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/README.md",
         revision: "b3179ad355be050328e483a9dfdd9e60cd62adfa",
         qualified: true,
-        evidence: "docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery",
+        evidence: "docs/qualification/qwen-image-2.1-metal-uat.json: SHA-256-verified official checkpoint, full default 1024x1024/40-step Metal render, and decoded RGB PNG delivery; the seven 2K presets are the pinned README's Supported Aspect Ratios table, admitted by the family's 2400x1792 / 2752 px ceilings, with CUDA renders recorded in docs/qualification/qwen-image-2.1-cuda-performance.json",
         candidates: QWEN_IMAGE21_UPSTREAM_CANDIDATES,
     };
 
@@ -1653,7 +1939,7 @@ pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
         "flux" | "flux2" => FLUX,
         "z-image" => Z_IMAGE_UPSTREAM_CANDIDATES,
         "qwen-image" | "qwen-image-edit" => QWEN_UPSTREAM_CANDIDATES,
-        "qwen-image21" => QWEN_IMAGE21_UPSTREAM_CANDIDATES,
+        "qwen-image21" => QWEN_IMAGE21_PRESETS,
         "wuerstchen" => WUERSTCHEN,
         "ltx-video" => LTX_VIDEO,
         "ltx2" => LTX2,
@@ -1821,6 +2107,22 @@ fn base_compact_steps_note() -> String {
 /// table is named alongside them because a timestep means nothing without
 /// one, and the shipped distills do not share a table — the 1.3B sits on
 /// shift 8 and the TI2V-5B on shift 5.
+/// Why a Qwen Image 2.1 turbo tier's guidance is pinned.
+const QWEN21_TURBO_GUIDANCE_NOTE: &str = "The Viggle turbo distill runs one forward per step; guidance is fixed at 1.0 and a negative prompt is not encoded.";
+
+fn fixed_qwen21_turbo_steps_note(schedule: crate::manifest::QwenTurboSchedule) -> String {
+    let sigmas = schedule
+        .sigmas
+        .iter()
+        .map(|sigma| sigma.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Fixed by the Viggle turbo distill: {} steps on the published sigmas {sigmas}.",
+        schedule.steps()
+    )
+}
+
 fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
     let rungs = ladder
         .rungs
@@ -2068,6 +2370,13 @@ fn recipe(
         .then(|| crate::manifest::wan_dmd_ladder(&normalized_model))
         .flatten();
     let wan_dmd_steps = wan_dmd_ladder.map(|ladder| ladder.rungs.len() as u32);
+    // A Qwen Image 2.1 turbo tier walks Viggle's six published sigmas with
+    // the distilled adapter installed: steps and guidance are the recipe's
+    // (`manifest::qwen_image21_turbo_schedule`), never a preference.
+    let qwen21_turbo = (family == "qwen-image21")
+        .then(|| crate::manifest::qwen_image21_turbo_schedule(&normalized_model))
+        .flatten();
+    let pinned_steps = wan_dmd_steps.or(qwen21_turbo.map(|schedule| schedule.steps()));
     // BFL's own FP8 Flux.2 conversions store `weight / weight_scale`, and a
     // LoRA merge widens the weight it patches — dropping the scale on exactly
     // the layers the adapter touches. `Flux2Engine::load_transformer` refuses
@@ -2166,16 +2475,6 @@ fn recipe(
             delivery_reason: (family == "ltx2")
                 .then(|| "Audio-enabled video delivery requires MP4.".to_string()),
         }
-    } else if family == "qwen-image21" {
-        OutputCapabilitiesProfile {
-            default_format: OutputFormat::Png,
-            formats: vec![OutputFormat::Png, OutputFormat::Jpeg],
-            audio_requires_mp4: false,
-            delivery_reason: Some(
-                "Qwen Image 2.1's native Mold path currently publishes RGB PNG or JPEG."
-                    .to_string(),
-            ),
-        }
     } else {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Png,
@@ -2198,12 +2497,12 @@ fn recipe(
     // the identity and never from `input.default_steps` — that value is
     // laundered through user `model_prefs` in `build_model_catalog` and can
     // carry a stale off-ladder number.
-    let default_steps = match (wan_dmd_steps, h3_compact) {
+    let default_steps = match (pinned_steps, h3_compact) {
         (Some(steps), _) => steps,
         (None, true) => h3_compact_steps,
         (None, false) => input.default_steps,
     };
-    let steps_min = match (wan_dmd_steps, h3_compact_turbo_steps, family) {
+    let steps_min = match (pinned_steps, h3_compact_turbo_steps, family) {
         (Some(steps), _, _) | (None, Some(steps), _) => steps,
         // The undistilled floor is the identity's own smallest REVIEWED
         // schedule, not the sampler's arithmetic minimum — the same authority
@@ -2212,12 +2511,12 @@ fn recipe(
         (None, None, "minimax-h3") => crate::minimax_h3::steps_floor_for_model(input.model),
         _ => 1,
     };
-    let steps_max = match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
+    let steps_max = match (pinned_steps, h3_compact_turbo_steps, h3_compact) {
         (Some(steps), _, _) | (None, Some(steps), _) => steps,
         (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
         (None, None, false) => 100,
     };
-    let steps_mode = if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
+    let steps_mode = if pinned_steps.is_some() || h3_compact_turbo_steps.is_some() {
         ControlMode::Fixed
     } else {
         ControlMode::Adjustable
@@ -2269,6 +2568,7 @@ fn recipe(
             // the note contract was widened for.
             note: wan_dmd_ladder
                 .map(fixed_dmd_steps_note)
+                .or_else(|| qwen21_turbo.map(fixed_qwen21_turbo_steps_note))
                 .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note))
                 .or_else(|| (family == "minimax-h3").then(base_compact_steps_note)),
         },
@@ -2290,7 +2590,11 @@ fn recipe(
             } else {
                 ControlMode::Fixed
             },
-            note: fixed_guidance_note(family, wan_dmd_ladder, guidance_caps, effective_guidance),
+            note: if qwen21_turbo.is_some() && !guidance_caps.adjustable {
+                Some(QWEN21_TURBO_GUIDANCE_NOTE.to_string())
+            } else {
+                fixed_guidance_note(family, wan_dmd_ladder, guidance_caps, effective_guidance)
+            },
         },
         temporal,
         capabilities: GenerationCapabilitiesProfile {
@@ -2302,6 +2606,7 @@ fn recipe(
             ),
             source_image,
             reference_images: Some(reference_images),
+            transparency: Some(transparency_for_recipe(family, input.model)),
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
             supports_identity: identity_supported,
@@ -2650,6 +2955,14 @@ fn authored_aspect_label(family: &str, width: u32, height: u32) -> String {
     match (canonical_family(family), width, height) {
         ("qwen-image" | "qwen-image-edit", 1664, 928) => "≈16:9".to_string(),
         ("qwen-image" | "qwen-image-edit", 928, 1664) => "≈9:16".to_string(),
+        // The 2.1 model card names its 2K table by nominal aspect (2400x1792
+        // is "4:3", 2752x1536 is "16:9"); Mold's 1K presets share those groups.
+        ("qwen-image21", 2400, 1792) | ("qwen-image21", 1184, 896) => "4:3".to_string(),
+        ("qwen-image21", 1792, 2400) | ("qwen-image21", 896, 1184) => "3:4".to_string(),
+        ("qwen-image21", 2528, 1696) | ("qwen-image21", 1248, 832) => "3:2".to_string(),
+        ("qwen-image21", 1696, 2528) | ("qwen-image21", 832, 1248) => "2:3".to_string(),
+        ("qwen-image21", 2752, 1536) | ("qwen-image21", 1376, 768) => "16:9".to_string(),
+        ("qwen-image21", 1536, 2752) | ("qwen-image21", 768, 1376) => "9:16".to_string(),
         _ => {
             let divisor = gcd(width, height);
             format!("{}:{}", width / divisor, height / divisor)
@@ -2705,13 +3018,31 @@ fn provenance(family: &str) -> Vec<ProfileProvenance> {
         }];
     }
     if let Some(record) = resolution_qualification_record(family) {
-        return vec![ProfileProvenance {
+        let mut provenance = vec![ProfileProvenance {
             kind: ProvenanceKind::Upstream,
             source: record.source.to_string(),
             revision: Some(record.revision.to_string()),
             qualified: record.qualified,
             evidence: Some(record.evidence.to_string()),
         }];
+        if canonical_family(family) == "qwen-image21" {
+            provenance.push(ProfileProvenance {
+                kind: ProvenanceKind::MoldPolicy,
+                source: "Mold ~1 MP Qwen Image 2.1 aspect presets".to_string(),
+                revision: None,
+                qualified: true,
+                evidence: Some(format!(
+                    "{} Mold-chosen ~1 MP presets ({}) keep the 2K table's aspects at the default area on the 32 px grid; not published upstream",
+                    QWEN_IMAGE21_MOLD_1K_PRESETS.len(),
+                    QWEN_IMAGE21_MOLD_1K_PRESETS
+                        .iter()
+                        .map(|(width, height)| format!("{width}x{height}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            });
+        }
+        return provenance;
     }
     let (source, revision, evidence) = match family {
         "ltx-video" => (
@@ -2819,6 +3150,395 @@ mod tests {
             supports_extend: false,
             supports_audio: false,
         }
+    }
+
+    fn qwen21_profile(model: &str) -> GenerationProfileSet {
+        let manifest = crate::manifest::find_manifest(model).expect(model);
+        generation_profile_for_manifest(manifest)
+    }
+
+    fn qwen21_request(model: &str) -> crate::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a paper lantern",
+            "model": model,
+            "width": 1024,
+            "height": 1024,
+            "steps": 40,
+            "guidance": 4.0,
+            "batch_size": 1
+        }))
+        .unwrap()
+    }
+
+    const PNG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
+    const WEBP: &[u8] = b"RIFF\x0e\x00\x00\x00WEBPVP8 ";
+
+    #[test]
+    fn qwen_image21_advertises_ten_ordered_references_sized_from_the_last() {
+        let profile = qwen21_profile("qwen-image-2.1:bf16");
+        let recipe = profile.default_recipe().unwrap();
+        let references = recipe.capabilities.reference_images.as_ref().unwrap();
+        assert_eq!(references.mode, ControlMode::Adjustable);
+        assert!(!references.required);
+        assert_eq!(references.max_count, Some(10));
+        assert_eq!(
+            references.max_count,
+            Some(validation::QWEN_IMAGE21_MAX_REFERENCE_IMAGES)
+        );
+        assert!(!references.primary_is_target);
+        assert_eq!(
+            references.source_relation,
+            ReferenceSourceRelation::Replaces
+        );
+        assert_eq!(references.max_pixels_single, Some(1024 * 1024));
+        assert_eq!(references.max_pixels_multi, Some(1024 * 1024));
+        assert_eq!(references.canvas, Some(ReferenceCanvasRule::LastReference));
+        assert_eq!(
+            references.formats,
+            vec![
+                ImageInputFormat::Png,
+                ImageInputFormat::Jpeg,
+                ImageInputFormat::Webp
+            ]
+        );
+        assert!(references.weight.is_none());
+        // Not source-driven: the canvas is a picked size; the last reference
+        // only sets the client's default aspect.
+        assert_eq!(recipe.resolution.domain, ResolutionDomain::Dynamic);
+        // References replace the source, so there is no mask or strength.
+        assert_eq!(recipe.capabilities.mask.mode, ControlMode::Hidden);
+        assert!(!recipe.capabilities.supports_strength);
+        assert_eq!(recipe.capabilities.source_image, None);
+        let json = serde_json::to_value(references).unwrap();
+        assert_eq!(json["canvas"], "last-reference");
+        assert_eq!(json["formats"], serde_json::json!(["png", "jpeg", "webp"]));
+        // Every other recipe keeps the wire shape it always had.
+        let flux = resolve_generation_profile(input("flux2-dev:q8", "flux2"));
+        let flux_refs = serde_json::to_value(
+            flux.default_recipe()
+                .unwrap()
+                .capabilities
+                .reference_images
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(flux_refs.get("canvas").is_none());
+        assert!(flux_refs.get("formats").is_none());
+    }
+
+    #[test]
+    fn webp_references_are_accepted_only_where_advertised() {
+        let qwen = reference_images_for_recipe("qwen-image21", "qwen-image-2.1:bf16");
+        let mut req = qwen21_request("qwen-image-2.1:bf16");
+        req.edit_images = Some(vec![PNG.to_vec(), JPEG.to_vec(), WEBP.to_vec()]);
+        validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap();
+        req.edit_images = Some(vec![b"GIF89a".to_vec()]);
+        assert_eq!(
+            validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap_err(),
+            "edit_images must contain only PNG, JPEG, or WebP images"
+        );
+        req.edit_images = Some(vec![PNG.to_vec(); 11]);
+        assert_eq!(
+            validate_edit_images_against(&qwen, "qwen-image-2.1", &req).unwrap_err(),
+            "qwen-image-2.1 supports at most 10 ordered reference images"
+        );
+
+        // Every other family keeps the historical sentence byte for byte.
+        let flux = reference_images_for_recipe("flux2", "flux2-dev:q8");
+        let mut flux_req = qwen21_request("flux2-dev:q8");
+        flux_req.edit_images = Some(vec![WEBP.to_vec()]);
+        assert_eq!(
+            validate_edit_images_against(&flux, "flux2-dev", &flux_req).unwrap_err(),
+            "edit_images must contain only PNG or JPEG images"
+        );
+    }
+
+    #[test]
+    fn transparency_is_advertised_only_on_qwen_image21() {
+        let qwen = qwen21_profile("qwen-image-2.1:bf16");
+        let transparency = qwen
+            .default_recipe()
+            .unwrap()
+            .capabilities
+            .transparency
+            .clone()
+            .unwrap();
+        assert_eq!(transparency.mode, ControlMode::Adjustable);
+        assert!(!transparency.default);
+        assert!(transparency.native_alpha);
+        assert_eq!(
+            transparency.formats,
+            vec![OutputFormat::Png, OutputFormat::Webp]
+        );
+        assert!(transparency.reason.is_none());
+
+        for (model, family) in [
+            ("flux-dev:q8", "flux"),
+            ("qwen-image:q8", "qwen-image"),
+            ("sdxl-base:fp16", "sdxl"),
+        ] {
+            let profile = resolve_generation_profile(input(model, family));
+            let hidden = profile
+                .default_recipe()
+                .unwrap()
+                .capabilities
+                .transparency
+                .clone()
+                .unwrap();
+            assert_eq!(hidden.mode, ControlMode::Hidden, "{model}");
+            assert!(hidden.formats.is_empty(), "{model}");
+            assert_eq!(
+                hidden.reason.as_deref(),
+                Some(TRANSPARENCY_UNSUPPORTED_REASON),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_admission_doors_refuse_transparency_with_one_sentence() {
+        // A family without the contract.
+        let mut flux = qwen21_request("flux-dev:q8");
+        flux.guidance = 3.5;
+        flux.steps = 20;
+        flux.transparent_background = Some(true);
+        let family_door = crate::validation::validate_generate_request(&flux).unwrap_err();
+        let flux_profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let recipe_door =
+            validate_request_against_generation_profile(&flux_profile, &flux).unwrap_err();
+        assert_eq!(family_door, TRANSPARENCY_UNSUPPORTED_REASON);
+        assert_eq!(family_door, recipe_door);
+
+        // JPEG cannot carry alpha.
+        let profile = qwen21_profile("qwen-image-2.1:bf16");
+        let mut req = qwen21_request("qwen-image-2.1:bf16");
+        req.transparent_background = Some(true);
+        req.output_format = Some(OutputFormat::Jpeg);
+        let expected =
+            "transparent_background needs a format with an alpha channel; use png or webp instead of jpeg";
+        assert_eq!(
+            crate::validation::validate_generate_request(&req).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            validate_request_against_generation_profile(&profile, &req).unwrap_err(),
+            expected
+        );
+        for format in [None, Some(OutputFormat::Png), Some(OutputFormat::Webp)] {
+            req.output_format = format;
+            crate::validation::validate_generate_request(&req).unwrap();
+            validate_request_against_generation_profile(&profile, &req).unwrap();
+        }
+        // The request-free preflight a client runs before it has a request
+        // answers with the same sentences, because it is the same check.
+        let qwen_transparency = transparency_for_recipe("qwen-image21", "qwen-image-2.1:bf16");
+        assert_eq!(
+            validate_transparency_choice(&qwen_transparency, Some(true), OutputFormat::Jpeg)
+                .unwrap_err(),
+            expected
+        );
+        validate_transparency_choice(&qwen_transparency, Some(true), OutputFormat::Webp).unwrap();
+        validate_transparency_choice(&qwen_transparency, Some(false), OutputFormat::Jpeg).unwrap();
+        assert_eq!(
+            validate_transparency_choice(
+                &transparency_for_recipe("flux", "flux-dev:q8"),
+                Some(true),
+                OutputFormat::Png
+            )
+            .unwrap_err(),
+            TRANSPARENCY_UNSUPPORTED_REASON
+        );
+
+        // `false` asks for nothing, anywhere, and normalizes away.
+        flux.transparent_background = Some(false);
+        crate::validation::validate_generate_request(&flux).unwrap();
+        validate_request_against_generation_profile(&flux_profile, &flux).unwrap();
+        flux.normalize_transparent_background();
+        assert_eq!(flux.transparent_background, None);
+        req.transparent_background = Some(true);
+        req.normalize_transparent_background();
+        assert_eq!(req.transparent_background, Some(true));
+    }
+
+    #[test]
+    fn delivery_without_webp_narrows_the_transparency_formats_too() {
+        let mut profile = qwen21_profile("qwen-image-2.1:bf16");
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(
+            recipe.capabilities.output.formats,
+            vec![OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp]
+        );
+        assert!(recipe.capabilities.output.delivery_reason.is_none());
+        qualify_generation_profile_delivery(
+            &mut profile,
+            GenerationDeliveryCapabilities {
+                mp4: true,
+                webp: false,
+            },
+        );
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(
+            recipe.capabilities.output.formats,
+            vec![OutputFormat::Png, OutputFormat::Jpeg]
+        );
+        assert_eq!(
+            recipe.capabilities.transparency.as_ref().unwrap().formats,
+            vec![OutputFormat::Png]
+        );
+        let mut req = qwen21_request("qwen-image-2.1:bf16");
+        req.transparent_background = Some(true);
+        req.output_format = Some(OutputFormat::Webp);
+        assert!(validate_request_against_generation_profile(&profile, &req).is_err());
+    }
+
+    #[test]
+    fn every_qwen_image21_2k_preset_is_advertised_and_admitted() {
+        let profile = qwen21_profile("qwen-image-2.1:bf16");
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(recipe.resolution.max_pixels, 2400 * 1792);
+        assert_eq!(recipe.resolution.max_axis_pixels, Some(2752));
+        assert_eq!(recipe.resolution.alignment, 32);
+        let presets: std::collections::HashSet<(u32, u32)> = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| &group.presets)
+            .map(|preset| (preset.width, preset.height))
+            .collect();
+        let record = resolution_qualification_record("qwen-image21").unwrap();
+        assert_eq!(record.candidates.len(), 8);
+        for &(width, height) in record.candidates.iter().chain(QWEN_IMAGE21_MOLD_1K_PRESETS) {
+            assert!(presets.contains(&(width, height)), "{width}x{height}");
+            let mut req = qwen21_request("qwen-image-2.1:bf16");
+            req.width = width;
+            req.height = height;
+            crate::validation::validate_generate_request(&req)
+                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+            validate_request_against_generation_profile(&profile, &req)
+                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+        }
+        assert_eq!(presets.len(), 14);
+        let groups: Vec<&str> = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .map(|group| group.id.as_str())
+            .collect();
+        for label in ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"] {
+            assert!(groups.contains(&label), "{label} in {groups:?}");
+        }
+        // One past each ceiling is refused.
+        let mut req = qwen21_request("qwen-image-2.1:bf16");
+        req.width = 2784;
+        req.height = 1024;
+        assert!(crate::validation::validate_generate_request(&req).is_err());
+        req.width = 2432;
+        req.height = 1792;
+        assert!(crate::validation::validate_generate_request(&req).is_err());
+        assert_eq!(recipe.provenance.len(), 2);
+        assert_eq!(recipe.provenance[1].kind, ProvenanceKind::MoldPolicy);
+    }
+
+    /// A turbo tag pins the distill's recipe — steps, guidance, no negative
+    /// prompt — from its IDENTITY, while keeping everything else the base
+    /// tier advertises: references, transparency and a user LoRA on top.
+    #[test]
+    fn qwen_image21_turbo_tiers_pin_the_viggle_recipe() {
+        for tag in crate::manifest::QWEN_IMAGE21_TURBO_TAGS {
+            let name = format!("qwen-image-2.1-turbo:{tag}");
+            let manifest = crate::manifest::find_manifest(&name).unwrap();
+            // A stale model_prefs default must not reach the pinned control.
+            let profile = generation_profile_for_manifest_with_defaults(
+                manifest,
+                GenerationDefaultsProfile {
+                    width: 1024,
+                    height: 1024,
+                    steps: 40,
+                    guidance: 4.0,
+                    frames: None,
+                    fps: None,
+                    negative_prompt: None,
+                },
+            );
+            let recipe = profile.default_recipe().unwrap();
+            assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{name}");
+            assert_eq!((recipe.steps.min, recipe.steps.max), (6, 6), "{name}");
+            assert_eq!(recipe.defaults.steps, 6, "{name}");
+            assert!(recipe.steps.note.as_deref().unwrap().contains("0.9375"));
+            assert_eq!(recipe.guidance.mode, ControlMode::Fixed, "{name}");
+            assert_eq!(recipe.guidance.default, 1.0, "{name}");
+            assert_eq!(recipe.defaults.guidance, 1.0, "{name}");
+            assert!(recipe.guidance.note.as_deref().unwrap().contains("turbo"));
+            assert_eq!(
+                recipe.capabilities.negative_prompt.mode,
+                ControlMode::Hidden,
+                "{name}"
+            );
+            assert!(recipe.capabilities.supports_lora, "{name}");
+            let base = crate::manifest::find_manifest(&format!("qwen-image-2.1:{tag}")).unwrap();
+            let base_profile = generation_profile_for_manifest(base);
+            let base_recipe = base_profile.default_recipe().unwrap();
+            assert_eq!(
+                recipe.capabilities.lora.max_count,
+                base_recipe.capabilities.lora.max_count
+            );
+            assert_eq!(
+                recipe.capabilities.reference_images,
+                base_recipe.capabilities.reference_images
+            );
+            assert_eq!(
+                recipe.capabilities.transparency,
+                base_recipe.capabilities.transparency
+            );
+            assert_eq!(recipe.resolution, base_recipe.resolution);
+            // The base tier keeps ordinary true CFG.
+            assert_eq!(base_recipe.steps.mode, ControlMode::Adjustable);
+            assert_eq!(base_recipe.guidance.mode, ControlMode::Adjustable);
+            assert_eq!(
+                base_recipe.capabilities.negative_prompt.mode,
+                ControlMode::Adjustable
+            );
+
+            // Admission refuses anything but the recipe.
+            let mut req = qwen21_request(&name);
+            req.steps = 6;
+            req.guidance = 1.0;
+            validate_request_against_generation_profile(&profile, &req).unwrap();
+            req.steps = 8;
+            assert!(validate_request_against_generation_profile(&profile, &req).is_err());
+            req.steps = 6;
+            req.guidance = 4.0;
+            assert!(validate_request_against_generation_profile(&profile, &req).is_err());
+        }
+    }
+
+    #[test]
+    fn qwen_image21_takes_lora_on_every_tier() {
+        assert!(validation::family_supports_lora("qwen-image21"));
+        let profile = qwen21_profile("qwen-image-2.1:bf16");
+        let capabilities = &profile.default_recipe().unwrap().capabilities;
+        assert!(capabilities.supports_lora);
+        assert_eq!(capabilities.lora.mode, ControlMode::Adjustable);
+    }
+
+    #[test]
+    fn an_older_servers_profile_without_the_new_fields_still_parses() {
+        let profile = qwen21_profile("qwen-image-2.1:bf16");
+        let mut json = serde_json::to_value(&profile).unwrap();
+        let capabilities = &mut json["recipes"][0]["capabilities"];
+        capabilities.as_object_mut().unwrap().remove("transparency");
+        let references = capabilities["reference_images"].as_object_mut().unwrap();
+        references.remove("canvas");
+        references.remove("formats");
+        let parsed: GenerationProfileSet = serde_json::from_value(json).unwrap();
+        let capabilities = &parsed.default_recipe().unwrap().capabilities;
+        assert!(capabilities.transparency.is_none());
+        let references = capabilities.reference_images.as_ref().unwrap();
+        assert!(references.canvas.is_none());
+        assert!(references.formats.is_empty());
+        assert_eq!(references.accepted_formats(), ImageInputFormat::LEGACY);
     }
 
     /// `Flux2Engine::load_transformer` refuses an adapter over an FP8-scaled
@@ -3851,6 +4571,16 @@ mod tests {
                 row["source_relation"],
                 "{model} source_relation"
             );
+            // Optional per-row keys: pinned exactly when a row names them,
+            // absent from the wire when it does not.
+            let wire = serde_json::to_value(&actual).unwrap();
+            for key in ["canvas", "formats"] {
+                assert_eq!(
+                    wire.get(key),
+                    row.get(key),
+                    "{model} {key} (absent in the row means absent on the wire)"
+                );
+            }
             // The recipe every client reads must carry that same block.
             let profile = resolve_generation_profile(input(model, family));
             assert_eq!(

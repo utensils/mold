@@ -80,6 +80,7 @@ pub(crate) fn minimal_generate_request(model: &str) -> crate::types::GenerateReq
         id_image_names: None,
         true_cfg: None,
         cfg_start_step: None,
+        transparent_background: None,
     }
 }
 

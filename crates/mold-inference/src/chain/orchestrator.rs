@@ -574,6 +574,7 @@ fn build_stage_generate_request(
         id_image_names: None,
         true_cfg: None,
         cfg_start_step: None,
+        transparent_background: None,
     }
 }
 
