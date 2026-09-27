@@ -274,6 +274,23 @@ fn p3_cases() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
     ]
 }
 
+/// P3 bf16's per-case ceilings on the mean relative error of mold's
+/// `prompt_embeds` against the FP32 capture. Measured on an L40S with the
+/// shipped F32 vision tower (BF16 language model): p6_pos 5.18e-2, p6_neg
+/// 5.28e-2, p8_pos 4.36e-2, t2i_p8 2.86e-2 — against upstream's bf16 run's
+/// 2.99e-1, 3.01e-1, 2.85e-1 and 2.45e-2. Each ceiling is 1.25x mold's
+/// measurement, so a defect adding a few percent fails where the old gate
+/// (1.5x UPSTREAM's error) allowed the image cases to drift to 45%: upstream
+/// ran its vision tower in bf16, which alone moves its conditioning ~30%.
+fn p3_bf16_ceiling(case: &str) -> f32 {
+    match case {
+        "p6_pos" | "p6_neg" => 6.6e-2,
+        "p8_pos" => 5.5e-2,
+        "t2i_p8" => 3.6e-2,
+        other => panic!("no P3 bf16 ceiling for {other}"),
+    }
+}
+
 fn p3(dtype: DType, suffix: &str, tolerance: f32) {
     let env = env();
     let device = device();
@@ -317,9 +334,10 @@ fn p3(dtype: DType, suffix: &str, tolerance: f32) {
             );
         } else {
             // The bf16 vision tower alone moves upstream's own merger output
-            // ~11% from its fp32 run, so a bf16-to-bf16 comparison measures
-            // rounding chaos. Hold mold's bf16 to the fp32 truth no worse
-            // than upstream's bf16 is.
+            // ~14% from its fp32 run, so a bf16-to-bf16 comparison measures
+            // rounding chaos. Hold mold's bf16 to the fp32 truth under an
+            // absolute per-case ceiling, and never worse than `tolerance`
+            // times upstream's own bf16 error.
             let truth =
                 env.capture(&format!("p3_{case}_fp32.safetensors"))["prompt_embeds"].clone();
             let (_, ours) = relative_error(&conditioning.embeddings, &truth);
@@ -328,6 +346,11 @@ fn p3(dtype: DType, suffix: &str, tolerance: f32) {
                 "{case} bf16 vs fp32 truth: mold mean {ours:.3e}, upstream mean {theirs:.3e}"
             );
             assert!(ours <= theirs * tolerance, "{case}: {ours} vs {theirs}");
+            let ceiling = p3_bf16_ceiling(case);
+            assert!(
+                ours <= ceiling,
+                "{case}: mean {ours:.3e} from the fp32 truth exceeds {ceiling:.1e}"
+            );
         }
     }
 }
@@ -344,8 +367,9 @@ fn p3_fp32_conditioning_matches_the_upstream_capture() {
 #[test]
 #[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
 fn p3_bf16_conditioning_matches_the_upstream_capture() {
-    // `tolerance` is the allowed ratio to upstream's own bf16 error.
-    p3(DType::BF16, "bf16", 1.5);
+    // `tolerance` is the allowed ratio to upstream's own bf16 error; the
+    // absolute ceilings are `p3_bf16_ceiling`'s.
+    p3(DType::BF16, "bf16", 1.25);
 }
 
 fn p6(dtype: DType, suffix: &str, tolerance: f32) {
@@ -467,16 +491,27 @@ fn p6_bf16_transformer_matches_the_upstream_capture() {
     // `tolerance` is the allowed ratio to upstream's own bf16 error.
     p6(DType::BF16, "bf16", 1.5);
 }
-/// P3 diagnostics (fp32, one reference): MRoPE position ids exactly, then
-/// the language model's hidden states after the scatter and after layers
-/// 0-4, 18, 35 against transformers' `hidden_states`. Localizes a P3 drift.
-#[test]
-#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
-fn p3_p8_language_model_internals_match_the_upstream_capture() {
-    let (dtype, suffix) = match std::env::var("QWEN_IMAGE21_DIAG_DTYPE").as_deref() {
-        Ok("bf16") => (DType::BF16, "bf16"),
-        _ => (DType::F32, "fp32"),
-    };
+/// The language-model hidden states `p3_p8_pos_lm_internals_*` captures:
+/// the scatter (`lm_hidden_0`), layers 0-3, 17, 34 (`1`-`4`, `18`, `35`) and
+/// the last layer before the final norm (`36`).
+const LM_CAPTURED_LAYERS: [usize; 8] = [0, 1, 2, 3, 4, 18, 35, 36];
+
+/// Where the P8 reference's vision features come from for a language-model
+/// comparison.
+#[derive(Debug, Clone, Copy)]
+enum LmVision {
+    /// mold's own tower at this dtype.
+    Tower(DType),
+    /// P2's captured fp32 merger and DeepStack rows, so the comparison sees
+    /// the language model and nothing upstream of it.
+    CapturedFp32,
+}
+
+/// Run the P8 edit prompt (one reference) through mold's multimodal Qwen3
+/// language model at `lm_dtype` and return the captured layers'
+/// `(max, mean)` relative errors against `p3_p8_pos_lm_internals_{suffix}`,
+/// in [`LM_CAPTURED_LAYERS`] order. MRoPE position ids must match exactly.
+fn lm_internal_errors(lm_dtype: DType, vision: LmVision, suffix: &str) -> Vec<(f32, f32)> {
     use crate::encoders::qwen3::Qwen3Model;
     use crate::encoders::qwen3_vl_inject::VisualInjection;
     use mold_candle::qwen3_vl::{create_mm_token_type_ids, qwen_mrope_positions};
@@ -484,28 +519,40 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
     let device = device();
     let progress = ProgressReporter::default();
     let refs = references(&["ref_opaque.png"]);
-    let tower = load_vision_tower(
-        &env.text_encoder(),
-        &device,
-        super::reference::vision_tower_dtype(),
-        &progress,
-    )
-    .unwrap();
-    let vision = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
+    let tower_dtype = match vision {
+        LmVision::Tower(dtype) => dtype,
+        LmVision::CapturedFp32 => DType::F32,
+    };
+    let tower = load_vision_tower(&env.text_encoder(), &device, tower_dtype, &progress).unwrap();
+    let mut features = encode_vision(&tower, &refs, &device, &mut || Ok(())).unwrap();
     drop(tower);
+    let rows = features.embeds.dim(0).unwrap();
     let p2 = env.capture("p2_vision_fp32.safetensors");
     let (max_error, mean_error) = relative_error(
-        &vision.embeds,
-        &p2["vision_merger"]
-            .narrow(0, 0, vision.embeds.dim(0).unwrap())
-            .unwrap(),
+        &features.embeds,
+        &p2["vision_merger"].narrow(0, 0, rows).unwrap(),
     );
-    eprintln!("merger vs fp32: relative max {max_error:.3e}, mean {mean_error:.3e}");
+    eprintln!(
+        "{vision:?}: tower merger vs fp32 capture: relative max {max_error:.3e}, mean {mean_error:.3e}"
+    );
+    if let LmVision::CapturedFp32 = vision {
+        let captured = |name: &str| {
+            p2[name]
+                .narrow(0, 0, rows)
+                .unwrap()
+                .to_device(&device)
+                .unwrap()
+        };
+        features.embeds = captured("vision_merger");
+        features.deepstack = (0..features.deepstack.len())
+            .map(|index| captured(&format!("vision_deepstack_{index}")))
+            .collect();
+    }
     let encoder = Qwen3Encoder::load_bf16(
         &env.text_encoder(),
         &env.tokenizer(),
         &device,
-        dtype,
+        lm_dtype,
         &Qwen3BF16Config::qwen3_image_21_text_encoder(),
         &progress,
     )
@@ -513,7 +560,7 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
     let counts: Vec<usize> = refs.iter().map(|r| r.pad_count().unwrap()).collect();
     let ids = tokenize_image_conditioned(&encoder.tokenizer, P8_PROMPT, &counts).unwrap();
     let mrope =
-        qwen_mrope_positions(&create_mm_token_type_ids(&ids), &vision.grids, &[], 2).unwrap();
+        qwen_mrope_positions(&create_mm_token_type_ids(&ids), &features.grids, &[], 2).unwrap();
     let captured = env.capture(&format!("p3_p8_pos_lm_internals_{suffix}.safetensors"));
     let positions = captured["lm_position_ids"].to_vec3::<i64>().unwrap();
     for axis in 0..3 {
@@ -526,8 +573,8 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
             .enumerate()
             .filter_map(|(i, id)| (*id == super::reference::QWEN3_VL_IMAGE_PAD_ID).then_some(i))
             .collect(),
-        embeds: vision.embeds.clone(),
-        deepstack: vision.deepstack.clone(),
+        embeds: features.embeds.clone(),
+        deepstack: features.deepstack.clone(),
     };
     let input_ids = Tensor::from_vec(ids.clone(), (1, ids.len()), &device).unwrap();
     let Some(Qwen3Model::BF16(model)) = encoder.model.as_ref() else {
@@ -536,11 +583,120 @@ fn p3_p8_language_model_internals_match_the_upstream_capture() {
     let states = model
         .multimodal_hidden_states(&input_ids, &visual, &mrope)
         .unwrap();
-    for index in [0usize, 1, 2, 3, 4, 18, 35, 36] {
-        let (max_error, mean_error) =
-            relative_error(&states[index], &captured[&format!("lm_hidden_{index}")]);
-        eprintln!("lm_hidden_{index}: relative max {max_error:.3e}, mean {mean_error:.3e}");
+    LM_CAPTURED_LAYERS
+        .iter()
+        .map(|&index| {
+            let (max_error, mean_error) =
+                relative_error(&states[index], &captured[&format!("lm_hidden_{index}")]);
+            eprintln!(
+                "{lm_dtype:?} LM, {vision:?} vs {suffix}: lm_hidden_{index} relative max {max_error:.3e}, mean {mean_error:.3e}"
+            );
+            (max_error, mean_error)
+        })
+        .collect()
+}
+/// Upstream's own bf16 language model's per-layer `(max, mean)` relative
+/// error against its fp32 run: `p3_p8_pos_lm_internals_bf16` against
+/// `_fp32`, in [`LM_CAPTURED_LAYERS`] order.
+fn upstream_bf16_lm_errors() -> Vec<(f32, f32)> {
+    let env = env();
+    let bf16 = env.capture("p3_p8_pos_lm_internals_bf16.safetensors");
+    let fp32 = env.capture("p3_p8_pos_lm_internals_fp32.safetensors");
+    LM_CAPTURED_LAYERS
+        .iter()
+        .map(|index| {
+            let name = format!("lm_hidden_{index}");
+            let (max_error, mean_error) = relative_error(&bf16[&name], &fp32[&name]);
+            eprintln!(
+                "upstream bf16 vs fp32: {name} relative max {max_error:.3e}, mean {mean_error:.3e}"
+            );
+            (max_error, mean_error)
+        })
+        .collect()
+}
+
+/// Assert every captured layer's mean relative error is within its ceiling.
+fn assert_lm_ceilings(label: &str, errors: &[(f32, f32)], ceilings: &[f32; 8]) {
+    for ((index, (_, mean)), ceiling) in LM_CAPTURED_LAYERS.iter().zip(errors).zip(ceilings) {
+        assert!(
+            mean <= ceiling,
+            "{label}: lm_hidden_{index} mean relative error {mean:.3e} exceeds {ceiling:.1e}"
+        );
     }
+}
+
+/// fp32 per-layer mean relative-error ceilings against the fp32 capture,
+/// [`LM_CAPTURED_LAYERS`] order. Measured (L40S, captured fp32 vision rows
+/// injected so nothing upstream of the language model contributes):
+/// [1.02e-5, 8.74e-6, 7.49e-6, 6.95e-6, 6.92e-6, 2.07e-5, 5.05e-5,
+/// 5.43e-5]. The ceilings are 10x those, and at least 1e-4: fp32
+/// accumulation-order noise, three orders of magnitude below the percent-level
+/// error of any wrong constant (a RoPE section, an eps, a DeepStack layer).
+const LM_FP32_CEILINGS: [f32; 8] = [1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 2.5e-4, 6e-4, 6e-4];
+
+/// bf16 per-layer mean relative-error ceilings against the FP32 capture,
+/// [`LM_CAPTURED_LAYERS`] order. Measured with the shipped F32 vision tower:
+/// [1.41e-3, 3.42e-3, 4.24e-3, 4.82e-3, 5.55e-3, 2.15e-2, 3.92e-2,
+/// 4.34e-2]. Each ceiling is 1.5x the measurement. The early layers
+/// carry the discrimination — a layer-level bug appears at the first layer it
+/// touches, where bf16's own rounding is still a fraction of a percent — and
+/// the late layers keep the accumulated rounding from growing unnoticed.
+///
+/// The bf16 CAPTURE is not the target: upstream ran its vision tower in bf16,
+/// which moves the merger ~14% (mean) from fp32, so its language-model states
+/// sit 8-28% from the fp32 run (`upstream_bf16_lm_errors`) — no
+/// several-percent defect could be seen against it. It is the ceiling of a
+/// second gate instead: mold's bf16 language model must be no further from
+/// the fp32 truth than upstream's own bf16 run is, layer by layer.
+const LM_BF16_CEILINGS: [f32; 8] = [
+    2.2e-3, 5.2e-3, 6.4e-3, 7.3e-3, 8.4e-3, 3.3e-2, 5.9e-2, 6.6e-2,
+];
+
+/// P3 language-model internals, fp32: MRoPE position ids exactly, then the
+/// scatter and layers 0-3, 17, 34 and the pre-norm output against
+/// transformers' `hidden_states`, with P2's captured vision rows injected so
+/// the comparison isolates the language model.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_p8_language_model_internals_match_the_fp32_capture() {
+    let errors = lm_internal_errors(DType::F32, LmVision::CapturedFp32, "fp32");
+    assert_lm_ceilings("fp32 LM", &errors, &LM_FP32_CEILINGS);
+}
+
+/// P3 language-model internals, bf16 (the shipped configuration: BF16
+/// language model, F32 vision tower), against the fp32 truth under absolute
+/// ceilings and against upstream's own bf16 run layer by layer.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_p8_language_model_internals_match_the_bf16_capture() {
+    let errors = lm_internal_errors(
+        DType::BF16,
+        LmVision::Tower(super::reference::vision_tower_dtype()),
+        "fp32",
+    );
+    assert_lm_ceilings("bf16 LM", &errors, &LM_BF16_CEILINGS);
+    for ((index, (_, ours)), (_, theirs)) in LM_CAPTURED_LAYERS
+        .iter()
+        .zip(&errors)
+        .zip(upstream_bf16_lm_errors())
+    {
+        assert!(
+            *ours <= theirs,
+            "bf16 LM: lm_hidden_{index} is {ours:.3e} from fp32, upstream bf16 {theirs:.3e}"
+        );
+    }
+}
+
+/// P3 diagnostics, measurement only: why the bf16 CAPTURE cannot be a
+/// target — upstream's own bf16 run against its fp32 run, and mold's bf16
+/// language model (with the shipped F32 tower, then a BF16 one) against the
+/// bf16 capture.
+#[test]
+#[ignore = "requires QWEN_IMAGE21_MODEL_ROOT and QWEN_IMAGE21_FIXTURES"]
+fn p3_p8_language_model_internals_study() {
+    upstream_bf16_lm_errors();
+    lm_internal_errors(DType::BF16, LmVision::Tower(DType::F32), "bf16");
+    lm_internal_errors(DType::BF16, LmVision::Tower(DType::BF16), "bf16");
 }
 fn engine_paths(env: &Env) -> mold_core::ModelPaths {
     mold_core::ModelPaths {

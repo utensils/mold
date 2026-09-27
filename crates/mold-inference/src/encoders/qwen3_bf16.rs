@@ -683,6 +683,13 @@ impl Bf16Qwen3Encoder {
     /// The multimodal forward's hidden state after the embedding scatter
     /// (index 0) and after each decoder layer `k` (index `k + 1`), for parity
     /// diagnostics against transformers' `hidden_states` tuple.
+    ///
+    /// transformers records each DECODER LAYER's output
+    /// (`_can_record_outputs = {"hidden_states": Qwen3VLTextDecoderLayer}`,
+    /// `modeling_qwen3_vl.py:636-637`) and adds the DeepStack rows to the
+    /// stream only afterwards (`:844-852`), so layers 0-2's recorded states
+    /// are PRE-DeepStack. Recording them after the add read as a 27-49% mean
+    /// error at exactly those three layers while layer 3 matched to 1e-5.
     #[cfg(test)]
     pub(crate) fn multimodal_hidden_states(
         &self,
@@ -700,8 +707,8 @@ impl Bf16Qwen3Encoder {
         let mut states = vec![hidden.clone()];
         for (index, layer) in self.layers.iter().enumerate() {
             hidden = layer.forward_multimodal(&hidden, &cos, &sin, None)?;
-            hidden = super::qwen3_vl_inject::apply_deepstack(&hidden, visual, index)?;
             states.push(hidden.clone());
+            hidden = super::qwen3_vl_inject::apply_deepstack(&hidden, visual, index)?;
         }
         Ok(states)
     }
