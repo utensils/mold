@@ -473,7 +473,7 @@ impl ImageInputFormat {
 }
 
 /// "PNG or JPEG", "PNG, JPEG, or WebP": the list a refusal names.
-fn image_input_format_list(formats: &[ImageInputFormat]) -> String {
+pub fn image_input_format_list(formats: &[ImageInputFormat]) -> String {
     let labels: Vec<&str> = formats.iter().map(|format| format.label()).collect();
     match labels.as_slice() {
         [] => String::new(),

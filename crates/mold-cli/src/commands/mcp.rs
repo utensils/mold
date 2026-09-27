@@ -2886,13 +2886,9 @@ fn build_generate_request(
             for (index, image) in images.iter().enumerate() {
                 let format = mold_core::validation::sniff_image_input_format(image);
                 if !format.is_some_and(|format| accepted.contains(&format)) {
-                    let labels = accepted
-                        .iter()
-                        .map(|format| format.label())
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     return Err(format!(
-                        "reference_images[{index}] must be one of: {labels}"
+                        "reference_images[{index}] must be a {} image for this model",
+                        mold_core::generation_profile::image_input_format_list(accepted)
                     ));
                 }
             }
@@ -6831,7 +6827,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             build_generate_request(args, None).unwrap_err(),
-            "reference_images[0] must be one of: PNG, JPEG"
+            "reference_images[0] must be a PNG or JPEG image for this model"
         );
 
         let args = qwen21_args(json!({ "reference_images": ["bm90IGFuIGltYWdl"] }));
