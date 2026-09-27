@@ -11,8 +11,10 @@ use candle_nn::{
 use super::config::H3ConditionerConfig;
 use super::model::ConditionerCheckpoint;
 
+/// Qwen3-VL vision-tower geometry. H3 derives it from its conditioner config;
+/// Qwen Image 2.1 uses [`Qwen3VlVisionDimensions::qwen_image_21`].
 #[derive(Clone, Debug)]
-pub(super) struct Qwen3VlVisionDimensions {
+pub struct Qwen3VlVisionDimensions {
     depth: usize,
     hidden_size: usize,
     intermediate_size: usize,
@@ -44,6 +46,47 @@ impl Qwen3VlVisionDimensions {
             deepstack_visual_indexes: vision.deepstack_visual_indexes.clone(),
             activation: Activation::GeluPytorchTanh,
         }
+    }
+
+    /// Qwen Image 2.1's tower (`text_encoder/config.json` `vision_config` at
+    /// `b3179ad`): depth 27, width 1152, MLP 4304, 16 heads, patch 16,
+    /// temporal patch 2, merge 2, output 4096, 48x48 learned positions,
+    /// DeepStack taps after blocks 8/16/24, `gelu_pytorch_tanh`.
+    pub fn qwen_image_21() -> Self {
+        Self {
+            depth: 27,
+            hidden_size: 1152,
+            intermediate_size: 4304,
+            num_heads: 16,
+            in_channels: 3,
+            patch_size: 16,
+            temporal_patch_size: 2,
+            spatial_merge_size: 2,
+            output_hidden_size: 4096,
+            num_position_embeddings: 2304,
+            deepstack_visual_indexes: vec![8, 16, 24],
+            activation: Activation::GeluPytorchTanh,
+        }
+    }
+
+    /// Output width of the merger and every DeepStack merger.
+    pub fn output_hidden_size(&self) -> usize {
+        self.output_hidden_size
+    }
+
+    /// Patches folded into one merged token per side.
+    pub fn spatial_merge_size(&self) -> usize {
+        self.spatial_merge_size
+    }
+
+    /// Transformer depth of the tower.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Blocks after which a DeepStack map is taken, in tap order.
+    pub fn deepstack_visual_indexes(&self) -> &[usize] {
+        &self.deepstack_visual_indexes
     }
 
     fn validate(&self) -> Result<()> {
@@ -527,7 +570,9 @@ impl VisionRotaryEmbedding {
     }
 }
 
-pub(super) struct Qwen3VlVisionModel {
+/// The Qwen3-VL vision tower: patch embedding, learned interpolated
+/// positions, 2-D rotary blocks, the output merger and the DeepStack mergers.
+pub struct Qwen3VlVisionModel {
     patch_embed: PatchEmbed,
     position_embedding: Embedding,
     blocks: Vec<VisionBlock>,
@@ -542,7 +587,8 @@ pub(super) struct Qwen3VlVisionModel {
 }
 
 impl Qwen3VlVisionModel {
-    pub(super) fn new(config: &Qwen3VlVisionDimensions, vb: VarBuilder) -> Result<Self> {
+    /// Build the tower rooted at `vb` (`model.visual` in a Qwen3-VL checkpoint).
+    pub fn new(config: &Qwen3VlVisionDimensions, vb: VarBuilder) -> Result<Self> {
         config.validate()?;
         let patch_embed = PatchEmbed::new(config, vb.pp("patch_embed"))?;
         let position_embedding = embedding(
@@ -584,7 +630,10 @@ impl Qwen3VlVisionModel {
         })
     }
 
-    pub(super) fn forward(
+    /// Run packed patches `[N, 3*2*16*16]` with their `[images, 3]` grid.
+    /// Returns the merger output `[N/4, out]` and one `[N/4, out]` DeepStack
+    /// map per tap, in tap order.
+    pub fn forward(
         &self,
         pixels: &Tensor,
         grid_thw: &Tensor,

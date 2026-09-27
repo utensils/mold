@@ -85,6 +85,34 @@ pub fn pack_qwen_vision_u8(
     height: usize,
     width: usize,
 ) -> Result<PackedVisionPatches, ProcessorError> {
+    pack_qwen_vision_u8_with(rgb_frames, frame_count, height, width, |byte| {
+        f32::from(byte) / 127.5 - 1.0
+    })
+}
+
+/// [`pack_qwen_vision_u8`] with transformers' torchvision-backend
+/// normalization: `Qwen2VLImageProcessorFast` fuses `rescale_factor = 1/255`
+/// and `mean = std = 0.5` into one `(x - 127.5) / 127.5` in f32, which can
+/// differ from `x / 127.5 - 1` by one ulp. Qwen Image 2.1's processor takes
+/// this path whenever torchvision is installed.
+pub fn pack_qwen_vision_u8_torchvision(
+    rgb_frames: &[u8],
+    frame_count: usize,
+    height: usize,
+    width: usize,
+) -> Result<PackedVisionPatches, ProcessorError> {
+    pack_qwen_vision_u8_with(rgb_frames, frame_count, height, width, |byte| {
+        (f32::from(byte) - 127.5) / 127.5
+    })
+}
+
+fn pack_qwen_vision_u8_with(
+    rgb_frames: &[u8],
+    frame_count: usize,
+    height: usize,
+    width: usize,
+    normalize: impl Fn(u8) -> f32,
+) -> Result<PackedVisionPatches, ProcessorError> {
     const CHANNELS: usize = 3;
     const TEMPORAL_PATCH: usize = 2;
     const PATCH: usize = 16;
@@ -132,7 +160,7 @@ pub fn pack_qwen_vision_u8(
                                         let index = (((frame * height + row) * width + column)
                                             * CHANNELS)
                                             + channel;
-                                        values.push(f32::from(rgb_frames[index]) / 127.5 - 1.0);
+                                        values.push(normalize(rgb_frames[index]));
                                     }
                                 }
                             }
@@ -396,5 +424,25 @@ mod tests {
     fn vision_packing_rejects_unresized_shapes() {
         let error = pack_qwen_vision_u8(&vec![0; 31 * 32 * 3], 1, 31, 32).unwrap_err();
         assert!(error.to_string().contains("multiples of 32"));
+    }
+}
+#[cfg(test)]
+mod torchvision_tests {
+    use super::*;
+
+    #[test]
+    fn torchvision_normalization_is_the_fused_center_scale() {
+        let bytes: Vec<u8> = (0..32 * 32 * 3).map(|i| (i % 256) as u8).collect();
+        let fused = pack_qwen_vision_u8_torchvision(&bytes, 1, 32, 32).unwrap();
+        let affine = pack_qwen_vision_u8(&bytes, 1, 32, 32).unwrap();
+        assert_eq!(fused.grid, affine.grid);
+        assert_eq!(fused.patch_count, affine.patch_count);
+        for (a, b) in fused.values.iter().zip(&affine.values) {
+            assert!((a - b).abs() <= f32::EPSILON, "{a} vs {b}");
+        }
+        for byte in [0u8, 127, 128, 255] {
+            let expected = (f32::from(byte) - 127.5) / 127.5;
+            assert!(fused.values.contains(&expected));
+        }
     }
 }

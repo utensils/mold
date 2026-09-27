@@ -11,4 +11,5 @@ pub mod metal_reduce;
 pub mod minimax_h3;
 pub mod quantized;
 pub mod quantized_nn;
+pub mod qwen3_vl;
 pub mod stable_diffusion;
