@@ -1369,8 +1369,11 @@ pub fn qwen_image21_denoise_workspace_bytes(
         dtype_bytes as u32,
         ActivationFamily::QwenImage21Dit,
     );
+    // `activation_bytes` carries the legacy both-branch prefix term; the
+    // workspace excludes every cache (the headroom it sizes is FOR the cache),
+    // exactly as the reference arm subtracts it.
     let workspace = if references.is_empty() {
-        base
+        base.saturating_sub(crate::qwen_image21::prefix_cache_budget_bytes(batch))
     } else {
         qwen_image21_reference_workspace_bytes(base, shape, batch, dtype_bytes)
     };
@@ -8791,9 +8794,13 @@ mod qwen_image21_sequence_sizing_tests {
             )
         );
         assert!(workspace > one);
+        // The text-to-image workspace is the activation WITHOUT the legacy
+        // both-branch F32 prefix term `activation_bytes` carries: the cache is
+        // what the headroom is being sized FOR, so charging it inside the
+        // workspace too recomputed prefixes that fit.
         assert_eq!(
             qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[], 1, 2),
-            base
+            base - crate::qwen_image21::prefix_cache_budget_bytes(1)
         );
         // A plan also keeps the reference encoders' WEIGHTS beside the
         // denoise — never the encode phase's working set, which is freed
@@ -8811,7 +8818,7 @@ mod qwen_image21_sequence_sizing_tests {
         assert!(qwen_image21_encode_workspace_bytes(three, 2) > 0);
         assert_eq!(
             qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[], 1, 2),
-            base
+            base - crate::qwen_image21::prefix_cache_budget_bytes(1)
         );
     }
 
