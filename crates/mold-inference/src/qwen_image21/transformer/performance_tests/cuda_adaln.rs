@@ -148,7 +148,18 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
         dtype,
     )?;
     let text = conditioning.embeddings.to_dtype(dtype)?;
-    let (rope_cos, rope_sin) = transformer.t2i_rope(text_len, lh, lw, dtype, &device)?;
+    let layout = crate::qwen_image21::layout::QwenImage21JointLayout::text_to_image(
+        &conditioning.valid_tokens,
+        (lh, lw),
+    )?;
+    let (rope_cos, rope_sin) = crate::qwen_image21::layout::QwenImage21JointLayout::rope_tables(
+        layout.rope(),
+        transformer.cfg.axes_dims_rope,
+        dtype,
+        &device,
+    )?;
+    let plan = layout.attention_plan(false);
+    let prefix_len = layout.prefix_len();
     let mut sites = Vec::new();
     let mut worst = (0f64, String::new());
     let mut worst_hand = 0f64;
@@ -189,11 +200,12 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
                     let mod1 = per_token.narrow(D::Minus1, 0, 2 * inner)?;
                     let (normalized, gate) =
                         TransformerBlock::modulate(block.norm1.forward(&hidden)?, &mod1)?;
-                    let attn = block.attn.forward_t2i(
+                    let attn = block.attn.forward_block_causal(
                         &normalized,
                         &rope_cos,
                         &rope_sin,
-                        &conditioning.valid_tokens,
+                        &plan,
+                        prefix_len,
                         LayerCache::Disabled,
                     )?;
                     (
@@ -224,12 +236,13 @@ fn official_cuda_adaln_precision_study() -> Result<()> {
                     }));
                 }
             }
-            hidden = block.forward_t2i(
+            hidden = block.forward_block_causal(
                 &hidden,
                 &per_token,
                 &rope_cos,
                 &rope_sin,
-                &conditioning.valid_tokens,
+                &plan,
+                prefix_len,
                 LayerCache::Disabled,
             )?;
         }
