@@ -128,7 +128,11 @@ fn denoise_cache_budget(
     if exec_path.is_legacy() {
         return super::PrefixCacheBudget::RequestOnly;
     }
-    let free = crate::device::usable_free_vram_bytes(gpu_id).unwrap_or(0);
+    // Settle the frees queued behind the encoder park before sampling, and
+    // count what this process's pool still holds idle: both read as "used"
+    // to the driver, and the cache is ours to place there.
+    let _ = device.synchronize();
+    let free = crate::device::usable_allocatable_vram_bytes(gpu_id).unwrap_or(0);
     let workspace = crate::device::qwen_image21_denoise_workspace_bytes(
         format,
         req.width,
@@ -393,7 +397,7 @@ impl QwenImage21Engine {
             residency::TeDevice::Cuda => crate::device::qwen_image21_prefix_cache_budget(
                 Some(usable_free_bytes),
                 transformer_bytes.saturating_add(vae_bytes),
-                crate::device::qwen_image21_denoise_workspace_bytes(
+                crate::device::qwen_image21_planned_denoise_bytes(
                     residency::transformer_format(paths),
                     req.width,
                     req.height,

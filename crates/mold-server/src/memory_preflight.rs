@@ -1793,7 +1793,7 @@ pub(crate) fn qwen_image21_cache_budget(
     mold_inference::device::qwen_image21_prefix_cache_budget(
         available_bytes.filter(|bytes| *bytes > 0),
         residency::transformer_device_bytes(paths).saturating_add(vae_bytes),
-        mold_inference::device::qwen_image21_denoise_workspace_bytes(
+        mold_inference::device::qwen_image21_planned_denoise_bytes(
             residency::transformer_format(paths),
             req.width,
             req.height,
@@ -2648,7 +2648,6 @@ fn wan_transformer_can_park(paths: &ModelPaths) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn request_sensitive_activation_memory_with_wan_geometry(
     req: &GenerateRequest,

@@ -1293,6 +1293,7 @@ pub fn qwen_image21_encode_phase_bytes(shape: QwenImage21SequenceShape, dtype_by
 /// and the text-to-image denoise term already charges it for the text and
 /// target rows, so this adds exactly the CONDITION rows — one estimate over
 /// the whole joint sequence, never the text rows twice.
+#[allow(clippy::too_many_arguments)]
 pub fn qwen_image21_reference_extra_bytes(
     format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
     width: u32,
@@ -1355,6 +1356,30 @@ pub fn qwen_image21_denoise_workspace_bytes(
         shape.joint_tokens() as u64,
         batch,
     ))
+}
+
+/// What a PLAN must keep beside the transformer and the VAE for a render's
+/// denoise, before any prefix cache: [`qwen_image21_denoise_workspace_bytes`]
+/// plus the reference encoders an eager engine keeps resident through the
+/// denoise ([`qwen_image21_encode_phase_bytes`], zero without references).
+/// Admission and the text-encoder residency plan hand this to
+/// [`qwen_image21_prefix_cache_budget`], so the cache they plan fits beside
+/// exactly what the residency decision then charges; the engine's own
+/// denoise-time sample already sees those encoders resident and passes the
+/// bare workspace.
+pub fn qwen_image21_planned_denoise_bytes(
+    format: Option<crate::artifact_format::QwenImage21TransformerFormat>,
+    width: u32,
+    height: u32,
+    references: &[(u32, u32)],
+    batch: u32,
+    dtype_bytes: usize,
+) -> u64 {
+    qwen_image21_denoise_workspace_bytes(format, width, height, references, batch, dtype_bytes)
+        .saturating_add(qwen_image21_encode_phase_bytes(
+            QwenImage21SequenceShape::for_request(width, height, references),
+            dtype_bytes,
+        ))
 }
 
 /// Header dimensions of encoded reference images; an unreadable header is
@@ -3687,6 +3712,59 @@ pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemory
 
 fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
     free.saturating_sub(reserve)
+}
+
+/// Bytes this process can allocate on `ordinal` right now: the driver's free
+/// memory plus what this process's own stream-ordered pool holds RESERVED but
+/// not in use, less the operator reserve.
+///
+/// `usable_free_vram_bytes` is the driver's view, and after a large drop (a
+/// text encoder parked to the host, say) the pool keeps the freed pages
+/// reserved rather than returning them, so the driver reports them as used —
+/// by us. Deciding whether an optional allocation fits (the Qwen Image 2.1
+/// prefix cache) from that view refused 12 GiB with ~20 GiB idle in the pool.
+/// Off CUDA, and without pool-backed allocation, this is
+/// `usable_free_vram_bytes`.
+#[cfg(feature = "cuda")]
+pub fn usable_allocatable_vram_bytes(ordinal: usize) -> Option<u64> {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys, CudaContext};
+    let context = CudaContext::new(ordinal).ok()?;
+    let (free, _) = context.mem_get_info().ok()?;
+    let mut pool_idle = 0u64;
+    if context.has_async_alloc() && context.preflight_raw_call().is_ok() {
+        // SAFETY: `context.cu_device()` is the live device this retained
+        // context owns, and this is the pool `cuMemAllocAsync` draws from.
+        if let Ok(pool) = unsafe { result::device::get_mem_pool(context.cu_device()) } {
+            let reserved = pool_attribute(
+                &context,
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+            );
+            let used = pool_attribute(
+                &context,
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+            );
+            if let (Some(reserved), Some(used)) = (reserved, used) {
+                pool_idle = reserved.saturating_sub(used);
+            }
+        }
+    }
+    Some(usable_allocatable_from_raw(
+        free as u64,
+        pool_idle,
+        reserved_vram_bytes(),
+    ))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn usable_allocatable_vram_bytes(ordinal: usize) -> Option<u64> {
+    usable_free_vram_bytes(ordinal)
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn usable_allocatable_from_raw(free: u64, pool_idle: u64, reserve: u64) -> u64 {
+    free.saturating_add(pool_idle).saturating_sub(reserve)
 }
 
 /// Total VRAM currently in use (`total - free`) for the specified GPU
@@ -7838,8 +7916,34 @@ mod tests {
         assert_eq!(report.global_free_drop(), Some(0));
     }
 
+    /// The pool high-water marks a probe reads are ONE counter per device for
+    /// the whole process, and `enter` rearms them. The lib suite runs tests on
+    /// parallel threads, so a second live probe rearming mid-phase erased the
+    /// first one's peak (the flaky `each_cuda_phase_measures_only_its_own_peak`
+    /// "big peak" failure). Every test that opens a live probe holds this.
+    static LIVE_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn live_probe_lock() -> std::sync::MutexGuard<'static, ()> {
+        LIVE_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Memory the pool holds reserved but unused is this process's to
+    /// allocate: it counts beside the driver's free bytes, the operator
+    /// reserve still comes off the top, and nothing underflows.
+    #[test]
+    fn allocatable_vram_counts_the_pools_idle_reservation() {
+        const GB: u64 = 1_000_000_000;
+        assert_eq!(usable_allocatable_from_raw(4 * GB, 20 * GB, GB), 23 * GB);
+        assert_eq!(usable_allocatable_from_raw(4 * GB, 0, GB), 3 * GB);
+        assert_eq!(usable_allocatable_from_raw(0, 0, GB), 0);
+    }
+
     #[test]
     fn a_probe_on_a_gpuless_build_finishes_as_unavailable() {
+        // Under the `cuda` feature this probe is live and rearms the marks.
+        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("vae_decode");
         let report = probe.finish();
 
@@ -7860,6 +7964,7 @@ mod tests {
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let probe = PhaseVramProbe::enter("test_alloc");
         let tensor =
             candle_core::Tensor::zeros((256, 1024, 1024), candle_core::DType::F32, &device)
@@ -7894,6 +7999,7 @@ mod tests {
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let big = PhaseVramProbe::enter("big");
         {
             let _tensor =
@@ -7915,10 +8021,16 @@ mod tests {
             big_report.peak_pool_used.expect("big peak") >= 2_147_483_648,
             "the first phase owns its own 2 GB: {big_report}"
         );
+        // Relative, not absolute: another test's allocation on the shared
+        // pool (which no lock here serializes) may raise either phase's mark,
+        // but only an un-rearmed counter hands the second phase the first
+        // one's 2 GB on top of its own 256 MB.
+        let big_peak = big_report.peak_pool_used.expect("big peak");
+        let small_peak = small_report.peak_pool_used.expect("small peak");
         assert!(
-            small_report.peak_pool_used.expect("small peak") < 2_147_483_648,
+            small_peak < big_peak || small_peak < 2_147_483_648,
             "the high-water mark must be rearmed per phase, so the second phase \
-             never inherits the first's peak: {small_report}"
+             never inherits the first's peak: {small_report} after {big_report}"
         );
     }
 
@@ -7949,6 +8061,7 @@ mod tests {
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             return;
         };
+        let _live = live_probe_lock();
         let outer = PhaseVramProbe::enter("outer");
         {
             let _tensor =
@@ -8633,6 +8746,16 @@ mod qwen_image21_sequence_sizing_tests {
         assert!(workspace > one);
         assert_eq!(
             qwen_image21_denoise_workspace_bytes(None, 1024, 1024, &[], 1, 2),
+            base
+        );
+        // A plan also keeps the reference encoders beside the denoise.
+        let three = QwenImage21SequenceShape::for_request(1024, 1024, &[(1024, 1024); 3]);
+        assert_eq!(
+            qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[(1024, 1024); 3], 1, 2),
+            workspace + qwen_image21_encode_phase_bytes(three, 2)
+        );
+        assert_eq!(
+            qwen_image21_planned_denoise_bytes(None, 1024, 1024, &[], 1, 2),
             base
         );
     }
