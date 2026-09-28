@@ -20,7 +20,16 @@ struct Composer: View {
             ScrollView { content }.frame(maxHeight: UIScreen.main.bounds.height * 0.55)
         }
         .padding(14)
+        .background {
+            if size.isAccessibilitySize {
+                RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground))
+            }
+        }
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        // The chrome the canvas scrolls under: what is behind it is judged
+        // there, not through it (the accessibility audit's rule).
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("bottom-chrome")
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
         .toolbar {
@@ -45,7 +54,9 @@ struct Composer: View {
                 HStack(alignment: .top, spacing: 8) {
                     TextField(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…",
                               text: $generate.draft.prompt, axis: .vertical)
-                        .lineLimit(1 ... (size.isAccessibilitySize ? 3 : 6))
+                        // At the smallest text one line is too short a
+                        // target to hit; two reserved lines are not.
+                        .lineLimit((size <= .small ? 2 : 1) ... (size.isAccessibilitySize ? 3 : 6))
                         .focused($editing)
                     ExpandButton().labelStyle(.iconOnly)
                 }

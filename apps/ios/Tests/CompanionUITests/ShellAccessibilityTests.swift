@@ -151,6 +151,17 @@ final class ShellAccessibilityTests: XCTestCase {
                issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
                 return true
             }
+            // The Library grid is lazy too, and the auditor flags its day
+            // headers (headline) at xSmall and Large the same way; the AX5
+            // pass lays them out at full size. Tile badges (caption2, drawn
+            // at 48 pt tall at AX5) are flagged at every size: XCUITest lists
+            // them although VoiceOver never reaches them (hidden -- the
+            // tile's label says what they show). Only Dynamic Type; their
+            // contrast is still audited.
+            if issue.auditType == .dynamicType, let id = issue.element?.identifier,
+               id == "tile-badge" || (id == "day-header" && !place.contains("AccessibilityXXXL")) {
+                return true
+            }
             // The iPad sidebar's rows are UIKit's single-line cells, and at
             // xSmall and Large the auditor PREDICTS a long one ("Recently
             // Deleted") "may be clipped at larger Dynamic Type sizes". The
@@ -158,6 +169,11 @@ final class ShellAccessibilityTests: XCTestCase {
             // clipping there; only the prediction is skipped, only there.
             if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
                issue.detailedDescription.contains("larger Dynamic Type sizes") {
+                return true
+            }
+            // A disabled control (Generate before a model is chosen) is an
+            // inactive component, which WCAG 1.4.3 exempts from contrast.
+            if issue.auditType == .contrast, let element = issue.element, element.exists, !element.isEnabled {
                 return true
             }
             // The system search field, grown out of the tab bar, reports its
@@ -215,12 +231,19 @@ final class ShellAccessibilityTests: XCTestCase {
 
     /// Scrolled beneath the bottom chrome, and not part of it.
     @MainActor private func isUnderChrome(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
-        let pinned = app.otherElements["bottom-chrome"].firstMatch
-        if pinned.exists, pinned.frame.contains(element.frame) { return false }
+        // Any type: at AX5 the composer is a ScrollView, not a plain group.
+        let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        // A control IN the chrome is never skipped -- by descent, not frame:
+        // at AX5 the composer's frame covers the canvas text behind it.
+        if pinned.exists, isDescendant(element, of: pinned) { return false }
         var top = app.frame.maxY
         let bar = app.tabBars.firstMatch
         if bar.exists { top = min(top, bar.frame.minY) }
         if pinned.exists { top = min(top, pinned.frame.minY) }
+        // The glass bar's scroll-edge effect dims what scrolls toward it
+        // from above its own frame (UIKit's "AdditionalDimmingOverlay").
+        let dimming = app.images["AdditionalDimmingOverlay"].firstMatch
+        if dimming.exists { top = min(top, dimming.frame.minY) }
         return element.frame.maxY > top
     }
 }

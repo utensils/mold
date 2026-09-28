@@ -43,7 +43,8 @@ struct LibraryStoreTests {
         try hosts.add(name: "alpha", address: "10.0.0.1", apiKey: nil, makeDefault: true)
         try hosts.add(name: "beta", address: "10.0.0.2", apiKey: nil, makeDefault: false)
         await hosts.refreshAll()
-        let library = LibraryStore(hosts: hosts)
+        let library = LibraryStore(hosts: hosts, snapshots: LibrarySnapshots(
+            directory: FileManager.default.temporaryDirectory.appending(path: "lib-\(UUID())")))
         await library.reload()
         return (library, hosts, one, two)
     }

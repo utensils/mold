@@ -227,11 +227,23 @@ pull, with "Accept and Download".
 ### 5.2 Library
 
 **Grid.** `LazyVGrid(columns: [.adaptive(minimum: tileMin)])`, where `tileMin`
-is an `@ScaledMetric` from the Small / Medium / Large ladder (96 / 128 / 180 pt at
-Large).
+is an `@ScaledMetric` from the Tiny / Small / Medium / Large / Largest ladder
+(52 / 76 / 112 / 170 / 300 pt at Large: about 7, 5, 3, 2 and 1 columns on an
+iPhone).
 
-- Pinching snaps between the three sizes, with `.selection` haptics. The View
-  menu offers the same choice.
+- A pinch walks the ladder live, one size per ~35% of spread or squeeze, with
+  `.selection` haptics, keeping the top print in place (UIKit's pinch
+  recognizer beside the scroll view: SwiftUI's `MagnifyGesture` never saw a
+  squeeze there). The View menu and ⌘+ / ⌘− offer the same choice.
+- On the two smallest sizes badges shrink to a symbol; nothing wraps over a
+  picture.
+- Thumbnails are requested at 256 or 512 px only -- the sizes machines serve
+  (any other is a 422) -- and decoded off the main thread.
+- **Offline.** Each machine's listing is saved on the device and shown before
+  any machine answers; a machine that is down keeps its prints in the grid,
+  with a note saying so. Thumbnails and the prints opened in the viewer are
+  kept too (Application Support, excluded from backup), within Settings'
+  storage limit; the newest 200 prints' thumbnails are always saved.
 - Day sections have pinned headers: "Today", "Thursday 24 September".
 
 **Tile.** Square, radius 5.
@@ -397,7 +409,10 @@ button.
 
 - **Machines:** add, edit, remove, Default.
 - **Generation:** defaults.
-- **Library:** Save new prints to Photos (off); media cache size and Empty Now.
+- **Library:** Save new prints to Photos (off); Offline Storage limit
+  (250 MB – 5 GB, 1 GB by default; thumbnails 30%, opened prints the rest);
+  how much is used; Save All Thumbnails for Offline (with progress and Stop);
+  Empty Now.
 - **Notifications:** Finished · Failed · Held.
 - **Live Activities.**
 - **About:** version, acknowledgements, and a privacy policy link that opens

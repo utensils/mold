@@ -46,7 +46,8 @@ struct MachineCard: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(.tint.opacity(0.15), in: .capsule)
-                    .foregroundStyle(.tint)
+                    // Primary on the tinted capsule: tint on tint was 4.4:1.
+                    .foregroundStyle(.primary)
             }
         }
     }
@@ -59,7 +60,8 @@ struct MachineCard: View {
                 AdaptiveRow {
                     Text("Video memory")
                 } value: {
-                    Text(memory.words).monospacedDigit()
+                    // Never truncated: at accessibility sizes the row stacks.
+                    Text(memory.words).monospacedDigit().fixedSize()
                 }
                 Gauge(value: memory.fraction) { Text("Video memory") }
                     .gaugeStyle(.accessoryLinearCapacity)

@@ -40,6 +40,8 @@ final class CompanionStores {
         models = ModelStore(hosts: hosts, queue: queue)
         catalog = CatalogStore(hosts: hosts)
         notifier = Notifier()
+        // A machine removed: its saved pictures go with its saved listing.
+        library.forgot = { [thumbnails] id in Task { await thumbnails.forget(host: id) } }
         activities = ActivityCoordinator(generate: generate, hosts: hosts, notifier: notifier, library: library)
         widgets = WidgetSnapshotWriter(hosts: hosts, library: library, queue: queue, generate: generate,
                                        thumbnails: thumbnails)
@@ -62,6 +64,9 @@ final class CompanionStores {
     /// The foreground: reconcile everything, then keep it live.
     func becameActive() async {
         isForeground = true
+        // The saved library first: the grid is there before any machine
+        // answers, and stays there if none does.
+        await library.restoreSaved()
         await hosts.refreshAll()
         guard isForeground else { return }
         hosts.startWatching()
@@ -78,11 +83,24 @@ final class CompanionStores {
             await reconcile(batch)
         }
         await widgets.refresh()
+        // The newest prints' thumbnails, kept for offline browsing: what is
+        // already saved is skipped, so this costs nothing on a quiet day.
+        if thumbnails.saving == nil {
+            // Newest first ACROSS machines: the pool is in machine order.
+            let newest = self.library.pool.sorted { $0.createdAt > $1.createdAt }.prefix(Self.savedAhead)
+            thumbnails.save(Array(newest))
+        }
     }
+
+    /// How many of the newest prints are always kept for offline.
+    static let savedAhead = 200
 
     func enteredBackground() {
         isForeground = false
         generate.saveDraft()
+        // A save left running would be frozen mid-request; the next return
+        // to the foreground starts it again from what is on disk.
+        thumbnails.cancelSaving()
         pauseStreams()
         activities.enteredBackground()
         scheduleRefresh()

@@ -14,19 +14,34 @@ struct PrintTile: View {
     let selected: Bool
     let showsHost: Bool
 
+    /// `false` when the grid draws the badges itself, OUTSIDE the tile's
+    /// button: SwiftUI lists every view inside a button's label for testing
+    /// and auditing even when it is hidden from VoiceOver, so tiny badge
+    /// text inside the label was audited as if it were the tile's content.
+    var drawsBadges = true
+
     var body: some View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay { PrintThumbnail(entry: entry, points: points, trashed: trashed) }
-            .overlay(alignment: .topTrailing) { topBadge }
-            .overlay(alignment: .bottomLeading) { hostBadge }
-            .overlay(alignment: .bottomTrailing) { kindBadge }
+            .overlay { if drawsBadges { badges } }
             .overlay(alignment: .topLeading) { selectMark }
             .clipShape(.rect(cornerRadius: 5))
             .contentShape(.rect)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(entry.spokenDescription(showsHost: showsHost))
             .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// The star, the clip's length, the cube, the machine, the countdown --
+    /// all said in the tile's spoken label, so hidden from VoiceOver.
+    var badges: some View {
+        Color.clear
+            .overlay(alignment: .topTrailing) { topBadge }
+            .overlay(alignment: .bottomLeading) { hostBadge }
+            .overlay(alignment: .bottomTrailing) { kindBadge }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder private var topBadge: some View {
@@ -40,18 +55,23 @@ struct PrintTile: View {
     /// Hidden at accessibility sizes, where it would cover the picture; the
     /// spoken label and the Info sheet still say it.
     @ViewBuilder private var hostBadge: some View {
-        if showsHost, !size.isAccessibilitySize {
+        if showsHost, !size.isAccessibilitySize, !isCompact {
             Badge(text: entry.hostBadge(compact: points < 150))
         }
     }
 
     @ViewBuilder private var kindBadge: some View {
         switch entry.print.kind {
-        case .clip: Badge(symbol: "play.fill", text: duration)
+        // On the smallest tiles the length would cover the picture: the
+        // play mark alone says it is a clip (and VoiceOver says its length).
+        case .clip: Badge(symbol: "play.fill", text: isCompact ? nil : duration)
         case .mesh: Badge(symbol: "cube")
         default: EmptyView()
         }
     }
+
+    /// The two smallest sizes: badges shrink to a symbol.
+    private var isCompact: Bool { points < 90 }
 
     private var duration: String? {
         guard let frames = entry.print.metadata.frames, let fps = entry.print.metadata.fps, fps > 0 else { return nil }
@@ -78,17 +98,31 @@ struct Badge: View {
     var text: String?
     var mono = false
 
+    /// XCUITest still lists hidden views; the accessibility audit keys its
+    /// badge exemption on this (ShellAccessibilityTests).
+    static let identifier = "tile-badge"
+
     var body: some View {
         HStack(spacing: 3) {
             // a11y: decorative -- the tile's spoken label says what each badge says.
-            if let symbol { Image(systemName: symbol).accessibilityHidden(true) }
-            if let text { Text(text).font(mono ? .caption2.monospacedDigit() : .caption2) }
+            if let symbol { Image(systemName: symbol).accessibilityHidden(true).accessibilityIdentifier(Self.identifier) }
+            if let text {
+                Text(text).font(mono ? .caption2.monospacedDigit() : .caption2)
+                    .accessibilityIdentifier(Self.identifier)
+            }
         }
         .font(.caption2.weight(.semibold))
+        // Never wraps onto the picture: a badge is one short line or none.
+        .fixedSize()
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .padding(.vertical, 2)
-        .background(.black.opacity(0.6), in: .rect(cornerRadius: 5))
+        // Dark enough for white text over any picture: over pure white it
+        // still leaves 5:1.
+        .background(.black.opacity(0.85), in: .rect(cornerRadius: 5))
         .padding(5)
+        // a11y: the tile is one element whose spoken label already says what
+        // each badge shows; a second, tiny copy would only be noise.
+        .accessibilityHidden(true)
     }
 }

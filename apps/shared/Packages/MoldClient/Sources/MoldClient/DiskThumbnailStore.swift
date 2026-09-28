@@ -1,14 +1,16 @@
 import CryptoKit
 import Foundation
 
-/// Thumbnails on disk, bounded, least-recently-used first out.
+/// Pictures on disk, bounded, least-recently-used first out.
 ///
-/// Keyed on (machine, filename, `media_version`, pixel size): the same
-/// `media_version` the server builds its ETag from, so a re-rendered print
-/// never shows a stale picture -- and a print WITHOUT a media version is never
-/// stored here at all (the caller keeps it in memory only). The caps are the
-/// phone's (`.claude/rules/mobile.md`): 4,000 items, 256 MiB, 2 MiB each. A
-/// thumbnail over the per-item cap is refused rather than stored and evicted.
+/// Keyed on (machine, filename, version, pixel size). The version is the
+/// caller's: the machine's `media_version` (what its ETag is built from) or,
+/// for a machine that sends none, something that still changes when a print
+/// is re-rendered -- a caller with nothing trustworthy keeps that print in
+/// memory and never asks this store. The caps are set at creation and can
+/// be changed (`setLimits`); an item over the per-item cap is refused rather
+/// than stored and evicted. Over a cap, the oldest go until the store is at
+/// 90% of it, so the writes after a trim do not each pay for another sort.
 ///
 /// Access time is the file's modification date, touched on every read, so the
 /// order survives a relaunch without an index file to keep consistent.
@@ -28,12 +30,14 @@ public actor DiskThumbnailStore {
     }
 
     public let directory: URL
-    public let maxItems: Int
-    public let maxBytes: Int
+    public private(set) var maxItems: Int
+    public private(set) var maxBytes: Int
     public let maxItemBytes: Int
 
     private struct Item { var bytes: Int; var used: Date }
     private var index: [String: Item]?
+    /// Kept alongside `index`, so a write that fits costs no sort.
+    private var bytesUsed = 0
     private let files = FileManager.default
 
     public init(directory: URL, maxItems: Int = 4_000, maxBytes: Int = 256 << 20, maxItemBytes: Int = 2 << 20) {
@@ -62,9 +66,21 @@ public actor DiskThumbnailStore {
             try files.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: url(name), options: .atomic)
         } catch { return false }
+        bytesUsed += data.count - (index?[name]?.bytes ?? 0)
         index?[name] = Item(bytes: data.count, used: .now)
         trim()
         return true
+    }
+
+    /// Whether a thumbnail is saved, without reading it or touching its age.
+    public func contains(_ key: Key) -> Bool { loaded()[Self.name(for: key)] != nil }
+
+    /// New caps (Settings' storage limit), applied at once.
+    public func setLimits(maxItems: Int, maxBytes: Int) {
+        self.maxItems = maxItems
+        self.maxBytes = maxBytes
+        _ = loaded()
+        trim()
     }
 
     /// Every thumbnail of one machine -- it was removed.
@@ -80,11 +96,14 @@ public actor DiskThumbnailStore {
     public func purge() { remove { _ in true } }
 
     /// What the cache holds on disk, for Settings.
-    public var totalBytes: Int { loaded().values.reduce(0) { $0 + $1.bytes } }
+    public var totalBytes: Int {
+        _ = loaded()
+        return bytesUsed
+    }
 
     public var totals: (count: Int, bytes: Int) {
         let all = loaded()
-        return (all.count, all.values.reduce(0) { $0 + $1.bytes })
+        return (all.count, bytesUsed)
     }
 
     // MARK: - Internals
@@ -99,24 +118,28 @@ public actor DiskThumbnailStore {
                                                  used: values?.contentModificationDate ?? .distantPast)
         }
         index = found
+        bytesUsed = found.values.reduce(0) { $0 + $1.bytes }
         return found
     }
 
     private func trim() {
-        guard var all = index else { return }
-        var bytes = all.values.reduce(0) { $0 + $1.bytes }
+        guard var all = index, all.count > maxItems || bytesUsed > maxBytes else { return }
+        var bytes = bytesUsed
+        let itemGoal = maxItems - maxItems / 10, byteGoal = maxBytes - maxBytes / 10
         let oldestFirst = all.sorted { $0.value.used < $1.value.used }.map(\.key)
-        for name in oldestFirst where all.count > maxItems || bytes > maxBytes {
+        for name in oldestFirst where all.count > itemGoal || bytes > byteGoal {
             bytes -= all[name]?.bytes ?? 0
             all[name] = nil
             try? files.removeItem(at: url(name))
         }
         index = all
+        bytesUsed = bytes
     }
 
     private func remove(where matches: (String) -> Bool) {
         guard var all = Optional(loaded()) else { return }
         for name in all.keys where matches(name) {
+            bytesUsed -= all[name]?.bytes ?? 0
             all[name] = nil
             try? files.removeItem(at: url(name))
         }

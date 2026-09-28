@@ -44,6 +44,11 @@ Stop is its own small button beside the progress sentence, e.g.
 
 ## Library, Queue and Models
 
+- **Library** keeps working offline: it shows each machine's saved prints
+  when the machine isn't answering, and the prints you have opened. Pinch to
+  change the tile size (five sizes, from seven columns to one). Settings ▸
+  Library sets how much space it may use and can save every thumbnail ahead
+  of time.
 - **Library** shows every machine's prints as one grid, a print found on two
   machines once. Favourites, tags, collections and Recently Deleted work the
   way they do on the Mac, across every machine that holds a copy. Search
