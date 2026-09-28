@@ -42,7 +42,9 @@ jobs:
   check:
     name: Lint, test and audit
     runs-on: macos-26
-    timeout-minutes: 60
+    # The audit alone is four passes (iPhone and iPad, light and dark) of
+    # three text sizes, about 45 minutes on a fast Mac.
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: apps/ios
