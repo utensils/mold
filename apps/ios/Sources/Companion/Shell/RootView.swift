@@ -47,7 +47,11 @@ struct RootView: View {
                 Label("Settings", systemImage: "gearshape")
             }
         }
-        .sheet(isPresented: $router.showsSettings) { SettingsSheet() }
+        .sheet(isPresented: $router.showsSettings) {
+            // Page-sized on iPad: the default form sheet showed half of it,
+            // with the first and last rows under the scroll-edge fades.
+            SettingsSheet().presentationSizing(.page)
+        }
         .printSheets()
         .fullScreenCover(item: $router.openedPrint) { opened in LinkedPrint(id: opened.id) }
         .onOpenURL { url in DeepLink(url).map(router.open) }
