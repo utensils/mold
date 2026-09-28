@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+mod port;
+
 /// How long the HTTP side may take to drain before the engine thread gives up.
 /// The app owns the process, so an overrun must not wedge quitting.
 const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -173,7 +175,9 @@ unsafe fn bootstrap(
     0
 }
 
-/// Reserves a loopback port and returns it, or 0 on failure.
+/// Probes the configured loopback port and returns it, or 0 on failure.
+/// `server_port` has the same config/DB/env precedence as the engine and
+/// defaults to 7680. A conflict is a startup failure, never a random port.
 ///
 /// The probe is dropped before the engine rebinds, so there is a window where
 /// another process could take it. mold's own desktop app has the same race for
@@ -182,10 +186,11 @@ unsafe fn bootstrap(
 #[no_mangle]
 pub extern "C" fn mold_engine_alloc_port() -> u16 {
     guarded("alloc_port", 0, || {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-            .and_then(|probe| probe.local_addr())
-            .map(|addr| addr.port())
-            .unwrap_or(0)
+        let requested = mold_core::Config::load_or_default().server_port;
+        port::available(requested).unwrap_or_else(|error| {
+            tracing::error!(port = requested, %error, "configured engine port is unavailable");
+            0
+        })
     })
 }
 
@@ -291,10 +296,9 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
 /// not a port: `<output_dir>/.mold-gallery-writer.lease`, a file every writing
 /// process holds a SHARED flock on for its whole life, with its pid in the
 /// body (CLAUDE.md, "Gallery archive authority storage"). The first version of
-/// this check probed `127.0.0.1:7680` instead and detected nothing, because
-/// this app always binds an ephemeral port and Mold Desktop only PREFERS 7680
-/// (`desktop/src-tauri/src/server.rs:119-131`) -- so the ordinary sequence,
-/// native engine first and Desktop second, saw neither (review F3).
+/// this check probed `127.0.0.1:7680` instead and missed writers on other
+/// ports. The native app honors server_port, and Mold Desktop can fall back
+/// from 7680, so one listener cannot establish the home's writer (review F3).
 ///
 /// Read-only, and deliberately not `gallery_authority::storage_status`: that
 /// takes the bookkeeping flock, which creates and locks a file under
@@ -450,10 +454,9 @@ mod tests {
         root
     }
 
-    /// **Fails today**: the interlock asked `127.0.0.1:7680`, which this app
-    /// never binds and Mold Desktop only PREFERS, so it detected nothing. The
-    /// authority is the lease, and this is the detection itself rather than an
-    /// injected stub.
+    /// The old interlock asked `127.0.0.1:7680`, missing writers using another
+    /// port. The authority is the lease, and this tests the detection itself
+    /// rather than an injected stub.
     #[test]
     fn a_home_with_no_lease_has_no_writer() {
         assert_eq!(writer_pid_at(&scratch_root()), 0);

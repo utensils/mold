@@ -148,6 +148,8 @@ current platform support.
 notarized, self-updating through Sparkle, with mold's own Metal engine built
 in, and it talks to any `mold serve` on your network too. Generate, a merged
 multi-machine Library, Queue, Models and Machines, all in one native window.
+Its authenticated local engine listens on `127.0.0.1:7680` by default;
+`server_port` configures that port and takes effect after restarting the app.
 [Mold Studio for Mac guide](https://utensils.io/mold/guide/macos)
 
 **[Download Mold Studio for Mac (Apple Silicon, macOS 26+)](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)**

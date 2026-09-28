@@ -312,12 +312,16 @@ engine is not paired either**, for a different reason: it binds `127.0.0.1`
 and a phone cannot reach loopback on this Mac, so a pairing issued there
 would be a credential nothing could use.
 
+The loopback address uses `server_port` from Mold's configuration (7680 by
+default). Restart the app after changing it. If another process holds that
+port, the engine reports the conflict instead of selecting a different port.
+
 It is not keyless, though. The engine is started with an API key this app
 mints once and keeps in the same owner-only `secrets.json` as every machine's
 key (`local-engine-api-key`; `MOLD_API_KEY` in the environment overrides it),
 and "This Mac" presents that key back on every call. Loopback is not a
-boundary a browser respects: with no key, any page you opened could scan the
-ephemeral port range and then read the gallery, delete prints, queue pulls and
+boundary a browser respects: with no key, any page you opened could find the
+loopback port and then read the gallery, delete prints, queue pulls and
 `POST /api/shutdown`. For the same reason the engine is started with
 `MOLD_CORS_ORIGIN` set to a value that is not a serialized origin at all, so
 no page is ever handed a usable `Access-Control-Allow-Origin` — without it the

@@ -1,0 +1,2 @@
+- Fixed the native macOS app ignoring `server_port`: its engine now uses the configured loopback port (7680 by default) and reports a conflict instead of silently choosing a random port.
+- Fixed a macOS layout crash when switching from Models to Generate with the sidebar visible and an installed model selected.

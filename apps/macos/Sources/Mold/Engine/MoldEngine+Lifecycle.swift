@@ -93,7 +93,9 @@ extension MoldEngine {
         let port = await Task.detached { mold_engine_alloc_port() }.value
         guard port != 0 else {
             transition(to: .failed(MoldEngine.Failure(
-                reason: "No free port on this Mac.", relaunchNeeded: false)))
+                reason: "The configured loopback port is unavailable. Stop the other service "
+                    + "or change server_port in Mold's configuration, then try again.",
+                relaunchNeeded: false)))
             return
         }
         let started = await Task.detached {

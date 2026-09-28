@@ -57,6 +57,9 @@ for Macs that cannot run macOS 26, and remains the default desktop app on
   machines to add, and phone pairing for keyed hosts.
 - **This Mac** — mold's engine starts in-process when the app opens (Settings
   ▸ This Mac turns that off) and joins the machine list like any other host.
+  It listens on `127.0.0.1:7680` by default, with API-key authentication.
+  Change `server_port` to use another port, then restart the app. An occupied
+  port is reported as a conflict rather than silently replaced with a random one.
 
 Not in Mold Studio (by design or not yet): authoring scripted sequences (CLI
 and API only), RunPod provisioning, and the 3-D authoring workflows.

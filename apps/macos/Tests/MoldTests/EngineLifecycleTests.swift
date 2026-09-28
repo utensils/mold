@@ -108,8 +108,8 @@ struct EngineLifecycleTests {
         }
     }
 
-    /// **Fails today**: the check asked `127.0.0.1:7680`, which this app never
-    /// binds and Mold Desktop only PREFERS — so it detected nothing, and the
+    /// The old check asked `127.0.0.1:7680`, missing writers on another
+    /// configured port — so it detected nothing, and the
     /// test injected the probe and could not see that. The DETECTION now lives
     /// in the FFI against mold's own gallery writer lease and is tested there
     /// (`a_held_lease_names_the_writer_and_is_never_taken_from_it`); what is
@@ -134,7 +134,7 @@ struct EngineLifecycleTests {
 
     /// **Fails today**: the engine is started with a key now, so
     /// `auth_required` is true for "This Mac" and the Machines pane drew a
-    /// live "Pair a Phone…" whose QR encodes `http://127.0.0.1:<ephemeral>` —
+    /// live "Pair a Phone…" whose QR encodes `http://127.0.0.1:<port>` —
     /// a credential for the phone's own loopback, persisted server-side.
     @Test func thisMacsEngineIsNotSomethingAPhonePairsWith() {
         let url = URL(string: "http://127.0.0.1:61440")!
