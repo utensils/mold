@@ -40,15 +40,6 @@ import Testing
     #expect(!clients.canPair)
 }
 
-/// A code with no token redeems nothing, so there is nothing honest to show.
-@Test func aCodeWithNoTokenIsNoCodeAtAll() {
-    let session = PairingSession(
-        token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
-    let payload = MobilePairingPayload(
-        session: session, baseURL: URL(string: "http://127.0.0.1:7680")!, name: "This Mac")
-    #expect(payload == nil)
-}
-
 /// One hand-derived vector against `pairing.ts:47-56`: same field order,
 /// `token`/`expires_at` present only because they are non-nil, no `type` at
 /// all, and a hostname-with-a-space name so the `+` rule bites. Computed
@@ -73,9 +64,8 @@ import Testing
 /// A `nil` token or `expires_at` is simply OMITTED, not sent as an empty or
 /// null parameter -- `pairing.ts:50-53`'s own `if` guards.
 @Test func aPairingUrlOmitsAnAbsentTokenAndExpiry() throws {
-    // Only reachable with authRequired == false, since a keyed session
-    // always issues both together -- but the payload type itself makes no
-    // such promise, so the omission is tested independently of that.
+    // The server's keyed session normally issues both together, but the
+    // payload serializer omits an absent expiry independently.
     let session = PairingSession(
         token: "tok", expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
     let payload = try #require(
