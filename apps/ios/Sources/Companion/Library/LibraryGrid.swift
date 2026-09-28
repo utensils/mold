@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The day-sectioned grid. Columns come from a scaled minimum tile width, so
 /// larger text means larger, fewer tiles -- never clipped labels. A pinch
-/// snaps between the three sizes.
+/// walks the five sizes live (`TileSize.pinched`), keeping the print you were
+/// looking at in place.
 struct LibraryGrid: View {
     let sections: [LibrarySection]
     @Binding var tile: TileSize
@@ -15,7 +16,10 @@ struct LibraryGrid: View {
 
     @Environment(HostStore.self) private var hosts
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
-    @State private var pinch: CGFloat = 1
+    /// The size a pinch began at; `nil` between pinches.
+    @State private var pinchStart: TileSize?
+    /// The print at the top of the screen, kept there across size changes.
+    @State private var anchor: PrintID?
 
     var body: some View {
         let minimum = tile.basePoints * scale
@@ -25,7 +29,8 @@ struct LibraryGrid: View {
                 ForEach(sections) { section in
                     Section {
                         ForEach(section.items) { entry in
-                            cell(entry, points: minimum * 1.4)
+                            cell(entry, points: minimum * 1.25)
+                                .id(entry.id)
                         }
                     } header: {
                         if let day = section.day {
@@ -40,16 +45,10 @@ struct LibraryGrid: View {
                     }
                 }
             }
+            .scrollTargetLayout()
         }
-        .simultaneousGesture(
-            MagnifyGesture()
-                .onChanged { pinch = $0.magnification }
-                .onEnded { value in
-                    if value.magnification > 1.25 { tile = tile.stepped(bigger: true) }
-                    if value.magnification < 0.8 { tile = tile.stepped(bigger: false) }
-                    pinch = 1
-                }
-        )
+        .scrollPosition(id: $anchor, anchor: .top)
+        .gesture(PinchRecognizer(changed: pinched, ended: { pinchStart = nil }))
         .sensoryFeedback(.selection, trigger: tile)
         .accessibilityRotor("Days") {
             ForEach(sections.filter { $0.day != nil }) { section in
@@ -84,6 +83,17 @@ struct LibraryGrid: View {
                         .frame(width: 360, height: 360)
                 }
         }
+    }
+
+    /// Walks the sizes live as the fingers move, keeping the top print put.
+    private func pinched(_ scale: CGFloat) {
+        let start = pinchStart ?? tile
+        pinchStart = start
+        let next = TileSize.pinched(from: start, magnification: scale)
+        guard next != tile else { return }
+        let keep = anchor
+        withAnimation(.snappy(duration: 0.25)) { tile = next }
+        anchor = keep
     }
 
     private func toggle(_ id: PrintID) {

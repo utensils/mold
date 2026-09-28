@@ -4,14 +4,14 @@ import Testing
 
 @testable import MoldCompanion
 
-/// Small shell rules: ⌘+ / ⌘− walk the three tile sizes and stop at the
+/// Small shell rules: ⌘+ / ⌘− walk the five tile sizes and stop at the
 /// ends, and a sidebar machine says in words when it is not answering.
 @MainActor
 struct ShellBehaviourTests {
     @Test func tileSizesStepAndStopAtTheEnds() {
         #expect(TileSize.small.stepped(bigger: true) == .medium)
-        #expect(TileSize.large.stepped(bigger: true) == .large)
-        #expect(TileSize.small.stepped(bigger: false) == .small)
+        #expect(TileSize.huge.stepped(bigger: true) == .huge)
+        #expect(TileSize.tiny.stepped(bigger: false) == .tiny)
         #expect(TileSize.large.stepped(bigger: false) == .medium)
     }
 

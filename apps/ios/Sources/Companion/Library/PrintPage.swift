@@ -25,18 +25,38 @@ struct ZoomableStill: View {
     let entry: LibraryEntry
     let trashed: Bool
     @State private var image: UIImage?
+    @State private var isPreview = false
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
             if let image {
                 ZoomingImage(image: image)
                     .accessibilityLabel(entry.spokenDescription(showsHost: false))
             } else {
                 ProgressView().tint(.white)
             }
+            if isPreview {
+                // Offline and never opened before: the saved thumbnail is all
+                // there is, and it says so rather than pretending.
+                Text("Offline — showing a preview")
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.black.opacity(0.6), in: .capsule)
+                    .padding(.bottom, 24)
+            }
         }
         .task(id: entry.id.filename) {
-            image = await loader.image(for: entry, pixels: 2048, trashed: trashed)
+            // The grid's thumbnail at once; the print itself when it arrives
+            // (from disk after the first view, so offline too).
+            image = loader.cachedThumbnail(for: entry)
+            if image == nil { image = await loader.image(for: entry, pixels: 512, trashed: trashed) }
+            if let full = await loader.original(for: entry, trashed: trashed) {
+                image = full
+                isPreview = false
+            } else {
+                isPreview = image != nil
+            }
         }
     }
 }

@@ -12,34 +12,15 @@ struct SettingsSections: View {
     @AppStorage(Preference.notifyFailed) private var failed = true
     @AppStorage(Preference.notifyHeld) private var held = true
     @AppStorage(Preference.liveActivities) private var live = true
-    @State private var cacheBytes: Int64?
     @State private var systemAllowsNotifications = true
 
     var body: some View {
-        Section {
-            Toggle("Save Finished Prints to Photos", isOn: $autoSave)
-            AdaptiveRow {
-                Text("Thumbnail Cache")
-            } value: {
-                Text(cacheBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
-                     ?? String(localized: "Measuring…")).monospacedDigit()
-            }
-            .accessibilityElement(children: .combine)
-            // On a real row: a `.task` on EmptyView never runs.
+        OfflineLibrarySection(autoSave: $autoSave)
+            // On a real row's section: a `.task` on EmptyView never runs.
             .task {
-                cacheBytes = await thumbnails.diskBytes()
                 let settings = await UNUserNotificationCenter.current().notificationSettings()
                 systemAllowsNotifications = settings.authorizationStatus != .denied
             }
-            Button("Empty Now") {
-                Task { await thumbnails.emptyCaches(); cacheBytes = await thumbnails.diskBytes() }
-            }
-        } header: {
-            SectionHeader(String(localized: "Library"))
-        } footer: {
-            Text("Thumbnails are kept on this device to scroll quickly. Emptying the cache removes no prints.")
-                .foregroundStyle(.secondaryText)
-        }
         Section {
             Toggle("Finished", isOn: $finished)
             Toggle("Didn't Finish", isOn: $failed)

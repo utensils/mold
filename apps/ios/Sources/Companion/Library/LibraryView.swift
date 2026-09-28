@@ -73,7 +73,12 @@ struct LibraryView: View {
             }
             return true
         }
-        .overlay(alignment: .top) { FailureBanner() }
+        .overlay(alignment: .top) {
+            VStack(spacing: 4) {
+                FailureBanner()
+                OfflineNote()
+            }
+        }
         .onChange(of: sort) { query.sort = sort }
         .onAppear { query.sort = sort }
     }
@@ -145,35 +150,6 @@ struct LibraryView: View {
                 Label("View Options", systemImage: "ellipsis")
             }
         }
-    }
-}
-
-/// The three tile sizes a pinch snaps between; minimum widths scale with text.
-enum TileSize: String, CaseIterable, Identifiable {
-    case small, medium, large
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .small: String(localized: "Small")
-        case .medium: String(localized: "Medium")
-        case .large: String(localized: "Large")
-        }
-    }
-
-    /// Points at Large text; `@ScaledMetric` in the grid grows them with it.
-    var basePoints: CGFloat {
-        switch self {
-        case .small: 96
-        case .medium: 128
-        case .large: 180
-        }
-    }
-
-    func stepped(bigger: Bool) -> TileSize {
-        let all = Self.allCases
-        let index = all.firstIndex(of: self) ?? 1
-        return all[max(0, min(all.count - 1, index + (bigger ? 1 : -1)))]
     }
 }
 

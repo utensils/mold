@@ -40,18 +40,23 @@ struct PrintTile: View {
     /// Hidden at accessibility sizes, where it would cover the picture; the
     /// spoken label and the Info sheet still say it.
     @ViewBuilder private var hostBadge: some View {
-        if showsHost, !size.isAccessibilitySize {
+        if showsHost, !size.isAccessibilitySize, !isCompact {
             Badge(text: entry.hostBadge(compact: points < 150))
         }
     }
 
     @ViewBuilder private var kindBadge: some View {
         switch entry.print.kind {
-        case .clip: Badge(symbol: "play.fill", text: duration)
+        // On the smallest tiles the length would cover the picture: the
+        // play mark alone says it is a clip (and VoiceOver says its length).
+        case .clip: Badge(symbol: "play.fill", text: isCompact ? nil : duration)
         case .mesh: Badge(symbol: "cube")
         default: EmptyView()
         }
     }
+
+    /// The two smallest sizes: badges shrink to a symbol.
+    private var isCompact: Bool { points < 90 }
 
     private var duration: String? {
         guard let frames = entry.print.metadata.frames, let fps = entry.print.metadata.fps, fps > 0 else { return nil }
@@ -85,6 +90,8 @@ struct Badge: View {
             if let text { Text(text).font(mono ? .caption2.monospacedDigit() : .caption2) }
         }
         .font(.caption2.weight(.semibold))
+        // Never wraps onto the picture: a badge is one short line or none.
+        .fixedSize()
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .padding(.vertical, 2)

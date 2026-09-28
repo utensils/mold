@@ -16,7 +16,7 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | --- | --- |
 | Machines | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain |
 | Generate | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share |
-| Library | Every machine's prints as one grid; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
+| Library | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
 | Queue | Every machine's work; held jobs in words with Pull and Retry, Retry and Move to…; reorder, pause, empty |
 | Models | Installed per machine, Discover, downloads, licences |
 | Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension |

@@ -32,6 +32,35 @@ struct DiskThumbnailStoreTests {
         #expect(await cache.totalBytes == 0)
     }
 
+    /// Settings' limit applies at once: lowering it drops the least recently
+    /// read until the rest fit.
+    @Test func aLowerLimitTrimsTheOldestAtOnce() async throws {
+        let cache = store(bytes: 1 << 20)
+        await cache.store(Data(count: 10), for: key("old.png"))
+        try await Task.sleep(for: .milliseconds(20))
+        await cache.store(Data(count: 10), for: key("new.png"))
+        await cache.setLimits(maxItems: 100, maxBytes: 15)
+        #expect(await cache.data(for: key("old.png")) == nil)
+        #expect(await cache.data(for: key("new.png")) != nil)
+        #expect(await cache.totalBytes == 10)
+    }
+
+    /// Prefetching asks whether a thumbnail is already saved without reading it.
+    @Test func containsAnswersWithoutReading() async {
+        let cache = store()
+        #expect(!(await cache.contains(key("a.png"))))
+        await cache.store(Data([1]), for: key("a.png"))
+        #expect(await cache.contains(key("a.png")))
+    }
+
+    /// Replacing a thumbnail counts its bytes once.
+    @Test func replacingAThumbnailCountsItOnce() async {
+        let cache = store()
+        await cache.store(Data(count: 10), for: key("a.png"))
+        await cache.store(Data(count: 4), for: key("a.png"))
+        #expect(await cache.totalBytes == 4)
+    }
+
     @Test func aNewMediaVersionIsANewThumbnail() async {
         let cache = store()
         await cache.store(Data([1]), for: key("a.png", version: "v1"))
