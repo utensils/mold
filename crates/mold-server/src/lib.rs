@@ -342,6 +342,43 @@ pub async fn run_server(
     gpu_selection: GpuSelection,
     queue_size: usize,
 ) -> Result<()> {
+    run_server_inner(bind, port, models_dir, gpu_selection, queue_size, None).await
+}
+
+/// Runs the server on a socket already reserved by an embedding app. The
+/// listener stays bound while startup recovers storage and initializes workers.
+pub async fn run_server_with_listener(
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+    queue_size: usize,
+    listener: std::net::TcpListener,
+) -> Result<()> {
+    listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(listener)?;
+    if listener.local_addr()? != format!("{bind}:{port}").parse::<SocketAddr>()? {
+        anyhow::bail!("reserved listener does not match requested bind address");
+    }
+    run_server_inner(
+        bind,
+        port,
+        models_dir,
+        gpu_selection,
+        queue_size,
+        Some(listener),
+    )
+    .await
+}
+
+async fn run_server_inner(
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+    queue_size: usize,
+    reserved_listener: Option<TcpListener>,
+) -> Result<()> {
     // Re-arm SIG_IGN for SIGPIPE. The CLI resets it to SIG_DFL in main() for
     // clean piping of short-lived commands, but for this long-running server
     // that is fatal — a single client dropping mid-write would kill the whole
@@ -1405,7 +1442,10 @@ pub async fn run_server(
     let version = mold_core::build_info::version_string();
     info!(%addr, %version, "starting mold server");
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = match reserved_listener {
+        Some(listener) => listener,
+        None => TcpListener::bind(addr).await?,
+    };
 
     // ── mDNS/DNS-SD advertising ─────────────────────────────────────────────
     // Advertise this server as `_mold._tcp.local.` so desktop clients and
@@ -1948,8 +1988,8 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_runtime_shutdown, build_cors_layer, classify_startup_mode, startup_plan,
-        trace_request_path, GpuOwnerThreads, StartupMode,
+        begin_runtime_shutdown, build_cors_layer, classify_startup_mode, run_server_with_listener,
+        startup_plan, trace_request_path, GpuOwnerThreads, StartupMode,
     };
     use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
     use crate::device_registry::DeviceRegistry;
@@ -1966,6 +2006,27 @@ mod tests {
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_reserved_listener_must_match_the_requested_port() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let actual = listener.local_addr().unwrap().port();
+        let different = if actual == u16::MAX {
+            actual - 1
+        } else {
+            actual + 1
+        };
+        let result = run_server_with_listener(
+            "127.0.0.1",
+            different,
+            std::path::PathBuf::new(),
+            GpuSelection::All,
+            1,
+            listener,
+        )
+        .await;
+        assert!(result.is_err());
+    }
 
     #[test]
     fn runtime_shutdown_parks_chains_before_interrupting_gpu_work() {

@@ -3,9 +3,9 @@ import Foundation
 /// Whether something else is already publishing into this mold home.
 ///
 /// The first version asked `http://127.0.0.1:7680/api/status`, which detects
-/// nothing: this app always binds an EPHEMERAL port and Mold Desktop only
+/// nothing: this app uses its configured port and Mold Desktop only
 /// PREFERS 7680 (`desktop/src-tauri/src/server.rs:119-131`), so the ordinary
-/// sequence — native engine first, Desktop second — saw neither side. The
+/// sequence could see neither side. The
 /// authority mold actually has is the gallery writer lease, held SHARED for
 /// the life of every writing process with its pid in the body, and
 /// `mold_engine_home_writer_pid` reads it without writing anything

@@ -5,10 +5,8 @@ import Foundation
 // ENGINE's shared constant, `SCHEDULER_TIMING_MAX_MS` (`config.rs:809`),
 // pinned by `theThreeSchedulerBoundsAreTheSharedConstant` -- one match arm
 // backs all three (`config_keys.rs:685-696`), not three copies of 30000.
-// `server_port` is a plain `.number` -- it is NOT restart-flagged by the
-// server (`routes_config.rs:63` only ever sets it for `scheduler.*`), so its
-// row draws no "Needs a restart" caption even though changing it plainly
-// needs one; that is the server's answer to give, not this client's to guess.
+// `server_port` is restart-flagged by the server, so the row draws the
+// server's own "Needs a restart" caption after a change.
 public extension SettingKeys {
     static let performanceServer: [SettingKey] = [
         SettingKey(

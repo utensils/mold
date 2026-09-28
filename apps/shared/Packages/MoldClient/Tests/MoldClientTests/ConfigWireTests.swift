@@ -80,8 +80,8 @@ private func row(_ key: String) throws -> ConfigEntry {
     #expect(try !row("models_dir").canReset) // source: "env"
 }
 
-/// Only the three `scheduler.*` keys ever carry `restart_required`; every
-/// other DB row is absent, and absent must not read as `true`.
+/// `server_port` and the three `scheduler.*` keys carry `restart_required`;
+/// an absent value on another row must not read as `true`.
 @Test func absentRestartRequiredIsNotARestart() throws {
     #expect(try row("default_width").restartRequired == nil)
     #expect(try !row("default_width").needsRestart)

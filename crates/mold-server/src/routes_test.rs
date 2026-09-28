@@ -11926,6 +11926,7 @@ mod tests {
             find("server_port")["value"],
             serde_json::json!(mold_core::Config::default().server_port)
         );
+        assert_eq!(find("server_port")["restart_required"], true);
         assert!(find("embed_metadata")["value"].is_boolean());
     }
 
@@ -12086,6 +12087,7 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["source"], "file");
         assert_eq!(body["value"], serde_json::json!(8123));
+        assert_eq!(body["restart_required"], true);
 
         let written = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
         assert!(

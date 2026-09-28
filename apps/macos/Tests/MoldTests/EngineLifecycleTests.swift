@@ -134,7 +134,7 @@ struct EngineLifecycleTests {
 
     /// **Fails today**: the engine is started with a key now, so
     /// `auth_required` is true for "This Mac" and the Machines pane drew a
-    /// live "Pair a Phone…" whose QR encodes `http://127.0.0.1:<ephemeral>` —
+    /// live "Pair a Phone…" whose QR encodes `http://127.0.0.1:<configured port>` —
     /// a credential for the phone's own loopback, persisted server-side.
     @Test func thisMacsEngineIsNotSomethingAPhonePairsWith() {
         let url = URL(string: "http://127.0.0.1:61440")!

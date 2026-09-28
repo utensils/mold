@@ -53,6 +53,7 @@ const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const EMBEDDED_CORS_ORIGIN: &str = "mold-embedded-engine no browser origin";
 
 static ENGINE: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();
+static RESERVED_LISTENER: Mutex<Option<std::net::TcpListener>> = Mutex::new(None);
 static ALIVE: AtomicBool = AtomicBool::new(false);
 static BOOTSTRAPPED: AtomicBool = AtomicBool::new(false);
 
@@ -173,20 +174,39 @@ unsafe fn bootstrap(
     0
 }
 
-/// Reserves a loopback port and returns it, or 0 on failure.
-///
-/// The probe is dropped before the engine rebinds, so there is a window where
-/// another process could take it. mold's own desktop app has the same race for
-/// the same reason: `run_server` does not report the port it bound. The fix
-/// upstream is `run_server_with_listener`.
+/// Reserves the configured loopback port until the engine takes the listener.
+/// Returns 0 if another process owns it.
 #[no_mangle]
-pub extern "C" fn mold_engine_alloc_port() -> u16 {
-    guarded("alloc_port", 0, || {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-            .and_then(|probe| probe.local_addr())
-            .map(|addr| addr.port())
-            .unwrap_or(0)
+pub extern "C" fn mold_engine_configured_port() -> u16 {
+    guarded("configured_port", 0, || {
+        let Ok(mut slot) = RESERVED_LISTENER.lock() else {
+            return 0;
+        };
+        reserve_configured_port(&mut slot, &mold_core::Config::load_or_default()).unwrap_or(0)
     })
+}
+
+fn reserve_configured_port(
+    slot: &mut Option<std::net::TcpListener>,
+    config: &mold_core::Config,
+) -> std::io::Result<u16> {
+    if let Some(listener) = slot.as_ref() {
+        return listener.local_addr().map(|addr| addr.port());
+    }
+    let listener = configured_listener(config)?;
+    let port = listener.local_addr()?.port();
+    *slot = Some(listener);
+    Ok(port)
+}
+
+fn configured_listener(config: &mold_core::Config) -> std::io::Result<std::net::TcpListener> {
+    if config.server_port == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "port is zero",
+        ));
+    }
+    std::net::TcpListener::bind(("127.0.0.1", config.server_port))
 }
 
 /// Starts the engine on its own thread. Returns 0 if it was started.
@@ -211,6 +231,14 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
         return 0; // Already running.
     }
 
+    let listener = match RESERVED_LISTENER
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+    {
+        Some(listener) if listener.local_addr().is_ok_and(|addr| addr.port() == port) => listener,
+        _ => return 1,
+    };
     let bind = unsafe { str_arg(bind) }.unwrap_or("127.0.0.1").to_string();
     let config = mold_core::Config::load_or_default();
     let models = unsafe { str_arg(models_dir) }
@@ -251,12 +279,13 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
                         return;
                     }
                 };
-                let result = runtime.block_on(mold_server::run_server(
+                let result = runtime.block_on(mold_server::run_server_with_listener(
                     &bind,
                     port,
                     models,
                     gpu_selection,
                     queue_size,
+                    listener,
                 ));
                 if let Err(error) = result {
                     // Through tracing, which `bootstrap` has pointed at a
@@ -292,9 +321,8 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
 /// process holds a SHARED flock on for its whole life, with its pid in the
 /// body (CLAUDE.md, "Gallery archive authority storage"). The first version of
 /// this check probed `127.0.0.1:7680` instead and detected nothing, because
-/// this app always binds an ephemeral port and Mold Desktop only PREFERS 7680
-/// (`desktop/src-tauri/src/server.rs:119-131`) -- so the ordinary sequence,
-/// native engine first and Desktop second, saw neither (review F3).
+/// the native app and Mold Desktop need not use port 7680
+/// (`desktop/src-tauri/src/server.rs:119-131`) (review F3).
 ///
 /// Read-only, and deliberately not `gallery_authority::storage_status`: that
 /// takes the bookkeeping flock, which creates and locks a file under
@@ -430,9 +458,10 @@ fn joined_within(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        guarded, joined_within, writer_pid_at, AliveGuard, ALIVE, EMBEDDED_CORS_ORIGIN,
-        WRITER_LEASE_FILE,
+        configured_listener, guarded, joined_within, reserve_configured_port, writer_pid_at,
+        AliveGuard, ALIVE, EMBEDDED_CORS_ORIGIN, WRITER_LEASE_FILE,
     };
+    use mold_core::Config;
     use std::os::unix::io::AsRawFd;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -450,10 +479,37 @@ mod tests {
         root
     }
 
-    /// **Fails today**: the interlock asked `127.0.0.1:7680`, which this app
-    /// never binds and Mold Desktop only PREFERS, so it detected nothing. The
-    /// authority is the lease, and this is the detection itself rather than an
-    /// injected stub.
+    #[test]
+    fn embedded_engine_uses_the_saved_port_and_refuses_a_busy_one() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let mut config = Config::default();
+        config.server_port = port;
+        assert!(configured_listener(&config).is_err());
+        drop(held);
+        let reserved = configured_listener(&config).unwrap();
+        assert_eq!(reserved.local_addr().unwrap().port(), port);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+    }
+
+    #[test]
+    fn a_repeated_port_request_keeps_the_same_reservation() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut config = Config::default();
+        config.server_port = port;
+        let mut slot = None;
+        assert_eq!(reserve_configured_port(&mut slot, &config).unwrap(), port);
+        assert_eq!(reserve_configured_port(&mut slot, &config).unwrap(), port);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+        drop(slot.take());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    /// **Failed before the lease check**: a probe of `127.0.0.1:7680`
+    /// could not find another writer on a different port. The authority is
+    /// the lease, and this tests the detection itself rather than a stub.
     #[test]
     fn a_home_with_no_lease_has_no_writer() {
         assert_eq!(writer_pid_at(&scratch_root()), 0);
