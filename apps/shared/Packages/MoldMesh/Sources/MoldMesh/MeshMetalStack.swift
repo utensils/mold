@@ -22,6 +22,8 @@ public nonisolated struct MeshMetalStack {
         let library: any MTLLibrary
         do {
             library = try Self.shaderLibrary(on: device)
+        } catch let failure as MeshViewFailure {
+            throw failure
         } catch {
             throw MeshViewFailure.shaders(error.localizedDescription)
         }
@@ -50,10 +52,16 @@ public nonisolated struct MeshMetalStack {
                               depthState: depthState)
     }
 
-    /// The shaders, compiled from the source this package carries. A few
-    /// milliseconds once per view, and the same whether Xcode or `swift build`
-    /// built the package.
+    /// The shaders. The two builds ship them differently: Xcode compiles a
+    /// package's `.metal` into the resource bundle's `default.metallib` even
+    /// when it is declared `.copy` (the apps), while `swift build` copies the
+    /// source and never compiles it (`swift test`). The compiled library
+    /// first, then the source -- a few milliseconds, once per view.
     static func shaderLibrary(on device: any MTLDevice) throws -> any MTLLibrary {
+        if let compiled = try? device.makeDefaultLibrary(bundle: .module),
+           compiled.functionNames.contains("mold_mesh_vertex") {
+            return compiled
+        }
         guard let url = Bundle.module.url(forResource: "MeshShaders", withExtension: "metal") else {
             throw MeshViewFailure.shaders("the mesh shaders are missing from this build")
         }

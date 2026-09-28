@@ -34,12 +34,17 @@ extension RootView {
         }
     }
 
+    /// Sidebar only: in the floating tab bar every shelf and machine became
+    /// an item, and UIKit paged and re-laid that bar out for so long on a
+    /// text-size change that the app stopped answering (the audit's
+    /// Dynamic Type pass caught it). The bar keeps All Prints and Machines.
     private func shelfTab(_ scope: LibraryScope, _ library: LibraryStore) -> some TabContent<TabSelection> {
         Tab(value: TabSelection.shelf(scope)) {
             NavigationStack { LibraryView(fixedScope: scope) }
         } label: {
             Label(scope.title(in: library.shelves), systemImage: scope.symbol)
         }
+        .defaultVisibility(.hidden, for: .tabBar)
     }
 
     @TabContentBuilder<TabSelection>
@@ -58,6 +63,7 @@ extension RootView {
                 }
                 // Words beside the name, never colour alone.
                 .badge(Self.badge(hosts.reachability(of: host)))
+                .defaultVisibility(.hidden, for: .tabBar)
             }
         } header: {
             Text(Destination.machines.title)

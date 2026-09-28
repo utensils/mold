@@ -77,11 +77,19 @@ final class ShellAccessibilityTests: XCTestCase {
     @MainActor private func check(_ app: XCUIApplication, _ place: String, sheet: XCUIElement? = nil) throws {
         do {
             try audit(app, place, sheet: sheet)
-        } catch let error as NSError where error.domain == "com.apple.xcode.xctest.accessibilityAudit" && error.code == -56 {
+        } catch where Self.isTimeout(error) {
             // "Audit failed to complete in time" is the harness, not a
-            // finding (the big iPad sidebar, on a loaded machine): once more.
-            try audit(app, place, sheet: sheet)
+            // finding: once more, and if it still cannot finish, say where.
+            do { try audit(app, place, sheet: sheet) } catch where Self.isTimeout(error) {
+                XCTFail("\(place): the audit could not finish (\(error.localizedDescription))")
+            }
         }
+    }
+
+    private static func isTimeout(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == "com.apple.xcode.xctest.accessibilityAudit" && error.code == -56)
+            || error.domain == "com.apple.dt.XCTest.XCTFuture"
     }
 
     @MainActor private func audit(_ app: XCUIApplication, _ place: String, sheet: XCUIElement?) throws {
