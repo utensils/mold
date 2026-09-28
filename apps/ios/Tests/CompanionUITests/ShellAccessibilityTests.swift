@@ -35,6 +35,20 @@ final class ShellAccessibilityTests: XCTestCase {
             }
             settle(app.navigationBars.firstMatch)
             try check(app, "\(tab) at \(size)")
+
+            if tab == "Generate" {
+                let chooser = app.buttons["choose-model"]
+                if chooser.exists {
+                    let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+                    for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
+                    XCTAssertTrue(chooser.isHittable)
+                    chooser.tap()
+                    settle(app.navigationBars["Choose a Model"])
+                    try check(app, "Model chooser at \(size)",
+                              within: app.descendants(matching: .any)["model-chooser"].firstMatch)
+                    app.buttons["Done"].firstMatch.tap()
+                }
+            }
         }
 
         // iPad: the sidebar, opened over the content -- its shelves and

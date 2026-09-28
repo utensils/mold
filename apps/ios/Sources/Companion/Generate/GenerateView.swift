@@ -21,24 +21,20 @@ struct GenerateView: View {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
             } else {
-                GenerateCanvas()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(.rect)
-                    .onTapGesture { hideKeyboard() }
-                    .safeAreaBar(edge: .bottom) {
-                        Composer(showsOptions: $showsOptions, estimate: estimate)
+                GeometryReader { geometry in
+                    VStack(spacing: 0) {
+                        GenerateCanvas()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .contentShape(.rect)
+                            .onTapGesture { hideKeyboard() }
+                        Composer(showsOptions: $showsOptions, estimate: estimate,
+                                 maximumHeight: geometry.size.height * 0.55)
                     }
+                }
             }
         }
         .navigationTitle(Destination.generate.title)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if !hosts.hosts.isEmpty {
-                ToolbarItem(placement: .topBarLeading) { KindMenu() }
-                ToolbarItem(placement: .principal) { ModelMenu() }
-                ToolbarItem(placement: .topBarTrailing) { MachineMenu() }
-            }
-        }
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }
         .overlay(alignment: .top) {
             VStack(spacing: 8) {
@@ -51,7 +47,7 @@ struct GenerateView: View {
             generate.reuse(entry)
             router.pendingReuse = nil
         }
-        .task(id: hosts.upHosts.map(\.id)) { generate.settleChoice() }
+        .onChange(of: generate.families.flatMap(\.models), initial: true) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
     }
 
@@ -81,10 +77,11 @@ struct GenerateView: View {
 struct KindMenu: View {
     @Environment(GenerateController.self) private var generate
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         let binding = Binding(get: { generate.kind }, set: { generate.setKind($0) })
-        if width == .regular {
+        if width == .regular && !size.isAccessibilitySize {
             Picker("Kind", selection: binding) {
                 ForEach(PrintKind.allCases, id: \.self) { Text($0.makeTitle).tag($0) }
             }

@@ -11,15 +11,21 @@ struct Composer: View {
     @Environment(\.dynamicTypeSize) private var size
     @Binding var showsOptions: Bool
     let estimate: String?
+    let maximumHeight: CGFloat
     @FocusState private var editing: Bool
 
     var body: some View {
-        @Bindable var generate = generate
-        ViewThatFits(in: .vertical) {
-            content
-            ScrollView { content }.frame(maxHeight: UIScreen.main.bounds.height * 0.55)
+        ScrollViewReader { proxy in
+            ScrollView {
+                content.padding(14)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: editing) { _, focused in
+                if focused { proxy.scrollTo("prompt", anchor: .top) }
+            }
         }
-        .padding(14)
+        .frame(maxHeight: maximumHeight)
         .background {
             if size.isAccessibilitySize {
                 RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground))
@@ -58,22 +64,34 @@ struct Composer: View {
                         // target to hit; two reserved lines are not.
                         .lineLimit((size <= .small ? 2 : 1) ... (size.isAccessibilitySize ? 3 : 6))
                         .focused($editing)
+                        .accessibilityIdentifier("generation-prompt")
+                        .id("prompt")
+                        .frame(minHeight: 44)
                     ExpandButton().labelStyle(.iconOnly)
                 }
             } else {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
             }
-            ViewThatFits(in: .horizontal) {
-                ChipRow(style: .full, showsOptions: $showsOptions)
-                ChipRow(style: .short, showsOptions: $showsOptions)
-                Button { showsOptions = true } label: {
-                    Label("Options", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+            ModelMenu()
+            if size.isAccessibilitySize {
+                optionsButton
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    ChipRow(style: .full, showsOptions: $showsOptions)
+                    ChipRow(style: .short, showsOptions: $showsOptions)
+                    optionsButton
                 }
-                .buttonStyle(.bordered)
             }
             GenerateRow(estimate: estimate)
         }
+    }
+
+    private var optionsButton: some View {
+        Button { showsOptions = true } label: {
+            Label("Options", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
     }
 }
 

@@ -21,6 +21,13 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Models | Installed per machine, Discover, downloads, licences |
 | Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension |
 
+## Generation and playback
+
+Tap **Model** in the composer to search installed models and choose the kind,
+recipe or machine. **Get More Models…** opens model management directly.
+The prompt stays in one scrollable panel as the keyboard and text size change.
+Video playback uses the media audio session, including in silent mode.
+
 ## Building
 
 Everything goes through the Makefile. `make help` lists the targets, and inside

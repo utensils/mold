@@ -127,11 +127,14 @@ struct ClipPlayer: View {
                 ProgressView().tint(.white)
             }
         }
-        .task(id: entry.id.filename) { await load() }
+        .task(id: entry.id) { await load() }
         .onDisappear { player?.pause() }
     }
 
     private func load() async {
+        player?.pause()
+        player = nil
+        problem = nil
         await play(from: nil, reminted: false)
     }
 
@@ -142,7 +145,12 @@ struct ClipPlayer: View {
         guard let host = hosts.host(entry.hostID) else { return }
         let item: AVPlayerItem
         do {
-            item = AVPlayerItem(url: try await hosts.backend(for: host).playableURL(for: entry.print.filename))
+            try PlaybackAudio.configure()
+            let url = try await hosts.backend(for: host).playableURL(for: entry.print.filename)
+            try Task.checkCancellation()
+            item = AVPlayerItem(url: url)
+        } catch is CancellationError {
+            return
         } catch {
             problem = String(localized: "This clip can't be played here: \(error.reasonSentence)")
             return
@@ -150,9 +158,11 @@ struct ClipPlayer: View {
         if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
         if let time {
             await player?.seek(to: time)
+            guard !Task.isCancelled else { player?.pause(); return }
             player?.play()
         }
         for await status in item.publisher(for: \.status).values where status == .failed {
+            guard !Task.isCancelled else { return }
             guard !reminted else {
                 player = nil
                 problem = String(localized: "This clip stopped playing: \(item.error?.reasonSentence ?? String(localized: "the machine closed the stream."))")
@@ -161,4 +171,5 @@ struct ClipPlayer: View {
             await play(from: player?.currentTime(), reminted: true)
             return
         }
-    }}
+    }
+}

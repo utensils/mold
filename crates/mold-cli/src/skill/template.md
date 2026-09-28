@@ -10,6 +10,15 @@ mold info <model>
 mold server status
 ```
 
+## Native iPhone and iPad app
+
+Mold Studio Companion (`apps/ios`) is remote-only. In Generate, tap **Model**
+below the prompt to search installed models and choose the output kind, recipe
+and machine. **Get More Models…** opens model management. For development,
+`nix develop -c companion-dev` watches native/shared Swift sources and
+rebuilds/relaunches in Simulator; `companion-run` launches once. Helpers accept
+`SIM=<UDID>` and `BUILD=<directory>`. Tauri retains `ios-dev`.
+
 ## Route the request
 
 - For generation, editing, or upscaling, confirm the intended model family,

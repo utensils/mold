@@ -140,17 +140,15 @@ words beside its name, never by colour alone.
 
 ### 5.1 Generate
 
-**Toolbar**
+**Model selection**
 
-- **Principal:** the Model menu. The model's plain name is shown in `.headline`,
-  with its id (`flux-dev:q4`) in mono `.caption` underneath. The menu lists
-  models grouped by family, filtered to the current kind, with availability for
-  each machine.
-- **Trailing:** the Machine menu (status dot + name). "Auto" follows the
-  Default machine, or the first one that is up. Any machine that is up can be
-  pinned.
-- **Leading:** Kind. It is a menu on iPhone (Still picture · Short clip ·
-  3-D object) and a segmented control on iPad.
+The composer has a full-width **Model** button with a wrapping model name and
+chevron. It opens a searchable **Choose a Model** sheet. The sheet groups
+installed models by family and includes Kind, Machine, Recipe, and a direct
+**Get More Models…** navigation link. These controls no longer compete for a
+fixed-height navigation title; the navigation bar says Generate. Kind uses a
+menu on iPhone and at accessibility sizes, and a segmented control on a roomy
+iPad. Auto follows the default online machine that holds the selected model.
 
 **Canvas.** Fills the rest of the screen.
 
@@ -158,9 +156,10 @@ words beside its name, never by colour alone.
 - Transparent prints sit on the AlphaBed checkerboard.
 - Tapping the canvas while the keyboard is up dismisses it.
 
-**Composer.** A glass panel (radius 16), attached with
-`.safeAreaBar(edge: .bottom)` above the tab bar. It rides the keyboard. Top to
-bottom:
+**Composer.** A glass panel (radius 16) above the tab bar. One stable scroll
+view is capped to 55% of the current window's available height, including
+keyboard avoidance and iPad resizing; its prompt never moves between
+`ViewThatFits` alternatives. Top to bottom:
 
 1. **Picture wells**, shown only when the recipe reads them:
    - **Start from** (the source picture). Strength lives in More options.
@@ -175,9 +174,10 @@ bottom:
 3. **Expand** (`text.badge.star`). Tapping it rewrites the prompt in place, and
    the original is kept for undo. Its menu offers "Suggest other ways", which
    opens a list sheet with Use.
-4. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
+4. **Model** opens the chooser described above.
+5. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
    (`slider.horizontal.3`).
-5. **Last row:** the estimate ("about 40s", mono) at the leading edge.
+6. **Last row:** the estimate ("about 40s", mono) at the leading edge.
    **Generate** sits at the trailing edge: `.buttonStyle(.glassProminent)`,
    `.controlSize(.large)`, ⌘↩.
 
@@ -557,7 +557,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 
 | Screen | xSmall | Large (default) | xxxLarge | AX5 |
 | --- | --- | --- | --- | --- |
-| Generate | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the title wraps to 2 lines |
+| Generate | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
 | Library | 5 columns | 3 columns | 3 columns, larger headers | 1–2 columns; headers wrap; machine badges hidden on tiles (still spoken, and shown in Info) |
 | Viewer | Icon bar | Icon bar | Icon bar | Icon bar with the Large Content Viewer; Info opens straight to `.large` |
 | Queue | Thumbnail beside text | same | same | Thumbnail above text; held-row buttons stacked full width; ETA on its own line |

@@ -28,6 +28,7 @@ struct MachineCard: View {
         .padding(16)
         .background(.background.secondary, in: .rect(cornerRadius: 8))
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("machine-card-" + host.id.uuidString)
     }
 
     private func header(_ state: HostStore.Reachability) -> some View {
@@ -61,7 +62,7 @@ struct MachineCard: View {
                     Text("Video memory")
                 } value: {
                     // Never truncated: at accessibility sizes the row stacks.
-                    Text(memory.words).monospacedDigit().fixedSize()
+                    Text(memory.words).monospacedDigit().fixedSize(horizontal: false, vertical: true)
                 }
                 Gauge(value: memory.fraction) { Text("Video memory") }
                     .gaugeStyle(.accessoryLinearCapacity)
