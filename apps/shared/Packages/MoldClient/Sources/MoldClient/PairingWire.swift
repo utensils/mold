@@ -56,9 +56,10 @@ public struct PairedClients: Codable, Hashable, Sendable {
         self.clients = clients
     }
 
-    /// Whether this machine has anything to pair. `pairingAvailable` is
-    /// `true` even on a keyless host (`routes.rs:9678-9685`), so it is NOT
-    /// the gate -- a host with no key has no key to hand over and can never
-    /// hold a client. `authRequired` is the only honest gate.
-    public var canPair: Bool { authRequired && pairingAvailable }
+    /// Whether this host can hold paired client credentials. A keyless host
+    /// can still issue an address-only code, but has no client key to manage.
+    public var canManagePairedClients: Bool { authRequired && pairingAvailable }
+
+    @available(*, deprecated, renamed: "canManagePairedClients")
+    public var canPair: Bool { canManagePairedClients }
 }

@@ -30,14 +30,13 @@ import Testing
     #expect(clients.clients[0].clientKind == "mobile")
 }
 
-/// `pairing_available` is `true` even on a keyless host (`routes.rs:9678-9685`),
-/// so it is NOT the gate -- the gate trap this app must not fall into.
-@Test func aKeylessMachineHasNothingToPair() throws {
+/// Keyless hosts can issue address-only codes, but hold no paired client keys.
+@Test func aKeylessMachineHasNoManagedPairedClients() throws {
     let clients = try MoldJSON.decoder.decode(
         PairedClients.self, from: RepoFixtures.fixture("pairing-clients-workstation.json"))
     #expect(!clients.authRequired)
     #expect(clients.pairingAvailable)
-    #expect(!clients.canPair)
+    #expect(!clients.canManagePairedClients)
 }
 
 /// A keyed code with no token cannot be redeemed.
