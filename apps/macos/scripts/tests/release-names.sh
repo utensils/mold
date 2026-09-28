@@ -56,6 +56,15 @@ if ! recipe MARKETING_VERSION="$nightly" build | grep -q "MARKETING_VERSION=$nig
   echo "FAIL: MARKETING_VERSION does not reach xcodebuild" >&2
   exit 1
 fi
+signed_recipe=$(recipe CONFIG=Release MOLD_DEV_SIGN_IDENTITY='Developer ID Application: CI (28X9H69QGE)' build)
+if ! grep -Fq 'CODE_SIGN_IDENTITY="-"' <<< "$signed_recipe"; then
+  echo "FAIL: Xcode Release must build ad hoc before depth-first distribution signing" >&2
+  exit 1
+fi
+if ! grep -Fq 'set -o pipefail;' <<< "$signed_recipe"; then
+  echo "FAIL: xcodebuild failures are hidden by the build output filter" >&2
+  exit 1
+fi
 # The embedded server reports its own build version in the Machines sidebar.
 # It must receive the same nightly version as the app around it.
 engine_recipe=$(recipe MARKETING_VERSION="$nightly" engine)

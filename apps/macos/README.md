@@ -157,6 +157,9 @@ and the app would die in dyld before `main`. Signing is depth-first and never
 path's own dylibs), and the two it keeps — `allow-jit` and
 `allow-unsigned-executable-memory` — each record beside them the exact check
 owed before they can go, which needs a signed build rendering on Metal.
+Xcode builds Release ad hoc, then `scripts/sign-release.sh` signs nested code
+and the app with Developer ID. Passing Developer ID into Xcode itself makes
+SwiftPM's MoldMesh resource bundle fail its signing settings on CI.
 
 **arm64 only, macOS 26.0 or newer.** The deployment target is macOS 26
 (`project.yml`) and `ARCHS` is `arm64`, so every Intel Mac and every Mac not on

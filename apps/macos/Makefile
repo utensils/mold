@@ -21,7 +21,11 @@ APP      := $(BUILD)/$(CONFIG)/Mold Studio.app
 MOLD_DEV_SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
   | grep -oE '"(Developer ID Application: [^"]+|Apple Development: [^"]+)"' \
   | sort -t'"' -k2,2r | head -1 | tr -d '"')
-SIGN := CODE_SIGN_IDENTITY="$(or $(MOLD_DEV_SIGN_IDENTITY),-)"
+# Release is signed depth-first by sign-release.sh after Xcode links the app.
+# Signing the build itself with Developer ID makes SwiftPM's MoldMesh resource
+# bundle demand a development team (then conflict with its automatic signing).
+# Build Release ad hoc and let the release signer handle every nested bundle.
+SIGN := CODE_SIGN_IDENTITY="$(if $(filter Release,$(CONFIG)),-,$(or $(MOLD_DEV_SIGN_IDENTITY),-))"
 
 # Sparkle decides which build is newer by comparing CFBundleVersion, and it
 # compares across BOTH channels -- a nightly and a stable are the same app.
@@ -100,7 +104,7 @@ gen: ## Regenerate Mold.xcodeproj from project.yml
 
 build: gen ## Build the app
 	@scripts/engine-freshness.sh Engine.xcconfig
-	@$(XCB) build | grep -Ev '^\s*$$' | tail -5
+	@set -o pipefail; $(XCB) build | grep -Ev '^\s*$$' | tail -5
 
 run: build ## Build and launch the app
 	@open "$(APP)"
