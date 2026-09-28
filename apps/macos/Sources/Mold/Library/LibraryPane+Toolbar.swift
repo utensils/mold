@@ -29,14 +29,10 @@ extension LibraryPane {
                     }
                 }
             } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "server.rack")
-                    Text(machineFilterTitle)
-                        .lineLimit(1)
-                        .frame(maxWidth: 110)
-                }
+                Image(systemName: "server.rack")
+                    .accessibilityLabel("Machine: \(machineFilterTitle)")
             }
-            .help("Show prints from one machine")
+            .help("Show prints from one machine (\(machineFilterTitle))")
         }
         ToolbarItem {
             Menu {

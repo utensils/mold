@@ -81,6 +81,8 @@ enum PreferencesReset {
         // Its own toggle on Settings ▸ This Mac; a reset quietly turning the
         // engine back on at launch would be a change nobody asked for.
         "engineStartsAtLaunch",
+        // Playback sound is a universal choice across Generate and Library.
+        "videoPlaybackMuted",
     ]
 
     static func reset(in defaults: UserDefaults) {

@@ -85,7 +85,7 @@ struct LibraryViewer: View {
     /// on a keyless one.
     @ViewBuilder private var video: some View {
         if let player {
-            VideoPlayer(player: player)
+            VideoPlaybackView(player: player)
                 .onDisappear { player.pause() }
         } else {
             ProgressView()

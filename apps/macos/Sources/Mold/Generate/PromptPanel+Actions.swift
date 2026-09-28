@@ -28,6 +28,7 @@ extension PromptPanel {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
             if controller.queuedCount > 0 {
                 Text("\(controller.queuedCount) more queued")
                     .font(.caption)

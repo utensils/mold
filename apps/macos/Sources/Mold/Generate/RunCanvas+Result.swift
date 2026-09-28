@@ -44,8 +44,7 @@ extension RunCanvas {
             // Streamed, not downloaded, exactly as `LibraryViewer` plays one:
             // a clip can be hundreds of megabytes and waiting for all of it
             // before the first frame is not playback.
-            VideoPlayer(player: player)
-                .aspectRatio(contentMode: .fit)
+            VideoPlaybackView(player: player)
                 .onDisappear {
                     player.pause()
                     player.replaceCurrentItem(with: nil)

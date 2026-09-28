@@ -42,6 +42,9 @@ extension GeneratePane {
         if case .chain = routing {
             reuse.warnIfTheRouteCannotCarryMedia(chained: true, outgoing: outgoingProbe(on: host))
         }
+        if let model = controller.modelName {
+            promptHistory.remember(controller.draft.prompt, model: model, on: host.id)
+        }
         // TAKEN, not read: a handle is good for one admission and a relay's
         // bytes ride the request that took them, so the submit that gets this
         // is the last one to have it. That is what stops a print conditioning

@@ -16,13 +16,8 @@ import SwiftUI
 /// A modifier rather than an inline call because Generate takes the same
 /// column, and two copies of a rule are two rules.
 extension View {
-    /// - Parameter searchFillsTheColumn: whether this pane's own `.searchable`
-    ///   field already occupies the toolbar over the column. macOS pins that
-    ///   field to the toolbar's trailing end at a fixed width -- which is what
-    ///   `TrailingColumn.width` IS -- so a pane that has one needs nothing
-    ///   else there, and a pane that has not stretches the switch to reserve
-    ///   the same width instead. Either way what the PANE puts in the toolbar
-    ///   stops at the divider rather than being drawn across the column.
+    /// A search field already reserves the trailing toolbar region; other
+    /// panes reserve that space beside the inspector switch themselves.
     func trailingColumn(
         isShowing: Binding<Bool>, searchFillsTheColumn: Bool = false,
         @ViewBuilder _ column: () -> some View
@@ -31,6 +26,10 @@ extension View {
             column().inspectorColumnWidth(TrailingColumn.width)
         }
         .toolbar {
+            // Keep the pane's controls and the inspector switch in separate
+            // glass groups. Otherwise macOS paints one capsule across the
+            // column divider even when their hit regions fit individually.
+            ToolbarSpacer(.fixed)
             // Hidden, there is no column and no divider, so the switch is an
             // ordinary trailing button whatever the pane does with search.
             let reservesColumn = isShowing.wrappedValue && !searchFillsTheColumn
@@ -47,6 +46,7 @@ extension View {
                 }
                 .frame(width: reservesColumn ? TrailingColumn.toolbarRegion : nil)
             }
+            .sharedBackgroundVisibility(.hidden)
         }
     }
 }

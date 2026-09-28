@@ -54,6 +54,15 @@ final class PromptHistoryStore {
 
     func entries(on host: MoldHost.ID) -> [HistoryEntry] { byHost[host] ?? [] }
 
+    /// Make a just-submitted prompt available to ↑ before the host refreshes.
+    func remember(_ prompt: String, model: String, on host: MoldHost.ID) {
+        let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        let entry = HistoryEntry(prompt: value, model: model,
+                                 usedAt: Int64(Date().timeIntervalSince1970 * 1_000))
+        byHost[host] = [entry] + entries(on: host).filter { $0.prompt != value }
+    }
+
     /// Whether this host has ever answered -- with rows, with none, or with
     /// "this machine can't". `nil` in `byHost` and absence from
     /// `unavailable` together mean "not yet asked".

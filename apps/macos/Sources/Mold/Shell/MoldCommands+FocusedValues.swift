@@ -24,6 +24,10 @@ struct PromptTuckKey: FocusedValueKey {
     typealias Value = PromptTuckAction
 }
 
+struct ExpandPromptKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 /// Whether the showing pane has an inspector open, and how to change that.
 /// Equatable on the state alone, for the same reason `PromptTuckAction` is.
 struct InspectorToggle: Equatable {
@@ -80,6 +84,11 @@ extension FocusedValues {
     var promptTuck: PromptTuckAction? {
         get { self[PromptTuckKey.self] }
         set { self[PromptTuckKey.self] = newValue }
+    }
+
+    var expandPrompt: ExpandPromptKey.Value? {
+        get { self[ExpandPromptKey.self] }
+        set { self[ExpandPromptKey.self] = newValue }
     }
 
     var inspectorToggle: InspectorToggle? {

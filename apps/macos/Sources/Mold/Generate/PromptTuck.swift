@@ -1,6 +1,12 @@
 import MoldStyle
 import SwiftUI
 
+enum PromptTuckLayout {
+    static func availablePanelHeight(in height: CGFloat) -> CGFloat {
+        max(0, height - 40)
+    }
+}
+
 /// Slides the prompt capsule off the bottom edge, leaving a lip behind.
 ///
 /// An offset rather than an `if`: removing the panel would tear down the
@@ -13,14 +19,15 @@ import SwiftUI
 struct PromptTuck<Panel: View>: View {
     @Binding var tucked: Bool
     let steps: (done: Int, total: Int)?
-    @ViewBuilder let panel: Panel
+    @ViewBuilder let panel: (CGFloat) -> Panel
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var height: CGFloat = 0
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            panel
+        GeometryReader { geometry in
+          ZStack(alignment: .bottom) {
+            panel(PromptTuckLayout.availablePanelHeight(in: geometry.size.height))
                 .padding(20)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 // Measured height includes the padding, so the capsule clears
@@ -33,6 +40,8 @@ struct PromptTuck<Panel: View>: View {
                 // Invisible while the capsule is up, so it never takes a click
                 // meant for the capsule sitting on top of it.
                 .allowsHitTesting(tucked)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
         .animation(reduceMotion ? nil : .snappy, value: tucked)
     }

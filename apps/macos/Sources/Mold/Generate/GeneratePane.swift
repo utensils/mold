@@ -22,6 +22,8 @@ struct GeneratePane: View {
     /// notice is drawn by the body below.
     @Environment(ReuseStore.self) var reuse
     @Environment(DraftPersistence.self) var drafts
+    @Environment(PromptHistoryStore.self) var promptHistory
+    @Environment(ExpandStore.self) var expansions
     /// Holds a licence the press has to accept first; the sheet itself is
     /// the root's (`RootView`). Not `private`: `+Licence` writes it.
     @Environment(DownloadStore.self) var downloads
@@ -42,11 +44,12 @@ struct GeneratePane: View {
         ZStack(alignment: .bottom) {
             canvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            PromptTuck(tucked: $controller.promptTucked, steps: controller.run.steps) {
+            PromptTuck(tucked: $controller.promptTucked, steps: controller.run.steps) { availableHeight in
                 PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
                             host: host, destination: $destination,
                             submit: startRun, cancel: cancelRun, stopAll: { controller.stopAll() },
-                            maxBatch: maxBatch, chainLimits: advertisedChainLimits)
+                            maxBatch: maxBatch, chainLimits: advertisedChainLimits,
+                            maxHeight: availableHeight)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -71,6 +74,7 @@ struct GeneratePane: View {
         .focusedSceneValue(\.promptTuck, PromptTuckAction(isTucked: controller.promptTucked) {
             controller.promptTucked.toggle()
         })
+        .focusedSceneValue(\.expandPrompt, expandPromptAction)
         .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
             showsInspector.toggle()
         })
@@ -139,5 +143,19 @@ struct GeneratePane: View {
         guard let host else { return "No machine" }
         guard let model = selectedModel else { return host.name }
         return "\(model.headline) · \(host.name)"
+    }
+
+    private var expandPromptAction: (() -> Void)? {
+        guard let recipe, let host else { return nil }
+        let offer = ExpansionOffer.resolve(recipe: recipe, capabilities: hosts.capabilities(of: host))
+        let visibility = PromptWand.Visibility.resolve(
+            offer: offer, promptMode: recipe.capabilities.promptRequirement, prompt: controller.draft.prompt)
+        let isWorking: Bool
+        if case .working = expansions.expansion { isWorking = true } else { isWorking = false }
+        guard PromptWand.shortcutAvailable(offer: offer, visibility: visibility, isWorking: isWorking)
+        else { return nil }
+        return {
+            Task { await expansions.expand(controller, on: host, backend: hosts.backend(for: host)) }
+        }
     }
 }
