@@ -56,6 +56,13 @@ if ! recipe MARKETING_VERSION="$nightly" build | grep -q "MARKETING_VERSION=$nig
   echo "FAIL: MARKETING_VERSION does not reach xcodebuild" >&2
   exit 1
 fi
+# The embedded server reports its own build version in the Machines sidebar.
+# It must receive the same nightly version as the app around it.
+engine_recipe=$(recipe MARKETING_VERSION="$nightly" engine)
+if ! grep -Fq "MOLD_BUILD_VERSION=$nightly" <<< "$engine_recipe"; then
+  echo "FAIL: MARKETING_VERSION does not reach the embedded engine" >&2
+  exit 1
+fi
 
 # 3. The workflow expects exactly that name, built from the same one variable.
 distribution="$WORKFLOWS/macos-native-distribution.yml"

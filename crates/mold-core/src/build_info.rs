@@ -1,5 +1,5 @@
-/// Crate version from Cargo.toml.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Distribution version, or the Cargo workspace version for local builds.
+pub const VERSION: &str = env!("MOLD_BUILD_VERSION");
 
 /// Exact git commit SHA, or `"unknown"` if built outside a git repo.
 ///
@@ -50,8 +50,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_matches_cargo_pkg() {
-        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+    fn version_matches_distribution_override_or_cargo_pkg() {
+        assert_eq!(
+            VERSION,
+            option_env!("MOLD_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

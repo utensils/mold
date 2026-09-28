@@ -1894,6 +1894,8 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("application/json"));
+        let status = json_body(resp).await;
+        assert_eq!(status["version"], mold_core::build_info::VERSION);
     }
 
     #[tokio::test]
@@ -13916,6 +13918,7 @@ mod tests {
             .await
             .unwrap();
         let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(spec["info"]["version"], mold_core::build_info::VERSION);
         // Must have openapi version field
         assert!(
             spec["openapi"].is_string(),

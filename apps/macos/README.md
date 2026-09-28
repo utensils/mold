@@ -290,7 +290,9 @@ The base version comes from `[workspace.package].version` in the root
 `Cargo.toml`, shared with the CLI. Nightlies use the desktop helper
 (`next-patch-nightly.<commit-count>`); Sparkle still orders builds by the
 monotonic commit count. `make gen` writes the resolved version into the ignored
-`Version.yml` include, so builds opened in Xcode report it too.
+`Version.yml` include, so builds opened in Xcode report it too. `make engine`
+passes that same resolved version into the embedded Rust build, so This Mac's
+status reports the app's nightly version rather than the workspace base version.
 `scripts/tests/release-names.sh` asks `make` what it would produce and greps
 the workflow for the same expression, because they once disagreed and nightly
 could not build at all.

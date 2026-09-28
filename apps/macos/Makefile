@@ -57,7 +57,8 @@ ENGINE_LIB := $(ENGINE_TARGET)/release/libmold_macos_ffi.a
 engine: ## Build mold's Rust engine and link it into the app
 	@command -v cargo >/dev/null || { echo "cargo not found -- run inside 'nix develop'"; exit 1; }
 	@# Same deployment target as the app, or every object file warns.
-	@cd $(ENGINE_DIR) && CARGO_TARGET_DIR=$(ENGINE_TARGET) CARGO_BUILD_JOBS=8 \
+	@cd $(ENGINE_DIR) && MOLD_BUILD_VERSION=$(MARKETING_VERSION) \
+	  CARGO_TARGET_DIR=$(ENGINE_TARGET) CARGO_BUILD_JOBS=8 \
 	  MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release --features metal
 	@# What `engine-freshness.sh` compares against on every `make build`: the
 	@# commit, and the uncommitted engine diff the build included.
