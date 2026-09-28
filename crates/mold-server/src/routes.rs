@@ -6193,7 +6193,7 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
     };
 
     Ok(Json(ServerStatus {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: mold_core::build_info::VERSION.to_string(),
         git_sha: if mold_core::build_info::GIT_SHA == "unknown" {
             None
         } else {
@@ -11557,7 +11557,9 @@ async fn delete_model_placement(
 // ── /api/openapi.json ─────────────────────────────────────────────────────────
 
 async fn openapi_json() -> impl IntoResponse {
-    Json(ApiDoc::openapi())
+    let mut doc = ApiDoc::openapi();
+    doc.info.version = mold_core::build_info::VERSION.to_string();
+    Json(doc)
 }
 
 // ── /api/docs ─────────────────────────────────────────────────────────────────

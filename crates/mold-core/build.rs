@@ -57,7 +57,14 @@ fn main() {
 
     // Build a full version string as a compile-time constant for clap's
     // #[command(version = ...)] which requires &'static str.
-    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    // Native macOS Nightly sets this to the app's resolved marketing version.
+    // Cargo's package version stays at the workspace base until release-plz
+    // cuts the next stable release.
+    let version = std::env::var("MOLD_BUILD_VERSION")
+        .ok()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=MOLD_BUILD_VERSION={version}");
     let full_version = if sha == "unknown" {
         version
     } else {
@@ -72,4 +79,5 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MOLD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=MOLD_BUILD_DATE");
     println!("cargo:rerun-if-env-changed=MOLD_BUILD_CHANNEL");
+    println!("cargo:rerun-if-env-changed=MOLD_BUILD_VERSION");
 }

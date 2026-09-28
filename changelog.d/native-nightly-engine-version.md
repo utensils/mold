@@ -1,0 +1,1 @@
+- **Matching native nightly versions.** This Mac now reports the same nightly version as its Mold Studio app bundle.

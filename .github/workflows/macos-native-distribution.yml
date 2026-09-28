@@ -207,6 +207,7 @@ jobs:
           # offer "Mold 0.1.0" to a user already on 0.1.0, and the workflow's
           # own appcast assertion below could never match.
           MARKETING_VERSION: ${{ steps.release.outputs.version }}
+          MOLD_BUILD_CHANNEL: ${{ steps.release.outputs.channel }}
         run: |
           set -euo pipefail
           # No `make gen` ahead of this: `signed` builds the engine, which
