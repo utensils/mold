@@ -1,6 +1,7 @@
 import MoldClient
 import MoldStyle
 import SwiftUI
+import AppKit
 
 /// The floating panel: what to make, how to make it, and the button.
 struct PromptPanel: View {
@@ -22,25 +23,48 @@ struct PromptPanel: View {
     let maxBatch: Int
     /// This machine's own chain limits for the chosen model.
     let chainLimits: ChainLimits?
+    let maxHeight: CGFloat
 
     /// Not `private`: `PromptPanel+Actions`, an extension in another file,
     /// reads the run and the queue depth to build the trailing button group.
     @Environment(GenerateController.self) var controller
     @Environment(ExpandStore.self) private var expansions
-    @FocusState private var promptFocused: Bool
+    @Environment(PromptHistoryStore.self) private var history
+    private enum FocusedField: Hashable { case prompt, negative }
+    @FocusState private var focusedField: FocusedField?
+    @State private var cycler = PromptHistoryCycler()
+    @State private var keyMonitor: Any?
+    @State private var contentHeight: CGFloat = 0
+    @State private var actionsHeight: CGFloat = 0
+    @State private var stepsHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let steps = controller.run.steps {
                 StepSegments(done: steps.done, total: steps.total)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        stepsHeight = $0
+                    }
             }
             if let recipe {
-                prompt(recipe)
-                promptTools(recipe)
-                Divider()
-                ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch,
-                            chainLimits: chainLimits, draft: $draft)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        prompt(recipe)
+                        promptTools(recipe)
+                        Divider()
+                        ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch,
+                                    chainLimits: chainLimits, draft: $draft)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        contentHeight = $0
+                    }
+                }
+                .frame(height: min(contentHeight, scrollHeight))
                 actions(recipe)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        actionsHeight = $0
+                    }
             } else {
                 Text("Pick a model to see its controls.")
                     .foregroundStyle(.secondary)
@@ -49,10 +73,19 @@ struct PromptPanel: View {
         .padding(16)
         .panel(.floating)
         .frame(maxWidth: Self.maxWidth)
+        .frame(maxHeight: maxHeight)
         // Published the same way the Library's title and tag fields already
         // do, so `ResultStrip`'s arrow-key shortcuts stand down for a caret
         // here exactly as they do for one there.
-        .focusedValue(\.editingText, promptFocused ? true : nil)
+        .focusedValue(\.editingText, focusedField == nil ? nil : true)
+        .onAppear { installHistoryKeyMonitor() }
+        .onDisappear { removeHistoryKeyMonitor() }
+        .task(id: host?.id) {
+            guard let host else { return }
+            await history.refresh(on: host.id)
+        }
+        .onChange(of: host?.id, initial: true) { _, _ in loadHistory() }
+        .onChange(of: host.flatMap { history.byHost[$0.id] }) { _, _ in loadHistory() }
     }
 
     @ViewBuilder private func prompt(_ recipe: GenerationRecipe) -> some View {
@@ -70,7 +103,7 @@ struct PromptPanel: View {
                         .textFieldStyle(.plain)
                         .font(.body)
                         .lineLimit(2...6)
-                        .focused($promptFocused)
+                        .focused($focusedField, equals: .prompt)
                     if recipe.capabilities.negativePrompt?.isAvailable == true {
                         TextField("Avoid…", text: $draft.negativePrompt, axis: .vertical)
                             .textFieldStyle(.plain)
@@ -82,7 +115,7 @@ struct PromptPanel: View {
                             // "is either of these two typing", which is
                             // exactly what a caret's claim on an arrow key
                             // needs.
-                            .focused($promptFocused)
+                            .focused($focusedField, equals: .negative)
                     }
                 }
                 ImageConditioningWells(recipe: recipe, model: model, draft: $draft)
@@ -125,5 +158,48 @@ struct PromptPanel: View {
     /// prompt -- the operation the accepted choice actually carried out.
     private var undoLabel: String {
         draft.promptTransform?.operation == .remix ? "remixed" : "expanded"
+    }
+
+    private var scrollHeight: CGFloat {
+        // The action row stays outside the scroll area and inside the window.
+        // 32 is the capsule padding; 12 is each VStack gap.
+        let stepSpace = controller.run.steps == nil ? 0 : stepsHeight + 12
+        return max(0, maxHeight - 32 - actionsHeight - 12 - stepSpace)
+    }
+
+    private func loadHistory() {
+        cycler.setEntries(host.map { history.entries(on: $0.id).map(\.prompt) } ?? [])
+    }
+
+    private func historyKey(up: Bool) -> Bool {
+        guard focusedField == .prompt,
+              let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return false }
+        let selection = editor.selectedRange()
+        guard up ? PromptHistoryCaret.isOnFirstLine(draft.prompt, selection: selection)
+                 : PromptHistoryCaret.isOnLastLine(draft.prompt, selection: selection)
+        else { return false }
+        let next = up ? cycler.previous(from: draft.prompt) : cycler.next(from: draft.prompt)
+        guard let next else { return false }
+        draft.prompt = next
+        editor.setSelectedRange(NSRange(location: (next as NSString).length, length: 0))
+        return true
+    }
+
+    private func installHistoryKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard modifiers.isEmpty else { return event }
+            switch event.keyCode {
+            case 126 where historyKey(up: true): return nil
+            case 125 where historyKey(up: false): return nil
+            default: return event
+            }
+        }
+    }
+
+    private func removeHistoryKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
     }
 }

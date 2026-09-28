@@ -21,6 +21,7 @@ struct MoldCommands: Commands {
     @Binding var destination: Destination
     @FocusedValue(\.refreshAction) private var refresh
     @FocusedValue(\.promptTuck) private var promptTuck
+    @FocusedValue(\.expandPrompt) private var expandPrompt
     @FocusedValue(\.inspectorToggle) private var inspector
     @FocusedValue(\.libraryFile) private var libraryFile
     @FocusedValue(\.librarySelection) private var librarySelection
@@ -63,6 +64,9 @@ struct MoldCommands: Commands {
             Button("Find") { findAction?() }
                 .keyboardShortcut("f")
                 .disabled(findAction == nil)
+            Button("Expand Prompt") { expandPrompt?() }
+                .keyboardShortcut("e")
+                .disabled(expandPrompt == nil)
         }
 
         CommandGroup(after: .toolbar) {

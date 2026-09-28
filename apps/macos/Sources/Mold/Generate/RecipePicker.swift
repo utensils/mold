@@ -10,6 +10,7 @@ import SwiftUI
 /// (decision 11, M4 design) -- and a control with that blast radius belongs
 /// beside the other choice that does the same thing.
 struct RecipePicker: View {
+    static let maxToolbarWidth: CGFloat = 160
     let recipes: [GenerationRecipe]
     let selected: GenerationRecipe?
     let choose: (GenerationRecipe) -> Void
@@ -35,9 +36,12 @@ struct RecipePicker: View {
                 }
             } label: {
                 Label(selected?.label ?? "Recipe", systemImage: "list.bullet")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: Self.maxToolbarWidth, alignment: .leading)
             }
             .labelStyle(.titleAndIcon)
-            .fixedSize()
+            .frame(width: Self.maxToolbarWidth)
             .help("Choose which of this model's recipes to run")
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import MoldClient
 import Testing
 
@@ -10,6 +11,52 @@ import Testing
 /// and the source well's menu items (decision 5).
 @MainActor
 struct CapsuleTests {
+    @Test func promptPanelLeavesRoomForWindowInsets() {
+        #expect(PromptTuckLayout.availablePanelHeight(in: 900) == 860)
+        #expect(PromptTuckLayout.availablePanelHeight(in: 300) == 260)
+        #expect(PromptTuckLayout.availablePanelHeight(in: 30) == 0)
+    }
+
+    @Test func clipKeepsItsPresentationRatio() {
+        #expect(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 960, height: 960)) == 1)
+        #expect(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 1920, height: 1080)) == 16.0 / 9.0)
+        #expect(VideoPlaybackLayout.aspectRatio(for: .zero) == 16.0 / 9.0)
+    }
+
+    @Test func mutePreferenceSurvivesPlaybackInstances() throws {
+        let name = "video-playback-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        #expect(VideoPlaybackPreference.isMuted(in: defaults) == false)
+        VideoPlaybackPreference.setMuted(true, in: defaults)
+        #expect(VideoPlaybackPreference.isMuted(in: defaults))
+        VideoPlaybackPreference.setMuted(false, in: defaults)
+        #expect(VideoPlaybackPreference.isMuted(in: defaults) == false)
+    }
+
+    @Test func promptHistoryCyclesAndRestoresDraft() {
+        var cycler = PromptHistoryCycler()
+        cycler.setEntries(["newest", "middle", "oldest"])
+        #expect(cycler.previous(from: "draft") == "newest")
+        #expect(cycler.previous(from: "newest") == "middle")
+        #expect(cycler.next(from: "middle") == "newest")
+        #expect(cycler.next(from: "newest") == "draft")
+        #expect(cycler.next(from: "draft") == nil)
+    }
+
+    @Test func promptHistoryKeepsMultilineCaretMovement() {
+        let text = "first\nsecond"
+        #expect(PromptHistoryCaret.isOnFirstLine(text, selection: NSRange(location: 2, length: 0)))
+        #expect(!PromptHistoryCaret.isOnFirstLine(text, selection: NSRange(location: 8, length: 0)))
+        #expect(PromptHistoryCaret.isOnLastLine(text, selection: NSRange(location: 8, length: 0)))
+        #expect(!PromptHistoryCaret.isOnLastLine(text, selection: NSRange(location: 2, length: 0)))
+    }
+
+    @Test func generateToolbarChoicesFitTheNarrowDetail() {
+        let detail = CGFloat(1_080 - 220) - TrailingColumn.width
+        #expect(ModelPicker.maxToolbarWidth + RecipePicker.maxToolbarWidth + 20 <= detail)
+    }
+
     // MARK: - PromptPanel.stopControl
 
     @Test func noQueueIsAPlainStopButton() {

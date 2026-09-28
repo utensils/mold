@@ -34,7 +34,8 @@ verification. Scoped to generation and the library. No 3-D studio.
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It starts when Mold opens -- Settings ▸ This Mac ▸ "Start the engine when Mold opens" turns that off -- shows as Starting… in the sidebar until it answers, then joins the machine list like any other and is reached over the same HTTP. Every machine's row reads its version and the commit it was built from, `Ready · 0.31.0 (9c81f69)`. |
 
 Shortcuts: ⌘1–⌘5 for the destinations (⌘2 and View ▸ Library open the library
-on the shelf you left it on), ⌘R to refresh, ⌘↩ to generate, ⌘, for
+on the shelf you left it on), ⌘R to refresh, ⌘↩ to generate, ⌘E to expand the
+current prompt, ↑/↓ in the prompt field to browse and restore prompt history, ⌘, for
 Settings, ⌥⌘I for the inspector (on Generate and on Library, each remembering its own), ⌥-click Expand to remix, ⌘[ and ⌘] for the brush and ⌘Z inside the mask editor, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
 favourite, ⌘⌫ to trash a print or cancel the selected queue row, ⌘Z to undo, Space for Quick Look, Escape to leave the
 viewer. ⇧⌘R checks a selected machine right now, ⇧⌘E and ⇧⌘S export or save a
@@ -432,6 +433,8 @@ Audio starts on for video recipes that can deliver it. Optional-audio models
 remember an explicit off choice across model switches and relaunches; H3 always
 includes synchronized audio. A recipe without denoise-strength control sends
 its fixed strength without losing the slider value chosen for another model.
+Generated and Library videos share a Mute control. The choice is remembered
+across videos and app launches until you change it.
 
 From inside `nix develop`:
 

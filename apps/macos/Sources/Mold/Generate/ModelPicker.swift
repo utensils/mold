@@ -9,6 +9,7 @@ import SwiftUI
 /// manifest's plain-English trade-off, the one thing that tells you what a
 /// model is FOR, would be thrown away.
 struct ModelPicker: View {
+    static let maxToolbarWidth: CGFloat = 280
     let host: MoldHost?
     let families: [(family: String, models: [Model])]
     let selected: Model?
@@ -20,9 +21,12 @@ struct ModelPicker: View {
     var body: some View {
         Button { isPresented = true } label: {
             Label(selected?.headline ?? "Model", systemImage: "cube")
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.maxToolbarWidth, alignment: .leading)
         }
         .labelStyle(.titleAndIcon)
-        .fixedSize()
+        .frame(width: Self.maxToolbarWidth)
         .help(selected?.description ?? "Choose a model")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             content
