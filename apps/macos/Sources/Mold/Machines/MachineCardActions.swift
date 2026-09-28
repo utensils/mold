@@ -1,3 +1,4 @@
+import Foundation
 import MoldClient
 
 /// What one machine's card on the fleet overview offers.
@@ -29,7 +30,7 @@ enum MachineCardActions {
     ///
     /// Set as Default is absent on the machine that already IS the default,
     /// for the same reason.
-    static func offered(isThisMac: Bool, isDefault: Bool) -> [RowAction<Kind>] {
+    static func offered(isThisMac: Bool, isDefault: Bool, isLoopback: Bool = false) -> [RowAction<Kind>] {
         var actions = [
             RowAction(kind: Kind.open, title: open),
             RowAction(kind: .checkNow, title: SidebarMachineActions.checkNow),
@@ -38,10 +39,13 @@ enum MachineCardActions {
             actions.append(RowAction(kind: .setDefault, title: SidebarMachineActions.setAsDefault))
         }
         actions.append(RowAction(kind: .copyAddress, title: copyAddress))
-        if !isThisMac {
-            // Not on This Mac: its engine listens on loopback, which no phone
-            // can reach (`LocalEngineSettings`).
+        // Not on This Mac, nor on any machine saved at a loopback address:
+        // a phone cannot reach this Mac's loopback, and a code carrying one
+        // would send the phone to itself (`LocalEngineSettings`).
+        if !isThisMac, !isLoopback {
             actions.append(RowAction(kind: .pairPhone, title: pairPhone))
+        }
+        if !isThisMac {
             actions.append(RowAction(kind: .edit, title: edit))
             actions.append(RowAction(kind: .remove, title: remove, isDestructive: true))
         }
@@ -57,5 +61,13 @@ enum MachineCardActions {
             RowAction(kind: $0.kind, title: $0.title, isDestructive: $0.isDestructive,
                       isDisabled: true)
         }
+    }
+}
+
+extension MachineCardActions {
+    /// `localhost`, `127.x`, `::1`: an address only this Mac can use.
+    static func isLoopback(_ url: URL) -> Bool {
+        guard let host = url.host(percentEncoded: false)?.lowercased() else { return false }
+        return host == "localhost" || host.hasPrefix("127.") || host == "::1" || host == "[::1]"
     }
 }

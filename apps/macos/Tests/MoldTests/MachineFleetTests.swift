@@ -35,6 +35,14 @@ struct MachineFleetTests {
         #expect(offered[2].title == SidebarMachineActions.setAsDefault)
     }
 
+    /// A machine saved at a loopback address is reached over this Mac's own
+    /// loopback: its code would send a phone to the phone itself.
+    @Test func aLoopbackMachineOffersNoPairing() {
+        let offered = MachineCardActions.offered(isThisMac: false, isDefault: false, isLoopback: true)
+        #expect(!offered.contains { $0.kind == .pairPhone })
+        #expect(offered.contains { $0.kind == .edit })
+    }
+
     /// Absent, not inert: the machine that IS the default has nothing to set.
     @Test func theDefaultMachineIsNotOfferedSetAsDefault() {
         let offered = MachineCardActions.offered(isThisMac: false, isDefault: true)

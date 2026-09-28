@@ -41,7 +41,8 @@ struct MachineCardView: View {
         .contentShape(.rect)
         .onTapGesture { perform(.open) }
         .rowActionMenu(MachineCardActions.offered(isThisMac: card.isThisMac,
-                                                  isDefault: card.isDefault),
+                                                  isDefault: card.isDefault,
+                                                  isLoopback: card.isLoopback),
                        perform: perform)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(card.name)

@@ -8,15 +8,33 @@ import Testing
 /// the file-size advisory, sharing that file's `machine(_:)` helper.
 @MainActor
 extension PairingTests {
-    /// **Fails today** -- `PairingSheet` does not exist. A code with no
-    /// token redeems nothing (`MobilePairingPayload.init?`), so the sheet
-    /// has nothing honest to show.
-    @Test func aSessionWithNoTokenOffersNoCode() {
+    /// A KEYED machine that answered with no token has nothing to hand over:
+    /// that code would redeem nothing, so the sheet shows no code.
+    @Test func aKeyedSessionWithNoTokenOffersNoCode() {
         let session = PairingSession(
-            token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
+            token: nil, expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
         let state = PairingSheet.resolve(
-            session, baseURL: URL(string: "http://127.0.0.1:7680")!, name: "This Mac")
+            session, baseURL: URL(string: "http://workstation:7680")!, name: "workstation")
         #expect(state == .noCode)
+    }
+
+    /// A keyless machine's code is its address alone -- still a code.
+    @Test func aKeylessSessionShowsAnAddressOnlyCode() throws {
+        let session = PairingSession(
+            token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: "hal9000")
+        let state = PairingSheet.resolve(
+            session, baseURL: URL(string: "http://hal9000:7680")!, name: "hal9000")
+        guard case let .code(payload) = state else { Issue.record("expected a code, got \(state)"); return }
+        #expect(payload.token == nil)
+    }
+
+    /// The Mac could not start a code (a paired key, the database off, the
+    /// machine down): the sheet says why instead of spinning forever.
+    @Test func aFailedRequestSaysWhyInsteadOfWaiting() {
+        let state = PairingSheet.resolve(
+            nil, failure: "Only this machine's operator key can pair a phone.",
+            baseURL: URL(string: "http://workstation:7680")!, name: "workstation")
+        #expect(state == .failed("Only this machine's operator key can pair a phone."))
     }
 
     @Test func noSessionYetIsWaitingNotNoCode() {
@@ -70,5 +88,10 @@ extension PairingTests {
         #expect(PairingSheet.needsFreshCode(session: live, sessionHost: other.id, host: workstation.id, now: now))
         #expect(PairingSheet.needsFreshCode(session: dead, sessionHost: workstation.id, host: workstation.id, now: now))
         #expect(PairingSheet.needsFreshCode(session: nil, sessionHost: nil, host: workstation.id, now: now))
+        // A keyless code never expires, so it is re-read on every opening:
+        // the machine may have gained a key since.
+        let keyless = PairingSession(
+            token: nil, expiresAt: nil, authRequired: false, instanceId: "i", hostname: "workstation")
+        #expect(PairingSheet.needsFreshCode(session: keyless, sessionHost: workstation.id, host: workstation.id, now: now))
     }
 }
