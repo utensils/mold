@@ -29,3 +29,5 @@ paths:
 **TestFlight.** `testflight-ios-native.yml` uploads after `iOS native app` passes on main, gated on the repository variable `COMPANION_TESTFLIGHT=true` -- it skips with a notice until the owner creates the App Store Connect record (no API exists for that). It is NOT part of the release tag gate.
 
 **Commands.** `make -C apps/ios gen|build|test|uitest|lint` (devshell: `companion-*`); pass `BUILD=/Volumes/ExternalStorage/...` locally to keep DerivedData off the internal disk. Simulator tests do not touch the desktop. Never run the MAC app's `make test` locally unasked: its host-app bundle launches Mold Studio on the user's desktop; CI (`macos-native.yml`) runs it. CI for this app: `.github/workflows/ios-native.yml`.
+
+**Development loop.** `nix develop -c companion-dev` (`scripts/companion.sh dev`) watches iOS and shared Swift sources and rebuilds/relaunches after edits. `companion-run` launches once; `companion-build` builds only. All helpers accept `SIM=<UDID>` and `BUILD=<directory>`. Generated projects/build output are excluded from the watch set. `scripts/tests/companion-helper.sh` checks argument forwarding from outside the repository.

@@ -26,6 +26,17 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 Everything goes through the Makefile. `make help` lists the targets, and inside
 `nix develop` the `companion-*` commands wrap them.
 
+Run `nix develop -c companion-dev` to watch iOS and shared Swift sources,
+rebuild, install and relaunch after edits. Ctrl-C stops watching.
+`companion-run` launches once; `companion-build` only builds. The equivalent
+script is `nix develop -c ./scripts/companion.sh dev` (also `run`, `build`,
+`gen`, `test`, `uitest`, `packages-test`, and `lint`). These commands serve
+the native app; `ios-dev` and `scripts/ios.sh` still serve Tauri.
+
+Every helper accepts Make overrides, for example
+`companion-dev SIM=<UDID> BUILD=/Volumes/ExternalStorage/mold-ios-build`.
+Xcode must be installed and selected; the devshell provides XcodeGen and Python.
+
 | Target | What |
 | --- | --- |
 | `make gen` | Regenerate `MoldCompanion.xcodeproj` from `project.yml` (the project is generated and gitignored) |
@@ -38,7 +49,8 @@ Everything goes through the Makefile. `make help` lists the targets, and inside
 On a disk that fills up, put build output elsewhere:
 `make test BUILD=/Volumes/ExternalStorage/mold-ios-build`.
 The simulator defaults to an iPhone 17 Pro when one exists (`scripts/pick-simulator.sh`).
-To choose another, set `SIM="iPhone Air"`.
+To choose another, pass `SIM=<UDID>` from `xcrun simctl list devices available`.
+The Makefile accepts simulator UDIDs, not names.
 
 ## Layout
 

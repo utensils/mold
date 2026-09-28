@@ -58,7 +58,7 @@ run: require-sim build ## Build, install and launch in the simulator
 	@xcrun simctl boot $(SIM_ID) 2>/dev/null || true
 	@open -a Simulator
 	@xcrun simctl install $(SIM_ID) "$(APP_PATH)"
-	@xcrun simctl launch $(SIM_ID) io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM_ID)"
+	@xcrun simctl launch --terminate-running-process $(SIM_ID) io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM_ID)"
 
 test: require-sim gen ## Unit tests on the simulator (the shared packages' own suites run from their Makefiles)
 	@$(XCB) test -only-testing:MoldCompanionTests 2>&1 \
