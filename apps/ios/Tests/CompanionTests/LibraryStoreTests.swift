@@ -77,6 +77,22 @@ struct LibraryStoreTests {
         #expect(library.pool.first?.print.isFavorite == false)
     }
 
+    @Test func theSystemsUndoShakeOrCommandZPutsItBack() async throws {
+        let (library, _, one, two) = try await fleet(first: [try print("a.png")], second: [])
+        one.stub("mutate(_:)") { _ in () }
+        two.stub("mutate(_:)") { _ in () }
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        library.undoManager = undo
+        undo.beginUndoGrouping()
+        library.apply(.favorite(true), to: library.pool)
+        undo.endUndoGrouping()
+        #expect(undo.undoActionName == "Favourite")
+        undo.undo()
+        #expect(library.pool.first?.print.isFavorite == false)
+        #expect(library.lastEdit == nil, "the Undo button has nothing left to put back")
+    }
+
     @Test func aMachineWithoutATrashDeletesForGood() async throws {
         let (library, _, one, _) = try await fleet(first: [try print("a.png")], second: [], trash: false)
         one.stub("deleteForever(_:)") { _ in () }

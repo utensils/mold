@@ -8,6 +8,7 @@ struct PrintViewer: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PrintActions.self) private var actions
     @Environment(\.dismiss) private var dismiss
+    @Environment(HostStore.self) private var hosts
     let start: PrintID
     let entries: [LibraryEntry]
     let trashed: Bool
@@ -56,7 +57,15 @@ struct PrintViewer: View {
             // The print on screen went away (deleted, moved): back to the grid.
             if let now = current ?? Optional(start), !ids.contains(now) { dismiss() }
         }
-        .keyboardShortcut(for: entries, current: $current, start: start)
+        .keyboardShortcut(for: entries, current: $current, start: start, close: { dismiss() })
+        // Handoff: the same print, continued in Mold Studio on the Mac.
+        .userActivity(PrintHandoff.activityType, element: entry) { entry, activity in
+            guard let host = hosts.host(entry.hostID) else { return }
+            activity.title = entry.spokenName
+            activity.isEligibleForHandoff = true
+            activity.addUserInfoEntries(from: PrintHandoff.userInfo(
+                filename: entry.print.filename, address: host.baseURL, instanceId: hosts.instanceID(of: host.id)))
+        }
     }
 
     @ViewBuilder private func bottomBar(_ entry: LibraryEntry) -> some View {
@@ -87,10 +96,14 @@ struct PrintViewer: View {
 }
 
 private extension View {
-    /// ← → walk the prints on iPad or with a keyboard, as on the Mac.
-    func keyboardShortcut(for entries: [LibraryEntry], current: Binding<PrintID?>, start: PrintID) -> some View {
+    /// ← → walk the prints on iPad or with a keyboard, and Esc closes, as on
+    /// the Mac.
+    func keyboardShortcut(for entries: [LibraryEntry], current: Binding<PrintID?>, start: PrintID,
+                          close: @escaping () -> Void) -> some View {
         background {
             Group {
+                Button("Close", action: close)
+                    .keyboardShortcut(.cancelAction)
                 Button("Previous Print") { step(-1, entries, current, start) }
                     .keyboardShortcut(.leftArrow, modifiers: [])
                 Button("Next Print") { step(1, entries, current, start) }

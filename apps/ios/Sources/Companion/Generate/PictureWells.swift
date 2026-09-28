@@ -101,6 +101,12 @@ struct Well: View {
                 .multilineTextAlignment(.center).frame(maxWidth: side)
             if let problem { Text(problem).font(.caption2).foregroundStyle(.red).frame(maxWidth: side * 1.6) }
         }
+        // iPad: a picture dragged from Photos, Files or the Library grid.
+        .dropDestination(for: Data.self) { items, _ in
+            guard let data = items.first else { return false }
+            take { try await PictureImport.conforming(data, name: "Dropped", accepting: accepting) }
+            return true
+        }
         .photosPicker(isPresented: $showsPhotos, selection: $photo, matching: .images)
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.image]) { result in
             if case let .success(url) = result { take { try await PictureImport.load(url, accepting: accepting) } }

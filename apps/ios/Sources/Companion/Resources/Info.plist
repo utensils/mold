@@ -56,6 +56,26 @@
 	<string>Mold Studio looks for machines running mold on your network.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Mold Studio saves the pictures you make to your photo library when you ask it to.</string>
+	<!-- Which print is being dragged, inside the app (onto a sidebar
+	     collection). Other apps receive the file itself. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.utensils.mold.print-id</string>
+			<key>UTTypeDescription</key>
+			<string>Mold Studio print</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Handoff of a viewed print with Mold Studio on the Mac. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>io.utensils.mold.print</string>
+	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<!-- Background refresh asks each machine how a pending render went:

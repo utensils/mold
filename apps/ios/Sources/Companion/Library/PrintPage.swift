@@ -1,3 +1,4 @@
+import Combine
 import AVKit
 import MoldClient
 import SwiftUI
@@ -111,12 +112,32 @@ struct ClipPlayer: View {
     }
 
     private func load() async {
+        await play(from: nil, reminted: false)
+    }
+
+    /// Plays from a fresh ticket. A ticket that expires mid-watch fails the
+    /// item; that is re-minted ONCE, resuming where it stopped -- a second
+    /// failure is a real one and says so.
+    private func play(from time: CMTime?, reminted: Bool) async {
         guard let host = hosts.host(entry.hostID) else { return }
+        let item: AVPlayerItem
         do {
-            let url = try await hosts.backend(for: host).playableURL(for: entry.print.filename)
-            player = AVPlayer(url: url)
+            item = AVPlayerItem(url: try await hosts.backend(for: host).playableURL(for: entry.print.filename))
         } catch {
             problem = String(localized: "This clip can't be played here: \(error.reasonSentence)")
+            return
         }
-    }
-}
+        if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
+        if let time {
+            await player?.seek(to: time)
+            player?.play()
+        }
+        for await status in item.publisher(for: \.status).values where status == .failed {
+            guard !reminted else {
+                problem = String(localized: "This clip stopped playing: \(item.error?.reasonSentence ?? String(localized: "the machine closed the stream."))")
+                return
+            }
+            await play(from: player?.currentTime(), reminted: true)
+            return
+        }
+    }}

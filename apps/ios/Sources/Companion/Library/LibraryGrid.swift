@@ -13,6 +13,7 @@ struct LibraryGrid: View {
     let zoom: Namespace.ID
     let visible: [LibraryEntry]
 
+    @Environment(HostStore.self) private var hosts
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
     @State private var pinch: CGFloat = 1
 
@@ -68,6 +69,11 @@ struct LibraryGrid: View {
         } else {
             NavigationLink(value: entry.id) { tileView }
                 .buttonStyle(.plain)
+                // iPad: drag the print itself out -- to Files, Photos, another
+                // app, or a picture well -- fetched only when dropped.
+                .draggable(DraggedPrint(entry, backend: hosts.backend(for: entry.hostID))) {
+                    PrintThumbnail(entry: entry, points: 120, trashed: trashed).frame(width: 120, height: 120)
+                }
                 .contextMenu { PrintMenu(entries: [entry], trashed: trashed) } preview: {
                     PrintThumbnail(entry: entry, points: 360, trashed: trashed)
                         .frame(width: 360, height: 360)

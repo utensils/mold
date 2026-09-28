@@ -18,8 +18,11 @@ struct LibraryView: View {
     /// Search opens with a query already in it; the Library tab opens empty.
     var searchFocused = false
 
+    /// Set by an iPad sidebar shelf: that shelf, with no title menu.
+    var fixedScope: LibraryScope?
+
     private var scope: LibraryScope {
-        (try? JSONDecoder().decode(LibraryScope.self, from: Data(storedScope.utf8))) ?? .all
+        fixedScope ?? (try? JSONDecoder().decode(LibraryScope.self, from: Data(storedScope.utf8))) ?? .all
     }
 
     private func setScope(_ new: LibraryScope) {
@@ -41,7 +44,7 @@ struct LibraryView: View {
             }
         }
         .navigationTitle(scope.title(in: library.shelves))
-        .toolbarTitleMenu { ShelfMenu(scope: scope, choose: setScope) }
+        .modifier(ShelfTitleMenu(enabled: fixedScope == nil, scope: scope, choose: setScope))
         .toolbar { toolbar(showing) }
         .modifier(LibrarySearch(enabled: searchFocused, query: $query, machines: machines, tags: tags))
         .onSubmit(of: .search) {
@@ -60,6 +63,16 @@ struct LibraryView: View {
             if selecting { SelectionBar(scope: scope, selected: showing.selected) { selection = [] } }
         }
         .refreshable { await library.reload() }
+        // iPad: a picture dropped on the grid joins the Default machine's Library.
+        .dropDestination(for: Data.self) { items, _ in
+            guard !scope.isTrash, let host = hosts.preferredHost, !items.isEmpty else { return false }
+            Task {
+                for (index, data) in items.enumerated() {
+                    await library.importPicture(data, stem: "dropped-\(Int(Date.now.timeIntervalSince1970))-\(index)", to: host)
+                }
+            }
+            return true
+        }
         .overlay(alignment: .top) { FailureBanner() }
         .onChange(of: sort) { query.sort = sort }
         .onAppear { query.sort = sort }
@@ -118,6 +131,12 @@ struct LibraryView: View {
                 Picker("Tile Size", selection: $tile) {
                     ForEach(TileSize.allCases) { Text($0.title).tag($0) }
                 }
+                Button("Larger Tiles") { tile = tile.step(1) }
+                    .keyboardShortcut("+", modifiers: .command)
+                    .disabled(tile == .large)
+                Button("Smaller Tiles") { tile = tile.step(-1) }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .disabled(tile == .small)
                 if scope.isTrash, !library.trashPool.isEmpty {
                     Divider()
                     EmptyTrashButton()
@@ -140,6 +159,13 @@ enum TileSize: String, CaseIterable, Identifiable {
         case .medium: String(localized: "Medium")
         case .large: String(localized: "Large")
         }
+    }
+
+    /// One size up (1) or down (-1), stopping at the ends.
+    func step(_ by: Int) -> TileSize {
+        let all = Self.allCases
+        let index = all.firstIndex(of: self)! + by
+        return all.indices.contains(index) ? all[index] : self
     }
 
     /// Points at Large text; `@ScaledMetric` in the grid grows them with it.
@@ -173,6 +199,22 @@ private struct LibrarySearch: ViewModifier {
                     Label(token.label, systemImage: token.symbol)
                 }
                 .searchSuggestions { SearchSuggestions(query: $query, machines: machines, tags: tags) }
+        } else {
+            content
+        }
+    }
+}
+
+/// The shelf switcher in the title -- only where the sidebar does not
+/// already list the shelves.
+private struct ShelfTitleMenu: ViewModifier {
+    let enabled: Bool
+    let scope: LibraryScope
+    let choose: (LibraryScope) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.toolbarTitleMenu { ShelfMenu(scope: scope, choose: choose) }
         } else {
             content
         }

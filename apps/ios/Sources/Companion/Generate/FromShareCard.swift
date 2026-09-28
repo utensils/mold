@@ -97,22 +97,16 @@ struct FromShareCard: View {
     }
 
     private func importToLibrary(_ item: ShareInbox.Item) {
-        guard let host = generate.target, case let .up(status) = hosts.reachability(of: host) else {
-            problem = String(localized: "The machine isn't answering. Try again when it is.")
-            return
-        }
+        guard let host = generate.target else { return }
         working = true
         Task {
             defer { working = false }
-            do {
-                let data = try Data(contentsOf: ShareInbox.url(of: item))
-                let upload = GalleryImport(prompt: "", model: "", width: item.width, height: item.height,
-                                           version: status.version, file: data, timestamp: item.created)
-                _ = try await hosts.backend(for: host).importPrint(upload, as: "shared-\(item.file)")
-                await library.reload(host.id)
+            guard let data = try? Data(contentsOf: ShareInbox.url(of: item)) else {
+                problem = String(localized: "That picture couldn't be read.")
+                return
+            }
+            if await library.importPicture(data, stem: "shared-\(item.id)", taken: item.created, to: host) {
                 finish(item)
-            } catch {
-                hosts.report(host, doing: String(localized: "add that picture to its Library"), error)
             }
         }
     }

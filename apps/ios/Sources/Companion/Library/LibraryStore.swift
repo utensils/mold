@@ -29,6 +29,8 @@ final class LibraryStore {
     @ObservationIgnored var lastFailure: [MoldHost.ID: Error] = [:]
     /// The change Undo would put back.
     var lastEdit: PrintEdit?
+    /// The focused window's, so ⌘Z and shake-to-undo reach `undo()`.
+    @ObservationIgnored weak var undoManager: UndoManager?
 
     init(hosts: HostStore) {
         self.hosts = hosts

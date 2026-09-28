@@ -31,11 +31,7 @@ struct MachinesView: View {
                 fleet
             }
         }
-        .navigationDestination(for: MoldHost.ID.self) { MachineDetailView(id: $0) }
-        .navigationDestination(for: ModelsRoute.self) { route in
-            ModelsView(fixedHost: route.host).navigationTitle("Models")
-        }
-        .navigationDestination(for: QueueRoute.self) { _ in QueueView().navigationTitle("Queue") }
+        .machineRoutes()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { router.showsAddMachine = true } label: {
@@ -123,3 +119,14 @@ struct NearbySection: View {
 /// Machines ▸ a machine ▸ Models (or Queue), as a navigation value.
 struct ModelsRoute: Hashable { let host: MoldHost.ID }
 struct QueueRoute: Hashable { let host: MoldHost.ID }
+
+extension View {
+    /// Where a machine's rows lead: its page, its Models, its Queue.
+    func machineRoutes() -> some View {
+        navigationDestination(for: MoldHost.ID.self) { MachineDetailView(id: $0) }
+            .navigationDestination(for: ModelsRoute.self) { route in
+                ModelsView(fixedHost: route.host).navigationTitle("Models")
+            }
+            .navigationDestination(for: QueueRoute.self) { _ in QueueView().navigationTitle("Queue") }
+    }
+}

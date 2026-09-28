@@ -11,7 +11,13 @@ extension LibraryStore {
         let copies = entries.flatMap(\.everyCopy)
         let edit = PrintEdit.plan(change, over: copies, collectionIDs: collectionIDs(for: change))
         guard !edit.isEmpty else { return }
-        if undoable { lastEdit = edit }
+        if undoable {
+            lastEdit = edit
+            undoManager?.registerUndo(withTarget: self) { store in
+                MainActor.assumeIsolated { store.revert(edit) }
+            }
+            undoManager?.setActionName(edit.actionName)
+        }
         show(edit)
         let queued = outbox.enqueue(edit)
         for host in Set(queued.map(\.host)) { drain(host) }
@@ -20,7 +26,12 @@ extension LibraryStore {
     /// Puts back the most recent change (shake, or ⌘Z on iPad).
     func undo() {
         guard let edit = lastEdit else { return }
-        lastEdit = nil
+        revert(edit)
+    }
+
+    /// Puts one change back, from the Undo button or the system's undo.
+    func revert(_ edit: PrintEdit) {
+        if lastEdit == edit { lastEdit = nil }
         show(edit.inverse)
         let queued = outbox.enqueue(edit.inverse)
         for host in Set(queued.map(\.host)) { drain(host) }

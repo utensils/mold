@@ -24,11 +24,15 @@ final class ShellAccessibilityTests: XCTestCase {
             let button = app.buttons[tab].firstMatch
             // Models is a sidebar destination: present on iPad, absent on iPhone.
             if tab == "Models", !button.waitForExistence(timeout: 2) { continue }
-            XCTAssertTrue(button.waitForExistence(timeout: 5), "no \(tab) tab at \(size)")
-            // At AX sizes the iPad's floating tab bar pages its tabs; the Go
-            // menu's ⌘1–⌘5 is the way there that never scrolls -- and using it
-            // tests those shortcuts too.
-            if button.isHittable { button.tap() } else { app.typeKey("\(index + 1)", modifierFlags: .command) }
+            // At AX sizes the iPad's floating tab bar pages its tabs, and its
+            // sidebar names the Library's first shelf "All Prints"; the Go
+            // menu's ⌘1–⌘5 is the way there that never scrolls -- and using
+            // it tests those shortcuts too.
+            if button.waitForExistence(timeout: 3), button.isHittable {
+                button.tap()
+            } else {
+                app.typeKey("\(index + 1)", modifierFlags: .command)
+            }
             try check(app, "\(tab) at \(size)")
         }
 

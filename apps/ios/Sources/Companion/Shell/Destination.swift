@@ -1,3 +1,4 @@
+import MoldClient
 import SwiftUI
 
 /// Where the app can be: the Mac app's five destinations, in its order, words
@@ -48,4 +49,7 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
 enum TabSelection: Hashable {
     case go(Destination)
     case search
+    /// iPad sidebar only: one Library shelf, or one machine.
+    case shelf(LibraryScope)
+    case machine(UUID)
 }

@@ -20,6 +20,7 @@ struct LibraryViewer: View {
     let onStep: (Int) -> Void
 
     @Environment(ThumbnailCache.self) private var cache
+    @Environment(HostStore.self) private var hosts
     @State private var full: NSImage?
     /// Not `private`: the mesh arm lives in `+Mesh` for size.
     @State var placeholder: NSImage?
@@ -56,6 +57,14 @@ struct LibraryViewer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+        // Handoff: the same print, continued on the iPhone or iPad companion.
+        .userActivity(PrintHandoff.activityType, element: entry.id) { id, activity in
+            guard let host else { return }
+            activity.title = entry.spokenName
+            activity.isEligibleForHandoff = true
+            activity.addUserInfoEntries(from: PrintHandoff.userInfo(
+                filename: id.filename, address: host.baseURL, instanceId: hosts.instanceIDs[host.id]))
+        }
         .overlay(alignment: .top) { bar }
         .libraryMenu(LibraryMenu(targets: [entry], scope: scope, actions: actions,
                                  shelves: shelves, enclosingShelf: enclosingShelf,
