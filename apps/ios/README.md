@@ -32,7 +32,7 @@ Everything goes through the Makefile. `make help` lists the targets, and inside
 | `make build` / `make run` | Build for the simulator, and install and launch it |
 | `make test` | Unit tests (Swift Testing) on the simulator |
 | `make packages-test` | MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator |
-| `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone and an iPad |
+| `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
 | `make lint` | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`) |
 
 On a disk that fills up, put build output elsewhere:
