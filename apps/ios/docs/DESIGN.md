@@ -112,8 +112,8 @@ Shelves            Favourites · each collection (drop prints on one to file the
 Your Machines      workstation · hal9000 "Offline" · studio-mini "Key"
 ```
 
-The floating tab bar (the sidebar put away) carries only the five
-destinations and Search. The sections live in the sidebar alone: listed in
+The floating tab bar (the sidebar put away) carries Generate, Library, Queue,
+Machines and Search. Models and the sections live in the sidebar alone: listed in
 the bar they made UIKit page and re-lay it out on every text-size change
 until the app stopped answering. A machine that is not answering says so in
 words beside its name, never by colour alone.

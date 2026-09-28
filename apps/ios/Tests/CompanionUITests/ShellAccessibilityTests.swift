@@ -23,7 +23,7 @@ final class ShellAccessibilityTests: XCTestCase {
         for (index, tab) in ["Generate", "Library", "Queue", "Models", "Machines"].enumerated() {
             let button = app.buttons[tab].firstMatch
             // Models is a sidebar destination: present on iPad, absent on iPhone.
-            if tab == "Models", !button.waitForExistence(timeout: 2) { continue }
+            if tab == "Models", !button.waitForExistence(timeout: 2), !app.buttons["ToggleSideBar"].exists { continue }
             // Restore the requested size after the prior size-changing audit.
             app.terminate()
             app.launch()

@@ -44,6 +44,17 @@ final class GenerationInteractionTests: XCTestCase {
         capture(app)
     }
 
+    @MainActor func testFloatingBarKeepsModelsInSidebar() throws {
+        let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
+        guard app.buttons["ToggleSideBar"].exists else { return }
+        let favourites = app.descendants(matching: .any)["Favourites"].firstMatch
+        if favourites.exists, favourites.isHittable { app.buttons["ToggleSideBar"].tap() }
+        XCTAssertFalse(app.buttons["Models"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["Next Page"].firstMatch.exists)
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        XCTAssertTrue(app.navigateToDestination("Models", shortcut: "4"))
+    }
+
     @MainActor func testPromptAcceptsTypingAndKeepsKeyboard() throws {
         try checkPrompt(size: "UICTContentSizeCategoryL")
     }
