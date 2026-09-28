@@ -32,7 +32,11 @@ public extension HTTPBackend {
     /// exists on this body and is documented as IGNORED here
     /// (`routes.rs:5330-5337`), so it is not on this signature.
     func loadModel(_ model: String, gpu: Int?) async throws {
-        try await send("/api/models/load", method: "POST", body: LoadModelWireBody(model: model, gpu: gpu))
+        var request = try body("/api/models/load", method: "POST", LoadModelWireBody(model: model, gpu: gpu))
+        // A cold checkpoint load can take minutes (101 s observed for Z-Image).
+        // Bound this operation alone; ordinary probes keep their 10 s timeout.
+        request.timeoutInterval = 300
+        _ = try await bytes(for: request)
     }
 
     /// `nil` model and `nil` gpu unloads everything on the machine

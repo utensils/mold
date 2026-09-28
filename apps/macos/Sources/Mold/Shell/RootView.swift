@@ -33,6 +33,11 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
             DestinationDetail(destination: $destination)
+                // The window owns the minimum size. A destination's changing
+                // controls must not renegotiate the split column's minimum
+                // during a transition (Generate can adopt a model here).
+                .frame(minWidth: 0, maxWidth: .infinity,
+                       minHeight: 0, maxHeight: .infinity)
         }
         .navigationTitle("Mold Studio")
         // At the ROOT, not on the Models pane: a gated install can start from
