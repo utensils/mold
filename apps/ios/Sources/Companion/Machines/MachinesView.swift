@@ -22,8 +22,12 @@ struct MachinesView: View {
                         Button("Add a Machine…") { router.showsAddMachine = true }
                             .prominentAction()
                         if !nearby.machines.isEmpty {
+                            // Arrives whenever Bonjour answers: shown at once,
+                            // never faded in (half-faded, it read as low
+                            // contrast to the audit, and to anyone glancing).
                             Text("\(nearby.machines.count) found on this network")
                                 .foregroundStyle(.secondaryText)
+                                .transition(.identity)
                         }
                     }
                 }
