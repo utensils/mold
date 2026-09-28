@@ -491,14 +491,16 @@ foreground, Generate shows a **From Share** card with the same three choices.
 9. **Colour that the audit proved.** The palette is the system's, with three
    asset-catalog colours added after the shell's contrast audit failed on the
    system defaults:
-   - `AccentColor` is light #0062CC and dark #0A84FF. White on the stock light
-     #007AFF is about 4.0:1.
+   - `AccentColor` is light #0062CC and dark #4DA3FF. White on the stock light
+     #007AFF is about 4.0:1, and the stock dark #0A84FF failed as tint text on
+     a grouped row.
    - `ProminentFill` is light #0062CC and dark #1A66CC. It is the fill for the
      one filled button on a screen (`.prominentAction()`), giving 5.5:1 or
      better under white text. In dark mode no single blue passes as a fill AND
      as tint text on a grouped row, so the two are split.
-   - `SecondaryText` is light #6C6C70 and dark #AEAEB2. The system `.secondary`
-     is about 4.4:1 on white; `make lint` rejects `.foregroundStyle(.secondary)`.
+   - `SecondaryText` is light #48484A and dark #C7C7CC. The system `.secondary`
+     is about 4.4:1 on white, and #6C6C70 still failed on the grouped
+     background; `make lint` rejects `.foregroundStyle(.secondary)`.
 10. **An empty state's action is never under the glass.** At accessibility sizes
     it is pinned above the tab bar while the explanation scrolls.
 

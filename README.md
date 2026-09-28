@@ -174,6 +174,11 @@ Linux desktop builds are source/CI distributions for now — `nix build
 .#mold-desktop` or the devshell's `desktop-build` CUDA AppImage. See the
 [desktop guide](https://utensils.io/mold/guide/desktop).
 
+On iPhone and iPad, **Mold Studio Companion** is the native app beside Mold
+Studio for Mac: pair by scanning the Mac's code, generate on your machines,
+and follow renders from the Lock Screen. It is in TestFlight while it is new.
+[Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
+
 Android uses the same remote-only Mold Studio mobile interface. Download the
 signed universal nightly APK directly; there is no zip to unpack:
 

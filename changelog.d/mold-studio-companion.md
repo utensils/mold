@@ -7,7 +7,11 @@
   stills, clips and 3-D objects with each model's own controls. The Queue
   shows every machine's work with held jobs explained in words (Pull and
   Retry, Move to… another machine), and Models installs, loads and removes
-  models per machine, with a licence sheet before any gated download. Every screen
+  models per machine, with a licence sheet before any gated download. A
+  Live Activity follows a render on the Lock Screen and in the Dynamic
+  Island with a Stop button, notifications arrive when a render settles
+  while the app is away, widgets show recent prints and the queue, and
+  Share ▸ Mold Studio hands a photo to Generate. Every screen
   is audited from the smallest text size to the largest accessibility size,
   in light and dark, on iPhone and iPad
   ([#1775](https://github.com/utensils/mold/pull/1775)).

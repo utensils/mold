@@ -1,10 +1,11 @@
 # Privacy Policy
 
-**Effective September 6, 2026**
+**Effective September 27, 2026**
 
 This policy describes how the open-source Mold project handles information on its public website and in
 the Mold apps that link to it: the mobile app for iPhone, iPad, and Android,
-and the desktop app for macOS, Linux, and Windows. Each is a client for Mold
+Mold Studio Companion for iPhone and iPad, Mold Studio for Mac, and the
+desktop app for macOS, Linux, and Windows. Each is a client for Mold
 servers that you choose and control. The Mold project does not operate a
 central account service, hosted generation service, advertising network, or
 analytics service for these apps.
@@ -53,6 +54,30 @@ The mobile apps use the platform's local network permission (Apple's Local
 Network permission on iOS, network service discovery on Android) to find Mold
 servers that advertise themselves on your current network. Mold does not use
 this permission to track your location.
+
+## Mold Studio Companion permissions
+
+Mold Studio Companion (the native iPhone and iPad app, shown as "Mold Studio"
+on the Home Screen) asks for these permissions only when you use the feature
+that needs them, and uses them only on your device:
+
+- **Camera** — to scan a machine's pairing code, and to take a photo for a
+  picture well when you choose Camera. Nothing is recorded otherwise.
+- **Local Network** — to find Mold servers that advertise themselves on your
+  current network and to connect to servers at local addresses.
+- **Photos (add only)** — to save prints to your photo library when you ask,
+  or automatically if you turn on "Save Finished Prints to Photos".
+- **Notifications** — to tell you when a render finishes, fails, or waits on a
+  machine while the app is in the background. They are generated on the
+  device; no push service is involved.
+
+Live Activities and widgets draw from a small snapshot the app writes into
+storage shared only with its own extensions (recent print thumbnails, machine
+names, and queue counts — never API keys). The Share extension saves a shared
+photo, downscaled, into the same private storage for the app to pick up; it
+makes no network requests. API keys are kept in the app's own iOS Keychain,
+available after the device is first unlocked and never synced to other
+devices.
 
 ## Information sent to your Mold servers
 
