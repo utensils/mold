@@ -716,10 +716,13 @@ one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
 only unauthenticated credential handoff: tokens are 256-bit random values,
 stored server-side only as an HMAC, capped, single-use, and expire after two
 minutes. Both responses are `no-store`; the QR must never contain the durable
-API key. Pairing QR codes use the registered `mold://pair` scheme so the mobile
-Camera app offers to open them directly in Mold; cold-launch and already-open
-links share the same claim, instance-verification, and Keychain path as Mold's
-in-app scanner. Android's in-app scanner releases CameraX before resolving the
+API key. Pairing QR codes are universal links
+(`https://utensils.io/mold/pair#...`, the code in the fragment, which never
+reaches the web server) claimed by Mold Studio Companion; on a phone without it
+the Camera opens the utensils.io page, whose **Open in Mold** button hands the
+code to this app as `mold://pair?...`. The in-app scanner reads both forms.
+Cold-launch and already-open `mold://pair` links share the same claim,
+instance-verification, and Keychain path as Mold's in-app scanner. Android's in-app scanner releases CameraX before resolving the
 scanned payload, then completes that same claim, verification, secure storage,
 and host-selection path.
 

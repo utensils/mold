@@ -1,3 +1,4 @@
+import Foundation
 import MoldClient
 import Observation
 
@@ -42,6 +43,33 @@ final class AppRouter {
         case let .generate(inbox):
             pendingInbox = inbox
             selection = .go(.generate)
+        }
+    }
+
+    /// A pairing code opened from outside (the Camera app reading the Mac's
+    /// QR, a tapped `https://utensils.io/mold/pair#…`), waiting for the
+    /// person to say Pair -- never claimed on its own.
+    var pairingLink: PairingLink?
+
+    struct PairingLink: Identifiable, Equatable {
+        let id = UUID()
+        /// `nil` when the code could not be read; `failure` says why.
+        let payload: MobilePairingPayload?
+        let failure: String?
+    }
+
+    /// Any URL the system hands the app: a pairing link, or a
+    /// `moldstudio://` link. Anything else is ignored.
+    func open(url: URL) {
+        if MobilePairingPayload.isPairingLink(url) {
+            selection = .go(.machines)
+            do {
+                pairingLink = PairingLink(payload: try MobilePairingPayload.parse(url.absoluteString), failure: nil)
+            } catch {
+                pairingLink = PairingLink(payload: nil, failure: error.errorDescription)
+            }
+        } else if let link = DeepLink(url) {
+            open(link)
         }
     }
 

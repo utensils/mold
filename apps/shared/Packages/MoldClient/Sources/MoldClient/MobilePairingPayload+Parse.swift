@@ -1,8 +1,10 @@
 import Foundation
 
 /// Reading a pairing code: a port of `parseMobilePairingPayload`
-/// (`studio/api/pairing.ts`). Two forms are accepted -- the JSON payload and
-/// the `mold://pair?...` link the Mac, desktop and web all produce -- and
+/// (`studio/api/pairing.ts`, both held to `studio/api/pairing.fixtures.json`).
+/// Two forms are accepted -- the JSON payload and a link: the
+/// `https://utensils.io/mold/pair#...` universal link the Mac, desktop and
+/// web produce, or the older `mold://pair?...` -- and
 /// refused the same two ways: not a pairing code at all, or one this version
 /// cannot use.
 ///
@@ -42,12 +44,17 @@ extension MobilePairingPayload {
         return Double(expiresAt) <= now.timeIntervalSince1970
     }
 
+    /// A link this parser reads -- for routing an opened URL to pairing
+    /// before parsing it (and reporting what is wrong with it).
+    public static func isPairingLink(_ url: URL) -> Bool {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return linkQuery(parts) != nil
+    }
+
     private static func linkFields(_ text: String) throws(ParseError) -> [String: Any] {
-        guard let url = URLComponents(string: text),
-              url.scheme?.lowercased() == "mold", url.host?.lowercased() == "pair",
-              url.user == nil, url.password == nil, url.fragment == nil
-        else { throw .notPairingCode }
-        func value(_ name: String) -> String? { url.queryItems?.first { $0.name == name }?.value }
+        guard let parts = URLComponents(string: text), let query = linkQuery(parts) else { throw .notPairingCode }
+        let items = FormURLEncoded.decode(query)
+        func value(_ name: String) -> String? { items.first { $0.0 == name }?.1 }
         var fields: [String: Any] = ["type": "mold.mobile-pairing"]
         fields["version"] = value("version").flatMap(Double.init) ?? Double.nan
         fields["base_url"] = value("base_url")
@@ -56,6 +63,24 @@ extension MobilePairingPayload {
         fields["instance_id"] = value("instance_id")
         fields["name"] = value("name")
         return fields
+    }
+
+    /// The still form-encoded fields: the universal link's fragment (never
+    /// its query -- that would reach the web server) or `mold://pair`'s query.
+    private static func linkQuery(_ url: URLComponents) -> String? {
+        guard url.user == nil, url.password == nil else { return nil }
+        switch url.scheme?.lowercased() {
+        case "mold":
+            guard url.host?.lowercased() == "pair", url.fragment == nil else { return nil }
+            return url.percentEncodedQuery ?? ""
+        case link.scheme:
+            let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
+            guard url.host?.lowercased() == link.host, url.port == nil, path == link.path,
+                  url.query == nil else { return nil }
+            return url.percentEncodedFragment ?? ""
+        default:
+            return nil
+        }
     }
 
     private static func validated(_ f: [String: Any]) throws(ParseError) -> MobilePairingPayload {

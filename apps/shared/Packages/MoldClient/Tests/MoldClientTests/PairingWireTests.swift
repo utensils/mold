@@ -72,12 +72,12 @@ import Testing
         instanceId: "inst-1", hostname: nil)
     let payload = try #require(
         MobilePairingPayload(
-            session: session, baseURL: URL(string: "https://100.105.134.43:7680")!,
+            session: session, baseURL: URL(string: "https://workstation.tail.ts.net:7680")!,
             name: "James's Phone"))
     let url = try #require(payload.url)
     #expect(
         url.absoluteString
-            == "mold://pair?version=1&base_url=https%3A%2F%2F100.105.134.43%3A7680"
+            == "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680"
             + "&token=abc+def%2Bghi%3Ajkl%2Fmno&expires_at=1700000000"
             + "&instance_id=inst-1&name=James%27s+Phone")
 }

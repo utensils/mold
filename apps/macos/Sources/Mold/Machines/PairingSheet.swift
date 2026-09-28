@@ -134,6 +134,13 @@ struct PairingSheet: View {
         let countdown = payload.expiresAt.map { Countdown.resolve(expiresAt: $0, now: now) }
         let expired = countdown == .expired
         VStack(spacing: 12) {
+            // The code is a universal link: the Camera app opens Mold Studio
+            // on the phone, which asks before it pairs.
+            Text("Point your iPhone's Camera at this code, or scan it in Mold Studio: Add a Machine ▸ Scan a Pairing Code.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
             QRCodeImage(payload: url.absoluteString)
                 .frame(width: 220, height: 220)
                 .opacity(expired ? 0.3 : 1)

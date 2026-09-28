@@ -123,7 +123,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
   - `moldstudio://print/<host>/<file>`
   - `moldstudio://queue/<job>`
   - `moldstudio://generate?inbox=<id>`
-- Not in this app: a universal-link pairing QR (`https://utensils.io/mold/pair#…`). It needs an `apple-app-site-association` file at the utensils.io root (outside this repository) and a new QR format in the Mac, desktop and web apps; the in-app scanner reads today's `mold://pair` codes.
+- Pairing QRs are universal links (`https://utensils.io/mold/pair#…`, #1776): `applinks:utensils.io`, with the `apple-app-site-association` file at the utensils.io root (`utensils/utensils.github.io`, `public/.well-known/`). An opened link is confirmed in `PairingLinkSheet` before anything is claimed; the in-app scanner reads both forms, and the older `mold://pair` codes too.
 
 **MoldClient additions (TDD'd)**
 

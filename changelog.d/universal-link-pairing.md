@@ -1,0 +1,2 @@
+- Pairing codes are now universal links (`https://utensils.io/mold/pair#…`), so an iPhone's own Camera opens Mold Studio Companion and asks before pairing; a phone without it gets a page that says what to install and can hand the code to the Mold app. The code rides in the link's fragment and never reaches the web. Older `mold://pair` codes still work everywhere.
+- Fixed a machine name with a space (e.g. "Studio Mac") reading as "Studio+Mac" when an iPhone scanned its pairing code.

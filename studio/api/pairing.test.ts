@@ -4,6 +4,7 @@ import {
   mobilePairingUrl,
   parseMobilePairingPayload,
 } from "./pairing";
+import fixtures from "./pairing.fixtures.json";
 
 const payload = {
   type: "mold.mobile-pairing" as const,
@@ -28,7 +29,7 @@ describe("parseMobilePairingPayload", () => {
   it("round-trips an app-opening mobile pairing URL", () => {
     const url = mobilePairingUrl(payload);
 
-    expect(url).toMatch(/^mold:\/\/pair\?/);
+    expect(url).toMatch(/^https:\/\/utensils\.io\/mold\/pair#/);
     expect(url).not.toContain("api_key");
     expect(parseMobilePairingPayload(url)).toEqual(payload);
   });
@@ -60,6 +61,29 @@ describe("parseMobilePairingPayload", () => {
         }),
       ),
     ).toThrow("not a supported Mold pairing code");
+  });
+});
+
+describe("the shared pairing-link contract (pairing.fixtures.json)", () => {
+  // The Swift port (MoldClient's MobilePairingPayload) reads the same file.
+  const envelope = (p: (typeof fixtures.links)[number]["payload"]) => ({
+    type: "mold.mobile-pairing" as const,
+    version: 1 as const,
+    ...p,
+  });
+
+  it.each(fixtures.links)("prints $link", (fixture) => {
+    expect(mobilePairingUrl(envelope(fixture.payload))).toBe(fixture.link);
+  });
+
+  it.each(fixtures.links)("reads $link and its legacy spellings", (fixture) => {
+    for (const raw of [fixture.link, ...fixture.legacy]) {
+      expect(parseMobilePairingPayload(raw)).toEqual(envelope(fixture.payload));
+    }
+  });
+
+  it.each(fixtures.rejected)("refuses %s", (raw) => {
+    expect(() => parseMobilePairingPayload(raw)).toThrow(/pairing code/);
   });
 });
 

@@ -19,7 +19,11 @@ Open **Machines ▸ Add a Machine…** and pick one of three ways in:
   code. For a machine with an API key the code is single-use, expires after
   two minutes, and carries no key; the key the machine issues goes straight
   into this device's Keychain. For a machine without a key, the code simply
-  carries its address. You can paste a pairing link instead.
+  carries its address. The code is a link, so the iPhone's own Camera opens
+  Mold Studio too: it names the machine and pairs only when you tap **Pair**.
+  You can paste a pairing link instead. On a phone without the app, the link
+  opens a [page](/pair) that says what to install; the code itself never
+  reaches the web.
 - **Nearby.** Machines advertising `_mold._tcp` on your network are listed.
   Allow Local Network access when iOS asks.
 - **Enter an Address.** An IP address, host name, Tailscale MagicDNS name or

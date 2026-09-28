@@ -24,7 +24,9 @@ Open **Machines** on the iPhone and use one of these paths:
   confirm the LAN, MagicDNS, or HTTPS address the phone can reach, tap **Create
   pairing code**, then tap **Scan pairing code** on iPhone. The code is single-use,
   expires after two minutes, and contains no API key; the redeemed key goes
-  directly into the iOS Keychain.
+  directly into the iOS Keychain. Scanned with the iPhone Camera instead, the
+  code opens a [utensils.io page](/pair) whose **Open in Mold** button hands it
+  to this app (the [Companion](/guide/companion) opens it directly).
 - Tap **Discover nearby** to browse `_mold._tcp` services on the current LAN.
   Allow Local Network access when iOS asks.
 - Enter an IP address such as `192.168.1.10`. Mold adds `http://` and port

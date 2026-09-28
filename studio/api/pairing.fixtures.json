@@ -1,0 +1,57 @@
+{
+  "comment": "Pairing-code contract shared by studio/api/pairing.ts and MoldClient's MobilePairingPayload (Swift). `links` are what a producer prints for `payload`, byte for byte; `legacy` also parse to it; everything in `rejected` is refused. The payload rides in the fragment, which a browser never sends to utensils.io.",
+  "links": [
+    {
+      "payload": {
+        "base_url": "http://studio.local:7680",
+        "token": "one-time",
+        "expires_at": 4000000000,
+        "instance_id": "inst-1",
+        "name": "Studio Mac"
+      },
+      "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+      "legacy": [
+        "mold://pair?version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+        "https://utensils.io/mold/pair/#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio%20Mac"
+      ]
+    },
+    {
+      "payload": {
+        "base_url": "https://workstation.tail.ts.net:7680",
+        "token": null,
+        "expires_at": null,
+        "instance_id": "a7f3",
+        "name": "workstation"
+      },
+      "link": "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation",
+      "legacy": [
+        "mold://pair?version=1&base_url=https%3A%2F%2Fworkstation.tail.ts.net%3A7680&instance_id=a7f3&name=workstation"
+      ]
+    },
+    {
+      "payload": {
+        "base_url": "http://192.168.1.20:7680",
+        "token": "t+k/=",
+        "expires_at": 4000000000,
+        "instance_id": "inst-2",
+        "name": "Café ☕ box"
+      },
+      "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2F192.168.1.20%3A7680&token=t%2Bk%2F%3D&expires_at=4000000000&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box",
+      "legacy": []
+    }
+  ],
+  "rejected": [
+    "https://utensils.io/mold/pair?version=1&base_url=http%3A%2F%2Fbox&token=t&instance_id=i&name=b",
+    "http://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://example.com/mold/pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://utensils.io.example.com/mold/pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://utensils.io/mold/other#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://user:pw@utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://utensils.io/mold/pair",
+    "https://utensils.io/mold/pair#version=2&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "https://utensils.io/mold/pair#version=1&base_url=ftp%3A%2F%2Fbox&instance_id=i&name=b",
+    "mold://pair#version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "mold://other?version=1&base_url=http%3A%2F%2Fbox&instance_id=i&name=b",
+    "hello"
+  ]
+}
