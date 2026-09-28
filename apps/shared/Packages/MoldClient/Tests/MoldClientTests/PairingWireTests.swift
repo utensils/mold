@@ -40,13 +40,26 @@ import Testing
     #expect(!clients.canPair)
 }
 
-/// A code with no token redeems nothing, so there is nothing honest to show.
-@Test func aCodeWithNoTokenIsNoCodeAtAll() {
+/// A keyed code with no token cannot be redeemed.
+@Test func aKeyedCodeWithNoTokenIsNoCodeAtAll() {
     let session = PairingSession(
-        token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
+        token: nil, expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
     let payload = MobilePairingPayload(
         session: session, baseURL: URL(string: "http://127.0.0.1:7680")!, name: "This Mac")
     #expect(payload == nil)
+}
+
+/// A keyless host can still pair a phone by address and identity.
+@Test func aKeylessCodeCarriesNoToken() throws {
+    let session = PairingSession(
+        token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
+    let payload = try #require(MobilePairingPayload(
+        session: session, baseURL: URL(string: "http://box:7680")!, name: "Box"))
+    let url = try #require(payload.url)
+    #expect(payload.token == nil)
+    #expect(url.absoluteString.contains("base_url=http%3A%2F%2Fbox%3A7680"))
+    #expect(!url.absoluteString.contains("token="))
+    #expect(!url.absoluteString.contains("expires_at="))
 }
 
 /// One hand-derived vector against `pairing.ts:47-56`: same field order,
