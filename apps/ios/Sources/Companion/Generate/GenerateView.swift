@@ -21,14 +21,14 @@ struct GenerateView: View {
                 }
             } else {
                 GeometryReader { geometry in
-                    VStack(spacing: 0) {
-                        GenerateCanvas()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .contentShape(.rect)
-                            .onTapGesture { hideKeyboard() }
-                        Composer(showsOptions: $showsOptions, estimate: estimate,
-                                 maximumHeight: geometry.size.height * 0.55)
-                    }
+                    GenerateCanvas()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(.rect)
+                        .onTapGesture { hideKeyboard() }
+                        .safeAreaBar(edge: .bottom) {
+                            Composer(showsOptions: $showsOptions, estimate: estimate,
+                                     maximumHeight: geometry.size.height * 0.55)
+                        }
                 }
             }
         }

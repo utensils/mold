@@ -20,6 +20,7 @@ struct AddressForm: View {
         Form {
             Section {
                 TextField("Address", text: $address, prompt: Text(verbatim: "workstation.local"))
+                    .accessibilityIdentifier("machine-address")
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

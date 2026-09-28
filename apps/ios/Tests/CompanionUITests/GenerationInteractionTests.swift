@@ -11,7 +11,7 @@ final class GenerationInteractionTests: XCTestCase {
         if app.buttons["Add a Machine…"].firstMatch.exists {
             app.buttons["Add a Machine…"].firstMatch.tap()
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
-            let address = app.textFields["Address"]
+            let address = app.textFields["machine-address"]
             XCTAssertTrue(address.waitForExistence(timeout: 5))
             address.tap()
             address.typeText("127.0.0.1:9")
@@ -35,6 +35,9 @@ final class GenerationInteractionTests: XCTestCase {
         capture(app)
         app.buttons["Machines"].firstMatch.tap()
         let card = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'machine-card-'")).firstMatch
+        // At AX sizes iPadOS pages its floating tabs. The Go shortcut
+        // reaches the destination even when that tab is outside the page.
+        if !card.waitForExistence(timeout: 2) { app.typeKey("5", modifierFlags: .command) }
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(card.frame.minX, app.frame.minX)
         XCTAssertLessThanOrEqual(card.frame.maxX, app.frame.maxX)
@@ -42,7 +45,15 @@ final class GenerationInteractionTests: XCTestCase {
     }
 
     @MainActor func testPromptAcceptsTypingAndKeepsKeyboard() throws {
-        let app = launch()
+        try checkPrompt(size: "UICTContentSizeCategoryL")
+    }
+
+    @MainActor func testLargestTextPromptKeepsKeyboard() throws {
+        try checkPrompt(size: "UICTContentSizeCategoryAccessibilityXXXL")
+    }
+
+    @MainActor private func checkPrompt(size: String) throws {
+        let app = launch(size: size)
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
         XCTAssertTrue(prompt.waitForExistence(timeout: 5))
         prompt.tap()

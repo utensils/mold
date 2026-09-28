@@ -71,7 +71,7 @@ struct ModelChooser: View {
                 }
                 if generate.families.isEmpty {
                     Section {
-                        Text("No installed models for this kind on an online machine. Choose another kind, check Machines, or get a model below.")
+                        Text("No installed models for this kind on an online machine. Choose another kind, check Machines, or use Get More Models.")
                             .foregroundStyle(.secondaryText)
                     }
                 }
