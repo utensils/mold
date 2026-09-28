@@ -24,15 +24,10 @@ final class ShellAccessibilityTests: XCTestCase {
             let button = app.buttons[tab].firstMatch
             // Models is a sidebar destination: present on iPad, absent on iPhone.
             if tab == "Models", !button.waitForExistence(timeout: 2) { continue }
-            // At AX sizes the iPad's floating tab bar pages its tabs, and its
-            // sidebar names the Library's first shelf "All Prints"; the Go
-            // menu's ⌘1–⌘5 is the way there that never scrolls -- and using
-            // it tests those shortcuts too.
-            if button.waitForExistence(timeout: 3), button.isHittable {
-                button.tap()
-            } else {
-                app.typeKey("\(index + 1)", modifierFlags: .command)
-            }
+            // Restore the requested size after the prior size-changing audit.
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination(tab, shortcut: "\(index + 1)"))
             settle(app.navigationBars.firstMatch)
             if tab == "Generate" { try auditComposer(app, size: size) }
             try check(app, "\(tab) at \(size)")
@@ -62,6 +57,10 @@ final class ShellAccessibilityTests: XCTestCase {
             }
         }
 
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+
         // iPad: the sidebar, opened over the content -- its shelves and
         // machines are drawn nowhere else. What it dims behind it is exempt
         // from contrast, as behind a sheet.
@@ -71,9 +70,9 @@ final class ShellAccessibilityTests: XCTestCase {
             let row = app.descendants(matching: .any)["Favourites"].firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
             settle(row)
-            // The sidebar is the column from the left edge to its rows' end.
-            try check(app, "Sidebar at \(size)",
-                      region: CGRect(x: 0, y: 0, width: row.frame.maxX + 16, height: .greatestFiniteMagnitude))
+            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
+            XCTAssertTrue(sidebar.exists, app.debugDescription)
+            try check(app, "Sidebar at \(size)", within: sidebar)
             let hide = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
             if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
         }

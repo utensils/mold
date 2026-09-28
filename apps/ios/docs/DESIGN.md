@@ -148,7 +148,8 @@ installed models by family and includes Kind, Machine, Recipe, and a direct
 **Get More Models…** navigation link. These controls no longer compete for a
 fixed-height navigation title; the navigation bar says Generate. Kind uses a
 menu on iPhone and at accessibility sizes, and a segmented control on a roomy
-iPad. Auto follows the default online machine that holds the selected model.
+iPad. The model chooser uses a page-sized sheet so its first and last rows
+remain clear of the form-sheet scroll-edge fades. Auto follows the default online machine that holds the selected model.
 
 **Canvas.** Fills the rest of the screen.
 

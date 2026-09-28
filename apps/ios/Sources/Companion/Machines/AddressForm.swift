@@ -40,6 +40,7 @@ struct AddressForm: View {
             }
             Section {
                 TextField("Name", text: $name, prompt: Text(suggestedName))
+                    .accessibilityIdentifier("machine-name")
                 SecureField("API key (optional)", text: $apiKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

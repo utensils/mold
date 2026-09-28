@@ -87,6 +87,7 @@ struct ModelChooser: View {
                     }
                 }
             }
+            .scrollEdgeEffectHidden(true)
             .searchable(text: $search, prompt: "Find a model")
             .navigationTitle("Choose a Model")
             .navigationBarTitleDisplayMode(.inline)
@@ -94,6 +95,7 @@ struct ModelChooser: View {
         }
         .accessibilityIdentifier("model-chooser")
         .presentationDetents([.large])
+        .presentationSizing(.page)
     }
 }
 

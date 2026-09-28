@@ -15,6 +15,9 @@ final class GenerationInteractionTests: XCTestCase {
             XCTAssertTrue(address.waitForExistence(timeout: 5))
             address.tap()
             address.typeText("127.0.0.1:9")
+            let name = app.textFields["machine-name"]
+            name.tap()
+            name.typeText("UAT Machine")
             app.buttons["Add"].firstMatch.tap()
             app.buttons["Generate"].firstMatch.tap()
         }
@@ -33,16 +36,8 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertLessThanOrEqual(composer.frame.height, app.frame.height * 0.9)
         capture(app)
-        let machines = app.buttons["Machines"].firstMatch
-        if machines.waitForExistence(timeout: 2), machines.isHittable {
-            machines.tap()
-        } else {
-            app.typeKey("5", modifierFlags: .command)
-        }
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         let card = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'machine-card-'")).firstMatch
-        // At AX sizes iPadOS pages its floating tabs. The Go shortcut
-        // reaches the destination even when that tab is outside the page.
-        if !card.waitForExistence(timeout: 2) { app.typeKey("5", modifierFlags: .command) }
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(card.frame.minX, app.frame.minX)
         XCTAssertLessThanOrEqual(card.frame.maxX, app.frame.maxX)
@@ -89,5 +84,26 @@ final class GenerationInteractionTests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.lifetime = .keepAlways
         add(shot)
+    }
+}
+
+@MainActor extension XCUIApplication {
+    /// iPadOS can page the floating bar on the first tap at large text sizes.
+    /// Require the destination, then retry the now-visible tab if necessary.
+    func navigateToDestination(_ title: String, shortcut: String) -> Bool {
+        let bar = navigationBars[title == "Library" ? "All Prints" : title]
+        for _ in 0..<3 {
+            let tab = buttons[title].firstMatch
+            if tab.waitForExistence(timeout: 2), tab.isHittable {
+                tab.tap()
+            } else if buttons["Next Page"].firstMatch.exists, buttons["Next Page"].firstMatch.isHittable {
+                buttons["Next Page"].firstMatch.tap()
+                continue
+            } else {
+                typeKey(shortcut, modifierFlags: .command)
+            }
+            if bar.waitForExistence(timeout: 2) { return true }
+        }
+        return bar.exists
     }
 }
