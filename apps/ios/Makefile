@@ -30,7 +30,7 @@ BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIM_SIGN := CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 
 XCB_BASE = xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-       -derivedDataPath $(BUILD)/DerivedData $(SIM_SIGN) \
+       -derivedDataPath "$(BUILD)/DerivedData" $(SIM_SIGN) \
        CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) MARKETING_VERSION=$(MARKETING_VERSION)
 XCB = $(XCB_BASE) -destination '$(DEST)'
 
@@ -72,7 +72,7 @@ packages-test: require-sim ## MoldClient, MoldStyle and MoldMesh's own suites on
 	  (cd $(PACKAGES)/$$pkg && scheme=$$pkg && \
 	    { xcodebuild -list 2>/dev/null | grep -q "$$pkg-Package" && scheme=$$pkg-Package; true; } && \
 	    xcodebuild test -scheme $$scheme -destination '$(DEST)' \
-	    -derivedDataPath $(BUILD)/PackagesData 2>&1 \
+	    -derivedDataPath "$(BUILD)/PackagesData" 2>&1 \
 	    | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)'; \
 	    exit $${PIPESTATUS[0]}) || exit 1; \
 	done
