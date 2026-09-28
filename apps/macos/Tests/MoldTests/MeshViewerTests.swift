@@ -3,6 +3,7 @@ import Metal
 import MoldClient
 import Testing
 
+import MoldMesh
 @testable import Mold
 
 /// The half of the 3-D view that only the app bundle can answer for: that the

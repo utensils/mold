@@ -33,31 +33,29 @@ private struct HeldOpen: AsyncSequence, Sendable {
 /// the request's own timeout, which on `resourceStream` and `events` is
 /// 86,400 seconds. The error path, which already knows the status, hangs
 /// behind a body it does not need.
-@Test func aBodyOnAHeldOpenConnectionGivesUpAndReportsWhatArrived() async {
+///
+/// The failure this guards is a wait of 3,600 s, so the proof is a time
+/// LIMIT, not a stopwatch: on CI's three-core simulator, with 1,000+ tests
+/// running at once, scheduling alone stretched this 200 ms deadline past a
+/// minute -- a wall-clock bound only measured the machine.
+@Test(.timeLimit(.minutes(5)))
+func aBodyOnAHeldOpenConnectionGivesUpAndReportsWhatArrived() async {
     let body = Data(#"{"error":"restarting","code":"SERVER_RESTARTING"}"#.utf8)
-    let started = ContinuousClock.now
     let read = await RefusalBody.read(
         HeldOpen(prefix: Array(body)), within: .milliseconds(200))
-    let elapsed = ContinuousClock.now - started
-
-    // The failure this guards is a wait of 3,600 s. The bound is wide on
-    // purpose: the whole suite runs in parallel in about two seconds, and on an
-    // iOS Simulator scheduling alone pushed a correct read past a 2 s bound.
-    #expect(elapsed < .seconds(10))
     // What arrived before the deadline is what there is to report, and it is
     // enough: the refusal decodes.
     #expect(read == body)
 }
 
 /// A body that arrives and ENDS is not waited on at all -- the deadline is a
-/// last resort, not a delay.
-@Test func aBodyThatEndsIsReadImmediately() async {
+/// last resort, not a delay. The deadline here is an hour and the test's
+/// limit five minutes: waiting for the deadline fails it, however loaded the
+/// machine.
+@Test(.timeLimit(.minutes(5)))
+func aBodyThatEndsIsReadImmediately() async {
     let body = Data(#"{"error":"nope"}"#.utf8)
-    let started = ContinuousClock.now
-    let read = await RefusalBody.read(Array(body).async, within: .seconds(30))
-    // Well under the 30 s deadline it must not wait on, and wide enough that a
-    // loaded parallel run (the iOS Simulator took 1.9 s) cannot trip it.
-    #expect(ContinuousClock.now - started < .seconds(10))
+    let read = await RefusalBody.read(Array(body).async, within: .seconds(3600))
     #expect(read == body)
 }
 

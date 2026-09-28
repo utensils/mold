@@ -104,11 +104,6 @@ struct ModelActions {
     /// 10/11 and the S5 removal-summary note). Pure so a test can ask the
     /// exact sentence without a store.
     static func removalSummary(headline: String, removal: ModelRemoval) -> String {
-        let freed = Int64(removal.freedBytes).formatted(.byteCount(style: .file))
-        let base = "Removed \(headline) and freed \(freed)."
-        guard !removal.kept.isEmpty else { return base }
-        let names = Set(removal.kept.flatMap(\.usedBy)).sorted().joined(separator: ", ")
-        let noun = removal.kept.count == 1 ? "file" : "files"
-        return "\(base) \(removal.kept.count) shared \(noun) kept for \(names)."
+        removal.summary(headline: headline)
     }
 }

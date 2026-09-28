@@ -20,6 +20,11 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.graphics-design</string>
+	<!-- Handoff of a viewed print with Mold Studio Companion on iPhone/iPad. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>io.utensils.mold.print</string>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<!-- A SwiftUI Window limits windows, not processes. Notification activation

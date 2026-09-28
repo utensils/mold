@@ -116,3 +116,22 @@ public struct GenerationProfileSet: Codable, Hashable, Sendable {
         recipes.first { $0.id == id }
     }
 }
+
+public extension GenerationRecipe {
+    /// What this recipe makes, read from its own profile -- never from a
+    /// family list: a recipe that delivers GLB makes a 3-D object, one with a
+    /// time axis makes a clip, anything else a picture. It is how the phone's
+    /// Still / Short clip / 3-D object switch filters the model menu.
+    var makes: PrintKind {
+        if capabilities.output?.formats.contains("glb") == true { return .mesh }
+        if temporal != nil { return .clip }
+        return .picture
+    }
+}
+
+public extension Model {
+    /// Every kind this model's recipes make; empty for a model with no profile.
+    var makes: Set<PrintKind> {
+        Set(generationProfile?.recipes.map(\.makes) ?? [])
+    }
+}

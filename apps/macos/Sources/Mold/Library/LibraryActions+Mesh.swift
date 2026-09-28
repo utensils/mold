@@ -1,5 +1,6 @@
 import Foundation
 import MoldClient
+import MoldMesh
 
 // What the 3-D view needs from the Library: the stored bytes, and the
 // sentence to put on the poster when they do not arrive.

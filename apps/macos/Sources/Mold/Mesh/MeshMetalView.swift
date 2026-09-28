@@ -1,6 +1,7 @@
 import AppKit
 import MetalKit
 import MoldClient
+import MoldMesh
 
 /// The `MTKView` the mesh is drawn into, and the thing the mouse and keyboard
 /// talk to.

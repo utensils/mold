@@ -1,4 +1,5 @@
 import Foundation
+import MoldClient
 
 /// A file mold takes as OPAQUE bytes -- a continuation clip, conditioning
 /// audio, a source video -- read and base64-encoded off the main actor.

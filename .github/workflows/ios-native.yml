@@ -1,0 +1,81 @@
+name: iOS native app
+
+# Mold Studio Companion (apps/ios): the native SwiftUI iPhone/iPad app. Lints,
+# unit tests and the accessibility audit (every destination at xSmall, Large
+# and AX5, light and dark) on an iOS 26 simulator. The Tauri iPhone app has its
+# own workflow (ios.yml); the two never share a build.
+#
+# `macos-26` because the deployment target is iOS 26.0 and nothing older
+# carries that SDK.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "apps/shared/**"
+      - ".github/workflows/ios-native.yml"
+      # The version stamp the Makefile reads.
+      - "apps/macos/scripts/workspace-version.sh"
+      # The pairing claim contract the phone redeems.
+      - "crates/mold-server/src/auth.rs"
+      - "studio/api/pairing.ts"
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "apps/shared/**"
+      - ".github/workflows/ios-native.yml"
+      # The version stamp the Makefile reads.
+      - "apps/macos/scripts/workspace-version.sh"
+      # The pairing claim contract the phone redeems.
+      - "crates/mold-server/src/auth.rs"
+      - "studio/api/pairing.ts"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, test and audit
+    runs-on: macos-26
+    # The audit alone is four passes (iPhone and iPad, light and dark) of
+    # three text sizes, about 45 minutes on a fast Mac.
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: apps/ios
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # BUILD_NUMBER is the commit count.
+          fetch-depth: 0
+
+      - name: Show the toolchain
+        run: |
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun --show-sdk-version --sdk iphonesimulator)"
+          echo "simulator: $(scripts/pick-simulator.sh)"
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Architecture lints
+        run: make lint
+
+      # The shared packages on the phone's platform: MoldClient's suite on an
+      # iOS simulator, so a macOS-only API cannot land in them unnoticed.
+      - name: Shared packages on iOS
+        run: make packages-test
+
+      - name: Unit tests
+        run: make test
+
+      # The iPhone passes. The hosted runner times the iPad's audits out
+      # (the audit itself, UI snapshots, even synthesized taps), so the iPad
+      # sweep is the local `make uitest`'s -- run it before merging iPad work.
+      - name: Accessibility audit
+        run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"

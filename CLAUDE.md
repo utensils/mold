@@ -2,7 +2,7 @@
 
 Guidance for Claude Code in this repository. `AGENTS.md` is a symlink to this file.
 
-Only rules that apply to ANY change live here. Area-specific invariants live in path-scoped `.claude/rules/*.md` files, which load automatically when you read matching files — read the relevant one before editing an area it covers (e.g. `inference.md`, `server-queue.md`, `studio-web.md`, `desktop.md`, `mesh-3d.md`, `gallery-authority.md`, `reference-images.md`, `chain-sequences.md`, `prompting-corpus.md`, `release-ci.md`). New area-specific rules go there, not here.
+Only rules that apply to ANY change live here. Area-specific invariants live in path-scoped `.claude/rules/*.md` files, which load automatically when you read matching files — read the relevant one before editing an area it covers (e.g. `inference.md`, `server-queue.md`, `studio-web.md`, `desktop.md`, `mesh-3d.md`, `gallery-authority.md`, `reference-images.md`, `chain-sequences.md`, `prompting-corpus.md`, `release-ci.md`, `ios-native.md`). New area-specific rules go there, not here.
 
 ## What mold is
 
@@ -74,6 +74,9 @@ ui/        @mold/ui      — visual tokens + low-level Vue primitives (lowest la
 studio/    @mold/studio  — HTTP contracts, Pinia state, shared domain logic; must never import Tauri or a shell
 web/       SPA embedded in the binary       desktop/  Tauri 2 app (own cargo root, excluded from workspace)
 apps/mobile/  iPhone/Android thin Tauri crate (own cargo root, remote-only)
+apps/macos/   Mold Studio, the native SwiftUI Mac app (XcodeGen; embeds the engine)
+apps/ios/     Mold Studio Companion, the native SwiftUI iPhone/iPad app (remote-only)
+apps/shared/  MoldClient + MoldStyle Swift packages both native apps build on
 ```
 
 **Directory ≠ package name.** Use these with `-p`:

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mold Studio</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>io.utensils.mold.companion</string>
+			<!-- moldstudio:// only. The Tauri iPhone app owns mold://, and two
+			     apps claiming one scheme is resolved arbitrarily by iOS. Pairing
+			     QRs (mold://pair) are read by the in-app scanner instead. -->
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>moldstudio</string>
+			</array>
+		</dict>
+	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- A client for servers the user runs: LAN names, Tailscale MagicDNS
+		     (*.ts.net) and custom hostnames over plain http all have to work,
+		     exactly as they do in the Mac app. Noted for App Review. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mold._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Mold Studio uses the camera to scan a pairing code from your Mac and to take a photo to start from.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Mold Studio looks for machines running mold on your network.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Mold Studio saves the pictures you make to your photo library when you ask it to.</string>
+	<!-- Which print is being dragged, inside the app (onto a sidebar
+	     collection). Other apps receive the file itself. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.utensils.mold.print-id</string>
+			<key>UTTypeDescription</key>
+			<string>Mold Studio print</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Handoff of a viewed print with Mold Studio on the Mac. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>io.utensils.mold.print</string>
+	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<!-- Background refresh asks each machine how a pending render went:
+	     the server has no push (DESIGN.md §A). -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>io.utensils.mold.companion.refresh</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

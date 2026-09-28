@@ -84,3 +84,28 @@ public struct CollectionShelf: Identifiable, Hashable, Sendable {
         )
     }
 }
+
+public extension CollectionShelf {
+    /// The slug a machine gives a collection name: a byte-for-byte port of
+    /// `collection_slug` (`crates/mold-core/src/organization.rs`) -- lowercase
+    /// ASCII, `[a-z0-9]` kept, anything else one `-`, runs collapsed, ends
+    /// trimmed, at most 80. `nil` when nothing survives. It is how a new
+    /// collection filed from one machine merges with the same name on another.
+    static func slug(for name: String) -> String? {
+        let cap = 80
+        var slug = ""
+        var pendingDash = false
+        for scalar in name.unicodeScalars {
+            if scalar.isASCII, scalar.properties.isAlphabetic || ("0"..."9").contains(scalar) {
+                if pendingDash, !slug.isEmpty { slug.append("-") }
+                pendingDash = false
+                slug.append(String(scalar).lowercased())
+            } else {
+                pendingDash = true
+            }
+            if slug.count >= cap { break }
+        }
+        let trimmed = String(slug.prefix(cap)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}

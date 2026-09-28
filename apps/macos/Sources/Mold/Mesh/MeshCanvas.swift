@@ -1,6 +1,7 @@
 import AppKit
 import MoldClient
 import SwiftUI
+import MoldMesh
 
 /// A mesh print, interactive, with the poster underneath it.
 ///

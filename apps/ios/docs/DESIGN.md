@@ -95,22 +95,28 @@ The native Mac app's vocabulary governs. `docs/design/README.md`'s web lexicon
   one the Models pane shows", so Models already belongs to a machine. The
   Machines list starts with a "Models" row for the Default machine, and Machine
   detail ▸ Models opens any other machine's.
-- **Settings** is a sheet, opened from the Machines toolbar gear and on iPad
-  from the sidebar footer.
+- **Settings** is a sheet, opened from the Machines toolbar gear (and ⌘,); the
+  iPad sidebar also lists it as a row that shows it as a page.
 
 ### iPad sidebar (mirrors the Mac sidebar through `TabSection`)
 
 ```
 Generate
-Library            All Prints · Favourites · ▸ Collections (…, New Collection…) · Recently Deleted
+Library            (All Prints)
 Queue
 Models             (follows the Default machine; switch in its toolbar)
-Machines           ● workstation · ● hal9000 · ○ studio-mini · Add a Machine…
-───
-Settings
+Machines
+Search
+Settings           (a page here; a sheet everywhere else)
+Shelves            Favourites · each collection (drop prints on one to file them) · Recently Deleted
+Your Machines      workstation · hal9000 "Offline" · studio-mini "Key"
 ```
 
-Collapsed to a tab bar, iPad uses the iPhone tabs.
+The floating tab bar (the sidebar put away) carries only the five
+destinations and Search. The sections live in the sidebar alone: listed in
+the bar they made UIKit page and re-lay it out on every text-size change
+until the app stopped answering. A machine that is not answering says so in
+words beside its name, never by colour alone.
 
 ### State and links
 
@@ -237,7 +243,10 @@ Large).
 **Toolbar.**
 
 - `.toolbarTitleMenu` switches the shelf: All Prints · Favourites ·
-  Collections ▸ (each, plus New Collection…) · Recently Deleted.
+  Collections ▸ (each) · Recently Deleted. A collection exists only once a
+  print is filed in it (no machine stores an empty one), so it is started
+  from a print's Add to Collection ▸ New Collection…, never from the
+  sidebar.
 - Trailing: Select, and ⋯ (Sort By, Tile Size, Machine).
 
 **Search.** The Search tab, or pulling Library down. Uses
@@ -488,6 +497,21 @@ foreground, Generate shows a **From Share** card with the same three choices.
 8. **The composer** is capped at 55% of the screen height and scrolls inside that
    cap. The canvas never drops below 30% of the height; below that, the composer
    scrolls.
+9. **Colour that the audit proved.** The palette is the system's, with three
+   asset-catalog colours added after the shell's contrast audit failed on the
+   system defaults:
+   - `AccentColor` is light #0062CC and dark #4DA3FF. White on the stock light
+     #007AFF is about 4.0:1, and the stock dark #0A84FF failed as tint text on
+     a grouped row.
+   - `ProminentFill` is light #0062CC and dark #1A66CC. It is the fill for the
+     one filled button on a screen (`.prominentAction()`), giving 5.5:1 or
+     better under white text. In dark mode no single blue passes as a fill AND
+     as tint text on a grouped row, so the two are split.
+   - `SecondaryText` is light #48484A and dark #C7C7CC. The system `.secondary`
+     is about 4.4:1 on white, and #6C6C70 still failed on the grouped
+     background; `make lint` rejects `.foregroundStyle(.secondary)`.
+10. **An empty state's action is never under the glass.** At accessibility sizes
+    it is pinned above the tab bar while the explanation scrolls.
 
 ### VoiceOver
 

@@ -1965,6 +1965,36 @@
                 help = "regenerate Mold.xcodeproj so the app can be opened in Xcode";
                 command = "cd apps/macos && make gen && echo 'open apps/macos/Mold.xcodeproj'";
               }
+              {
+                category = "companion";
+                name = "companion-run";
+                help = "build Mold Studio Companion (native iOS) and launch it in the iPhone simulator";
+                command = "cd apps/ios && make run \"$@\"";
+              }
+              {
+                category = "companion";
+                name = "companion-test";
+                help = "run Mold Studio Companion's unit tests on the simulator";
+                command = "cd apps/ios && make test";
+              }
+              {
+                category = "companion";
+                name = "companion-uitest";
+                help = "run Mold Studio Companion's accessibility audit (xSmall/Large/AX5, light and dark)";
+                command = "cd apps/ios && make uitest";
+              }
+              {
+                category = "companion";
+                name = "companion-lint";
+                help = "run Mold Studio Companion's architecture lints";
+                command = "cd apps/ios && make lint";
+              }
+              {
+                category = "companion";
+                name = "companion-gen";
+                help = "regenerate MoldCompanion.xcodeproj so the app can be opened in Xcode";
+                command = "cd apps/ios && make gen && echo 'open apps/ios/MoldCompanion.xcodeproj'";
+              }
             ];
           };
 

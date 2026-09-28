@@ -19,6 +19,8 @@ struct MoldApp: App {
                 .modifier(NotificationWindowRouting(
                     responses: delegate.notificationResponses, destination: $destination,
                     navigation: stores.libraryNavigation))
+                .modifier(HandoffRouting(destination: $destination, hosts: stores.hosts,
+                                         navigation: stores.libraryNavigation))
                 .task { ClickModifiers.startObserving() }
                 // Whether a caret owns the keyboard, asked once for the whole
                 // app -- what stands the Library's bare-space shortcut down.

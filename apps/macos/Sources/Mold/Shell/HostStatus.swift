@@ -54,16 +54,8 @@ extension HostStore.Reachability {
     }
 }
 
-extension ServerStatus {
-    /// What the machine renders with, collapsed the way a person would say it:
-    /// four identical cards are "4× NVIDIA L40S", not four lines.
-    var hardware: String? {
-        guard let gpus, let first = gpus.first else { return nil }
-        guard gpus.count > 1 else { return first.name }
-        let names = Set(gpus.map(\.name))
-        return names.count == 1 ? "\(gpus.count)× \(first.name)" : "\(gpus.count) GPUs"
-    }
-}
+// `ServerStatus.hardware` ("4× NVIDIA L40S") lives in MoldClient, shared with
+// the iOS companion.
 
 /// The dot every machine list uses.
 struct HostStatusDot: View {

@@ -96,7 +96,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 
 | Target | Bundle ID | Entitlements |
 |---|---|---|
-| MoldCompanion (app, `PRODUCT_NAME` Mold Studio) | `io.utensils.mold.companion` | App Group, Keychain group |
+| MoldCompanion (app, `PRODUCT_NAME` Mold Studio) | `io.utensils.mold.companion` | App Group (keys in the app's own Keychain group) |
 | MoldCompanionWidgets (WidgetKit + ActivityKit) | `…companion.widgets` | App Group only; no networking or Keychain (enforced by lint) |
 | MoldCompanionShare | `…companion.share` | App Group only (staging; no network) |
 | MoldCompanionTests (hosted) / MoldCompanionUITests | — | — |
@@ -123,7 +123,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
   - `moldstudio://print/<host>/<file>`
   - `moldstudio://queue/<job>`
   - `moldstudio://generate?inbox=<id>`
-- Deferred: a universal-link pairing QR (`https://utensils.io/mold/pair#…`). It is cross-product work.
+- Not in this app: a universal-link pairing QR (`https://utensils.io/mold/pair#…`). It needs an `apple-app-site-association` file at the utensils.io root (outside this repository) and a new QR format in the Mac, desktop and web apps; the in-app scanner reads today's `mold://pair` codes.
 
 **MoldClient additions (TDD'd)**
 
@@ -192,7 +192,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 **iPad sidebar** (`TabSection`s mirror the Mac sidebar)
 
 - Generate
-- Library: All Prints, Favourites, the collections plus New Collection…, Recently Deleted
+- Library: All Prints, Favourites, the collections (drop prints on one to file them), Recently Deleted. New Collection… lives in a print's Add to Collection menu: machines store no empty collection.
 - Queue
 - Models
 - Machines: one row per machine with a status dot, plus Add a Machine…
@@ -457,27 +457,23 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 |---|---|---|
 | D | DESIGN.md plus the mockup artifact (16 frames); review with James | Artifact renders in light and dark, iPhone and iPad frames |
 | M0 ✅ | Move packages to `apps/shared`; iOS 26 platform; `#if os(macOS)` on `MoldHome*` only (`SecretStore.applicationSupport` made portable instead, because `DraftStore` needs it on the phone); `CredentialStore` protocol keyed by host UUID, with `SecretStore` conforming; MoldStyle `hairline` branch; `lint-layers` also bans UIKit | Mac `make lint test` green; MoldClient (996 tests) and MoldStyle green on the iOS 26.5 sim. Two wall-clock `RefusalBodyTests` bounds widened: they measured parallel-run starvation on the sim |
-| M1 | `apps/ios` skeleton: 5 targets (placeholder extensions), entitlements, plist, sidebarAdaptable shell with empty states, Makefile, devshell `companion-*` commands, `.github/workflows/ios-native.yml` (`macos-26`), `.claude/rules/ios-native.md`; `apps/shared/scripts/swift-lint.sh` shared by both Makefiles (moved from M0: it needs its second consumer) | CI green; sim launch; `performAccessibilityAudit` on the shell at xSmall and AX5 |
-| M2 | Machines: `KeychainCredentialStore`, `MoldClientTesting` public-API `FakeBackend` (moved from M0: built with its first store), `HostStore`, `ConnectionSupervisor`, manual add, Bonjour, fleet cards, detail | FakeBackend store tests; hosted Keychain tests; UAT against a real `mold serve` and hal9000 |
-| M3 | Pairing: parse, claim, instance check, DataScanner, paste; `testflight-ios-native.yml` (second App Store Connect record, never internal-only) | Parser fixtures match `pairing.ts`; scan the Mac app's Pair a Phone QR; build appears in TestFlight |
-| M4 | Library read: merge, thumbnail pipeline, viewer, AVPlayer, MoldMesh extraction plus the iOS view | Cache-cap tests; media-token tests; Mac mesh tests green; device UAT |
-| M5 | Library V3: favourite, tags, collections, trash, Info sheet, `MutationOutbox` fan-out, Photos and Share, search tokens | Fan-out tests with a partly failing machine |
-| M6 | Generate stills: capability-driven picker, `RenderDraft`, wells, More options, submission background task, batch SSE and preview, draft persistence | Admission and ledger tests; AX5 audit on Generate |
-| M7 | Clips and 3-D generate; Camera / Photos / Files sources; Use These Settings | Capability-gating tests |
-| M8 | Queue: list, batches, held rows, cancel, reorder, pause, reconcile | Supervisor phase tests |
-| M9 | Models: installed, Discover, download stream, licences | Download reducer tests |
-| M10 | Live Activity, notifications, `BGAppRefreshTask` | `ActivityProjection` tests; Simulate Background Fetch UAT |
-| M11 | Widgets from the App Group snapshot | Encoder tests; previews of every family |
-| M12 | Share extension plus the "From Share" inbox card | Memory-ceiling test with a 48 MP photo |
-| M13 | Docs: `apps/ios/README.md`, root README / CLAUDE.md pointer, website Companion page, privacy (camera, local network), external TestFlight group | Doc review; `cd website && bun run build` |
+| M1 ✅ | `apps/ios` skeleton: 5 targets (app, WidgetKit, Share, unit tests, UI tests), entitlements, Info.plist, `.sidebarAdaptable` shell (Models only at regular width: iPhone ignores `defaultVisibility` and pushed Machines into "More"), `EmptyState` + `RowAxis`, Settings sheet, Go menu ⌘1–⌘5, Makefile, devshell `companion-*`, `ios-native.yml`, `.claude/rules/ios-native.md`, `apps/shared/scripts/swift-lint.sh` (+ its own test) used by both Makefiles | 7 unit tests; `make packages-test` (997 + 11 on iOS); `make uitest` audit clean at xSmall/Large/AX5 in light and dark after three real fixes (AccentColor, ProminentFill, SecondaryText) |
+| M2 ✅ | Machines: `KeychainCredentialStore` (app access group only: the Share extension never networks, so no shared Keychain group), `MoldClientTesting.FakeBackend` (97 routes, generated), `HostStore` (+ Editing, Reachability, Events, Pairing), `ConnectionSupervisor` (scene phase), `NearbyBrowser` (`NWBrowser`, TXT `id=` dedupe), fleet cards, detail with per-GPU switches, Add/Edit sheets, per-window `AppRouter`; `ServerStatus.hardware` and `DeviceWords` moved into MoldClient | FakeBackend + in-memory credential store tests; hosted Keychain tests; audit on the new screens |
+| M3 ✅ | Pairing: `MobilePairingPayload.parse` (byte port of `pairing.ts`), `HTTPBackend.claimPairing` (no key sent, 401 → expired, instance check), DataScanner + paste, re-key instead of duplicate; `testflight-ios-native.yml` gated on `vars.COMPANION_TESTFLIGHT` until the App Store Connect record exists (Apple has no API to create one); `make archive` refuses an iconless archive | Parser + claim URLProtocol tests; round trip with the Mac `url` producer; shipped with M2 in one PR |
+| M4 ✅ | Library read: `LibraryStore` (ETag listings per machine, `LibraryMerge`, collections by slug, Recently Deleted, event-driven reloads), `ThumbnailLoader` + `DiskThumbnailStore` (MoldClient; 4,000 / 256 MiB / 2 MiB LRU, media-version keys), day-sectioned grid with pinch tile sizes, shelf title menu, search tokens, zoom-transition viewer (UIScrollView zoom, `playableURL` clips, `MoldMesh` 3-D), Info sheet from `PrintDetails`; `MoldMesh` package extracted from the Mac (shaders: the bundle's compiled `default.metallib` in Xcode builds, the copied source under `swift build`); `LibraryScope` + `GenerationRecipe.makes` moved into MoldClient | 1,044 MoldClient + MoldMesh tests; Mac `build-for-testing` green; LibraryStore tests; audit on the Library |
+| M5 ✅ | Library V3: favourite / tags / title / collections through the shared `MutationOutbox` on EVERY copy (optimistic, 1s/2s/4s, operation-id fenced, re-read on give-up), one-step undo from `PrintEdit.inverse`, trash / Put Back / Delete Immediately / Empty (a machine without a trash deletes for good), selection bar, `PrintMenu` in the Mac order, Tags / Rename / New Collection sheets (`CollectionShelf.slug` ported from `collection_slug`), Share, Save to Photos (add-only), Copy | Fan-out + undo + refusal tests against FakeBackend |
+| M6 ✅ | Generate stills: capability-driven picker (`GenerationRecipe`, `RenderDraft.adopting`, shared refusal sentences), picture wells, More options (Adapters / Identity / Refine with the PencilKit mask), finite background task around submission only, batch SSE + 700 ms preview poll, `PendingLedger` in the App Group, draft saved on Generate and on background | Admission and ledger tests; AX5 audit on Generate |
+| M7 ✅ | Clips and 3-D generate (`GenerationRecipe.makes`), Camera / Photos / Files / Library sources, Use These Settings from the viewer and Library | Capability-gating tests |
+| M8 ✅ | Queue: sections per machine, batch parents (`QueueGroup`), running rows with preview + `ProgressWords`, held rows in words (`QueueHold`) with Pull and Retry / Retry / Move to… (`TransferPlan`), swipe Cancel / Pause, Move Up/Down and Edit reorder via `QueueOrder`, Pause / Resume / Empty Queue… per machine and for all, Queue tab badge; `QueueStoreTests` | Supervisor phase tests |
+| M9 ✅ | Models: Installed by family (Load / Unload / Repair / Components / Delete with the shared removal sentence), Discover (debounced catalog search, family + sort, paging), download stream reduced by the shared `DownloadBoard` (moved into MoldClient; the Mac uses it too), licence sheet then retry; Models row in Machines and machine detail; `DownloadBoardTests`, `ModelStoreTests` | Download reducer tests |
+| M10 ✅ | Live Activity (`ActivityCoordinator` over `RunState`, ~1 update/s, stale date = estimate + 5 min, ended 15 min after, `StopRenderIntent` handled in the app process), local notifications (`Notifier`: once per batch, threaded per machine, never in the foreground, View / Favourite), `BGAppRefreshTask` over `PendingLedger`, `moldstudio://` deep links, Settings: Library (auto-save, cache size, Empty Now), Notifications, Live Activities; `ActivityProjectionTests`, `NotifierTests`, `DeepLinkTests` | `ActivityProjection` tests; Simulate Background Fetch UAT |
+| M11 ✅ | Widgets from the App Group snapshot (`WidgetSnapshotWriter` → `WidgetSnapshot` + 360 px JPEGs, timelines reloaded only on change): Recent Prints S/M/L configurable by machine and favourites, Queue accessory rectangular / circular / inline, Live Activity UI; `WidgetSnapshotTests` | Encoder tests; previews of every family |
+| M12 ✅ | Share extension (`ShareInbox.stage`: ImageIO thumbnail to 2048 px, alpha kept as PNG, no network) plus the "From Share" card in Generate (Start From / Reference / Add to Library / Discard); `ShareInboxTests` incl. the 48 MP peak-memory ceiling | Memory-ceiling test with a 48 MP photo |
+| M13 ✅ | Docs: `apps/ios/README.md` (features, background behaviour, distribution), root README pointer, CLAUDE.md apps line, website `guide/companion.md` + nav, privacy policy (camera, local network, Photos, notifications, App Group, Keychain); the external TestFlight group is an owner step once the App Store Connect record exists | Doc review; `cd website && bun run build` |
 
 Each user-visible PR gets a `changelog.d/companion-*.md` fragment. M0, M1 and the CI-only PRs use `skip-changelog`. PRs are serialized: one open at a time, rebased right before merge.
 
-**Where James's input shapes the code** (learning-mode contribution points, set up at the matching milestone):
-
-- the AX-size layout breakpoint helper (M1)
-- the Library tile-size ladder and column rule (M4)
-- the progress-sentence wording function (M6)
+Goal (set by James, 2026-09-27): implement every milestone in full, with nothing deferred. The learning-mode contribution points were dropped under that goal; `RowAxis` shipped its tested rule (stack from AX1) in M1.
 
 ## Critical files
 

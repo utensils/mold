@@ -62,6 +62,11 @@ jobs:
           TRUSTED_RELEASE_PR: ${{ github.event_name == 'pull_request' && github.actor == 'release-plz-mold[bot]' && startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository }}
         run: echo "trusted_release_pr=$TRUSTED_RELEASE_PR" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
+      # release-plz refuses to run while a tracked file is also gitignored;
+      # #1767's fixture broke every release PR run after merge. Every job
+      # needs this one, so the PR fails instead of main.
+      - name: No tracked file is gitignored
+        run: bash scripts/tests/no-tracked-ignored-files.sh
       - uses: dorny/paths-filter@v3
         id: filter
         with:

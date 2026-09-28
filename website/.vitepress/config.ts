@@ -108,6 +108,7 @@ export default defineConfig({
             { text: '3D Meshes', link: '/guide/mesh' },
             { text: 'Mold Studio for Mac', link: '/guide/macos' },
             { text: 'Desktop App', link: '/guide/desktop' },
+            { text: 'Mold Studio for iPhone & iPad', link: '/guide/companion' },
             { text: 'iPhone App', link: '/guide/iphone' },
             { text: 'Android App', link: '/guide/android' },
             { text: 'Machines', link: '/guide/machines' },
