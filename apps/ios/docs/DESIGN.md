@@ -158,8 +158,10 @@ iPad. Auto follows the default online machine that holds the selected model.
 
 **Composer.** An opaque system-background panel (radius 16) above the tab bar
 keeps text legible over the canvas. One stable scroll
-view is capped to 55% of the current window's available height, including
-keyboard avoidance and iPad resizing; its prompt never moves between
+view is capped to 55% of the current window's available height. While idle at
+accessibility sizes it uses up to 90%, replacing the redundant empty-canvas
+guidance. Submitting, progress, results and failures retain the canvas. Both
+caps account for keyboard avoidance and iPad resizing; its prompt never moves between
 `ViewThatFits` alternatives. Top to bottom:
 
 1. **Prompt:** `TextField(axis: .vertical)` with up to six lines (three at
@@ -514,9 +516,9 @@ foreground, Generate shows a **From Share** card with the same three choices.
    (Generate, chips, the viewer bar) add `.accessibilityShowsLargeContentViewer`.
 7. **Targets** are at least 44×44 pt, via `.contentShape` and a scaled minimum
    frame.
-8. **The composer** is capped at 55% of the screen height and scrolls inside that
-   cap. The canvas never drops below 30% of the height; below that, the composer
-   scrolls.
+8. **The composer** scrolls within 55% of the available window height, or 90%
+   while idle at accessibility sizes. Active generation and results retain
+   their canvas; the idle hint gives way to readable controls.
 9. **Colour that the audit proved.** The palette is the system's, with three
    asset-catalog colours added after the shell's contrast audit failed on the
    system defaults:

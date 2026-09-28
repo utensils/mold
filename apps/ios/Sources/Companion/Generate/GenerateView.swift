@@ -8,6 +8,7 @@ struct GenerateView: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
+    @Environment(\.dynamicTypeSize) private var size
     @State private var showsOptions = false
     @State private var estimate: String?
 
@@ -21,13 +22,20 @@ struct GenerateView: View {
                 }
             } else {
                 GeometryReader { geometry in
-                    GenerateCanvas()
+                    Group {
+                        if generate.run == .idle && size.isAccessibilitySize {
+                            Color.clear
+                        } else {
+                            GenerateCanvas()
+                        }
+                    }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(.rect)
                         .onTapGesture { hideKeyboard() }
                         .safeAreaBar(edge: .bottom) {
                             Composer(showsOptions: $showsOptions, estimate: estimate,
-                                     maximumHeight: geometry.size.height * 0.55)
+                                     maximumHeight: geometry.size.height * Self.composerHeightFraction(
+                                        run: generate.run, accessibility: size.isAccessibilitySize))
                         }
                 }
             }
@@ -48,6 +56,12 @@ struct GenerateView: View {
         }
         .onChange(of: generate.families.flatMap(\.models), initial: true) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
+    }
+
+    /// Idle accessibility text gets the canvas space it needs; submitting,
+    /// progress, results and failures keep their visible canvas.
+    static func composerHeightFraction(run: RunState, accessibility: Bool) -> CGFloat {
+        accessibility && run == .idle ? 0.9 : 0.55
     }
 
     private var estimateKey: String {

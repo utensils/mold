@@ -31,7 +31,7 @@ final class GenerationInteractionTests: XCTestCase {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
         let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertLessThanOrEqual(composer.frame.height, app.frame.height * 0.55)
+        XCTAssertLessThanOrEqual(composer.frame.height, app.frame.height * 0.9)
         capture(app)
         let machines = app.buttons["Machines"].firstMatch
         if machines.waitForExistence(timeout: 2), machines.isHittable {

@@ -34,19 +34,30 @@ final class ShellAccessibilityTests: XCTestCase {
                 app.typeKey("\(index + 1)", modifierFlags: .command)
             }
             settle(app.navigationBars.firstMatch)
+            if tab == "Generate" { try auditComposer(app, size: size) }
             try check(app, "\(tab) at \(size)")
 
             if tab == "Generate" {
+                // The Dynamic Type auditor changes layout while probing sizes.
+                // Restore the requested size before interacting with the sheet.
+                app.terminate()
+                app.launch()
+                app.buttons["Generate"].firstMatch.tap()
                 let chooser = app.buttons["choose-model"]
                 if chooser.exists {
                     let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
                     for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
                     XCTAssertTrue(chooser.isHittable)
                     chooser.tap()
+                    XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
                     settle(app.navigationBars["Choose a Model"])
                     try check(app, "Model chooser at \(size)",
                               within: app.descendants(matching: .any)["model-chooser"].firstMatch)
-                    app.buttons["Done"].firstMatch.tap()
+                    // Size probing can leave UIKit exporting the presenting
+                    // hierarchy until another presentation. Restore a fresh
+                    // launch-size screen for the remaining destinations.
+                    app.terminate()
+                    app.launch()
                 }
             }
         }
@@ -103,17 +114,54 @@ final class ShellAccessibilityTests: XCTestCase {
         try check(app, "Search at \(size)")
     }
 
+    /// Audit every exported composer label/control while fully inside the
+    /// viewport. Pixel auditing a partly clipped AX node samples blank pixels
+    /// outside the scroll view. Coverage is mandatory, not an exemption: a
+    /// control that cannot be brought fully into view fails this test.
+    @MainActor private func auditComposer(_ app: XCUIApplication, size: String) throws {
+        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        guard composer.exists else { return }
+        let types: [XCUIElement.ElementType] = [.staticText, .button, .textField, .textView]
+        func elements() -> [XCUIElement] {
+            types.flatMap { composer.descendants(matching: $0).allElementsBoundByIndex }
+                .filter { !$0.label.isEmpty && $0.frame.height > 0 }
+        }
+        func key(_ element: XCUIElement) -> String { "\(element.elementType):\(element.label)" }
+        let expected = Set(elements().map(key))
+        var seen = Set<String>()
+        for step in 0..<20 {
+            settle(composer)
+            let visible = elements().filter { composer.frame.contains($0.frame) }
+            try check(app, "Composer scroll \(step) at \(size)", contrastOnly: true)
+            seen.formUnion(visible.map(key))
+            if expected.isSubset(of: seen) { break }
+            // Small, non-flinging steps ensure even tall wrapped guidance is
+            // sampled in full, rather than skipped between the two endpoints.
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                .press(forDuration: 0.1, thenDragTo: composer.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)),
+                       withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTAssertTrue(expected.isSubset(of: seen), "Composer content never fully visible: \(expected.subtracting(seen).sorted())")
+        let submit = app.buttons["submit-generation"]
+        XCTAssertTrue(submit.exists)
+        // Return to the prompt before the size-changing audit.
+        for _ in 0..<5 { composer.swipeDown() }
+        settle(composer)
+    }
+
     /// `region`: a presented sheet or the iPad sidebar. Everything outside it
     /// is the dimmed screen behind -- unreachable, and measured by
     /// the auditor through the scrim.
     @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
-                                  within container: XCUIElement? = nil, lazyForm: Bool = false) throws {
+                                  within container: XCUIElement? = nil, lazyForm: Bool = false,
+                                  contrastOnly: Bool = false) throws {
         do {
-            try audit(app, place, region: region, within: container, lazyForm: lazyForm)
+            try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly)
         } catch where Self.isTimeout(error) {
             // "Audit failed to complete in time" is the harness, not a
             // finding: once more, and if it still cannot finish, say where.
-            do { try audit(app, place, region: region, within: container, lazyForm: lazyForm) } catch where Self.isTimeout(error) {
+            do { try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly) } catch where Self.isTimeout(error) {
                 XCTFail("\(place): the audit could not finish (\(error.localizedDescription))")
             }
         }
@@ -126,13 +174,14 @@ final class ShellAccessibilityTests: XCTestCase {
     }
 
     @MainActor private func audit(_ app: XCUIApplication, _ place: String, region: CGRect?,
-                                  within container: XCUIElement?, lazyForm: Bool) throws {
+                                  within container: XCUIElement?, lazyForm: Bool, contrastOnly: Bool) throws {
         // Dynamic Type temporarily resizes the entire hierarchy. Sample pixels
         // first at the settled launch size, before that audit changes frames.
         // Combining both checks can measure contrast against stale geometry.
-        for types: XCUIAccessibilityAuditType in [
+        let passes: [XCUIAccessibilityAuditType] = contrastOnly ? [.contrast] : [
             [.contrast], [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription],
-        ] {
+        ]
+        for types in passes {
             try app.performAccessibilityAudit(for: types) { issue in
                 // Text scrolled UNDER the glass tab bar or a pinned action is
                 // measured through the glass; scrolled into view it is plain text
@@ -254,7 +303,11 @@ final class ShellAccessibilityTests: XCTestCase {
         let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch
         // A control IN the chrome is never skipped -- by descent, not frame:
         // at AX5 the composer's frame covers the canvas text behind it.
-        if pinned.exists, isDescendant(element, of: pinned) { return false }
+        if pinned.exists, isDescendant(element, of: pinned) {
+            // The explicit scroll coverage pass requires every composer
+            // label/control to be fully visible and audited at least once.
+            return !pinned.frame.contains(element.frame)
+        }
         var top = app.frame.maxY
         let bar = app.tabBars.firstMatch
         if bar.exists { top = min(top, bar.frame.minY) }

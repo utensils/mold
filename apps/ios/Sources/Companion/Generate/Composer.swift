@@ -4,8 +4,8 @@ import SwiftUI
 /// The composer (DESIGN.md §5.1): prompt, model, picture wells, the chip
 /// row, then the estimate and Generate. At
 /// accessibility sizes the chips fold into one Options button and Generate
-/// takes the full width under the estimate; the panel never takes more than
-/// 55% of the screen, and scrolls inside that.
+/// takes the full width under the estimate. The window supplies a bounded
+/// viewport, enlarged for idle accessibility text.
 struct Composer: View {
     @Environment(GenerateController.self) private var generate
     @Environment(\.dynamicTypeSize) private var size
@@ -27,6 +27,7 @@ struct Composer: View {
             }
         }
         .frame(maxHeight: maximumHeight)
+        .clipped()
         .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 16))
         // The chrome the canvas scrolls under: what is behind it is judged
         // there, not through it (the accessibility audit's rule).
@@ -116,6 +117,7 @@ struct GenerateRow: View {
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(generate.blocker != nil)
+            .accessibilityIdentifier("submit-generation")
             .accessibilityShowsLargeContentViewer()
             .sensoryFeedback(.impact(weight: .light), trigger: generate.queued.count + (generate.run.isBusy ? 1 : 0))
         }

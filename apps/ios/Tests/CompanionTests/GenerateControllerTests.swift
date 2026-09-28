@@ -10,6 +10,13 @@ import Testing
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func accessibilityComposerYieldsToActiveCanvas() {
+        #expect(GenerateView.composerHeightFraction(run: .idle, accessibility: true) == 0.9)
+        #expect(GenerateView.composerHeightFraction(run: .submitting, accessibility: true) == 0.55)
+        #expect(GenerateView.composerHeightFraction(run: .failed("Offline"), accessibility: true) == 0.55)
+        #expect(GenerateView.composerHeightFraction(run: .idle, accessibility: false) == 0.55)
+    }
+
     private func model(_ name: String = "flux-dev:q4") throws -> Model {
         let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: profilesURL())) as! [String: Any]
         let rows = doc["profiles"] as! [[String: Any]]
