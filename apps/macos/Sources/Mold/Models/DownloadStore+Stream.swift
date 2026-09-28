@@ -40,53 +40,20 @@ extension DownloadStore {
             reconcile()
             return
         }
-        guard let id = event.id else { return }
-        var forHost = active[host] ?? [:]
-
-        switch event.effect {
-        case .settle:
-            let last = forHost.removeValue(forKey: id)
-            remember(id: id, event: event, last: last, on: host)
-        case .forget:
-            forHost.removeValue(forKey: id)
-        case .introduce:
-            forHost[id] = moved(forHost[id] ?? Progress(model: event.model ?? ""), by: event)
-        case .update:
-            // Only a row already known. A frame about a job this client has
-            // never seen is not a reason to invent one (`downloads.ts:96-97`).
-            guard let known = forHost[id] else { return }
-            forHost[id] = moved(known, by: event)
-        case .snapshot, .ignore:
-            return
-        }
+        // The arms themselves are `DownloadBoard.apply` (MoldClient), shared
+        // with the iPhone app: only `enqueued`/`started` create a row, and a
+        // frame about a job this client never saw changes nothing
+        // (`downloads.ts:96-97`).
+        let before = active[host] ?? [:]
+        var forHost = before
+        let settled = DownloadBoard.apply(event, to: &forHost)
+        guard settled != nil || forHost != before else { return }
+        if let settled { remember(settled, on: host) }
         active[host] = forHost.isEmpty ? nil : forHost
         reconcile()
     }
 
-    /// One row, plus whatever this frame actually carried. Every field is
-    /// optional on the wire and absent means "unchanged", never zero.
-    private func moved(_ row: Progress, by event: DownloadEvent) -> Progress {
-        var progress = row
-        if let model = event.model { progress.model = model }
-        progress.fraction = event.fraction ?? progress.fraction
-        progress.bytesDone = event.bytesDone ?? progress.bytesDone
-        progress.bytesTotal = event.bytesTotal ?? progress.bytesTotal
-        progress.currentFile = event.currentFile ?? progress.currentFile
-        return progress
-    }
-
-    private func remember(id: String, event: DownloadEvent, last: Progress?, on host: MoldHost.ID) {
-        let status: JobStatus =
-            switch event.type {
-            case "job_done": .completed
-            case "job_cancelled": .cancelled
-            default: .failed
-            }
-        let job = DownloadJob(
-            id: id, model: event.model ?? last?.model ?? "", status: status,
-            bytesDone: event.bytesDone ?? last?.bytesDone ?? 0,
-            bytesTotal: event.bytesTotal ?? last?.bytesTotal ?? 0,
-            currentFile: event.currentFile ?? last?.currentFile, error: event.error ?? last?.failed)
+    private func remember(_ job: DownloadJob, on host: MoldHost.ID) {
         var list = finished[host] ?? []
         list.insert(job, at: 0)
         finished[host] = Array(list.prefix(16))

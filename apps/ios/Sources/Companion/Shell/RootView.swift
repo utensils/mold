@@ -15,6 +15,7 @@ struct RootView: View {
         _actions = State(initialValue: PrintActions(hosts: stores.hosts))
     }
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(QueueStore.self) private var queue
 
     /// Models joins the list only where there is a sidebar. On iPhone
     /// `.defaultVisibility(.hidden, for: .tabBar)` is ignored, and a sixth tab
@@ -32,6 +33,7 @@ struct RootView: View {
                 } label: {
                     Label { Text(destination.title) } icon: { Image(systemName: destination.symbol) }
                 }
+                .badge(destination == .queue ? queue.badge : 0)
             }
             Tab(value: TabSelection.search, role: .search) {
                 SearchHome()

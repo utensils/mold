@@ -32,11 +32,9 @@ struct DestinationHome: View {
         case .library:
             LibraryView()
         case .queue:
-            EmptyState(title: String(localized: "Nothing waiting"), symbol: destination.symbol,
-                       message: String(localized: "Renders you start appear here."))
+            QueueView()
         case .models:
-            EmptyState(title: String(localized: "No machine to show"), symbol: destination.symbol,
-                       message: String(localized: "Models belong to a machine. Add one to see what it has installed."))
+            ModelsView()
         case .machines:
             MachinesView()
         }

@@ -18,6 +18,14 @@ struct MachineDetailView: View {
                 if !devices.isEmpty { cards(host) }
                 storage(host)
                 Section {
+                    NavigationLink(value: ModelsRoute(host: id)) {
+                        AdaptiveRow { Text("Models") } value: {
+                            Text("\(hosts.models[id]?.filter { $0.downloaded == true }.count ?? 0) installed")
+                        }
+                    }
+                    NavigationLink(value: QueueRoute(host: id)) { Text("Queue") }
+                }
+                Section {
                     Button("Edit…") { editing = true }
                     Button("Set as Default") { hosts.makeDefault(id) }
                         .disabled(hosts.defaultMachine == id)

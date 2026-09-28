@@ -11,6 +11,10 @@ final class CompanionStores {
     let library: LibraryStore
     let thumbnails: ThumbnailLoader
     let generate: GenerateController
+    let queue: QueueStore
+    let transfers: TransferStore
+    let models: ModelStore
+    let catalog: CatalogStore
     let nearby: NearbyBrowser
     let claimPairing: PairingClaimer
 
@@ -23,6 +27,10 @@ final class CompanionStores {
         library = LibraryStore(hosts: hosts)
         thumbnails = ThumbnailLoader(hosts: hosts)
         generate = GenerateController(hosts: hosts)
+        queue = QueueStore(hosts: hosts)
+        transfers = TransferStore(hosts: hosts, queue: queue)
+        models = ModelStore(hosts: hosts, queue: queue)
+        catalog = CatalogStore(hosts: hosts)
         nearby = NearbyBrowser()
     }
 
@@ -30,12 +38,16 @@ final class CompanionStores {
     func becameActive() async {
         await hosts.refreshAll()
         hosts.startWatching()
-        await library.reload()
+        async let library: Void = library.reload()
+        async let queue: Void = queue.reload()
+        async let models: Void = models.resume()
+        _ = await (library, queue, models)
     }
 
     func enteredBackground() {
         generate.saveDraft()
         hosts.stopWatching()
+        models.stop()
         nearby.stop()
     }
 }
@@ -48,6 +60,10 @@ extension View {
             .environment(stores.library)
             .environment(stores.thumbnails)
             .environment(stores.generate)
+            .environment(stores.queue)
+            .environment(stores.transfers)
+            .environment(stores.models)
+            .environment(stores.catalog)
             .environment(stores.nearby)
     }
 }

@@ -4,7 +4,10 @@
   Mold Studio: pair with a machine by scanning the Mac's Pair a Phone… code
   (or by address or Bonjour), browse every machine's prints as one Library
   with favourites, tags, collections and Recently Deleted, and generate
-  stills, clips and 3-D objects with each model's own controls. Every screen
+  stills, clips and 3-D objects with each model's own controls. The Queue
+  shows every machine's work with held jobs explained in words (Pull and
+  Retry, Move to… another machine), and Models installs, loads and removes
+  models per machine, with a licence sheet before any gated download. Every screen
   is audited from the smallest text size to the largest accessibility size,
   in light and dark, on iPhone and iPad
   ([#1775](https://github.com/utensils/mold/pull/1775)).

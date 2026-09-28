@@ -54,3 +54,16 @@ public struct KeptComponent: Codable, Hashable, Sendable, Identifiable {
     public let usedBy: [String]
     public var id: String { component }
 }
+
+public extension ModelRemoval {
+    /// "Removed FLUX.1 Dev Q4 and freed 6.8 GB. 2 shared files kept for
+    /// sdxl-base." -- the one sentence both apps show after a delete.
+    func summary(headline: String) -> String {
+        let freed = Int64(freedBytes).formatted(.byteCount(style: .file))
+        let base = "Removed \(headline) and freed \(freed)."
+        guard !kept.isEmpty else { return base }
+        let names = Set(kept.flatMap(\.usedBy)).sorted().joined(separator: ", ")
+        let noun = kept.count == 1 ? "file" : "files"
+        return "\(base) \(kept.count) shared \(noun) kept for \(names)."
+    }
+}

@@ -81,6 +81,13 @@ final class HostStore {
 
     var upHosts: [MoldHost] { hosts.filter(isUp) }
 
+    /// The run of the server this machine last answered as: what a retry or
+    /// a transfer must name. `nil` until it answers.
+    func instanceID(of id: MoldHost.ID) -> String? {
+        guard let host = host(id), case let .up(status) = reachability(of: host) else { return nil }
+        return status.instanceId
+    }
+
     func persist() throws {
         try list.save(HostList(
             entries: hosts.map { .init(id: $0.id, name: $0.name, baseURL: $0.baseURL) },

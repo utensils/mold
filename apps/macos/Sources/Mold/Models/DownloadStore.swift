@@ -9,14 +9,8 @@ import MoldClient
 @MainActor
 @Observable
 final class DownloadStore {
-    struct Progress: Hashable {
-        var model: String
-        var fraction: Double?
-        var bytesDone: Int64?
-        var bytesTotal: Int64?
-        var currentFile: String?
-        var failed: String?
-    }
+    /// The shared row type; `DownloadBoard` (MoldClient) is the reducer.
+    typealias Progress = DownloadProgress
 
     /// A machine won't fetch a gated model until somebody accepts its
     /// terms. Held rather than reported through the usual funnel, because it
@@ -80,14 +74,7 @@ final class DownloadStore {
     /// `snapshot` frame. Keyed by job id either way, so a `mold pull` at a
     /// terminal lands on the same row a later frame updates.
     func adopt(_ listing: DownloadsListing, on host: MoldHost.ID) {
-        var forHost: [String: Progress] = [:]
-        for job in listing.activeJobs + listing.queued {
-            forHost[job.id] = Progress(
-                model: job.model,
-                fraction: job.bytesTotal > 0 ? Double(job.bytesDone) / Double(job.bytesTotal) : nil,
-                bytesDone: job.bytesDone, bytesTotal: job.bytesTotal,
-                currentFile: job.currentFile, failed: job.error)
-        }
+        let forHost = DownloadBoard.adopt(listing)
         active[host] = forHost.isEmpty ? nil : forHost
     }
 

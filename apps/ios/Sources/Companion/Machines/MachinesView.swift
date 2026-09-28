@@ -32,6 +32,10 @@ struct MachinesView: View {
             }
         }
         .navigationDestination(for: MoldHost.ID.self) { MachineDetailView(id: $0) }
+        .navigationDestination(for: ModelsRoute.self) { route in
+            ModelsView(fixedHost: route.host).navigationTitle("Models")
+        }
+        .navigationDestination(for: QueueRoute.self) { _ in QueueView().navigationTitle("Queue") }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { router.showsAddMachine = true } label: {
@@ -56,6 +60,19 @@ struct MachinesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 FailureBanner()
+                if let preferred = hosts.preferredHost {
+                    // On iPhone Models has no tab: it belongs to a machine.
+                    NavigationLink(value: ModelsRoute(host: preferred.id)) {
+                        Label {
+                            AdaptiveRow { Text("Models") } value: { Text(preferred.name) }
+                        } icon: { Image(systemName: Destination.models.symbol) }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.background.secondary, in: .rect(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: min(cardWidth, 600)), spacing: 16)], spacing: 16) {
                     ForEach(hosts.hosts) { host in
                         NavigationLink(value: host.id) { MachineCard(host: host) }
@@ -102,3 +119,7 @@ struct NearbySection: View {
         }
     }
 }
+
+/// Machines ▸ a machine ▸ Models (or Queue), as a navigation value.
+struct ModelsRoute: Hashable { let host: MoldHost.ID }
+struct QueueRoute: Hashable { let host: MoldHost.ID }
