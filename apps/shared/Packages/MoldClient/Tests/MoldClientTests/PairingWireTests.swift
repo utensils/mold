@@ -30,14 +30,35 @@ import Testing
     #expect(clients.clients[0].clientKind == "mobile")
 }
 
-/// `pairing_available` is `true` even on a keyless host (`routes.rs:9678-9685`),
-/// so it is NOT the gate -- the gate trap this app must not fall into.
-@Test func aKeylessMachineHasNothingToPair() throws {
+/// Keyless hosts can issue address-only codes, but hold no paired client keys.
+@Test func aKeylessMachineHasNoManagedPairedClients() throws {
     let clients = try MoldJSON.decoder.decode(
         PairedClients.self, from: RepoFixtures.fixture("pairing-clients-workstation.json"))
     #expect(!clients.authRequired)
     #expect(clients.pairingAvailable)
-    #expect(!clients.canPair)
+    #expect(!clients.canManagePairedClients)
+}
+
+/// A keyed code with no token cannot be redeemed.
+@Test func aKeyedCodeWithNoTokenIsNoCodeAtAll() {
+    let session = PairingSession(
+        token: nil, expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
+    let payload = MobilePairingPayload(
+        session: session, baseURL: URL(string: "http://127.0.0.1:7680")!, name: "This Mac")
+    #expect(payload == nil)
+}
+
+/// A keyless host can still pair a phone by address and identity.
+@Test func aKeylessCodeCarriesNoToken() throws {
+    let session = PairingSession(
+        token: nil, expiresAt: nil, authRequired: false, instanceId: "inst-1", hostname: nil)
+    let payload = try #require(MobilePairingPayload(
+        session: session, baseURL: URL(string: "http://box:7680")!, name: "Box"))
+    let url = try #require(payload.url)
+    #expect(payload.token == nil)
+    #expect(url.absoluteString.contains("base_url=http%3A%2F%2Fbox%3A7680"))
+    #expect(!url.absoluteString.contains("token="))
+    #expect(!url.absoluteString.contains("expires_at="))
 }
 
 /// One hand-derived vector against `pairing.ts:47-56`: same field order,
@@ -64,8 +85,9 @@ import Testing
 /// A `nil` token or `expires_at` is simply OMITTED, not sent as an empty or
 /// null parameter -- `pairing.ts:50-53`'s own `if` guards.
 @Test func aPairingUrlOmitsAnAbsentTokenAndExpiry() throws {
-    // The server's keyed session normally issues both together, but the
-    // payload serializer omits an absent expiry independently.
+    // Only reachable with authRequired == false, since a keyed session
+    // always issues both together -- but the payload type itself makes no
+    // such promise, so the omission is tested independently of that.
     let session = PairingSession(
         token: "tok", expiresAt: nil, authRequired: true, instanceId: "inst-1", hostname: nil)
     let payload = try #require(

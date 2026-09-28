@@ -39,9 +39,9 @@ public extension HTTPBackend {
         try await post("/api/pairing/sessions", body: EmptyBody())
     }
 
-    /// `GET /api/pairing/clients`. `pairingAvailable` is `true` even on a
-    /// keyless host (`routes.rs:9678-9685`) -- read `PairedClients.canPair`,
-    /// never this alone.
+    /// `GET /api/pairing/clients`. A keyless host can issue an address-only
+    /// pairing code, but has no client keys to list or revoke. Use
+    /// `PairedClients.canManagePairedClients` for the latter capability.
     func pairedClients() async throws -> PairedClients { try await get("/api/pairing/clients") }
 
     /// `DELETE /api/pairing/clients/:id`, 204. `escaped(id)` -- the same rule

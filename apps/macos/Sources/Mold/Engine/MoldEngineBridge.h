@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 int32_t mold_engine_bootstrap(const char *mold_home, const char *api_key, const char *log_dir);
-uint16_t mold_engine_alloc_port(void);
+uint16_t mold_engine_configured_port(void);
 int32_t mold_engine_start(const char *bind, uint16_t port, const char *models_dir);
 bool mold_engine_is_alive(void);
 bool mold_engine_join(uint64_t timeout_ms);

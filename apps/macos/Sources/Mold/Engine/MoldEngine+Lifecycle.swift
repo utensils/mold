@@ -90,11 +90,11 @@ extension MoldEngine {
         // On the actor: one open(2) and one non-blocking flock on a local
         // path, which is microseconds and cannot wait on a lock.
         advisory = EngineInterlock.advisory(for: EngineInterlock.homeWriter())
-        let port = await Task.detached { mold_engine_alloc_port() }.value
+        let port = await Task.detached { mold_engine_configured_port() }.value
         guard port != 0 else {
             transition(to: .failed(MoldEngine.Failure(
-                reason: "The configured loopback port is unavailable. Stop the other service "
-                    + "or change server_port in Mold's configuration, then try again.",
+                reason: "This Mac's configured port is unavailable. Set a free port with "
+                    + "mold config set server_port <port>, then try again.",
                 relaunchNeeded: false)))
             return
         }
@@ -112,6 +112,13 @@ extension MoldEngine {
         // there had every store polling a closed port (review 05-M3).
         switch await EngineProbe.answer(port: port, apiKey: launch.apiKey) {
         case .answered:
+            guard mold_engine_is_alive() else {
+                transition(to: .failed(MoldEngine.Failure(
+                    reason: "The engine stopped before it could answer on the configured port. "
+                        + "Mold's log in ~/Library/Logs/Mold has the detail.",
+                    relaunchNeeded: true)))
+                return
+            }
             transition(to: .running(port: port))
             if let host { onEngineReady?(host) }
             // After the engine is listening, so `run_server`'s own tokio
