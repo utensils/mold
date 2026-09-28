@@ -33,7 +33,12 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertLessThanOrEqual(composer.frame.height, app.frame.height * 0.55)
         capture(app)
-        app.buttons["Machines"].firstMatch.tap()
+        let machines = app.buttons["Machines"].firstMatch
+        if machines.waitForExistence(timeout: 2), machines.isHittable {
+            machines.tap()
+        } else {
+            app.typeKey("5", modifierFlags: .command)
+        }
         let card = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'machine-card-'")).firstMatch
         // At AX sizes iPadOS pages its floating tabs. The Go shortcut
         // reaches the destination even when that tab is outside the page.
