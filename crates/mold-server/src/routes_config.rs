@@ -4,8 +4,8 @@
 //! and DB-vs-TOML surface routing via `mold_core::config_keys`, and its
 //! DB persistence via `mold_db::config_sync`. Reads come from the server's
 //! in-memory `Config`; writes mutate it in place and persist to the owning
-//! surface. Rows marked `restart_required` (currently `scheduler.*`) are
-//! consumed by the next coordinator start rather than hot-reconfigured.
+//! surface. Rows marked `restart_required` (`scheduler.*` and `server_port`)
+//! take effect on the next server start rather than hot-reconfiguring.
 
 use axum::{
     extract::{Path, State},
@@ -30,6 +30,10 @@ const FILE_BACKED_KEY: &str = "FILE_BACKED_KEY";
 /// 409 error code for bootstrap namespaces that a live server cannot switch
 /// without splitting long-lived workers from HTTP observers.
 const RESTART_REQUIRED: &str = "RESTART_REQUIRED";
+
+fn needs_restart(key: &str) -> bool {
+    key == "server_port" || key.starts_with("scheduler.")
+}
 
 fn settings_db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
     state.metadata_db.as_ref().as_ref().ok_or_else(|| {
@@ -60,7 +64,7 @@ fn entry_for(key: &str, value: serde_json::Value) -> ConfigEntry {
         value,
         source,
         env_var,
-        restart_required: key.starts_with("scheduler."),
+        restart_required: needs_restart(key),
     }
 }
 
@@ -235,7 +239,7 @@ pub async fn put_config_key(
     let value = keys::get_value(&cfg, &key)
         .map(|v| v.to_json())
         .unwrap_or(serde_json::Value::Null);
-    let restart_required = key.starts_with("scheduler.");
+    let restart_required = needs_restart(&key);
     Ok(Json(ConfigEntry {
         key,
         value,
@@ -311,7 +315,7 @@ pub async fn delete_config_key(
         Some((var, _)) => ("env".to_string(), Some(var.to_string())),
         None => ("default".to_string(), None),
     };
-    let restart_required = key.starts_with("scheduler.");
+    let restart_required = needs_restart(&key);
     Ok(Json(ConfigEntry {
         key,
         value: fallback

@@ -109,7 +109,10 @@ one-shot `config.toml` → DB migration on a home that has never had one (it
 renames `config.toml` to `config.toml.migrated`). It is idempotent and guarded
 by a DB sentinel, so it happens once in the life of a home rather than once
 per launch; it is still a write to a home you may be sharing with Mold Desktop
-or `mold serve`. `.running` is published only
+or `mold serve`. On start, the embedded engine binds the `server_port` selected
+in Settings ▸ Performance (or `mold config set server_port <port>`), which takes
+effect after a relaunch. If that port is occupied, startup reports the conflict
+instead of choosing another port. `.running` is published only
 once `GET /api/status` answers on the chosen port — on a cold home with a big
 gallery, "started" and "listening" are a long way apart — and while it runs,
 its liveness is polled, so an engine that dies leaves the machine list instead
@@ -317,7 +320,7 @@ mints once and keeps in the same owner-only `secrets.json` as every machine's
 key (`local-engine-api-key`; `MOLD_API_KEY` in the environment overrides it),
 and "This Mac" presents that key back on every call. Loopback is not a
 boundary a browser respects: with no key, any page you opened could scan the
-ephemeral port range and then read the gallery, delete prints, queue pulls and
+configured port and then read the gallery, delete prints, queue pulls and
 `POST /api/shutdown`. For the same reason the engine is started with
 `MOLD_CORS_ORIGIN` set to a value that is not a serialized origin at all, so
 no page is ever handed a usable `Access-Control-Allow-Origin` — without it the
@@ -397,8 +400,8 @@ true, and Advanced renders whatever it is handed from the value's JSON type --
 which is what makes a key newer than this build still appear and still work.
 Two more traps in the same room: `runpod.api_key` and `lambda.api_key` read
 back as the literal string `"<set>"`, so a field that writes back what it read
-sets the key to `<set>`; and `restart_required` is true for exactly the three
-`scheduler.*` keys, computed by string prefix, which means a key that DOES
+sets the key to `<set>`; and `restart_required` is true for `server_port` and
+the three `scheduler.*` keys, which means a key that DOES
 need a restart (every `logging.*` one) reports false and the app does not
 invent a second opinion. And a `DELETE /api/config/:key` answers
 `source: "default"`, but the listing reports a key's storage SURFACE, so a
