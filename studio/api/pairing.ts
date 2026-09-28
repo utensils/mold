@@ -44,16 +44,47 @@ export interface MobilePairingPayload {
   name: string;
 }
 
+/**
+ * Where a pairing code points: a universal link the Mold Studio Companion
+ * claims (utensils.io/.well-known/apple-app-site-association), and on a phone
+ * without it, a page that says what to install. The payload rides in the
+ * fragment, which a browser never sends to utensils.io.
+ */
+export const MOBILE_PAIRING_LINK = "https://utensils.io/mold/pair";
+
 export function mobilePairingUrl(payload: MobilePairingPayload): string {
-  const url = new URL("mold://pair");
-  url.searchParams.set("version", String(payload.version));
-  url.searchParams.set("base_url", payload.base_url);
-  if (payload.token !== null) url.searchParams.set("token", payload.token);
+  const fields = new URLSearchParams();
+  fields.set("version", String(payload.version));
+  fields.set("base_url", payload.base_url);
+  if (payload.token !== null) fields.set("token", payload.token);
   if (payload.expires_at !== null)
-    url.searchParams.set("expires_at", String(payload.expires_at));
-  url.searchParams.set("instance_id", payload.instance_id);
-  url.searchParams.set("name", payload.name);
-  return url.toString();
+    fields.set("expires_at", String(payload.expires_at));
+  fields.set("instance_id", payload.instance_id);
+  fields.set("name", payload.name);
+  return `${MOBILE_PAIRING_LINK}#${fields.toString()}`;
+}
+
+/**
+ * The form-encoded fields of a pairing link: the fragment of
+ * `https://utensils.io/mold/pair#…`, or the query of the older
+ * `mold://pair?…` (which the Tauri app still opens). `null` for anything else.
+ */
+function pairingLinkFields(url: URL): URLSearchParams | null {
+  if (url.username || url.password) return null;
+  if (url.protocol === "mold:") {
+    return url.hostname === "pair" && !url.hash ? url.searchParams : null;
+  }
+  const link = new URL(MOBILE_PAIRING_LINK);
+  if (
+    url.protocol === link.protocol &&
+    url.hostname === link.hostname &&
+    !url.port &&
+    url.pathname.replace(/\/$/, "") === link.pathname &&
+    !url.search
+  ) {
+    return new URLSearchParams(url.hash.slice(1));
+  }
+  return null;
 }
 
 export function createPairingSession(
@@ -118,25 +149,17 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
     value = JSON.parse(raw);
   } catch {
     try {
-      const url = new URL(raw);
-      if (
-        url.protocol !== "mold:" ||
-        url.hostname !== "pair" ||
-        url.username ||
-        url.password ||
-        url.hash
-      ) {
-        throw new Error();
-      }
-      const expiresAt = url.searchParams.get("expires_at");
+      const fields = pairingLinkFields(new URL(raw.trim()));
+      if (!fields) throw new Error();
+      const expiresAt = fields.get("expires_at");
       value = {
         type: "mold.mobile-pairing",
-        version: Number(url.searchParams.get("version")),
-        base_url: url.searchParams.get("base_url"),
-        token: url.searchParams.get("token"),
+        version: Number(fields.get("version")),
+        base_url: fields.get("base_url"),
+        token: fields.get("token"),
         expires_at: expiresAt === null ? null : Number(expiresAt),
-        instance_id: url.searchParams.get("instance_id"),
-        name: url.searchParams.get("name"),
+        instance_id: fields.get("instance_id"),
+        name: fields.get("name"),
       };
     } catch {
       throw new Error("That QR code is not a Mold pairing code.");

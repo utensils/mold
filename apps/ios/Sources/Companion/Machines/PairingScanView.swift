@@ -3,9 +3,9 @@ import SwiftUI
 import VisionKit
 
 /// Scan a Pairing Code: the QR from the Mac's Pair a Phone…, redeemed in
-/// place. The in-app scanner is the only door -- this app never registers
-/// `mold://`, which the Tauri iPhone app owns -- so a "Paste a Pairing Link"
-/// row covers the copied-link case.
+/// place. The Camera app opens the same code's universal link
+/// (`PairingLinkSheet`); this app never registers `mold://`, which the Tauri
+/// iPhone app owns, so older `mold://pair` codes are read here or pasted.
 struct PairingScanView: View {
     @Environment(HostStore.self) private var hosts
     @Environment(CompanionStores.self) private var stores
@@ -42,7 +42,7 @@ struct PairingScanView: View {
                 }
             }
             Section("Paste a Pairing Link") {
-                TextField("mold://pair?…", text: $pasted, axis: .vertical)
+                TextField("https://utensils.io/mold/pair#…", text: $pasted, axis: .vertical)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
@@ -80,12 +80,8 @@ struct PairingScanView: View {
             do {
                 try await hosts.pair(payload, claim: stores.claimPairing)
                 done()
-            } catch let error as HostEditError {
-                phase = .failed(error.errorDescription ?? "")
-            } catch let error as PairingClaimError {
-                phase = .failed(error.errorDescription ?? "")
             } catch {
-                phase = .failed("\(payload.name) couldn't pair: \(error.failureSentence)")
+                phase = .failed(PairingFailure.sentence(error, name: payload.name))
             }
         }
     }

@@ -2,7 +2,8 @@ import MoldClient
 import SwiftUI
 
 /// Everything that arrives from outside the window and says where to go:
-/// `moldstudio://` links (widgets, the Live Activity), a tapped notification,
+/// `moldstudio://` links (widgets, the Live Activity), a pairing code's
+/// universal link (confirmed before it is claimed), a tapped notification,
 /// and Handoff from Mold Studio on the Mac. A print opens full screen over
 /// whatever is up.
 struct RootLinks: ViewModifier {
@@ -14,7 +15,10 @@ struct RootLinks: ViewModifier {
     func body(content: Content) -> some View {
         content
             .fullScreenCover(item: $router.openedPrint) { opened in LinkedPrint(id: opened.id) }
-            .onOpenURL { url in DeepLink(url).map(router.open) }
+            .sheet(item: $router.pairingLink) { link in PairingLinkSheet(link: link) }
+            // Universal links arrive here too (SwiftUI delivers a browsing
+            // activity as its URL).
+            .onOpenURL { url in router.open(url: url) }
             .onContinueUserActivity(PrintHandoff.activityType) { activity in
                 let info = activity.userInfo ?? [:]
                 Task {

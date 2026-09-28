@@ -2,7 +2,8 @@ import Foundation
 import MoldClient
 import UIKit
 
-/// Redeems a scanned or pasted pairing code (`mold://pair?...`).
+/// Redeems a scanned, pasted or opened pairing code
+/// (`https://utensils.io/mold/pair#...`, or the older `mold://pair?...`).
 typealias PairingClaimer = (MobilePairingPayload, _ clientName: String, _ clientKind: String) async throws -> PairingClaim
 
 extension HostStore {
@@ -46,5 +47,17 @@ struct PairingClient {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
         return PairingClient(name: isPad ? "Mold Studio on iPad" : "Mold Studio on iPhone",
                              kind: isPad ? "ipad" : "iphone")
+    }
+}
+
+/// Why pairing failed, in one sentence -- the scanner and an opened link say
+/// it the same way.
+enum PairingFailure {
+    static func sentence(_ error: any Error, name: String) -> String {
+        switch error {
+        case let error as HostEditError: error.errorDescription ?? ""
+        case let error as PairingClaimError: error.errorDescription ?? ""
+        default: "\(name) couldn't pair: \(error.failureSentence)"
+        }
     }
 }

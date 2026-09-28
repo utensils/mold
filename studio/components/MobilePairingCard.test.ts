@@ -56,9 +56,14 @@ describe("MobilePairingCard", () => {
     expect(headers.get("x-api-key")).toBe("durable-secret");
     expect(qrPayloads[0]).not.toContain("durable-secret");
     const qrUrl = new URL(qrPayloads[0]!);
-    expect(qrUrl.protocol).toBe("mold:");
-    expect(qrUrl.host).toBe("pair");
-    expect(Object.fromEntries(qrUrl.searchParams)).toMatchObject({
+    expect(`${qrUrl.origin}${qrUrl.pathname}`).toBe(
+      "https://utensils.io/mold/pair",
+    );
+    // The code rides in the fragment, which never reaches utensils.io.
+    expect(qrUrl.search).toBe("");
+    expect(
+      Object.fromEntries(new URLSearchParams(qrUrl.hash.slice(1))),
+    ).toMatchObject({
       base_url: "http://studio-mac.local:7680",
       token: "one-time-token",
       instance_id: "server-id",

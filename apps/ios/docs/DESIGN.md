@@ -367,6 +367,10 @@ button.
 2. **Scan:** VisionKit `DataScannerViewController` (`.barcode([.qr])`).
    - Caption: "On your Mac, open Machines ▸ your machine ▸ Pair a Phone…"
    - A "Paste a pairing link" row sits below it.
+   - The code is a universal link (`https://utensils.io/mold/pair#…`), so the
+     Camera app opens Mold Studio too. An opened link shows **Pair This
+     Phone?** with the machine's name and address; nothing is claimed until
+     **Pair**. An expired or unreadable code says so there.
    - The scanned text goes to `MobilePairingPayload.parse`. The app then claims
      the pairing ticket, checks that `instance_id` matches, and writes the
      returned key straight to the Keychain.

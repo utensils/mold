@@ -27,7 +27,9 @@
 			<string>io.utensils.mold.companion</string>
 			<!-- moldstudio:// only. The Tauri iPhone app owns mold://, and two
 			     apps claiming one scheme is resolved arbitrarily by iOS. Pairing
-			     QRs (mold://pair) are read by the in-app scanner instead. -->
+			     QRs are https://utensils.io/mold/pair universal links
+			     (applinks:utensils.io); older mold://pair codes are read by the
+			     in-app scanner. -->
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>moldstudio</string>
