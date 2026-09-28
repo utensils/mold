@@ -19,8 +19,8 @@ struct CapsuleTests {
 
     @Test func clipKeepsItsPresentationRatio() {
         #expect(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 960, height: 960)) == 1)
-        #expect(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 1920, height: 1080)) == 16.0 / 9.0)
-        #expect(VideoPlaybackLayout.aspectRatio(for: .zero) == 16.0 / 9.0)
+        #expect(abs(VideoPlaybackLayout.aspectRatio(for: CGSize(width: 1920, height: 1080)) - 16.0 / 9.0) < 0.000_001)
+        #expect(abs(VideoPlaybackLayout.aspectRatio(for: .zero) - 16.0 / 9.0) < 0.000_001)
     }
 
     @Test func mutePreferenceSurvivesPlaybackInstances() throws {
