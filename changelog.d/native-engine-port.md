@@ -1,2 +1,3 @@
 - Fixed the native macOS app ignoring `server_port`: its engine now uses the configured loopback port (7680 by default) and reports a conflict instead of silently choosing a random port.
 - Fixed a macOS layout crash when switching from Models to Generate with the sidebar visible and an installed model selected.
+- Allow up to five minutes for a cold model load in the native macOS and iOS apps, so large checkpoints can finish warming before the app reports a connection timeout.

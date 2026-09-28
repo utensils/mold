@@ -176,8 +176,8 @@ unsafe fn bootstrap(
 }
 
 /// Probes the configured loopback port and returns it, or 0 on failure.
-/// `server_port` has the same config/DB/env precedence as the engine and
-/// defaults to 7680. A conflict is a startup failure, never a random port.
+/// `server_port` comes from the engine's bootstrap configuration and defaults
+/// to 7680. A conflict is a startup failure, never a random port.
 ///
 /// The probe is dropped before the engine rebinds, so there is a window where
 /// another process could take it. mold's own desktop app has the same race for

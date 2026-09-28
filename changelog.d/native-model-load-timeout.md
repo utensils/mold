@@ -1,1 +1,0 @@
-- **Native model loading.** Allow up to five minutes for a cold model load in the macOS and iOS apps, so large checkpoints can finish warming before the app reports a connection timeout.
