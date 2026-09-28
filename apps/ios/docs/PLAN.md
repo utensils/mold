@@ -457,7 +457,7 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 |---|---|---|
 | D | DESIGN.md plus the mockup artifact (16 frames); review with James | Artifact renders in light and dark, iPhone and iPad frames |
 | M0 ✅ | Move packages to `apps/shared`; iOS 26 platform; `#if os(macOS)` on `MoldHome*` only (`SecretStore.applicationSupport` made portable instead, because `DraftStore` needs it on the phone); `CredentialStore` protocol keyed by host UUID, with `SecretStore` conforming; MoldStyle `hairline` branch; `lint-layers` also bans UIKit | Mac `make lint test` green; MoldClient (996 tests) and MoldStyle green on the iOS 26.5 sim. Two wall-clock `RefusalBodyTests` bounds widened: they measured parallel-run starvation on the sim |
-| M1 | `apps/ios` skeleton: 5 targets (placeholder extensions), entitlements, plist, sidebarAdaptable shell with empty states, Makefile, devshell `companion-*` commands, `.github/workflows/ios-native.yml` (`macos-26`), `.claude/rules/ios-native.md`; `apps/shared/scripts/swift-lint.sh` shared by both Makefiles (moved from M0: it needs its second consumer) | CI green; sim launch; `performAccessibilityAudit` on the shell at xSmall and AX5 |
+| M1 ✅ | `apps/ios` skeleton: 5 targets (app, WidgetKit, Share, unit tests, UI tests), entitlements, Info.plist, `.sidebarAdaptable` shell (Models only at regular width: iPhone ignores `defaultVisibility` and pushed Machines into "More"), `EmptyState` + `RowAxis`, Settings sheet, Go menu ⌘1–⌘5, Makefile, devshell `companion-*`, `ios-native.yml`, `.claude/rules/ios-native.md`, `apps/shared/scripts/swift-lint.sh` (+ its own test) used by both Makefiles | 7 unit tests; `make packages-test` (997 + 11 on iOS); `make uitest` audit clean at xSmall/Large/AX5 in light and dark after three real fixes (AccentColor, ProminentFill, SecondaryText) |
 | M2 | Machines: `KeychainCredentialStore`, `MoldClientTesting` public-API `FakeBackend` (moved from M0: built with its first store), `HostStore`, `ConnectionSupervisor`, manual add, Bonjour, fleet cards, detail | FakeBackend store tests; hosted Keychain tests; UAT against a real `mold serve` and hal9000 |
 | M3 | Pairing: parse, claim, instance check, DataScanner, paste; `testflight-ios-native.yml` (second App Store Connect record, never internal-only) | Parser fixtures match `pairing.ts`; scan the Mac app's Pair a Phone QR; build appears in TestFlight |
 | M4 | Library read: merge, thumbnail pipeline, viewer, AVPlayer, MoldMesh extraction plus the iOS view | Cache-cap tests; media-token tests; Mac mesh tests green; device UAT |
@@ -473,11 +473,7 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 
 Each user-visible PR gets a `changelog.d/companion-*.md` fragment. M0, M1 and the CI-only PRs use `skip-changelog`. PRs are serialized: one open at a time, rebased right before merge.
 
-**Where James's input shapes the code** (learning-mode contribution points, set up at the matching milestone):
-
-- the AX-size layout breakpoint helper (M1)
-- the Library tile-size ladder and column rule (M4)
-- the progress-sentence wording function (M6)
+All milestones are implemented in full; nothing is deferred (goal set 2026-09-27).
 
 ## Critical files
 

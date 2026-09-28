@@ -173,46 +173,22 @@ lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	  || { echo "SSE VIOLATION: use bytes.moldLines()"; exit 1; }
 	@echo "  layers ok"
 
-lint-color: ## No literal colors -- the system owns the palette
-	@! grep -rnE 'Color\((red|hue|white):|Color\(hex' Sources $(PACKAGES)/*/Sources --include='*.swift' \
-	  || { echo "COLOR VIOLATION: use a semantic color or a material"; exit 1; }
-	@echo "  color ok"
-
-lint-size: ## Advisory: flag files over 150 lines
-	@find Sources $(PACKAGES)/*/Sources -name '*.swift' -exec wc -l {} + \
-	  | awk '$$1 > 150 && $$2 != "total" { print "  large: " $$2 " (" $$1 " lines)" }'
-
-# A type's size is the sum of Type.swift and every Type+Concern.swift beside
-# it. Splitting a 400-line type into three files does not make it smaller, and
-# `lint-size` alone cannot see that.
+# The lints both native apps share live in one script (apps/shared/scripts);
+# this Makefile keeps only the rules that are the Mac's own (lint-layers).
+SWIFT_LINT := ../shared/scripts/swift-lint.sh
 TYPE_MAX ?= 600
 
+lint-color: ## No literal colors -- the system owns the palette
+	@$(SWIFT_LINT) color Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
+
+lint-size: ## Advisory: flag files over 150 lines
+	@$(SWIFT_LINT) size Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
+
 lint-type-size: ## Advisory: flag a type whose files together exceed $(TYPE_MAX) lines
-	@find Sources $(PACKAGES)/*/Sources -name '*.swift' -exec wc -l {} + \
-	  | awk -v max=$(TYPE_MAX) '$$2 != "total" { \
-	      name = $$2; sub(/.*\//, "", name); sub(/\.swift$$/, "", name); sub(/\+.*$$/, "", name); \
-	      total[name] += $$1 } \
-	    END { for (t in total) if (total[t] > max) \
-	      printf "  large type: %s (%d lines across its files)\n", t, total[t] }' \
-	  | sort
+	@TYPE_MAX=$(TYPE_MAX) $(SWIFT_LINT) type-size Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
 
 lint-a11y: ## Every file with a systemName image must name or opt out of it
-	@# A per-site grep cannot be honest about which glyph carries a label --
-	@# a same-line rule is mostly false positives, and a scan window misses
-	@# a sibling @ViewBuilder or falls for a NEIGHBOUR's `.help(` (design S7,
-	@# M7). This is a per-FILE floor: a file with a symbol in it must also
-	@# carry a real label somewhere, or say by name why the glyph needs
-	@# none. It cannot see whether the modifier actually reaches the right
-	@# view -- that is still a human call, not this rule's.
-	@fail=0; \
-	for f in $$(grep -rl 'Image(systemName:' Sources/Mold --include='*.swift'); do \
-	  if ! grep -qE 'accessibilityLabel|\.help\(|Label\(|Label \{|accessibilityElement|// a11y:' "$$f"; then \
-	    echo "  no VoiceOver label and no // a11y: opt-out: $$f"; \
-	    fail=1; \
-	  fi; \
-	done; \
-	if [ "$$fail" = 1 ]; then exit 1; fi
-	@echo "  a11y ok"
+	@$(SWIFT_LINT) a11y Sources/Mold
 
 # The workspace version is shared with the CLI and other interfaces.
 # `gen` writes it into the generated Xcode settings as well as the build.
