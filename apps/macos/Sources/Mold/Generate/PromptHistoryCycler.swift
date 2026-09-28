@@ -1,5 +1,14 @@
 import AppKit
 import Foundation
+import MoldClient
+
+enum PromptHistoryRecall {
+    static func apply(_ prompt: String, to draft: inout RenderDraft) {
+        draft.prompt = prompt
+        draft.originalPrompt = nil
+        draft.promptTransform = nil
+    }
+}
 
 /// Shell-style history navigation. Entries arrive newest first from the host.
 struct PromptHistoryCycler {

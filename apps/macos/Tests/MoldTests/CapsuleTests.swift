@@ -44,6 +44,19 @@ struct CapsuleTests {
         #expect(cycler.next(from: "draft") == nil)
     }
 
+    @Test func recalledPromptDoesNotCarryPriorTransformProvenance() {
+        var draft = RenderDraft()
+        draft.prompt = "expanded words"
+        draft.originalPrompt = "short words"
+        draft.promptTransform = PromptTransformProvenance(
+            operation: .expand, rootPrompt: "short words", sourcePrompt: "short words",
+            task: .textToImage)
+        PromptHistoryRecall.apply("saved prompt", to: &draft)
+        #expect(draft.prompt == "saved prompt")
+        #expect(draft.originalPrompt == nil)
+        #expect(draft.promptTransform == nil)
+    }
+
     @Test func promptHistoryKeepsMultilineCaretMovement() {
         let text = "first\nsecond"
         #expect(PromptHistoryCaret.isOnFirstLine(text, selection: NSRange(location: 2, length: 0)))

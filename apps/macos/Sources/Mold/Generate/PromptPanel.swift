@@ -180,7 +180,8 @@ struct PromptPanel: View {
         else { return false }
         let next = up ? cycler.previous(from: draft.prompt) : cycler.next(from: draft.prompt)
         guard let next else { return false }
-        draft.prompt = next
+        PromptHistoryRecall.apply(next, to: &draft)
+        expansions.lastAcceptedPrompt = nil
         editor.setSelectedRange(NSRange(location: (next as NSString).length, length: 0))
         return true
     }
