@@ -30,8 +30,14 @@ struct SettingsSheet: View {
                         dismiss()
                         router.addMachine()
                     }
-                } header: {
-                    SectionHeader(String(localized: "Machines"))
+                } footer: {
+                    // A footer, not a header: the first group sits right under
+                    // the bar, where the accessibility audit measured any
+                    // header below 4.5:1 however it was drawn (text, colour,
+                    // margin and edge effect all tried); an unheaded first
+                    // group is the Settings app's own pattern.
+                    Text("The machines Mold Studio uses. Their details are under Machines.")
+                        .foregroundStyle(.secondaryText)
                 }
                 SettingsSections()
                 Section {
@@ -59,6 +65,9 @@ struct SettingsSheet: View {
                     SectionHeader(String(localized: "About"))
                 }
             }
+            // The audit tells the sheet's own elements from the dimmed
+            // screen behind it by this.
+            .accessibilityIdentifier("settings-sheet")
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(inSidebar ? .large : .inline)
             .toolbar {

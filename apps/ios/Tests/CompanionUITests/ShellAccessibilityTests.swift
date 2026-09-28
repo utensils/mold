@@ -72,10 +72,7 @@ final class ShellAccessibilityTests: XCTestCase {
         XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         let sheetBar = app.navigationBars["Settings"].firstMatch
         settle(sheetBar)
-        // The sheet is the column under its navigation bar.
-        try check(app, "Settings at \(size)",
-                  region: CGRect(x: sheetBar.frame.minX, y: sheetBar.frame.minY,
-                                 width: sheetBar.frame.width, height: .greatestFiniteMagnitude),
+        try check(app, "Settings at \(size)", within: app.descendants(matching: .any)["settings-sheet"].firstMatch,
                   lazyForm: true)
         app.buttons["Done"].firstMatch.tap()
 
@@ -96,13 +93,13 @@ final class ShellAccessibilityTests: XCTestCase {
     /// is the dimmed screen behind -- unreachable, and measured by
     /// the auditor through the scrim.
     @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
-                                  lazyForm: Bool = false) throws {
+                                  within container: XCUIElement? = nil, lazyForm: Bool = false) throws {
         do {
-            try audit(app, place, region: region, lazyForm: lazyForm)
+            try audit(app, place, region: region, within: container, lazyForm: lazyForm)
         } catch where Self.isTimeout(error) {
             // "Audit failed to complete in time" is the harness, not a
             // finding: once more, and if it still cannot finish, say where.
-            do { try audit(app, place, region: region, lazyForm: lazyForm) } catch where Self.isTimeout(error) {
+            do { try audit(app, place, region: region, within: container, lazyForm: lazyForm) } catch where Self.isTimeout(error) {
                 XCTFail("\(place): the audit could not finish (\(error.localizedDescription))")
             }
         }
@@ -115,7 +112,7 @@ final class ShellAccessibilityTests: XCTestCase {
     }
 
     @MainActor private func audit(_ app: XCUIApplication, _ place: String, region: CGRect?,
-                                  lazyForm: Bool) throws {
+                                  within container: XCUIElement?, lazyForm: Bool) throws {
         try app.performAccessibilityAudit(for: [
             .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
         ]) { issue in
@@ -136,6 +133,13 @@ final class ShellAccessibilityTests: XCTestCase {
                issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
                 return true
             }
+            // A presented sheet: anything that is not its descendant is the
+            // screen behind (on iPhone the sheet spans the whole width, so
+            // the Machines title under it sits "inside" any column).
+            if issue.auditType == .contrast, let container, container.exists,
+               issue.element.map({ !self.isDescendant($0, of: container) }) ?? true {
+                return true
+            }
             // Settings' Form lays its cells out lazily, and at xSmall and
             // Large the auditor flags whichever rows it has not re-measured
             // as "partially unsupported" -- a different row as the layout or
@@ -143,8 +147,8 @@ final class ShellAccessibilityTests: XCTestCase {
             // out at 53 pt body text, nothing clipped) proves they scale.
             // Only that check, only in the sheet; clipping and contrast
             // there still fail.
-            if issue.auditType == .dynamicType, lazyForm, let region,
-               issue.element.map({ region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? false {
+            if issue.auditType == .dynamicType, lazyForm, let container, container.exists,
+               issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
                 return true
             }
             // The iPad sidebar's rows are UIKit's single-line cells, and at
@@ -195,6 +199,13 @@ final class ShellAccessibilityTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.75)
     }
 
+
+    @MainActor private func isDescendant(_ element: XCUIElement, of container: XCUIElement) -> Bool {
+        container.descendants(matching: element.elementType)
+            .matching(NSPredicate(format: "label == %@", element.label))
+            .allElementsBoundByIndex
+            .contains { $0.frame == element.frame }
+    }
 
     @MainActor private func isSystemBar(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
         let bars = app.navigationBars.allElementsBoundByIndex + app.tabBars.allElementsBoundByIndex
