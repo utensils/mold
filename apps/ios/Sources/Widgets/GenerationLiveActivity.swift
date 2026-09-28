@@ -40,7 +40,7 @@ struct GenerationLiveActivity: Widget {
     }
 
     private func link(_ context: ActivityViewContext<GenerationActivityAttributes>) -> URL {
-        DeepLink.queue(job: nil).url
+        context.attributes.link(for: context.state).url
     }
 }
 

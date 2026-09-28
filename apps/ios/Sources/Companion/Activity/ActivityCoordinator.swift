@@ -29,13 +29,13 @@ final class ActivityCoordinator {
         self.library = library
         saver = PrintActions(hosts: hosts)
         StopRenderIntent.handler = { [weak self] id in await self?.stop(clientBatchId: id) }
+        generate.settled = { [weak self] batch, run in self?.terminal(batch, run) }
         observe()
     }
 
     private func observe() {
         withObservationTracking {
             _ = generate.run
-            _ = generate.queued.count
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.changed()
@@ -48,10 +48,14 @@ final class ActivityCoordinator {
         Preference.isOn(Preference.liveActivities) && ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
+    /// Running updates, coalesced to about one a second. Where a batch ENDS
+    /// is `terminal`, told synchronously by the controller with that batch --
+    /// by the time an observation fires the next queued batch may already be
+    /// on screen.
     private func changed() {
-        if let batch = generate.activeBatch { current = batch }
         switch generate.run {
         case .running:
+            current = generate.activeBatch
             let now = Date.now
             if now.timeIntervalSince(lastPush) >= 1 { push() } else if pending == nil {
                 pending = Task { [weak self] in
@@ -60,23 +64,30 @@ final class ActivityCoordinator {
                     self?.push()
                 }
             }
-        case let .finished(outcome, host):
-            guard let batch = current else { return }
-            settle(batch, outcome: outcome, host: host)
-        case let .failed(reason):
-            guard let batch = current else { return }
-            end(batch.clientBatchId, with: finalState(.failed(reason), batch))
-            if UIApplication.shared.applicationState != .active {
-                notifier.post(.failed(reason), batch: batch, machine: machine(batch), print: nil)
-            }
-            current = nil
-        case .idle:
-            // Stopped from here: the activity goes at once.
-            if let batch = current { end(batch.clientBatchId, with: nil) }
-            current = nil
         case .submitting:
             // The first render is when asking makes sense; the system asks once.
             Task { await notifier.requestAuthorization() }
+        case .idle, .finished, .failed:
+            break
+        }
+    }
+
+    private func terminal(_ batch: ActiveBatch, _ run: RunState) {
+        pending?.cancel()
+        pending = nil
+        rate.reset()
+        if current?.clientBatchId == batch.clientBatchId { current = nil }
+        switch run {
+        case let .finished(outcome, host):
+            settle(batch, outcome: outcome, host: host)
+        case let .failed(reason):
+            end(batch.clientBatchId, with: finalState(run, batch))
+            if UIApplication.shared.applicationState != .active {
+                notifier.post(.failed(reason), batch: batch, machine: machine(batch), print: nil)
+            }
+        default:
+            // Stopped from here: the activity goes at once.
+            end(batch.clientBatchId, with: nil)
         }
     }
 
@@ -98,8 +109,6 @@ final class ActivityCoordinator {
             let names = outcome.results.compactMap(\.filename)
             Task { await autoSave(names, on: host) }
         }
-        current = nil
-        rate.reset()
     }
 
     /// The finished prints into Photos, once the Library lists them.

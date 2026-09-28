@@ -1,5 +1,6 @@
 import MoldClient
 import SwiftUI
+import UIKit
 
 /// The composition root: every store, built once, in dependency order, and
 /// injected through the environment (the Mac's `AppStores`). `HostStore` is
@@ -18,6 +19,10 @@ final class CompanionStores {
     let notifier: Notifier
     let activities: ActivityCoordinator
     let widgets: WidgetSnapshotWriter
+    /// Between `becameActive` and `enteredBackground`. Streams start only
+    /// while it holds: a return to the background mid-reconcile must not
+    /// leave them running behind the app's back.
+    @ObservationIgnored private(set) var isForeground = false
     let nearby: NearbyBrowser
     let claimPairing: PairingClaimer
 
@@ -38,23 +43,37 @@ final class CompanionStores {
         activities = ActivityCoordinator(generate: generate, hosts: hosts, notifier: notifier, library: library)
         widgets = WidgetSnapshotWriter(hosts: hosts, library: library, queue: queue, generate: generate,
                                        thumbnails: thumbnails)
-        notifier.favourite = { [library] id in
+        notifier.favourite = { [hosts, library] id in
+            // Pressed on a notification: the app may have just woken, with no
+            // machine checked yet. Ask it, apply, and wait for the machine
+            // to have it before iOS suspends the app again.
+            guard let host = hosts.host(id.host) else { return }
+            let task = UIApplication.shared.beginBackgroundTask(withName: "Favourite")
+            defer { UIApplication.shared.endBackgroundTask(task) }
+            await hosts.refresh(host)
             await library.reload(id.host)
-            guard let entry = library.pool.first(where: { $0.id == id }) else { return }
-            library.apply(.favorite(true), to: [entry])
+            guard let entry = library.pool.first(where: { $0.everyCopy.contains { $0.id == id } }) else { return }
+            library.apply(.favorite(true), to: [entry], undoable: false)
+            await library.flush()
         }
         nearby = NearbyBrowser()
     }
 
     /// The foreground: reconcile everything, then keep it live.
     func becameActive() async {
+        isForeground = true
         await hosts.refreshAll()
+        guard isForeground else { return }
         hosts.startWatching()
+        generate.resumeFollowing()
         async let library: Void = library.reload()
         async let queue: Void = queue.reload()
         async let models: Void = models.resume()
         _ = await (library, queue, models)
-        // What finished while the app was away, then what the widgets show.
+        // Gone again while those were answering: nothing stays streaming.
+        guard isForeground else { return pauseStreams() }
+        // What finished while the app was away (the batch on screen is
+        // `resumeFollowing`'s), then what the widgets show.
         for batch in generate.ledger.batches where batch.clientBatchId != generate.activeBatch?.clientBatchId {
             await reconcile(batch)
         }
@@ -62,13 +81,19 @@ final class CompanionStores {
     }
 
     func enteredBackground() {
+        isForeground = false
         generate.saveDraft()
-        hosts.stopWatching()
-        models.stop()
+        pauseStreams()
         activities.enteredBackground()
         scheduleRefresh()
         Task { await widgets.refresh() }
         nearby.stop()
+    }
+
+    private func pauseStreams() {
+        hosts.stopWatching()
+        models.stop()
+        generate.suspendFollowing()
     }
 }
 

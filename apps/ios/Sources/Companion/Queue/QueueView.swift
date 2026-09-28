@@ -81,7 +81,7 @@ struct QueueView: View {
         var after = groups
         let moving = after.remove(at: index)
         let landing = to > index ? to - 1 : to
-        let neighbour = landing > 0 ? after[landing - 1].rows.last?.id : nil
+        let neighbour = QueueStore.neighbour(above: landing, in: after)
         Task { await queue.moveGroup(moving.rows.map(\.id), after: neighbour, on: id) }
     }
 }

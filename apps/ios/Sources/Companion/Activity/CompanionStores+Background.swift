@@ -21,15 +21,38 @@ extension CompanionStores {
         for batch in generate.ledger.batches {
             await reconcile(batch)
         }
+        // The widgets show what the machines hold NOW, not what the app saw
+        // before it was suspended.
+        async let library: Void = library.reload()
+        async let queue: Void = queue.reload()
+        _ = await (library, queue)
         await widgets.refresh()
         scheduleRefresh()
     }
 
+    /// A render older than this is not waited for any more.
+    static let ledgerLimit: TimeInterval = 24 * 60 * 60
+
     /// One pending batch, as its machine reports it now.
     func reconcile(_ batch: ActiveBatch) async {
-        guard let host = hosts.host(batch.host), hosts.isUp(host) else { return }
+        // The machine was removed, or the render is a day old: stop asking.
+        guard let host = hosts.host(batch.host), Date.now.timeIntervalSince(batch.startedAt) < Self.ledgerLimit else {
+            activities.end(batch.clientBatchId, with: nil)
+            return generate.ledger.remove(batch.clientBatchId)
+        }
+        guard hosts.isUp(host) else { return }
         let client = hosts.backend(for: host)
-        guard let status = try? await client.batchStatus(id: batch.id) else { return }
+        let status: BatchStatus
+        do {
+            status = try await client.batchStatus(id: batch.id)
+        } catch {
+            // A machine that restarted has no record of it: nothing to wait for.
+            if TransferPlan.isNotFound(error) {
+                activities.end(batch.clientBatchId, with: nil)
+                generate.ledger.remove(batch.clientBatchId)
+            }
+            return
+        }
         let held = status.children.first { $0.state == .held }
         if let held, status.isAtRest {
             notifier.post(.held(BatchOutcome.heldSentence(held.error)), batch: batch, machine: host.name, print: nil)

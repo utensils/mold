@@ -6,6 +6,7 @@ import SwiftUI
 struct LinkedPrint: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(LibraryStore.self) private var library
+    @Environment(HostStore.self) private var hosts
     let id: PrintID
     @State private var looked = false
 
@@ -24,6 +25,9 @@ struct LinkedPrint: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
         }
         .task {
+            // Opened from a widget at launch: its machine may not have been
+            // asked yet, and an unasked machine lists nothing.
+            if let host = hosts.host(id.host), !hosts.isUp(host) { await hosts.refresh(host) }
             await library.reload(id.host)
             looked = true
         }

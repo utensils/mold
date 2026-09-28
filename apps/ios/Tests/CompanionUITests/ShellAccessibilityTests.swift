@@ -75,6 +75,16 @@ final class ShellAccessibilityTests: XCTestCase {
     /// sheet is the dimmed screen behind it -- unreachable, and measured by
     /// the auditor through the scrim.
     @MainActor private func check(_ app: XCUIApplication, _ place: String, sheet: XCUIElement? = nil) throws {
+        do {
+            try audit(app, place, sheet: sheet)
+        } catch let error as NSError where error.domain == "com.apple.xcode.xctest.accessibilityAudit" && error.code == -56 {
+            // "Audit failed to complete in time" is the harness, not a
+            // finding (the big iPad sidebar, on a loaded machine): once more.
+            try audit(app, place, sheet: sheet)
+        }
+    }
+
+    @MainActor private func audit(_ app: XCUIApplication, _ place: String, sheet: XCUIElement?) throws {
         try app.performAccessibilityAudit(for: [
             .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
         ]) { issue in

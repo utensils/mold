@@ -28,6 +28,10 @@ final class GenerateController {
     @ObservationIgnored let ledger: PendingLedger
     @ObservationIgnored let drafts: DraftStore
     @ObservationIgnored var runTask: Task<Void, Never>?
+    /// Told, synchronously, when a batch reaches its end here -- finished,
+    /// failed, or stopped (`.idle`) -- with THAT batch, before the next one
+    /// takes the canvas. The Live Activity and notifications hang off it.
+    @ObservationIgnored var settled: ((ActiveBatch, RunState) -> Void)?
     /// The model each kind last used, so switching kinds and back restores it.
     @ObservationIgnored var lastModel: [PrintKind: String] = [:]
 

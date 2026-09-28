@@ -100,6 +100,8 @@ extension GenerateController {
     }
 
     func follow(_ initial: BatchStatus, active: ActiveBatch, backend: any MoldBackend) async {
+        // Settled while nobody was watching (the app was away): say so now.
+        if BatchOutcome(settling: initial) != nil { return settle(initial, active: active) }
         run = .running(initial, nil)
         let preview = previewPoll(backend)
         defer { preview.cancel() }
@@ -116,6 +118,7 @@ extension GenerateController {
             guard !Task.isCancelled else { return }
             // A dropped stream does not mean the work stopped.
             run = .failed(String(localized: "Lost contact while rendering. The job may still be running — check the Queue."))
+            settled?(active, run)
         }
     }
 
@@ -140,6 +143,7 @@ extension GenerateController {
                 : .finished(outcome, host: active.host)
             ledger.remove(active.clientBatchId)
             activeBatch = nil
+            settled?(active, run)
             followNext()
         } else if case let .running(_, progress) = run {
             run = .running(status, progress)
@@ -161,6 +165,25 @@ extension GenerateController {
         }
     }
 
+    /// The app is going away: stop listening (iOS would freeze the socket
+    /// and it would look alive while saying nothing), but keep the batch --
+    /// the machine keeps rendering, and `resumeFollowing` picks it up.
+    func suspendFollowing() {
+        runTask?.cancel()
+        runTask = nil
+    }
+
+    /// Back in the foreground: read where the batch on screen got to, then
+    /// settle it or follow it again. Never re-submits.
+    func resumeFollowing() {
+        guard runTask == nil, let active = activeBatch, let host = hosts.host(active.host) else { return }
+        let backend = hosts.backend(for: host)
+        runTask = Task { [weak self] in
+            guard let status = try? await backend.batchStatus(id: active.id) else { return }
+            await self?.follow(status, active: active, backend: backend)
+        }
+    }
+
     /// Stops the render on screen, on its machine. Queued batches keep their
     /// place; "Stop Everything" cancels them too.
     func stop(everything: Bool = false) {
@@ -170,6 +193,7 @@ extension GenerateController {
         activeBatch = nil
         if everything { queued = [] }
         for batch in targets {
+            settled?(batch, .idle)
             ledger.remove(batch.clientBatchId)
             guard let host = hosts.host(batch.host) else { continue }
             Task { try? await hosts.backend(for: host).cancelBatch(id: batch.id) }

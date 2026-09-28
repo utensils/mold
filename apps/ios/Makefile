@@ -62,9 +62,13 @@ test: require-sim gen ## Unit tests on the simulator (the shared packages' own s
 	  | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)' ; exit $${PIPESTATUS[0]}
 
 packages-test: require-sim ## MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator
+	@# A package with more than one product (MoldClient + MoldClientTesting)
+	@# keeps its tests on the "-Package" scheme.
 	@for pkg in MoldClient MoldStyle MoldMesh; do \
 	  echo "  $$pkg"; \
-	  (cd $(PACKAGES)/$$pkg && xcodebuild test -scheme $$pkg -destination '$(DEST)' \
+	  (cd $(PACKAGES)/$$pkg && scheme=$$pkg && \
+	    { xcodebuild -list 2>/dev/null | grep -q "$$pkg-Package" && scheme=$$pkg-Package; true; } && \
+	    xcodebuild test -scheme $$scheme -destination '$(DEST)' \
 	    -derivedDataPath $(BUILD)/PackagesData 2>&1 \
 	    | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)'; \
 	    exit $${PIPESTATUS[0]}) || exit 1; \

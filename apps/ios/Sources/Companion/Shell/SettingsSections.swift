@@ -1,6 +1,7 @@
 import ActivityKit
 import MoldClient
 import SwiftUI
+import UserNotifications
 
 /// Library, Notifications and Live Activities (DESIGN.md §5.6), between
 /// Machines and About.
@@ -24,6 +25,12 @@ struct SettingsSections: View {
                      ?? String(localized: "Measuring…")).monospacedDigit()
             }
             .accessibilityElement(children: .combine)
+            // On a real row: a `.task` on EmptyView never runs.
+            .task {
+                cacheBytes = await thumbnails.diskBytes()
+                let settings = await UNUserNotificationCenter.current().notificationSettings()
+                systemAllowsNotifications = settings.authorizationStatus != .denied
+            }
             Button("Empty Now") {
                 Task { await thumbnails.emptyCaches(); cacheBytes = await thumbnails.diskBytes() }
             }
@@ -55,11 +62,5 @@ struct SettingsSections: View {
                     .foregroundStyle(.secondaryText)
             }
         }
-        EmptyView()
-            .task {
-                cacheBytes = await thumbnails.diskBytes()
-                let settings = await UNUserNotificationCenter.current().notificationSettings()
-                systemAllowsNotifications = settings.authorizationStatus != .denied
-            }
     }
 }

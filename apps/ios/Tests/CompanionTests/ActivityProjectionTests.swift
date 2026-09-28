@@ -41,6 +41,10 @@ struct ActivityProjectionTests {
         #expect(state.phase == .finished)
         #expect(state.sentence == "Finished on workstation")
         #expect(ActivityProjection.staleDate(for: state) == nil)
+        let host = UUID()
+        let attributes = GenerationActivityAttributes(prompt: "p", machine: "workstation", clientBatchId: "c1",
+                                                      host: host.uuidString)
+        #expect(attributes.link(for: state) == .print(host: host, filename: "a.png"), "View opens the print")
     }
 
     @Test func theStateStaysFarUnderActivityKitsLimit() throws {

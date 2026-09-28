@@ -23,6 +23,8 @@ nonisolated struct GenerationActivityAttributes: ActivityAttributes {
         var preview: String?
         /// More batches waiting behind this one.
         var waiting: Int
+        /// The first print a finished render made, for View.
+        var print: String? = nil
 
         var fraction: Double? {
             guard let step, let total, total > 0 else { return nil }
@@ -33,8 +35,16 @@ nonisolated struct GenerationActivityAttributes: ActivityAttributes {
     var prompt: String
     var machine: String
     var clientBatchId: String
-    /// Where View goes: the finished print, or the Queue while running.
+    /// The machine's id here, for View: the finished print, or the Queue
+    /// while it runs.
     var host: String
+
+    func link(for state: ContentState) -> DeepLink {
+        if state.phase == .finished, let print = state.print, let host = UUID(uuidString: host) {
+            return .print(host: host, filename: print)
+        }
+        return .queue(job: nil)
+    }
 }
 
 /// Stop, from the Lock Screen or the Dynamic Island. A `LiveActivityIntent`

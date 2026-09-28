@@ -52,7 +52,9 @@ final class WidgetSnapshotWriter {
             rendering: listings.filter { $0.state == .running }.count,
             held: listings.filter { $0.state == .held }.count,
             waiting: listings.filter { $0.state == .queued || $0.state == .paused }.count,
-            progress: generate.run.steps.map { Double($0.done) / Double($0.total) })
+            // Only while the app is in front is the render's progress live.
+            progress: UIApplication.shared.applicationState == .active
+                ? generate.run.steps.map { Double($0.done) / Double($0.total) } : nil)
     }
 
     /// A stable file name per print and version, safe for any filename.

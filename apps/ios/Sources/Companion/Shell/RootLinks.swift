@@ -8,6 +8,7 @@ import SwiftUI
 struct RootLinks: ViewModifier {
     @Environment(Notifier.self) private var notifier
     @Environment(HostStore.self) private var hosts
+    @Environment(\.scenePhase) private var phase
     @Bindable var router: AppRouter
 
     func body(content: Content) -> some View {
@@ -15,16 +16,27 @@ struct RootLinks: ViewModifier {
             .fullScreenCover(item: $router.openedPrint) { opened in LinkedPrint(id: opened.id) }
             .onOpenURL { url in DeepLink(url).map(router.open) }
             .onContinueUserActivity(PrintHandoff.activityType) { activity in
-                if let id = PrintHandoff.resolve(activity.userInfo ?? [:], hosts: hosts.hosts,
-                                                 instanceOf: hosts.instanceID(of:)) {
-                    router.openedPrint = AppRouter.OpenedPrint(id: id)
+                let info = activity.userInfo ?? [:]
+                Task {
+                    // From a cold launch no machine has answered yet, and the
+                    // match is by the server's run: ask first.
+                    if hosts.upHosts.isEmpty { await hosts.refreshAll() }
+                    if let id = PrintHandoff.resolve(info, hosts: hosts.hosts, instanceOf: hosts.instanceID(of:)) {
+                        router.openedPrint = AppRouter.OpenedPrint(id: id)
+                    }
                 }
             }
-            .onChange(of: notifier.link) { _, link in
-                guard let link else { return }
-                router.open(link)
-                notifier.link = nil
-            }
+            // One window takes it: the first active one to see it clears it,
+            // and every other window then finds nothing. A tap that launched
+            // the app waits for the window to become active.
+            .onChange(of: notifier.link) { takeLink() }
+            .onChange(of: phase) { takeLink() }
+    }
+
+    private func takeLink() {
+        guard phase == .active, let link = notifier.link else { return }
+        notifier.link = nil
+        router.open(link)
     }
 }
 

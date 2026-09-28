@@ -54,7 +54,10 @@ final class QueueStore {
             } else {
                 children[id] = [:]
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled else { return }
             hosts.report(host, doing: String(localized: "list its queue"), error)
         }
     }
@@ -152,6 +155,15 @@ final class QueueStore {
               up ? index > 0 : index + 1 < waiting.count else { return }
         let neighbour: String? = up ? (index >= 2 ? waiting[index - 2].id : nil) : waiting[index + 1].id
         await moveGroup([entry.id], after: neighbour, on: id)
+    }
+
+    /// Where a dragged group lands, as the machine's reorder route reads it:
+    /// the nearest row above that the machine can reorder. A held, paused or
+    /// running row is not in its index space (`QueueOrder`), and naming one
+    /// would send the job to the front -- as the Mac's pane learned.
+    static func neighbour(above landing: Int, in groups: [QueueGroup]) -> String? {
+        groups[..<min(max(landing, 0), groups.count)].reversed()
+            .compactMap { $0.rows.last(where: \.state.isReorderable)?.id }.first
     }
 
     /// Rows moved as a unit to sit after `neighbour` (`nil`: the front), as

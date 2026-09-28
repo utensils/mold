@@ -134,6 +134,7 @@ struct ClipPlayer: View {
         }
         for await status in item.publisher(for: \.status).values where status == .failed {
             guard !reminted else {
+                player = nil
                 problem = String(localized: "This clip stopped playing: \(item.error?.reasonSentence ?? String(localized: "the machine closed the stream."))")
                 return
             }

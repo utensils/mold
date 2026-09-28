@@ -24,7 +24,8 @@ enum ActivityProjection {
             return .init(phase: .finished,
                          sentence: count > 1 ? String(localized: "\(count) finished on \(machine)")
                                              : String(localized: "Finished on \(machine)"),
-                         figure: nil, step: nil, total: nil, endsAt: nil, preview: preview, waiting: waiting)
+                         figure: nil, step: nil, total: nil, endsAt: nil, preview: preview, waiting: waiting,
+                         print: outcome.results.first?.filename)
         case let .failed(reason):
             return .init(phase: .failed, sentence: reason, figure: nil, step: nil, total: nil,
                          endsAt: nil, preview: nil, waiting: waiting)

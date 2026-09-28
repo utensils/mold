@@ -60,6 +60,15 @@ extension LibraryStore {
         rebuildNow()
     }
 
+    /// Waits (up to 15 s, the outbox's whole retry ladder) until every
+    /// machine has been told -- for a change made where the app may be
+    /// suspended right after, like a notification's Favourite.
+    func flush() async {
+        for _ in 0..<150 where !draining.isEmpty {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     private func drain(_ id: MoldHost.ID) {
         guard draining.insert(id).inserted else { return }
         Task {

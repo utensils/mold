@@ -56,6 +56,18 @@ struct QueueStoreTests {
         #expect(call.arguments.last as? Int == 1)
     }
 
+    @Test func aDragLandsBehindTheNearestReorderableRowNotAHeldOne() async throws {
+        let entries = try Self.decode(QueueListing.self, #"{"entries":["#
+            + #"{"id":"R","state":"running","position":0},{"id":"A","state":"queued","position":1},"#
+            + #"{"id":"H","state":"held","position":2},{"id":"B","state":"queued","position":2}]}"#).merged
+        let groups = QueueGroup.build(entries, children: [:])
+        // B dropped just below H: [R, A, H | B] -> behind A, never the front.
+        var after = groups
+        after.removeAll { $0.id == "B" }
+        #expect(QueueStore.neighbour(above: 3, in: after) == "A")
+        #expect(QueueStore.neighbour(above: 1, in: after) == nil, "below only the running row: the front")
+    }
+
     @Test func aHeldRowIsCancelledByItsOwnRoute() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         fake.stub("cancelHeldJob(id:)") { _ in true }

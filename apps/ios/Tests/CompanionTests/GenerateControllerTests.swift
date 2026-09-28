@@ -110,6 +110,38 @@ struct GenerateControllerTests {
         }
     }
 
+    @Test func theSettledBatchIsTheOneThatFinishedNotTheNextInLine() async throws {
+        let (generate, fake) = try await setUp()
+        fake.stub("submit(_:)") { _ in try Self.batch("b\(fake.count("submit(_:)"))", state: "running") }
+        fake.stub("batchStatus(id:)") { args in try Self.batch(args.first as! String, state: "running") }
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        var settled: [String] = []
+        generate.settled = { batch, _ in settled.append(batch.id) }
+        generate.generate()
+        try await waitUntil { generate.activeBatch != nil }
+        generate.generate()
+        try await waitUntil { generate.queued.count == 1 }
+        let first = try #require(generate.activeBatch)
+        generate.settle(try Self.batch(first.id, state: "complete"), active: first)
+        #expect(settled == [first.id])
+        #expect(generate.activeBatch?.id != first.id, "the next batch took the canvas after the callback")
+    }
+
+    @Test func aRenderThatFinishedWhileAwaySettlesOnReturnWithoutResubmitting() async throws {
+        let (generate, fake) = try await setUp()
+        fake.stub("submit(_:)") { _ in try Self.batch("b1", state: "running") }
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        try await waitUntil { generate.activeBatch != nil }
+        generate.suspendFollowing()
+        #expect(generate.activeBatch != nil, "going to the background keeps the batch")
+        fake.stub("batchStatus(id:)") { _ in try Self.batch("b1", state: "complete") }
+        generate.resumeFollowing()
+        try await waitUntil { if case .finished = generate.run { true } else { false } }
+        #expect(fake.count("submit(_:)") == 1)
+        #expect(generate.ledger.batches.isEmpty)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())
