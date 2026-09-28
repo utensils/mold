@@ -16,6 +16,8 @@ struct MachineCard: Identifiable, Equatable {
     /// This Mac's own engine. It is not a saved row, so there is nothing to
     /// edit, nothing to remove and nothing to pair (`MoldEngine.isPairable`).
     let isThisMac: Bool
+    /// Saved at a loopback address: nothing a phone could reach.
+    let isLoopback: Bool
     let isDefault: Bool
     let reachability: HostStore.Reachability
     /// The GPUs said the way a person says them: "4× NVIDIA L40S".
@@ -81,6 +83,7 @@ extension MachineCard {
         name = host.name
         address = HostAddress.displayString(for: host.baseURL)
         isThisMac = host.id == MoldEngine.localHostID
+        isLoopback = MachineCardActions.isLoopback(host.baseURL)
         self.isDefault = isDefault
         self.reachability = reachability
 

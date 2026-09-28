@@ -18,20 +18,29 @@ struct MachineFleetTests {
     /// Machine menu in the menu bar. Pinned in draw order, through the one
     /// renderer, so the divider and the destructive-last rule are the ones
     /// `RowAction` decides rather than this surface's own.
-    @Test func aCardOffersOpenCheckDefaultCopyEditAndRemove() {
+    @Test func aCardOffersOpenCheckDefaultCopyPairEditAndRemove() {
         let offered = RowAction.rendered(
             MachineCardActions.offered(isThisMac: false, isDefault: false))
 
         #expect(offered.map(\.kind)
-            == [.open, .checkNow, .setDefault, .copyAddress, .edit, nil, .remove])
+            == [.open, .checkNow, .setDefault, .copyAddress, .pairPhone, .edit, nil, .remove])
         #expect(offered.map(\.title) == [
-            "Open", "Check Now", "Set as Default", "Copy Address", "Edit…", "", "Remove…",
+            "Open", "Check Now", "Set as Default", "Copy Address", "Pair a Phone…", "Edit…", "",
+            "Remove…",
         ])
         #expect(offered.last?.isDestructive == true)
         // The two words the sidebar's row already spells, read from there
         // rather than typed again.
         #expect(offered[1].title == SidebarMachineActions.checkNow)
         #expect(offered[2].title == SidebarMachineActions.setAsDefault)
+    }
+
+    /// A machine saved at a loopback address is reached over this Mac's own
+    /// loopback: its code would send a phone to the phone itself.
+    @Test func aLoopbackMachineOffersNoPairing() {
+        let offered = MachineCardActions.offered(isThisMac: false, isDefault: false, isLoopback: true)
+        #expect(!offered.contains { $0.kind == .pairPhone })
+        #expect(offered.contains { $0.kind == .edit })
     }
 
     /// Absent, not inert: the machine that IS the default has nothing to set.
@@ -42,7 +51,8 @@ struct MachineFleetTests {
     }
 
     /// This Mac's engine is a property of this launch, not a saved row: there
-    /// is no key to edit and removing it would only make it come back.
+    /// is no key to edit and removing it would only make it come back. And it
+    /// listens on loopback, which no phone can reach -- so no Pair a Phone.
     @Test func thisMacsCardOffersOnlyWhatAppliesToIt() {
         let offered = MachineCardActions.offered(isThisMac: true, isDefault: false)
         #expect(offered.map(\.kind) == [.open, .checkNow, .setDefault, .copyAddress])

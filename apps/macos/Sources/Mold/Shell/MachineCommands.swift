@@ -54,7 +54,7 @@ struct MachineCommands: Commands {
         switch kind {
         case .checkNow: KeyboardShortcut("r", modifiers: [.command, .shift])
         case .remove: KeyboardShortcut(.delete, modifiers: .command)
-        case .open, .setDefault, .copyAddress, .edit: nil
+        case .open, .setDefault, .copyAddress, .pairPhone, .edit: nil
         }
     }
 }

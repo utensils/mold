@@ -20,12 +20,14 @@ public struct MobilePairingPayload: Hashable, Sendable {
         self.name = name
     }
 
-    /// `nil` when `session.token == nil` -- a code with no token redeems
-    /// nothing, so there is nothing honest to show.
+    /// A keyless machine's code carries its address and identity alone --
+    /// no token, no expiry -- and the phone's claim is answered with no key
+    /// to store. `nil` only for a keyed machine that sent no token: that code
+    /// would redeem nothing, so there is nothing honest to show.
     public init?(session: PairingSession, baseURL: URL, name: String) {
-        guard let token = session.token else { return nil }
+        guard session.token != nil || !session.authRequired else { return nil }
         self.baseURL = baseURL.absoluteString
-        self.token = token
+        self.token = session.token
         expiresAt = session.expiresAt
         instanceId = session.instanceId
         self.name = name

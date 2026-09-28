@@ -28,6 +28,9 @@ final class PairingStore {
     /// nothing. Not `private(set)`, same reason as `authority` above.
     internal(set) var session: PairingSession?
     internal(set) var sessionHost: MoldHost.ID?
+    /// Why a code could not be started for that machine, in words -- what
+    /// the sheet shows instead of waiting forever.
+    internal(set) var sessionFailure: [MoldHost.ID: String] = [:]
     /// See `+Fixture.swift`: set by `seed(from:)`, and checked by every
     /// method below that would otherwise reach a backend. Not `private(set)`
     /// for the same cross-file reason as `byHost`.
@@ -67,14 +70,23 @@ final class PairingStore {
     func createSession(on host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: "start a pairing session") else { return }
         guard let client = hosts.backend(for: host) else { return }
+        sessionFailure[host] = nil
         do {
             session = try await client.pairingSession()
             sessionHost = host
             hosts.succeeded(on: host, doing: "start a pairing session")
+        } catch let MoldClientError.http(status, code, _)
+            where status == 403 && code == "PAIRING_OPERATOR_REQUIRED" {
+            authority[host] = .paired
+            sessionFailure[host] = Self.operatorRequired
         } catch {
+            sessionFailure[host] = error.failureSentence
             hosts.report(error, on: host, doing: "start a pairing session")
         }
     }
+
+    static let operatorRequired =
+        "Only this machine's operator key can pair a phone. Edit the machine to use that key."
 
     /// Revokes, then re-reads -- never trims the row locally, the same rule
     /// `ConfigStore.set` follows for a write that might touch more than the

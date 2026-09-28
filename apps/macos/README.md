@@ -303,9 +303,11 @@ No Intel and nothing below macOS 26 — see "Releasing". (The updater is built:
 see "Updates" -- the key is in place; what it still needs is a first run of
 the publish workflow.)
 
-The app is never a *claimant*. It can issue a pairing for a keyed machine it
-already holds an operator key for (Machines ▸ that machine ▸ Pair a Phone…),
-but nothing here scans a code or asks to be paired itself. **This Mac's own
+The app is never a *claimant*. It issues pairing codes: **Pair a Phone…** is
+on every machine's card menu, in the Machine menu, and on the machine's own
+page. A keyed machine's code carries a one-use token (the Mac needs that
+machine's operator key); a keyless machine's code carries only its address.
+Nothing here scans a code or asks to be paired itself. **This Mac's own
 engine is not paired either**, for a different reason: it binds `127.0.0.1`
 and a phone cannot reach loopback on this Mac, so a pairing issued there
 would be a credential nothing could use.

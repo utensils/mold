@@ -21,13 +21,12 @@ struct PairingTests {
 
     // MARK: - Section states
 
-    /// **Fails today** -- `PairingSection` does not exist. `pairing_available`
-    /// is `true` even on a keyless host (`routes.rs:9678-9685`), so this
-    /// plants that exact shape: the gate a naive read would fall for is
-    /// right here and still resolves to nothing to show.
-    @Test func aKeylessMachineDrawsNoPairingSectionAtAll() {
+    /// A keyless machine is still one a phone can be pointed at: the code
+    /// carries its address alone (no key to hand over, no paired devices to
+    /// list). Hiding the section here hid pairing from every keyless setup.
+    @Test func aKeylessMachineOffersPairingWithoutAKey() {
         let answer = PairedClients(authRequired: false, pairingAvailable: true, clients: [])
-        #expect(PairingSection.resolve(answer, authority: nil) == .absent)
+        #expect(PairingSection.resolve(answer, authority: nil) == .keyless)
     }
 
     /// A 403 `PAIRING_OPERATOR_REQUIRED` means this app's own key is a

@@ -26,6 +26,9 @@ struct MachinesDestination: View {
     @State private var isAdding = false
     @State var editing: MoldHost?
     @State var pendingRemoval: Destruction?
+    /// The machine whose Pair a Phone… sheet is up, from its card or the
+    /// Machine menu.
+    @State var pairing: MoldHost?
     /// The card the keyboard is on, or none. The Machine menu acts on THIS
     /// and nothing else while the overview is up: falling back to the default
     /// machine would make ⌘⌫ remove a machine nobody pointed at.
@@ -54,6 +57,7 @@ struct MachinesDestination: View {
         .sheet(isPresented: $isAdding) {
             HostEditor { hosts.add(name: $0, url: $1, apiKey: $2) }
         }
+        .sheet(item: $pairing) { host in PairingSheet(host: host) }
         .sheet(item: $editing) { host in
             HostEditor(host: host) { name, url, key in
                 hosts.update(MoldHost(id: host.id, name: name, baseURL: url, apiKey: key))

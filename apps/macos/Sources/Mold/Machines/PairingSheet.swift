@@ -15,11 +15,13 @@ struct PairingSheet: View {
         case waiting
         case code(MobilePairingPayload)
         case noCode
+        /// The machine refused or could not be reached, in words.
+        case failed(String)
     }
 
     /// Pure, so the three branches are tested with no view.
-    static func resolve(_ session: PairingSession?, baseURL: URL, name: String) -> SheetState {
-        guard let session else { return .waiting }
+    static func resolve(_ session: PairingSession?, failure: String? = nil, baseURL: URL, name: String) -> SheetState {
+        guard let session else { return failure.map(SheetState.failed) ?? .waiting }
         guard let payload = MobilePairingPayload(session: session, baseURL: baseURL, name: name) else {
             return .noCode
         }
@@ -33,6 +35,9 @@ struct PairingSheet: View {
     /// was being replaced by a request the fixture then refused).
     static func needsFreshCode(session: PairingSession?, sessionHost: MoldHost.ID?, host: MoldHost.ID, now: Date) -> Bool {
         guard let session, sessionHost == host else { return true }
+        // A keyless code has no expiry, and the machine may have gained a
+        // key since it was made: ask again on every opening (it is free).
+        guard session.token != nil else { return true }
         // No expiry on the wire reads as "still good": the machine set none.
         guard let expiresAt = session.expiresAt else { return false }
         return Countdown.resolve(expiresAt: expiresAt, now: now) == .expired
@@ -75,7 +80,7 @@ struct PairingSheet: View {
     /// "waiting" rather than a code for somewhere else.
     private var state: SheetState {
         let session = pairing.sessionHost == host.id ? pairing.session : nil
-        return Self.resolve(session, baseURL: host.baseURL, name: host.name)
+        return Self.resolve(session, failure: pairing.sessionFailure[host.id], baseURL: host.baseURL, name: host.name)
     }
 
     var body: some View {
@@ -86,6 +91,15 @@ struct PairingSheet: View {
                 ProgressView().frame(width: 220, height: 220)
             case .noCode:
                 unavailable
+            case let .failed(reason):
+                VStack(spacing: 12) {
+                    Text(reason)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Try Again") { Task { await pairing.createSession(on: host.id) } }
+                }
+                .frame(width: 220, height: 220)
             case let .code(payload):
                 if let url = payload.url {
                     TimelineView(.periodic(from: .now, by: 1)) { context in

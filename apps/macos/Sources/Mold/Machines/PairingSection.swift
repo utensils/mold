@@ -1,10 +1,11 @@
 import MoldClient
 import SwiftUI
 
-/// Mobile pairing, directly under Address (design decision 12) -- for a
-/// machine this app holds an OPERATOR key for. `auth_required` is the only
-/// honest gate (`PairedClients.canPair`'s own doc): `pairing_available` is
-/// `true` even on a keyless host, so it answers a different question.
+/// Mobile pairing, directly under Address (design decision 12). A keyed
+/// machine pairs through an OPERATOR key and lists its paired devices; a
+/// keyless one (`auth_required == false`) still offers a code, carrying only
+/// its address. `pairing_available` is `true` even on a keyless host, so it
+/// is never the gate.
 struct PairingSection: View {
     @Environment(HostStore.self) private var hosts
     @Environment(PairingStore.self) private var pairing
@@ -16,7 +17,8 @@ struct PairingSection: View {
     /// drawn -- the same "no view rather than a placeholder" rule `memory(_:)`
     /// (`MachinesPane+Sections.swift`) already follows.
     enum SectionState: Equatable {
-        case absent
+        /// No key on this machine: a phone pairs with its address alone.
+        case keyless
         case needsOperator
         case databaseOff
         case clients([PairedClient])
@@ -29,7 +31,7 @@ struct PairingSection: View {
     static func resolve(_ answer: PairedClients?, authority: PairingStore.Authority?) -> SectionState? {
         if authority == .paired { return .needsOperator }
         guard let answer else { return nil }
-        guard answer.authRequired else { return .absent }
+        guard answer.authRequired else { return .keyless }
         guard answer.pairingAvailable else { return .databaseOff }
         return .clients(answer.clients)
     }
@@ -47,8 +49,14 @@ struct PairingSection: View {
 
     @ViewBuilder private var content: some View {
         switch state {
-        case nil, .absent:
+        case nil:
             EmptyView()
+        case .keyless:
+            Section("Pairing") {
+                Text("This machine needs no key, so a phone connects with its address alone.")
+                    .foregroundStyle(.secondary)
+                Button("Pair a Phone…") { showingSheet = true }
+            }
         case .needsOperator:
             Section("Pairing") {
                 Text("This app's key for this machine can't manage paired access -- only an operator key can.")
