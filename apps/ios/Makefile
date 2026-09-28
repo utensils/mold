@@ -15,6 +15,7 @@ PACKAGES := ../shared/Packages
 SIM_OR_PICK = $(or $(SIM),$(shell scripts/pick-simulator.sh iPhone))
 SIM_ID = $(eval SIM_ID := $(SIM_OR_PICK))$(SIM_ID)
 IPAD_ID = $(eval IPAD_ID := $(or $(IPAD),$(shell scripts/pick-simulator.sh iPad)))$(IPAD_ID)
+# `UITEST_DEVICES` overrides which simulators the audit sweeps (CI: iPhones).
 # The smallest screen, when an iPhone SE simulator is installed (not created).
 SMALL_ID = $(eval SMALL_ID := $(or $(SMALL),$(shell scripts/pick-simulator.sh small)))$(SMALL_ID)
 DEST = platform=iOS Simulator,id=$(SIM_ID)
@@ -82,7 +83,7 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	@# an iPhone (tab bar) and an iPad (sidebar, where Models lives), and
 	@# puts each simulator back the way it found it, even on Ctrl-C.
 	@status=0; \
-	for dev in $(SIM_ID) $(SMALL_ID) $(IPAD_ID); do \
+	for dev in $(or $(UITEST_DEVICES),$(SIM_ID) $(SMALL_ID) $(IPAD_ID)); do \
 	  xcrun simctl boot $$dev 2>/dev/null || true; \
 	  was=$$(xcrun simctl ui $$dev appearance); \
 	  trap "xcrun simctl ui $$dev appearance $$was" EXIT INT TERM; \

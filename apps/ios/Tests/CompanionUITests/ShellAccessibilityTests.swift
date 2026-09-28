@@ -33,6 +33,7 @@ final class ShellAccessibilityTests: XCTestCase {
             } else {
                 app.typeKey("\(index + 1)", modifierFlags: .command)
             }
+            settle(app.navigationBars.firstMatch)
             try check(app, "\(tab) at \(size)")
         }
 
@@ -188,6 +189,10 @@ final class ShellAccessibilityTests: XCTestCase {
             frame = element.frame
             Thread.sleep(forTimeInterval: 0.25)
         }
+        // Still: but a sheet's content and a tab's cross-fade finish after
+        // the frames stop, and only on a slow machine does that show (CI
+        // measured a Settings header mid-fade as low contrast).
+        Thread.sleep(forTimeInterval: 0.75)
     }
 
 
