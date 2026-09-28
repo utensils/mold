@@ -57,6 +57,18 @@ struct CapsuleTests {
         #expect(draft.promptTransform == nil)
     }
 
+    @Test func expandShortcutFollowsWandAvailability() {
+        #expect(!PromptWand.shortcutAvailable(offer: .hidden, visibility: .hidden, isWorking: false))
+        #expect(!PromptWand.shortcutAvailable(offer: .wand(canRemix: false),
+                                               visibility: .disabled(reason: "Write a prompt"), isWorking: false))
+        #expect(PromptWand.shortcutAvailable(offer: .needsModel("expander"),
+                                              visibility: .disabled(reason: "Pull model"), isWorking: false))
+        #expect(PromptWand.shortcutAvailable(offer: .wand(canRemix: false),
+                                              visibility: .ready(canRemix: false), isWorking: false))
+        #expect(!PromptWand.shortcutAvailable(offer: .wand(canRemix: false),
+                                               visibility: .ready(canRemix: false), isWorking: true))
+    }
+
     @Test func promptHistoryKeepsMultilineCaretMovement() {
         let text = "first\nsecond"
         #expect(PromptHistoryCaret.isOnFirstLine(text, selection: NSRange(location: 2, length: 0)))

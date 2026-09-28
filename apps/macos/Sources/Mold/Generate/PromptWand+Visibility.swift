@@ -2,6 +2,13 @@ import MoldClient
 
 /// `PromptWand`'s pure gate, split out purely for size.
 extension PromptWand {
+    static func shortcutAvailable(offer: ExpansionOffer, visibility: Visibility, isWorking: Bool) -> Bool {
+        guard !isWorking else { return false }
+        if visibility.isReady { return true }
+        if case .needsModel = offer, case .disabled = visibility { return true }
+        return false
+    }
+
     /// What the button shows, decided once from the same three questions a
     /// view would otherwise ask itself: whether there is a wand at all,
     /// whether the machine can do anything with a click right now, and

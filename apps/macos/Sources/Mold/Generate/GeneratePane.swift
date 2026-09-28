@@ -146,9 +146,13 @@ struct GeneratePane: View {
     }
 
     private var expandPromptAction: (() -> Void)? {
-        guard let recipe, let host,
-              recipe.capabilities.promptRequirement != .ignored,
-              !controller.draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard let recipe, let host else { return nil }
+        let offer = ExpansionOffer.resolve(recipe: recipe, capabilities: hosts.capabilities(of: host))
+        let visibility = PromptWand.Visibility.resolve(
+            offer: offer, promptMode: recipe.capabilities.promptRequirement, prompt: controller.draft.prompt)
+        let isWorking: Bool
+        if case .working = expansions.expansion { isWorking = true } else { isWorking = false }
+        guard PromptWand.shortcutAvailable(offer: offer, visibility: visibility, isWorking: isWorking)
         else { return nil }
         return {
             Task { await expansions.expand(controller, on: host, backend: hosts.backend(for: host)) }
