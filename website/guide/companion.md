@@ -13,11 +13,13 @@ replacing it. Builds go out through TestFlight while it is new.
 
 Open **Machines ▸ Add a Machine…** and pick one of three ways in:
 
-- **Scan a Pairing Code.** On your Mac, open Mold Studio ▸ Machines ▸ your
-  machine ▸ **Pair a Phone…**, or Settings ▸ Mobile pairing in the desktop or
-  web app, and point the camera at the code. The code is single-use, expires
-  after two minutes, and carries no key; the key the machine issues goes
-  straight into this device's Keychain. You can paste a pairing link instead.
+- **Scan a Pairing Code.** On your Mac, choose **Pair a Phone…** from a
+  machine's card menu or the Machine menu in Mold Studio (or Settings ▸
+  Mobile pairing in the desktop or web app), and point the camera at the
+  code. For a machine with an API key the code is single-use, expires after
+  two minutes, and carries no key; the key the machine issues goes straight
+  into this device's Keychain. For a machine without a key, the code simply
+  carries its address. You can paste a pairing link instead.
 - **Nearby.** Machines advertising `_mold._tcp` on your network are listed.
   Allow Local Network access when iOS asks.
 - **Enter an Address.** An IP address, host name, Tailscale MagicDNS name or

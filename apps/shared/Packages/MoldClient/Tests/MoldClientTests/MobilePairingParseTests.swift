@@ -29,6 +29,28 @@ struct MobilePairingParseTests {
         #expect(read.expiresAt == 42)
     }
 
+    /// A keyless machine still gets a code: its address and identity, no key
+    /// and no expiry -- the phone claims it and is told there is nothing to
+    /// store (`claim_pairing_session`, keyless arm).
+    @Test func aKeylessMachineStillMakesACode() throws {
+        let keyless = PairingSession(token: nil, expiresAt: nil, authRequired: false,
+                                     instanceId: "inst-1", hostname: "hal9000")
+        let made = try #require(MobilePairingPayload(
+            session: keyless, baseURL: URL(string: "http://100.123.198.98:7680")!, name: "hal9000"))
+        #expect(made.token == nil)
+        #expect(made.expiresAt == nil)
+        let read = try MobilePairingPayload.parse(try #require(made.url).absoluteString)
+        #expect(read == made)
+    }
+
+    /// A keyed machine that somehow answered with no token has nothing to
+    /// hand over: no code, rather than one that claims nothing.
+    @Test func aKeyedSessionWithoutATokenMakesNoCode() {
+        let broken = PairingSession(token: nil, expiresAt: nil, authRequired: true,
+                                    instanceId: "inst-1", hostname: nil)
+        #expect(MobilePairingPayload(session: broken, baseURL: URL(string: "http://h")!, name: "h") == nil)
+    }
+
     @Test func aKeylessMachinesCodeHasNoToken() throws {
         let read = try MobilePairingPayload.parse(
             "mold://pair?version=1&base_url=http%3A%2F%2Fbox%3A7680&instance_id=i&name=box")

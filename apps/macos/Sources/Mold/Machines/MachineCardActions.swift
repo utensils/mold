@@ -9,11 +9,13 @@ import MoldClient
 /// time here -- renaming one there renames it everywhere.
 enum MachineCardActions {
     enum Kind: Hashable {
-        case open, checkNow, setDefault, copyAddress, edit, remove
+        case open, checkNow, setDefault, copyAddress, pairPhone, edit, remove
     }
 
     static let open = "Open"
     static let copyAddress = "Copy Address"
+    /// The same words as the machine page's own button (`PairingSection`).
+    static let pairPhone = "Pair a Phone…"
     static let edit = "Edit…"
     /// The ellipsis is the promise the dialog keeps: this asks first, and says
     /// that the machine's key goes with it (`MachineRemoval.swift`).
@@ -37,6 +39,9 @@ enum MachineCardActions {
         }
         actions.append(RowAction(kind: .copyAddress, title: copyAddress))
         if !isThisMac {
+            // Not on This Mac: its engine listens on loopback, which no phone
+            // can reach (`LocalEngineSettings`).
+            actions.append(RowAction(kind: .pairPhone, title: pairPhone))
             actions.append(RowAction(kind: .edit, title: edit))
             actions.append(RowAction(kind: .remove, title: remove, isDestructive: true))
         }

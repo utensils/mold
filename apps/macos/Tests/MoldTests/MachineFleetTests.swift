@@ -18,14 +18,15 @@ struct MachineFleetTests {
     /// Machine menu in the menu bar. Pinned in draw order, through the one
     /// renderer, so the divider and the destructive-last rule are the ones
     /// `RowAction` decides rather than this surface's own.
-    @Test func aCardOffersOpenCheckDefaultCopyEditAndRemove() {
+    @Test func aCardOffersOpenCheckDefaultCopyPairEditAndRemove() {
         let offered = RowAction.rendered(
             MachineCardActions.offered(isThisMac: false, isDefault: false))
 
         #expect(offered.map(\.kind)
-            == [.open, .checkNow, .setDefault, .copyAddress, .edit, nil, .remove])
+            == [.open, .checkNow, .setDefault, .copyAddress, .pairPhone, .edit, nil, .remove])
         #expect(offered.map(\.title) == [
-            "Open", "Check Now", "Set as Default", "Copy Address", "Edit…", "", "Remove…",
+            "Open", "Check Now", "Set as Default", "Copy Address", "Pair a Phone…", "Edit…", "",
+            "Remove…",
         ])
         #expect(offered.last?.isDestructive == true)
         // The two words the sidebar's row already spells, read from there
@@ -42,7 +43,8 @@ struct MachineFleetTests {
     }
 
     /// This Mac's engine is a property of this launch, not a saved row: there
-    /// is no key to edit and removing it would only make it come back.
+    /// is no key to edit and removing it would only make it come back. And it
+    /// listens on loopback, which no phone can reach -- so no Pair a Phone.
     @Test func thisMacsCardOffersOnlyWhatAppliesToIt() {
         let offered = MachineCardActions.offered(isThisMac: true, isDefault: false)
         #expect(offered.map(\.kind) == [.open, .checkNow, .setDefault, .copyAddress])

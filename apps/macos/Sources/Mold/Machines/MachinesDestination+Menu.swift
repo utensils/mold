@@ -19,6 +19,7 @@ extension MachinesDestination {
         case .checkNow: Task { await hosts.refresh(host) }
         case .setDefault: hosts.setDefault(host)
         case .copyAddress: Clipboard.put(HostAddress.displayString(for: host.baseURL))
+        case .pairPhone: if isManaged(host) { pairing = host }
         case .edit: edit(host)
         case .remove: remove(host)
         }
