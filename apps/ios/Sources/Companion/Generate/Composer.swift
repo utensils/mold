@@ -1,8 +1,8 @@
 import MoldClient
 import SwiftUI
 
-/// The composer (DESIGN.md §5.1): picture wells when the recipe reads them,
-/// the prompt, Expand, the chip row, then the estimate and Generate. At
+/// The composer (DESIGN.md §5.1): prompt, model, picture wells, the chip
+/// row, then the estimate and Generate. At
 /// accessibility sizes the chips fold into one Options button and Generate
 /// takes the full width under the estimate; the panel never takes more than
 /// 55% of the screen, and scrolls inside that.
@@ -20,18 +20,14 @@ struct Composer: View {
                 content.padding(14)
             }
             .scrollBounceBehavior(.basedOnSize)
+            .scrollEdgeEffectHidden(true)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: editing) { _, focused in
                 if focused { proxy.scrollTo("prompt", anchor: .top) }
             }
         }
         .frame(maxHeight: maximumHeight)
-        .background {
-            if size.isAccessibilitySize {
-                RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground))
-            }
-        }
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 16))
         // The chrome the canvas scrolls under: what is behind it is judged
         // there, not through it (the accessibility audit's rule).
         .accessibilityElement(children: .contain)
@@ -50,16 +46,11 @@ struct Composer: View {
     private var content: some View {
         @Bindable var generate = generate
         return VStack(alignment: .leading, spacing: 12) {
-            PictureWells()
-            if let blocker = generate.blocker, !generate.run.isBusy {
-                Label(blocker, systemImage: "exclamationmark.circle")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondaryText)
-            }
             if generate.recipe?.capabilities.promptRequirement != .ignored {
                 HStack(alignment: .top, spacing: 8) {
-                    TextField(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…",
-                              text: $generate.draft.prompt, axis: .vertical)
+                    TextField("Prompt", text: $generate.draft.prompt,
+                              prompt: Text(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…")
+                                .foregroundStyle(.secondaryText), axis: .vertical)
                         // At the smallest text one line is too short a
                         // target to hit; two reserved lines are not.
                         .lineLimit((size <= .small ? 2 : 1) ... (size.isAccessibilitySize ? 3 : 6))
@@ -74,6 +65,12 @@ struct Composer: View {
                     .foregroundStyle(.secondaryText)
             }
             ModelMenu()
+            PictureWells()
+            if let blocker = generate.blocker, !generate.run.isBusy {
+                Label(blocker, systemImage: "exclamationmark.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondaryText)
+            }
             if size.isAccessibilitySize {
                 optionsButton
             } else {

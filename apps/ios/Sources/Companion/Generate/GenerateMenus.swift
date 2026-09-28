@@ -37,13 +37,13 @@ struct ModelChooser: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Generate on") {
+                Section {
                     KindMenu().labelStyle(.titleAndIcon)
                     MachineMenu()
                 }
                 Section {
                     NavigationLink { ModelsView().navigationTitle("Models") } label: {
-                        Label("Get More Models…", systemImage: "arrow.down.circle")
+                        Text("Get More Models…").fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 ForEach(generate.families, id: \.family) { group in
@@ -52,7 +52,10 @@ struct ModelChooser: View {
                             || $0.headline.localizedCaseInsensitiveContains(search)
                     }
                     if !models.isEmpty {
-                        Section(group.family) {
+                        Section {
+                            Text(group.family).font(.headline)
+                                .foregroundStyle(.primary)
+                                .accessibilityAddTraits(.isHeader)
                             ForEach(models) { model in
                                 Button { generate.choose(model); dismiss() } label: {
                                     VStack(alignment: .leading, spacing: 4) {
@@ -73,12 +76,14 @@ struct ModelChooser: View {
                     }
                 }
                 if generate.recipes.count > 1 {
-                    Section("Recipe") {
+                    Section {
                         ForEach(generate.recipes) { recipe in
                             Button { generate.chooseRecipe(recipe.id); dismiss() } label: {
                                 Label(recipe.label, systemImage: recipe.id == generate.recipe?.id ? "checkmark.circle.fill" : "circle")
                             }
                         }
+                    } header: {
+                        Text("Recipe").foregroundStyle(.secondaryText)
                     }
                 }
             }

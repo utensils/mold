@@ -1,4 +1,5 @@
-import AVFoundation
+import AVKit
+import SwiftUI
 import Testing
 @testable import MoldCompanion
 
@@ -34,6 +35,36 @@ struct PlaybackAudioTests {
         #expect(player.currentTime().seconds >= 0.25)
         #expect(!player.isMuted && player.volume > 0)
         #expect(AVAudioSession.sharedInstance().category == .playback)
+    }
+
+    @Test func pagedVideoKeepsNativeTransportControls() async throws {
+        let scene = try #require(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let player = AVPlayer()
+        let host = UIHostingController(rootView: TabView {
+            NativeVideoPlayer(player: player).tag(0)
+            Text("Next print").tag(1)
+        }.tabViewStyle(.page(indexDisplayMode: .never)))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKey()
+        }
+        func findPlayer(in parent: UIViewController) -> AVPlayerViewController? {
+            if let player = parent as? AVPlayerViewController { return player }
+            return parent.children.lazy.compactMap { findPlayer(in: $0) }.first
+        }
+        for _ in 0..<20 where findPlayer(in: host) == nil {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let controller = try #require(findPlayer(in: host))
+        #expect(controller.player === player)
+        #expect(controller.showsPlaybackControls)
+        NativeVideoPlayer.dismantleUIViewController(controller, coordinator: ())
+        #expect(controller.player == nil)
     }
 
 }

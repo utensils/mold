@@ -20,9 +20,16 @@ struct PrintViewer: View {
         let entry = entries.first { $0.id == (current ?? start) }
         TabView(selection: Binding(get: { current ?? start }, set: { current = $0 })) {
             ForEach(entries) { page in
-                PrintPage(entry: page, trashed: trashed)
-                    .tag(page.id)
-                    .onTapGesture { withAnimation { chrome.toggle() } }
+                Group {
+                    if page.print.kind == .clip || page.print.kind == .mesh {
+                        // AVKit and the mesh viewer own their gestures.
+                        PrintPage(entry: page, trashed: trashed)
+                    } else {
+                        PrintPage(entry: page, trashed: trashed)
+                            .onTapGesture { withAnimation { chrome.toggle() } }
+                    }
+                }
+                .tag(page.id)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))

@@ -120,7 +120,7 @@ struct ClipPlayer: View {
     var body: some View {
         ZStack {
             if let player {
-                VideoPlayer(player: player)
+                NativeVideoPlayer(player: player)
             } else if let problem {
                 Text(problem).foregroundStyle(.white).padding()
             } else {
@@ -171,5 +171,27 @@ struct ClipPlayer: View {
             await play(from: player?.currentTime(), reminted: true)
             return
         }
+    }
+}
+
+/// Keep AVKit's controller and controls intact inside a paged gallery.
+/// SwiftUI's VideoPlayer can suppress its controls inside a page-style TabView.
+struct NativeVideoPlayer: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = true
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player { controller.player = player }
+    }
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
+        controller.player?.pause()
+        controller.player = nil
     }
 }

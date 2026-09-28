@@ -1,10 +1,9 @@
 import MoldClient
 import SwiftUI
 
-/// Generate (DESIGN.md §5.1): the canvas fills the screen; the composer --
-/// wells, prompt, chips, estimate and Generate -- is a glass panel above the
-/// tab bar that rides the keyboard. The toolbar holds the kind, the model
-/// (plain name over its id in mono) and the machine.
+/// Generate (DESIGN.md §5.1): the canvas and a bounded composer above the
+/// tab bar. The prompt stays in one hierarchy as the keyboard appears;
+/// the model button opens the kind, model, recipe and machine chooser.
 struct GenerateView: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts

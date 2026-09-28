@@ -156,12 +156,19 @@ iPad. Auto follows the default online machine that holds the selected model.
 - Transparent prints sit on the AlphaBed checkerboard.
 - Tapping the canvas while the keyboard is up dismisses it.
 
-**Composer.** A glass panel (radius 16) above the tab bar. One stable scroll
+**Composer.** An opaque system-background panel (radius 16) above the tab bar
+keeps text legible over the canvas. One stable scroll
 view is capped to 55% of the current window's available height, including
 keyboard avoidance and iPad resizing; its prompt never moves between
 `ViewThatFits` alternatives. Top to bottom:
 
-1. **Picture wells**, shown only when the recipe reads them:
+1. **Prompt:** `TextField(axis: .vertical)` with up to six lines (three at
+   accessibility sizes). Keyboard toolbar: Expand, Done.
+2. **Expand** (`text.badge.star`), beside the prompt. Tapping it rewrites the
+   prompt in place, and the original is kept for undo. Its menu offers
+   "Suggest other ways", which opens a list sheet with Use.
+3. **Model** opens the chooser described above.
+4. **Picture wells**, shown only when the recipe reads them:
    - **Start from** (the source picture). Strength lives in More options.
    - **image 1, image 2, …** (references). These numbers are how the prompt
      refers to them. On Qwen Image 2.1 the last reference sets the canvas
@@ -169,12 +176,6 @@ keyboard avoidance and iPad resizing; its prompt never moves between
    - Each well's menu: Photos, Camera, Files, Choose from Library…, Paste. A
      staged tile's menu adds Move Left, Move Right and Remove.
    - HEIC and WebP are converted on the phone. Alpha is never flattened.
-2. **Prompt:** `TextField(axis: .vertical)` with `.lineLimit(1...6)`. Keyboard
-   toolbar: Expand, Done.
-3. **Expand** (`text.badge.star`). Tapping it rewrites the prompt in place, and
-   the original is kept for undo. Its menu offers "Suggest other ways", which
-   opens a list sheet with Use.
-4. **Model** opens the chooser described above.
 5. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
    (`slider.horizontal.3`).
 6. **Last row:** the estimate ("about 40s", mono) at the leading edge.

@@ -127,90 +127,95 @@ final class ShellAccessibilityTests: XCTestCase {
 
     @MainActor private func audit(_ app: XCUIApplication, _ place: String, region: CGRect?,
                                   within container: XCUIElement?, lazyForm: Bool) throws {
-        try app.performAccessibilityAudit(for: [
-            .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
-        ]) { issue in
-            // Text scrolled UNDER the glass tab bar or a pinned action is
-            // measured through the glass; scrolled into view it is plain text
-            // on the background. Only that is skipped -- never a control that
-            // lives in the chrome itself.
-            if issue.auditType == .contrast, let element = issue.element,
-               self.isUnderChrome(element, in: app) {
+        // Dynamic Type temporarily resizes the entire hierarchy. Sample pixels
+        // first at the settled launch size, before that audit changes frames.
+        // Combining both checks can measure contrast against stale geometry.
+        for types: XCUIAccessibilityAuditType in [
+            [.contrast], [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription],
+        ] {
+            try app.performAccessibilityAudit(for: types) { issue in
+                // Text scrolled UNDER the glass tab bar or a pinned action is
+                // measured through the glass; scrolled into view it is plain text
+                // on the background. Only that is skipped -- never a control that
+                // lives in the chrome itself.
+                if issue.auditType == .contrast, let element = issue.element,
+                   self.isUnderChrome(element, in: app) {
+                    return true
+                }
+                // Behind a sheet: the iPad's sidebar beside a form sheet, and --
+                // with no element at all -- the status bar under the light
+                // scrim above an iPhone page sheet (the test's screen recording
+                // shows nothing else unnamed on screen). Every view inside the
+                // sheet is named, so an unnamed node cannot hide a real failure.
+                if issue.auditType == .contrast, let region,
+                   issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
+                    return true
+                }
+                // A presented sheet: anything that is not its descendant is the
+                // screen behind (on iPhone the sheet spans the whole width, so
+                // the Machines title under it sits "inside" any column).
+                if issue.auditType == .contrast, let container, container.exists,
+                   issue.element.map({ !self.isDescendant($0, of: container) }) ?? true {
+                    return true
+                }
+                // Settings' Form lays its cells out lazily, and at xSmall and
+                // Large the auditor flags whichever rows it has not re-measured
+                // as "partially unsupported" -- a different row as the layout or
+                // scroll position changes, while the AX5 pass (every row laid
+                // out at 53 pt body text, nothing clipped) proves they scale.
+                // Only that check, only in the sheet; clipping and contrast
+                // there still fail.
+                if issue.auditType == .dynamicType, lazyForm, let container, container.exists,
+                   issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
+                    return true
+                }
+                // The Library grid is lazy too, and the auditor flags its day
+                // headers (headline) at xSmall and Large the same way; the AX5
+                // pass lays them out at full size. Tile badges (caption2, drawn
+                // at 48 pt tall at AX5) are flagged at every size: XCUITest lists
+                // them although VoiceOver never reaches them (hidden -- the
+                // tile's label says what they show). Only Dynamic Type; their
+                // contrast is still audited.
+                if issue.auditType == .dynamicType, let id = issue.element?.identifier,
+                   id == "tile-badge" || (id == "day-header" && !place.contains("AccessibilityXXXL")) {
+                    return true
+                }
+                // The iPad sidebar's rows are UIKit's single-line cells, and at
+                // xSmall and Large the auditor PREDICTS a long one ("Recently
+                // Deleted") "may be clipped at larger Dynamic Type sizes". The
+                // AX5 pass audits the sidebar at that size and reports real
+                // clipping there; only the prediction is skipped, only there.
+                if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
+                   issue.detailedDescription.contains("larger Dynamic Type sizes") {
+                    return true
+                }
+                // A disabled control (Generate before a model is chosen) is an
+                // inactive component, which WCAG 1.4.3 exempts from contrast.
+                if issue.auditType == .contrast, let element = issue.element, element.exists, !element.isEnabled {
+                    return true
+                }
+                // The system search field, grown out of the tab bar, reports its
+                // own placeholder as clipped at every size while the recording
+                // shows it whole; the app supplies only the prompt text.
+                if issue.auditType == .textClipped, issue.element?.elementType == .searchField {
+                    return true
+                }
+                // System bars (the tab bar, the iPad's floating tab bar, a
+                // navigation bar's Done) cap their text by design and offer the
+                // Large Content Viewer instead. Only their Dynamic Type issues are
+                // skipped -- never contrast, clipping or hit area -- and an
+                // element the auditor cannot even name is taken to be one, since
+                // every view this app draws is named.
+                if issue.auditType == .dynamicType,
+                   issue.element.map({ self.isSystemBar($0, in: app) }) ?? true {
+                    return true
+                }
+                // Name the element: "Contrast failed" alone says nothing in a CI log.
+                let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
+                    ?? "unnamed element (\(issue.detailedDescription))"
+                XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
                 return true
             }
-            // Behind a sheet: the iPad's sidebar beside a form sheet, and --
-            // with no element at all -- the status bar under the light
-            // scrim above an iPhone page sheet (the test's screen recording
-            // shows nothing else unnamed on screen). Every view inside the
-            // sheet is named, so an unnamed node cannot hide a real failure.
-            if issue.auditType == .contrast, let region,
-               issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
-                return true
-            }
-            // A presented sheet: anything that is not its descendant is the
-            // screen behind (on iPhone the sheet spans the whole width, so
-            // the Machines title under it sits "inside" any column).
-            if issue.auditType == .contrast, let container, container.exists,
-               issue.element.map({ !self.isDescendant($0, of: container) }) ?? true {
-                return true
-            }
-            // Settings' Form lays its cells out lazily, and at xSmall and
-            // Large the auditor flags whichever rows it has not re-measured
-            // as "partially unsupported" -- a different row as the layout or
-            // scroll position changes, while the AX5 pass (every row laid
-            // out at 53 pt body text, nothing clipped) proves they scale.
-            // Only that check, only in the sheet; clipping and contrast
-            // there still fail.
-            if issue.auditType == .dynamicType, lazyForm, let container, container.exists,
-               issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
-                return true
-            }
-            // The Library grid is lazy too, and the auditor flags its day
-            // headers (headline) at xSmall and Large the same way; the AX5
-            // pass lays them out at full size. Tile badges (caption2, drawn
-            // at 48 pt tall at AX5) are flagged at every size: XCUITest lists
-            // them although VoiceOver never reaches them (hidden -- the
-            // tile's label says what they show). Only Dynamic Type; their
-            // contrast is still audited.
-            if issue.auditType == .dynamicType, let id = issue.element?.identifier,
-               id == "tile-badge" || (id == "day-header" && !place.contains("AccessibilityXXXL")) {
-                return true
-            }
-            // The iPad sidebar's rows are UIKit's single-line cells, and at
-            // xSmall and Large the auditor PREDICTS a long one ("Recently
-            // Deleted") "may be clipped at larger Dynamic Type sizes". The
-            // AX5 pass audits the sidebar at that size and reports real
-            // clipping there; only the prediction is skipped, only there.
-            if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
-               issue.detailedDescription.contains("larger Dynamic Type sizes") {
-                return true
-            }
-            // A disabled control (Generate before a model is chosen) is an
-            // inactive component, which WCAG 1.4.3 exempts from contrast.
-            if issue.auditType == .contrast, let element = issue.element, element.exists, !element.isEnabled {
-                return true
-            }
-            // The system search field, grown out of the tab bar, reports its
-            // own placeholder as clipped at every size while the recording
-            // shows it whole; the app supplies only the prompt text.
-            if issue.auditType == .textClipped, issue.element?.elementType == .searchField {
-                return true
-            }
-            // System bars (the tab bar, the iPad's floating tab bar, a
-            // navigation bar's Done) cap their text by design and offer the
-            // Large Content Viewer instead. Only their Dynamic Type issues are
-            // skipped -- never contrast, clipping or hit area -- and an
-            // element the auditor cannot even name is taken to be one, since
-            // every view this app draws is named.
-            if issue.auditType == .dynamicType,
-               issue.element.map({ self.isSystemBar($0, in: app) }) ?? true {
-                return true
-            }
-            // Name the element: "Contrast failed" alone says nothing in a CI log.
-            let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
-                ?? "unnamed element (\(issue.detailedDescription))"
-            XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
-            return true
         }
     }
 

@@ -487,7 +487,8 @@ class VisualCaptureContract(unittest.TestCase):
         # Model checkpoints and capture recordings are megabytes to gigabytes;
         # golden parity fixtures under a crate's testdata/ or the repository's
         # tests/fixtures/ tree are bounded synthetic tensors. Exempt only those
-        # two established fixture roots so the contract keeps catching real
+        # established fixture roots (and the tiny native playback fixture)
+        # so the contract keeps catching real
         # payloads without banning parity tests from using the formats the code
         # under test actually reads.
         forbidden_suffixes = {".safetensors", ".ckpt", ".pt", ".pth", ".mp4", ".mov"}
@@ -502,7 +503,11 @@ class VisualCaptureContract(unittest.TestCase):
 
         def is_exempt_fixture(path: str) -> bool:
             parts = pathlib.PurePosixPath(path).parts
-            in_fixture_root = "testdata" in parts or parts[:2] == ("tests", "fixtures")
+            in_fixture_root = (
+                "testdata" in parts
+                or parts[:2] == ("tests", "fixtures")
+                or path == "apps/ios/Tests/Fixtures/playback-tone.mp4"
+            )
             if not in_fixture_root:
                 return False
             full = REPO_ROOT / path
