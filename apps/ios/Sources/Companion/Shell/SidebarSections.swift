@@ -3,21 +3,16 @@ import MoldClient
 import SwiftUI
 import UniformTypeIdentifiers
 
-// The iPad sidebar's two sections (DESIGN.md §4), mirroring the Mac's:
-// Library's shelves -- All Prints, Favourites, each collection, Recently
-// Deleted -- and one row per machine, saying when it is not answering. Only
-// where there is a sidebar: on iPhone the Library's title menu and the
-// Machines list do this.
+// The iPad sidebar's two sections (DESIGN.md §4), under the five
+// destinations: the Library's other shelves -- Favourites, each collection,
+// Recently Deleted -- and one row per machine, saying when it is not
+// answering. Sidebar only (never in the floating tab bar); on iPhone the
+// Library's title menu and the Machines list do this.
 
 extension RootView {
     @TabContentBuilder<TabSelection>
     func librarySection(_ library: LibraryStore) -> some TabContent<TabSelection> {
         TabSection {
-            Tab(value: TabSelection.go(.library)) {
-                DestinationHome(destination: .library)
-            } label: {
-                Label(LibraryScope.all.title(in: library.shelves), systemImage: LibraryScope.all.symbol)
-            }
             shelfTab(.favorites, library)
             ForEach(library.shelves, id: \.slug) { collection in
                 shelfTab(.collection(slug: collection.slug), library)
@@ -30,8 +25,9 @@ extension RootView {
             }
             shelfTab(.trash, library)
         } header: {
-            Text(Destination.library.title)
+            Text("Shelves")
         }
+        .defaultVisibility(.hidden, for: .tabBar)
     }
 
     /// Sidebar only: in the floating tab bar every shelf and machine became
@@ -42,7 +38,7 @@ extension RootView {
         Tab(value: TabSelection.shelf(scope)) {
             NavigationStack { LibraryView(fixedScope: scope) }
         } label: {
-            Label(scope.title(in: library.shelves), systemImage: scope.symbol)
+            Label { Text(scope.title(in: library.shelves)) } icon: { Image(systemName: scope.symbol) }
         }
         .defaultVisibility(.hidden, for: .tabBar)
     }
@@ -50,11 +46,6 @@ extension RootView {
     @TabContentBuilder<TabSelection>
     func machinesSection(_ hosts: HostStore) -> some TabContent<TabSelection> {
         TabSection {
-            Tab(value: TabSelection.go(.machines)) {
-                DestinationHome(destination: .machines)
-            } label: {
-                Label(Destination.machines.title, systemImage: Destination.machines.symbol)
-            }
             ForEach(hosts.hosts) { host in
                 Tab(value: TabSelection.machine(host.id)) {
                     NavigationStack { MachineDetailView(id: host.id).machineRoutes() }
@@ -66,8 +57,9 @@ extension RootView {
                 .defaultVisibility(.hidden, for: .tabBar)
             }
         } header: {
-            Text(Destination.machines.title)
+            Text("Your Machines")
         }
+        .defaultVisibility(.hidden, for: .tabBar)
     }
 
     static func badge(_ state: HostStore.Reachability) -> Text? {

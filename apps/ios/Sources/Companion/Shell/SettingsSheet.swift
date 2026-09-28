@@ -8,6 +8,8 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
+    /// The iPad sidebar's Settings row shows this as a page, with no Done.
+    var inSidebar = false
 
     var body: some View {
         NavigationStack {
@@ -58,10 +60,12 @@ struct SettingsSheet: View {
                 }
             }
             .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(inSidebar ? .large : .inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                if !inSidebar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
             }
         }

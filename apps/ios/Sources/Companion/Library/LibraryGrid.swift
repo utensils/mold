@@ -56,6 +56,11 @@ struct LibraryGrid: View {
                 AccessibilityRotorEntry(Text(LibraryGrouping.title(for: section.day ?? .now)), id: section.id)
             }
         }
+        .accessibilityRotor("Favourites") {
+            ForEach(visible.filter(\.print.isFavorite)) { entry in
+                AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id)
+            }
+        }
     }
 
     @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat) -> some View {

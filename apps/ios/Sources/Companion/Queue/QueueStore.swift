@@ -119,6 +119,8 @@ final class QueueStore {
 
     var isEmpty: Bool { listings.values.allSatisfy(\.isEmpty) }
 
+    var heldCount: Int { listings.values.joined().filter { $0.state == .held }.count }
+
     /// Whether this row can be cancelled at all: a job already rendering on a
     /// machine that cannot stop at a safe point has nothing to press.
     func canCancel(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {

@@ -95,22 +95,28 @@ The native Mac app's vocabulary governs. `docs/design/README.md`'s web lexicon
   one the Models pane shows", so Models already belongs to a machine. The
   Machines list starts with a "Models" row for the Default machine, and Machine
   detail ▸ Models opens any other machine's.
-- **Settings** is a sheet, opened from the Machines toolbar gear and on iPad
-  from the sidebar footer.
+- **Settings** is a sheet, opened from the Machines toolbar gear (and ⌘,); the
+  iPad sidebar also lists it as a row that shows it as a page.
 
 ### iPad sidebar (mirrors the Mac sidebar through `TabSection`)
 
 ```
 Generate
-Library            All Prints · Favourites · ▸ Collections (drop prints on one to file them) · Recently Deleted
+Library            (All Prints)
 Queue
 Models             (follows the Default machine; switch in its toolbar)
-Machines           ● workstation · ● hal9000 · ○ studio-mini · Add a Machine…
-───
-Settings
+Machines
+Search
+Settings           (a page here; a sheet everywhere else)
+Shelves            Favourites · each collection (drop prints on one to file them) · Recently Deleted
+Your Machines      workstation · hal9000 "Offline" · studio-mini "Key"
 ```
 
-Collapsed to a tab bar, iPad uses the iPhone tabs.
+The floating tab bar (the sidebar put away) carries only the five
+destinations and Search. The sections live in the sidebar alone: listed in
+the bar they made UIKit page and re-lay it out on every text-size change
+until the app stopped answering. A machine that is not answering says so in
+words beside its name, never by colour alone.
 
 ### State and links
 

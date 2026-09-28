@@ -31,11 +31,25 @@ struct RootView: View {
         @Bindable var router = router
         TabView(selection: $router.selection) {
             if width == .regular {
+                // Both the floating tab bar and the sidebar list the five
+                // destinations; only the sidebar adds the sections
+                // (`SidebarSections`) -- in the bar they paged and re-laid it
+                // out until the app stopped answering.
                 destinationTab(.generate)
-                librarySection(library)
+                destinationTab(.library)
                 destinationTab(.queue)
                 destinationTab(.models)
+                destinationTab(.machines)
+                librarySection(library)
                 machinesSection(hosts)
+                // A sidebar row, not the sidebar's footer: the footer bar
+                // held its text at one size (the audit's Dynamic Type check).
+                Tab(value: TabSelection.settings) {
+                    SettingsSheet(inSidebar: true)
+                } label: {
+                    Label { Text("Settings") } icon: { Image(systemName: "gearshape") }
+                }
+                .defaultVisibility(.hidden, for: .tabBar)
             } else {
                 ForEach(destinations) { destinationTab($0) }
             }
@@ -44,12 +58,6 @@ struct RootView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
-        // The iPad sidebar's footer, where DESIGN.md §4 puts Settings.
-        .tabViewSidebarBottomBar {
-            Button { router.showsSettings = true } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-        }
         .sheet(isPresented: $router.showsSettings) {
             // Page-sized on iPad: the default form sheet showed half of it,
             // with the first and last rows under the scroll-edge fades.
@@ -72,7 +80,7 @@ struct RootView: View {
             // sidebar's shelves and machines.
             guard new != .regular else { return }
             switch router.selection {
-            case .go(.models), .machine: router.selection = .go(.machines)
+            case .go(.models), .machine, .settings: router.selection = .go(.machines)
             case .shelf: router.selection = .go(.library)
             default: break
             }
@@ -85,7 +93,7 @@ struct RootView: View {
             case .go(let destination): stored = destination.rawValue
             case .search: stored = Self.searchKey
             case .shelf: stored = Destination.library.rawValue
-            case .machine: stored = Destination.machines.rawValue
+            case .machine, .settings: stored = Destination.machines.rawValue
             }
         }
     }

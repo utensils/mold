@@ -18,9 +18,9 @@ let package = Package(
         .target(
             name: "MoldMesh",
             dependencies: [.product(name: "MoldClient", package: "MoldClient")],
-            // Copied as SOURCE and compiled at runtime: `swift build` never
-            // compiles .metal into a default library (only Xcode does), and the
-            // same package must draw under both.
+            // `swift build` copies the source and never compiles it; Xcode
+            // compiles it into the bundle's default.metallib regardless.
+            // `MeshMetalStack.shaderLibrary` loads whichever is there.
             resources: [.copy("MeshShaders.metal")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

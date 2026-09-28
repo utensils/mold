@@ -131,10 +131,10 @@ struct LibraryView: View {
                 Picker("Tile Size", selection: $tile) {
                     ForEach(TileSize.allCases) { Text($0.title).tag($0) }
                 }
-                Button("Larger Tiles") { tile = tile.step(1) }
+                Button("Larger Tiles") { tile = tile.stepped(bigger: true) }
                     .keyboardShortcut("+", modifiers: .command)
                     .disabled(tile == .large)
-                Button("Smaller Tiles") { tile = tile.step(-1) }
+                Button("Smaller Tiles") { tile = tile.stepped(bigger: false) }
                     .keyboardShortcut("-", modifiers: .command)
                     .disabled(tile == .small)
                 if scope.isTrash, !library.trashPool.isEmpty {
@@ -159,13 +159,6 @@ enum TileSize: String, CaseIterable, Identifiable {
         case .medium: String(localized: "Medium")
         case .large: String(localized: "Large")
         }
-    }
-
-    /// One size up (1) or down (-1), stopping at the ends.
-    func step(_ by: Int) -> TileSize {
-        let all = Self.allCases
-        let index = all.firstIndex(of: self)! + by
-        return all.indices.contains(index) ? all[index] : self
     }
 
     /// Points at Large text; `@ScaledMetric` in the grid grows them with it.

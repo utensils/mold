@@ -40,6 +40,13 @@ enum ProgressWords {
         return words
     }
 
+    /// Which quarter of the steps are done (0 through 4), for the VoiceOver
+    /// announcement every 25%. `nil` before a step count is known.
+    static func quarter(_ progress: JobProgress?) -> Int? {
+        guard let step = progress?.step, let total = progress?.total, total > 0 else { return nil }
+        return min(4, step * 4 / total)
+    }
+
     static func plain(_ progress: JobProgress) -> String {
         let stage = (progress.stage ?? "").lowercased()
         if isDenoising(stage) || (stage.isEmpty && progress.step != nil) { return String(localized: "Adding detail") }

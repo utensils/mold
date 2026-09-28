@@ -52,3 +52,16 @@ struct ProgressWordsTests {
         #expect(left == .seconds(8))
     }
 }
+
+extension ProgressWordsTests {
+    @Test func theAnnouncementComesAtEachQuarter() throws {
+        func progress(_ step: Int, _ total: Int) throws -> JobProgress {
+            try MoldJSON.decoder.decode(JobProgress.self, from: Data(#"{"step":\#(step),"total":\#(total)}"#.utf8))
+        }
+        #expect(ProgressWords.quarter(nil) == nil)
+        #expect(ProgressWords.quarter(try progress(6, 28)) == 0)
+        #expect(ProgressWords.quarter(try progress(7, 28)) == 1)
+        #expect(ProgressWords.quarter(try progress(14, 28)) == 2)
+        #expect(ProgressWords.quarter(try progress(28, 28)) == 4)
+    }
+}

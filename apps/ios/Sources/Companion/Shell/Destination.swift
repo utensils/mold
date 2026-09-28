@@ -52,4 +52,6 @@ enum TabSelection: Hashable {
     /// iPad sidebar only: one Library shelf, or one machine.
     case shelf(LibraryScope)
     case machine(UUID)
+    /// iPad sidebar only: Settings as a page (elsewhere it is a sheet).
+    case settings
 }

@@ -9,10 +9,10 @@ import Testing
 @MainActor
 struct ShellBehaviourTests {
     @Test func tileSizesStepAndStopAtTheEnds() {
-        #expect(TileSize.small.step(1) == .medium)
-        #expect(TileSize.large.step(1) == .large)
-        #expect(TileSize.small.step(-1) == .small)
-        #expect(TileSize.large.step(-1) == .medium)
+        #expect(TileSize.small.stepped(bigger: true) == .medium)
+        #expect(TileSize.large.stepped(bigger: true) == .large)
+        #expect(TileSize.small.stepped(bigger: false) == .small)
+        #expect(TileSize.large.stepped(bigger: false) == .medium)
     }
 
     @Test func aSidebarMachineSaysWhenItIsNotAnswering() {

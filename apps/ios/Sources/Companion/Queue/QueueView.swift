@@ -35,6 +35,8 @@ struct QueueView: View {
             Text("Anything already rendering keeps going. Waiting and held jobs are cancelled.")
         }
         .refreshable { await queue.reload() }
+        // A job just held asks for a decision: a warning, as on Generate.
+        .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
         .task { await queue.reload() }
         .task { await queue.followRunning() }
     }

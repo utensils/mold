@@ -97,6 +97,12 @@ struct ProgressPlate: View {
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
         .accessibilityElement(children: .contain)
+        // VoiceOver hears the render move on at each quarter, without having
+        // to find the bar (DESIGN.md §6).
+        .onChange(of: ProgressWords.quarter(progress)) { _, quarter in
+            guard let quarter, quarter > 0 else { return }
+            AccessibilityNotification.Announcement(ProgressWords.spoken(progress)).post()
+        }
     }
 
     private var queuePosition: Int? {

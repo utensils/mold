@@ -36,6 +36,22 @@ final class ShellAccessibilityTests: XCTestCase {
             try check(app, "\(tab) at \(size)")
         }
 
+        // iPad: the sidebar, opened over the content -- its shelves and
+        // machines are drawn nowhere else. What it dims behind it is exempt
+        // from contrast, as behind a sheet.
+        let showSidebar = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
+        if showSidebar.waitForExistence(timeout: 2), showSidebar.isHittable {
+            showSidebar.tap()
+            let row = app.descendants(matching: .any)["Favourites"].firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
+            settle(row)
+            // The sidebar is the column from the left edge to its rows' end.
+            try check(app, "Sidebar at \(size)",
+                      region: CGRect(x: 0, y: 0, width: row.frame.maxX + 16, height: .greatestFiniteMagnitude))
+            let hide = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
+            if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
+        }
+
         // Settings: the Machines toolbar button, or ⌘, where it is not on screen.
         let settings = app.buttons["Settings"].firstMatch
         if settings.waitForExistence(timeout: 3), settings.isHittable {
@@ -55,7 +71,11 @@ final class ShellAccessibilityTests: XCTestCase {
         XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         let sheetBar = app.navigationBars["Settings"].firstMatch
         settle(sheetBar)
-        try check(app, "Settings at \(size)", sheet: sheetBar)
+        // The sheet is the column under its navigation bar.
+        try check(app, "Settings at \(size)",
+                  region: CGRect(x: sheetBar.frame.minX, y: sheetBar.frame.minY,
+                                 width: sheetBar.frame.width, height: .greatestFiniteMagnitude),
+                  lazyForm: true)
         app.buttons["Done"].firstMatch.tap()
 
         // Search is its own tab role, drawn as the separate glass button.
@@ -71,16 +91,17 @@ final class ShellAccessibilityTests: XCTestCase {
         try check(app, "Search at \(size)")
     }
 
-    /// `sheet`: the presented sheet's navigation bar. Everything outside the
-    /// sheet is the dimmed screen behind it -- unreachable, and measured by
+    /// `region`: a presented sheet or the iPad sidebar. Everything outside it
+    /// is the dimmed screen behind -- unreachable, and measured by
     /// the auditor through the scrim.
-    @MainActor private func check(_ app: XCUIApplication, _ place: String, sheet: XCUIElement? = nil) throws {
+    @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
+                                  lazyForm: Bool = false) throws {
         do {
-            try audit(app, place, sheet: sheet)
+            try audit(app, place, region: region, lazyForm: lazyForm)
         } catch where Self.isTimeout(error) {
             // "Audit failed to complete in time" is the harness, not a
             // finding: once more, and if it still cannot finish, say where.
-            do { try audit(app, place, sheet: sheet) } catch where Self.isTimeout(error) {
+            do { try audit(app, place, region: region, lazyForm: lazyForm) } catch where Self.isTimeout(error) {
                 XCTFail("\(place): the audit could not finish (\(error.localizedDescription))")
             }
         }
@@ -92,7 +113,8 @@ final class ShellAccessibilityTests: XCTestCase {
             || error.domain == "com.apple.dt.XCTest.XCTFuture"
     }
 
-    @MainActor private func audit(_ app: XCUIApplication, _ place: String, sheet: XCUIElement?) throws {
+    @MainActor private func audit(_ app: XCUIApplication, _ place: String, region: CGRect?,
+                                  lazyForm: Bool) throws {
         try app.performAccessibilityAudit(for: [
             .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
         ]) { issue in
@@ -109,8 +131,8 @@ final class ShellAccessibilityTests: XCTestCase {
             // scrim above an iPhone page sheet (the test's screen recording
             // shows nothing else unnamed on screen). Every view inside the
             // sheet is named, so an unnamed node cannot hide a real failure.
-            if issue.auditType == .contrast, let sheet, sheet.exists,
-               issue.element.map({ !self.isInside(sheet, $0) }) ?? true {
+            if issue.auditType == .contrast, let region,
+               issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
                 return true
             }
             // Settings' Form lays its cells out lazily, and at xSmall and
@@ -120,8 +142,17 @@ final class ShellAccessibilityTests: XCTestCase {
             // out at 53 pt body text, nothing clipped) proves they scale.
             // Only that check, only in the sheet; clipping and contrast
             // there still fail.
-            if issue.auditType == .dynamicType, let sheet, sheet.exists,
-               issue.element.map({ self.isInside(sheet, $0) }) ?? false {
+            if issue.auditType == .dynamicType, lazyForm, let region,
+               issue.element.map({ region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? false {
+                return true
+            }
+            // The iPad sidebar's rows are UIKit's single-line cells, and at
+            // xSmall and Large the auditor PREDICTS a long one ("Recently
+            // Deleted") "may be clipped at larger Dynamic Type sizes". The
+            // AX5 pass audits the sidebar at that size and reports real
+            // clipping there; only the prediction is skipped, only there.
+            if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
+               issue.detailedDescription.contains("larger Dynamic Type sizes") {
                 return true
             }
             // The system search field, grown out of the tab bar, reports its
@@ -143,7 +174,7 @@ final class ShellAccessibilityTests: XCTestCase {
             // Name the element: "Contrast failed" alone says nothing in a CI log.
             let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
                 ?? "unnamed element (\(issue.detailedDescription))"
-            XCTFail("\(place): \(issue.compactDescription) -- \(element)")
+            XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
             return true
         }
     }
@@ -159,10 +190,6 @@ final class ShellAccessibilityTests: XCTestCase {
         }
     }
 
-    @MainActor private func isInside(_ sheet: XCUIElement, _ element: XCUIElement) -> Bool {
-        let bar = sheet.frame, frame = element.frame
-        return frame.midX >= bar.minX && frame.midX <= bar.maxX && frame.midY >= bar.minY
-    }
 
     @MainActor private func isSystemBar(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
         let bars = app.navigationBars.allElementsBoundByIndex + app.tabBars.allElementsBoundByIndex
