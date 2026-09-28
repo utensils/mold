@@ -1,5 +1,6 @@
 import AVKit
 import SwiftUI
+import MoldClient
 import Testing
 @testable import MoldCompanion
 
@@ -35,6 +36,13 @@ struct PlaybackAudioTests {
         #expect(player.currentTime().seconds >= 0.25)
         #expect(!player.isMuted && player.volume > 0)
         #expect(AVAudioSession.sharedInstance().category == .playback)
+    }
+
+    @Test func pagingFromAHiddenStillKeepsInteractiveMediaActionsReachable() {
+        #expect(!PrintViewer.showsChrome(for: .picture, requested: false))
+        #expect(PrintViewer.showsChrome(for: .clip, requested: false))
+        #expect(PrintViewer.showsChrome(for: .mesh, requested: false))
+        #expect(PrintViewer.showsChrome(for: .picture, requested: true))
     }
 
     @Test func pagedVideoKeepsNativeTransportControls() async throws {

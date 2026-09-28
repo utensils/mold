@@ -18,7 +18,8 @@ struct PrintViewer: View {
 
     var body: some View {
         let entry = entries.first { $0.id == (current ?? start) }
-        TabView(selection: Binding(get: { current ?? start }, set: { current = $0 })) {
+        let visibleChrome = Self.showsChrome(for: entry?.print.kind, requested: chrome)
+        return TabView(selection: Binding(get: { current ?? start }, set: { current = $0 })) {
             ForEach(entries) { page in
                 Group {
                     if page.print.kind == .clip || page.print.kind == .mesh {
@@ -34,8 +35,8 @@ struct PrintViewer: View {
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
         .background(.black)
-        .ignoresSafeArea(edges: chrome ? [] : .all)
-        .toolbar(chrome ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .ignoresSafeArea(edges: visibleChrome ? [] : .all)
+        .toolbar(visibleChrome ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .navigationTitle(entry.map(title) ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -73,6 +74,12 @@ struct PrintViewer: View {
             activity.addUserInfoEntries(from: PrintHandoff.userInfo(
                 filename: entry.print.filename, address: host.baseURL, instanceId: hosts.instanceID(of: host.id)))
         }
+    }
+
+    /// Still-image chrome can be hidden; interactive media must retain the
+    /// gallery actions because their own gestures cannot restore our bars.
+    static func showsChrome(for kind: PrintKind?, requested: Bool) -> Bool {
+        requested || kind == .clip || kind == .mesh
     }
 
     @ViewBuilder private func bottomBar(_ entry: LibraryEntry) -> some View {
