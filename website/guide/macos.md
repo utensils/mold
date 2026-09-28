@@ -78,3 +78,7 @@ the selected queue row, and ⌘, opens Settings.
 The source lives in `apps/macos/`; its
 [README](https://github.com/utensils/mold/blob/main/apps/macos/README.md)
 covers building, the embedded engine, releasing, and the Sparkle feeds.
+For distribution builds, `make engine` passes the app's resolved marketing
+version as `MOLD_BUILD_VERSION` to Rust. This keeps the version reported by
+This Mac and `/api/status` aligned with About Mold Studio on Nightly; ordinary
+Rust builds use the workspace package version.
