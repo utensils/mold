@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import MoldClient
 
 /// Getting picked pictures IN: the one pipeline every picture well shares.
 ///

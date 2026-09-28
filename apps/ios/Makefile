@@ -8,12 +8,14 @@ SCHEME   := MoldCompanion
 CONFIG   ?= Debug
 BUILD    ?= $(CURDIR)/build
 PACKAGES := ../shared/Packages
-# Any available iOS 26 simulator by name; CI and a laptop differ in which
-# runtimes they carry, so no OS is pinned.
-ifeq ($(origin SIM),undefined)
-SIM := $(shell scripts/pick-simulator.sh)
-endif
-DEST     := platform=iOS Simulator,name=$(SIM)
+# Simulators are addressed by UDID, never by name: a runner carries several
+# iOS 26.x runtimes with the same device names, and xcodebuild and simctl
+# would each resolve a name on their own. Picked lazily and once, so `lint`,
+# `help` and `clean` never touch simctl. Override with SIM=<udid>.
+SIM_OR_PICK = $(or $(SIM),$(shell scripts/pick-simulator.sh iPhone))
+SIM_ID = $(eval SIM_ID := $(SIM_OR_PICK))$(SIM_ID)
+IPAD_ID = $(eval IPAD_ID := $(or $(IPAD),$(shell scripts/pick-simulator.sh iPad)))$(IPAD_ID)
+DEST = platform=iOS Simulator,id=$(SIM_ID)
 
 MARKETING_VERSION ?= $(shell ../macos/scripts/workspace-version.sh)
 BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
@@ -24,11 +26,16 @@ BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 # with the team in project.yml (`make archive`).
 SIM_SIGN := CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 
-XCB := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-       -destination '$(DEST)' -derivedDataPath $(BUILD)/DerivedData $(SIM_SIGN) \
+XCB_BASE = xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
+       -derivedDataPath $(BUILD)/DerivedData $(SIM_SIGN) \
        CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) MARKETING_VERSION=$(MARKETING_VERSION)
+XCB = $(XCB_BASE) -destination '$(DEST)'
 
-.PHONY: help gen build run test packages-test uitest lint lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-size clean
+# Fails loudly rather than handing xcodebuild an empty `id=`.
+require-sim:
+	@[ -n "$(SIM_ID)" ] || { echo "no iOS 26 simulator found -- install an iOS 26 runtime"; exit 1; }
+
+.PHONY: help require-sim gen build archive run test packages-test uitest lint lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-size clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -39,23 +46,23 @@ gen: ## Regenerate MoldCompanion.xcodeproj from project.yml
 	@printf 'settings:\n  base:\n    MARKETING_VERSION: "%s"\n' "$(MARKETING_VERSION)" > Version.yml
 	@$(XCODEGEN) generate --spec project.yml --quiet
 
-build: gen ## Build for the simulator
+build: require-sim gen ## Build for the simulator
 	@$(XCB) build | grep -E 'error:|warning: .*MoldCompanion|BUILD (SUCCEEDED|FAILED)' ; exit $${PIPESTATUS[0]}
 
 APP_PATH = $(BUILD)/DerivedData/Build/Products/$(CONFIG)-iphonesimulator/Mold Studio.app
 
-run: build ## Build, install and launch in the simulator
-	@xcrun simctl boot "$(SIM)" 2>/dev/null || true
+run: require-sim build ## Build, install and launch in the simulator
+	@xcrun simctl boot $(SIM_ID) 2>/dev/null || true
 	@open -a Simulator
-	@xcrun simctl install "$(SIM)" "$(APP_PATH)"
-	@xcrun simctl launch "$(SIM)" io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM)"
+	@xcrun simctl install $(SIM_ID) "$(APP_PATH)"
+	@xcrun simctl launch $(SIM_ID) io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM_ID)"
 
-test: gen ## Unit tests on the simulator (the shared packages' own suites run from their Makefiles)
+test: require-sim gen ## Unit tests on the simulator (the shared packages' own suites run from their Makefiles)
 	@$(XCB) test -only-testing:MoldCompanionTests 2>&1 \
 	  | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)' ; exit $${PIPESTATUS[0]}
 
-packages-test: ## MoldClient and MoldStyle's own suites on the iOS simulator
-	@for pkg in MoldClient MoldStyle; do \
+packages-test: require-sim ## MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator
+	@for pkg in MoldClient MoldStyle MoldMesh; do \
 	  echo "  $$pkg"; \
 	  (cd $(PACKAGES)/$$pkg && xcodebuild test -scheme $$pkg -destination '$(DEST)' \
 	    -derivedDataPath $(BUILD)/PackagesData 2>&1 \
@@ -63,20 +70,36 @@ packages-test: ## MoldClient and MoldStyle's own suites on the iOS simulator
 	    exit $${PIPESTATUS[0]}) || exit 1; \
 	done
 
-uitest: gen ## The accessibility audit: every destination at xSmall, Large and AX5, light AND dark
+uitest: require-sim gen ## The accessibility audit: every destination at xSmall, Large and AX5, light AND dark, iPhone AND iPad
 	@# The audit sees whatever appearance the simulator is in -- contrast
-	@# passing in one says nothing about the other -- so it runs in both and
-	@# puts the simulator back the way it found it.
-	@xcrun simctl boot "$(SIM)" 2>/dev/null || true
-	@was=$$(xcrun simctl ui "$(SIM)" appearance); status=0; \
-	for mode in light dark; do \
-	  echo "  appearance: $$mode"; \
-	  xcrun simctl ui "$(SIM)" appearance $$mode; \
-	  $(XCB) test -only-testing:MoldCompanionUITests 2>&1 \
-	    | grep -E 'error:|TEST (SUCCEEDED|FAILED)'; \
-	  [ $${PIPESTATUS[0]} -eq 0 ] || status=1; \
-	done; \
-	xcrun simctl ui "$(SIM)" appearance $$was; exit $$status
+	@# passing in one says nothing about the other -- so it runs in both, on
+	@# an iPhone (tab bar) and an iPad (sidebar, where Models lives), and
+	@# puts each simulator back the way it found it, even on Ctrl-C.
+	@status=0; \
+	for dev in $(SIM_ID) $(IPAD_ID); do \
+	  xcrun simctl boot $$dev 2>/dev/null || true; \
+	  was=$$(xcrun simctl ui $$dev appearance); \
+	  trap "xcrun simctl ui $$dev appearance $$was" EXIT INT TERM; \
+	  for mode in light dark; do \
+	    echo "  $$(xcrun simctl list devices | grep $$dev | sed -E 's/ \(.*//;s/^ *//') · $$mode"; \
+	    xcrun simctl ui $$dev appearance $$mode; \
+	    $(XCB_BASE) -destination "platform=iOS Simulator,id=$$dev" test -only-testing:MoldCompanionUITests 2>&1 \
+	      | grep -E 'error:|TEST (SUCCEEDED|FAILED)'; \
+	    [ $${PIPESTATUS[0]} -eq 0 ] || status=1; \
+	  done; \
+	  xcrun simctl ui $$dev appearance $$was; trap - EXIT INT TERM; \
+	done; exit $$status
+
+ARCHIVE ?= $(BUILD)/MoldCompanion.xcarchive
+
+archive: gen ## Unsigned Release archive for App Store Connect (signed at export)
+	@xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration Release \
+	  -destination 'generic/platform=iOS' -archivePath "$(ARCHIVE)" \
+	  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+	  CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) MARKETING_VERSION=$(MARKETING_VERSION) \
+	  archive | grep -E 'error:|ARCHIVE (SUCCEEDED|FAILED)'; exit $${PIPESTATUS[0]}
+	@test -f "$(ARCHIVE)/Products/Applications/Mold Studio.app/AppIcon60x60@2x.png" \
+	  || { echo "the archive has no app icon -- App Store Connect would reject it"; exit 1; }
 
 SWIFT_LINT := ../shared/scripts/swift-lint.sh
 
@@ -85,9 +108,16 @@ lint: lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-s
 lint-script: ## The shared lint script still catches what it exists to catch
 	@../shared/scripts/tests/swift-lint.sh
 
-lint-layers: ## MoldClient stays UI-free
+lint-layers: ## MoldClient stays UI-free; one composition root; keys only in the Keychain
 	@! grep -rlnE '^import (SwiftUI|AppKit|UIKit)' $(PACKAGES)/MoldClient/Sources \
 	  || { echo "LAYER VIOLATION: MoldClient imports a UI framework"; exit 1; }
+	@! grep -rlnE 'HTTPBackend(\(|\.claimPairing)' Sources --include='*.swift' \
+	  | grep -v 'CompanionStores+Backend.swift' \
+	  || { echo "LAYER VIOLATION: a backend is constructed outside the composition root"; exit 1; }
+	@! grep -rnE 'X-Api-Key|api_key=' Sources --include='*.swift' \
+	  || { echo "KEY VIOLATION: a key never goes in a URL or a hand-built header"; exit 1; }
+	@! grep -rn 'SecretStore' Sources --include='*.swift' \
+	  || { echo "KEY VIOLATION: the phone keeps keys in the Keychain, never SecretStore's file"; exit 1; }
 	@echo "  layers ok"
 
 lint-color: ## No literal colors -- the system owns the palette

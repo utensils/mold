@@ -1,0 +1,139 @@
+name: iOS native TestFlight
+
+# Mold Studio Companion (apps/ios) to TestFlight, after `iOS native app` passes
+# on main. A SECOND App Store Connect app record beside the Tauri iPhone app's
+# (testflight-ios.yml); the two never share a build or a bundle ID.
+#
+# Gated on the repository variable COMPANION_TESTFLIGHT == 'true'. App Store
+# Connect has no API for creating an app record, so until its owner creates
+# "Mold Studio Companion" (io.utensils.mold.companion) and sets the variable,
+# this skips with a notice instead of failing every main push red. It is not
+# part of the release tag gate either: only the Tauri app's VALID build is.
+#
+# Exports stay eligible for internal AND external testing: never set
+# testFlightInternalTestingOnly to true (.claude/rules/mobile.md).
+
+on:
+  workflow_run:
+    workflows: [iOS native app]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Optional CFBundleVersion override
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-native-testflight-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_BUNDLE_ID: io.utensils.mold.companion
+  DEVELOPMENT_TEAM: 28X9H69QGE
+  TESTFLIGHT_GROUP_NAME: Mold Internal
+  TESTFLIGHT_TESTER_EMAIL: brink.james@gmail.com
+
+jobs:
+  gate:
+    name: Is the app record set up?
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - id: gate
+        env:
+          ENABLED: ${{ vars.COMPANION_TESTFLIGHT }}
+        run: |
+          if [ "$ENABLED" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Companion TestFlight is off: create the App Store Connect record for io.utensils.mold.companion, then set the repository variable COMPANION_TESTFLIGHT=true."
+          fi
+
+  upload:
+    name: Build, upload, and validate
+    needs: gate
+    if: >-
+      needs.gate.outputs.enabled == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/ios
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Install App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          test -n "$APPLE_API_PRIVATE_KEY" && test -n "$APPLE_API_KEY" && test -n "$APPLE_API_ISSUER"
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key"
+          chmod 600 "$key"
+          {
+            echo "ASC_KEY_PATH=$key"
+            echo "ASC_KEY_ID=$APPLE_API_KEY"
+            echo "ASC_ISSUER_ID=$APPLE_API_ISSUER"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve version
+        env:
+          REQUESTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          {
+            echo "MARKETING_VERSION=$(../macos/scripts/workspace-version.sh)"
+            echo "BUILD_NUMBER=${REQUESTED_BUILD:-$(git rev-list --count HEAD)}"
+          } >> "$GITHUB_ENV"
+
+      # Unsigned, as the Tauri app's archive is: the export below signs the
+      # app and both extensions with App Store Connect automatic signing.
+      - name: Archive
+        run: make archive ARCHIVE="$RUNNER_TEMP/MoldCompanion.xcarchive"
+
+      - name: Export and upload
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>destination</key><string>upload</string>
+          <key>method</key><string>app-store-connect</string>
+          <key>signingStyle</key><string>automatic</string>
+          <key>teamID</key><string>$DEVELOPMENT_TEAM</string>
+          <key>testFlightInternalTestingOnly</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/MoldCompanion.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+      - name: Wait for VALID processing
+        working-directory: .
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/wait-for-testflight.rb "$APP_BUNDLE_ID" "$MARKETING_VERSION" "$BUILD_NUMBER"
+
+      - name: Ensure internal TestFlight access
+        working-directory: .
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/ensure-testflight-tester.rb

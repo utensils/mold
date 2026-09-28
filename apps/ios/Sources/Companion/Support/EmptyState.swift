@@ -19,6 +19,7 @@ struct EmptyState<Actions: View>: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
+                // a11y: decorative -- the title beside it says what this is.
                 Image(systemName: symbol)
                     .font(.largeTitle)
                     .imageScale(.large)

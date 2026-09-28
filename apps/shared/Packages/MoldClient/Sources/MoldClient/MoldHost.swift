@@ -79,3 +79,15 @@ extension ServerStatus {
         return "\(version) (\(gitSha.prefix(7)))"
     }
 }
+
+extension ServerStatus {
+    /// What the machine renders with, said the way a person would: four
+    /// identical cards are "4× NVIDIA L40S", not four lines. Shared by both
+    /// apps' machine cards so the two can never word the same box differently.
+    public var hardware: String? {
+        guard let gpus, let first = gpus.first else { return nil }
+        guard gpus.count > 1 else { return first.name }
+        let names = Set(gpus.map(\.name))
+        return names.count == 1 ? "\(gpus.count)× \(first.name)" : "\(gpus.count) GPUs"
+    }
+}

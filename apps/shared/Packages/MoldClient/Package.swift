@@ -8,16 +8,24 @@ let package = Package(
     name: "MoldClient",
     platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
-        .library(name: "MoldClient", targets: ["MoldClient"])
+        .library(name: "MoldClient", targets: ["MoldClient"]),
+        // Test doubles for both apps' store tests. Test targets only: nothing
+        // in it belongs in a shipping binary.
+        .library(name: "MoldClientTesting", targets: ["MoldClientTesting"]),
     ],
     targets: [
         .target(
             name: "MoldClient",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .target(
+            name: "MoldClientTesting",
+            dependencies: ["MoldClient"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "MoldClientTests",
-            dependencies: ["MoldClient"],
+            dependencies: ["MoldClient", "MoldClientTesting"],
             // Read by path off #filePath, not from a bundle, so SwiftPM should
             // leave them alone rather than treat them as unhandled resources.
             exclude: ["Fixtures"],

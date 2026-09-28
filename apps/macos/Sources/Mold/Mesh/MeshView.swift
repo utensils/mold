@@ -1,6 +1,7 @@
 import MetalKit
 import MoldClient
 import SwiftUI
+import MoldMesh
 
 /// The mesh itself, as an AppKit view SwiftUI hosts.
 ///

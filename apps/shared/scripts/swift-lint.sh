@@ -36,7 +36,7 @@ a11y)
   # reaches the right view is still a human call, not this rule's.
   fail=0
   while IFS= read -r f; do
-    if ! grep -qE 'accessibilityLabel|accessibilityHidden|\.help\(|Label\(|Label \{|accessibilityElement|// a11y:' "$f"; then
+    if ! grep -qE 'accessibilityLabel|\.help\(|Label\(|Label \{|accessibilityElement|// a11y:' "$f"; then
       echo "  no VoiceOver label and no // a11y: opt-out: $f"
       fail=1
     fi

@@ -5,9 +5,9 @@ import SwiftUI
 /// what it will hold and how to get there, in DESIGN.md §7's words -- never a
 /// blank screen and never a disappearing tab.
 struct DestinationHome: View {
+    @Environment(AppRouter.self) private var router
+    @Environment(HostStore.self) private var hosts
     let destination: Destination
-    @Binding var selection: TabSelection
-    @Binding var showsSettings: Bool
 
     var body: some View {
         NavigationStack {
@@ -16,10 +16,9 @@ struct DestinationHome: View {
                 .toolbar {
                     if destination == .machines {
                         ToolbarItem(placement: .topBarLeading) {
-                            Button { showsSettings = true } label: {
+                            Button { router.showsSettings = true } label: {
                                 Label("Settings", systemImage: "gearshape")
                             }
-                            .keyboardShortcut(",", modifiers: .command)
                         }
                     }
                 }
@@ -29,15 +28,9 @@ struct DestinationHome: View {
     @ViewBuilder private var content: some View {
         switch destination {
         case .generate:
-            EmptyState(title: String(localized: "Add a machine to start generating"),
-                       symbol: destination.symbol,
-                       message: String(localized: "Mold makes pictures on a computer you own.")) {
-                Button("Add a Machine…") { selection = .go(.machines) }
-                    .prominentAction()
-            }
+            GenerateView()
         case .library:
-            EmptyState(title: String(localized: "No prints yet"), symbol: destination.symbol,
-                       message: String(localized: "What you generate on any machine appears here."))
+            LibraryView()
         case .queue:
             EmptyState(title: String(localized: "Nothing waiting"), symbol: destination.symbol,
                        message: String(localized: "Renders you start appear here."))
@@ -45,23 +38,14 @@ struct DestinationHome: View {
             EmptyState(title: String(localized: "No machine to show"), symbol: destination.symbol,
                        message: String(localized: "Models belong to a machine. Add one to see what it has installed."))
         case .machines:
-            EmptyState(title: String(localized: "No machines yet"), symbol: destination.symbol,
-                       message: String(localized: "Mold makes pictures on a computer you own. Add one to begin."))
+            MachinesView()
         }
     }
 }
 
-/// The Search tab: Library search. Tokens (`is:video`, `tag:`, `on:`) arrive
-/// with the Library in M4.
+/// The Search tab: the Library, searched -- the same grid, tokens and all.
 struct SearchHome: View {
-    @State private var query = ""
-
     var body: some View {
-        NavigationStack {
-            EmptyState(title: String(localized: "Search your prints"), symbol: "magnifyingglass",
-                       message: String(localized: "Add a machine, and its prints can be found here."))
-                .navigationTitle("Search")
-        }
-        .searchable(text: $query, prompt: Text("Prints, tags and machines"))
+        NavigationStack { LibraryView(searchFocused: true) }
     }
 }

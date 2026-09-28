@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MoldClient
 
 /// The pasteboard, as a picture well needs it.
 ///

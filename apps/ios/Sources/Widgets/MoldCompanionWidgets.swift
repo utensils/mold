@@ -43,6 +43,7 @@ struct RecentPrintsProvider: TimelineProvider {
 struct RecentPrintsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // a11y: decorative -- "No prints yet" below says it.
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.title2)
                 .foregroundStyle(.tint)

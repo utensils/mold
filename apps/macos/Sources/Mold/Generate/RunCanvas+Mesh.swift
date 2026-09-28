@@ -1,5 +1,6 @@
 import Foundation
 import MoldClient
+import MoldMesh
 
 // The mesh arm's two helpers: where its bytes come from, and what its file
 // actions mean here. Split from `RunCanvas+Result` for size.

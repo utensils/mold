@@ -38,6 +38,8 @@ packages:
     path: ../shared/Packages/MoldClient
   MoldStyle:
     path: ../shared/Packages/MoldStyle
+  MoldMesh:
+    path: ../shared/Packages/MoldMesh
 
 targets:
   MoldCompanion:
@@ -49,6 +51,7 @@ targets:
     dependencies:
       - package: MoldClient
       - package: MoldStyle
+      - package: MoldMesh
       - target: MoldCompanionWidgets
       - target: MoldCompanionShare
     settings:
@@ -110,6 +113,8 @@ targets:
       - path: Tests/CompanionTests
     dependencies:
       - target: MoldCompanion
+      - package: MoldClient
+        product: MoldClientTesting
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"

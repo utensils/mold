@@ -1,22 +1,60 @@
+import MoldClient
 import SwiftUI
 
-/// Settings, as a sheet from the Machines toolbar (DESIGN.md §5.6). There is
-/// deliberately no Appearance section: the system decides.
+/// Settings, as a sheet (DESIGN.md §5.6). There is deliberately no Appearance
+/// section: the system decides. Section headers are drawn in `.secondaryText`
+/// -- the system header colour failed the contrast audit on white.
 struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(HostStore.self) private var hosts
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("About") {
+                Section {
+                    ForEach(hosts.hosts) { host in
+                        HStack(spacing: 10) {
+                            StatusDot(reachability: hosts.reachability(of: host))
+                            Text(host.name)
+                            Spacer(minLength: 8)
+                            if hosts.defaultMachine == host.id {
+                                Text("Default").foregroundStyle(.secondaryText)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                    Button("Add a Machine…") {
+                        dismiss()
+                        router.addMachine()
+                    }
+                } header: {
+                    SectionHeader(String(localized: "Machines"))
+                }
+                SettingsSections()
+                Section {
                     AdaptiveRow {
                         Text("Version")
                     } value: {
-                        Text(Self.version).monospacedDigit().textSelection(.enabled)
+                        Text(Self.version).monospacedDigit()
+                    }
+                    .contextMenu {
+                        Button("Copy Version") { UIPasteboard.general.string = Self.version }
                     }
                     Link(destination: Self.privacyPolicy) {
-                        Label("Privacy Policy", systemImage: "hand.raised")
+                        HStack {
+                            // Primary, not the tint: blue words on a dark
+                            // grouped row were borderline in the audit; the
+                            // arrow says it is a link.
+                            Text("Privacy Policy").foregroundStyle(.primary)
+                            Spacer(minLength: 8)
+                            // a11y: decorative -- the link's own words say where it goes.
+                            Image(systemName: "arrow.up.forward").accessibilityHidden(true)
+                        }
                     }
+                    .tint(.primary)
+                } header: {
+                    SectionHeader(String(localized: "About"))
                 }
             }
             .navigationTitle("Settings")
@@ -39,4 +77,23 @@ struct SettingsSheet: View {
         let build = info["CFBundleVersion"] as? String ?? "?"
         return "\(marketing) (\(build))"
     }
+}
+
+/// A form section's title in a colour that passes contrast in both
+/// appearances, still read as a header by VoiceOver.
+struct SectionHeader: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .foregroundStyle(.secondaryText)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The sections later milestones add (Library, Notifications, Live
+/// Activities); empty until they land.
+struct SettingsSections: View {
+    var body: some View { EmptyView() }
 }

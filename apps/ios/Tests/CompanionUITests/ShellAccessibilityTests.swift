@@ -1,9 +1,11 @@
 import XCTest
 
-/// DESIGN.md §6 made executable: every destination is audited at the smallest
-/// and the largest text sizes for clipped text, Dynamic Type support, hit
-/// regions, contrast and element descriptions. A layout that only works at the
-/// default size fails here, not in someone's hand.
+/// DESIGN.md §6 made executable: every destination -- plus Search and the
+/// Settings sheet -- is audited at the smallest and the largest text sizes
+/// for clipped text, Dynamic Type support, hit regions, contrast and element
+/// descriptions. `make uitest` runs this on an iPhone and an iPad, in light
+/// and dark. A layout that only works at the default size fails here, not in
+/// someone's hand.
 final class ShellAccessibilityTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = true
@@ -18,36 +20,85 @@ final class ShellAccessibilityTests: XCTestCase {
         app.launchArguments += ["-UIPreferredContentSizeCategoryName", size]
         app.launch()
 
-        for tab in ["Generate", "Library", "Queue", "Machines"] {
+        for (index, tab) in ["Generate", "Library", "Queue", "Models", "Machines"].enumerated() {
             let button = app.buttons[tab].firstMatch
+            // Models is a sidebar destination: present on iPad, absent on iPhone.
+            if tab == "Models", !button.waitForExistence(timeout: 2) { continue }
             XCTAssertTrue(button.waitForExistence(timeout: 5), "no \(tab) tab at \(size)")
-            button.tap()
-            try app.performAccessibilityAudit(for: [
-                .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
-            ]) { issue in
-                // Text scrolled under the glass tab bar or a pinned action is
-                // measured THROUGH the glass; scrolled into view it is plain
-                // text on the background. Only that case is skipped.
-                if issue.auditType == .contrast, let element = issue.element,
-                   element.frame.maxY > self.bottomChromeTop(app) {
-                    return true
-                }
-                // Name the element: "Contrast failed" alone says nothing in a CI log.
-                let element = issue.element.map { "\($0.elementType) '\($0.label)'" } ?? "unknown element"
-                XCTFail("\(tab) at \(size): \(issue.compactDescription) -- \(element)")
+            // At AX sizes the iPad's floating tab bar pages its tabs; the Go
+            // menu's ⌘1–⌘5 is the way there that never scrolls -- and using it
+            // tests those shortcuts too.
+            if button.isHittable { button.tap() } else { app.typeKey("\(index + 1)", modifierFlags: .command) }
+            try check(app, "\(tab) at \(size)")
+        }
+
+        // Settings: the Machines toolbar button, or ⌘, where it is not on screen.
+        let settings = app.buttons["Settings"].firstMatch
+        if settings.waitForExistence(timeout: 3), settings.isHittable {
+            settings.tap()
+        } else {
+            app.typeKey(",", modifierFlags: .command)
+        }
+        // At huge text iPadOS folds toolbar items into the bar's overflow menu.
+        if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
+            let overflow = app.navigationBars.buttons["More"].firstMatch
+            if overflow.exists { overflow.tap(); app.buttons["Settings"].firstMatch.tap() }
+        }
+        XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
+        try check(app, "Settings at \(size)")
+        app.buttons["Done"].firstMatch.tap()
+
+        // Search is its own tab role, drawn as the separate glass button.
+        let search = app.buttons["Search"].firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5), "no Search tab at \(size)")
+        if search.isHittable { search.tap() } else { app.tabs["Search"].firstMatch.tap() }
+        try check(app, "Search at \(size)")
+    }
+
+    @MainActor private func check(_ app: XCUIApplication, _ place: String) throws {
+        try app.performAccessibilityAudit(for: [
+            .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
+        ]) { issue in
+            // Text scrolled UNDER the glass tab bar or a pinned action is
+            // measured through the glass; scrolled into view it is plain text
+            // on the background. Only that is skipped -- never a control that
+            // lives in the chrome itself.
+            if issue.auditType == .contrast, let element = issue.element,
+               self.isUnderChrome(element, in: app) {
                 return true
             }
+            // System bars (the tab bar, the iPad's floating tab bar, a
+            // navigation bar's Done) cap their text by design and offer the
+            // Large Content Viewer instead. Only their Dynamic Type issues are
+            // skipped -- never contrast, clipping or hit area -- and an
+            // element the auditor cannot even name is taken to be one, since
+            // every view this app draws is named.
+            if issue.auditType == .dynamicType,
+               issue.element.map({ self.isSystemBar($0, in: app) }) ?? true {
+                return true
+            }
+            // Name the element: "Contrast failed" alone says nothing in a CI log.
+            let element = issue.element.map { "\($0.elementType) '\($0.label)'" }
+                ?? "unnamed element (\(issue.detailedDescription))"
+            XCTFail("\(place): \(issue.compactDescription) -- \(element)")
+            return true
         }
     }
 
-    /// Where the bottom chrome begins: the tab bar, or an empty state's pinned
-    /// action bar (`bottom-chrome`) above it.
-    @MainActor private func bottomChromeTop(_ app: XCUIApplication) -> CGFloat {
+    @MainActor private func isSystemBar(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let bars = app.navigationBars.allElementsBoundByIndex + app.tabBars.allElementsBoundByIndex
+            + app.toolbars.allElementsBoundByIndex
+        return bars.contains { $0.frame.contains(element.frame) }
+    }
+
+    /// Scrolled beneath the bottom chrome, and not part of it.
+    @MainActor private func isUnderChrome(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let pinned = app.otherElements["bottom-chrome"].firstMatch
+        if pinned.exists, pinned.frame.contains(element.frame) { return false }
         var top = app.frame.maxY
         let bar = app.tabBars.firstMatch
         if bar.exists { top = min(top, bar.frame.minY) }
-        let pinned = app.otherElements["bottom-chrome"].firstMatch
         if pinned.exists { top = min(top, pinned.frame.minY) }
-        return top
+        return element.frame.maxY > top
     }
 }

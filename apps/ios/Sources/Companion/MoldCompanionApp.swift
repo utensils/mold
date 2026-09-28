@@ -4,9 +4,13 @@ import SwiftUI
 /// the Mac app's little sibling (apps/ios/docs/DESIGN.md).
 @main
 struct MoldCompanionApp: App {
+    @State private var stores = CompanionStores()
+
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(stores: stores)
+                .injecting(stores)
+                .supervisesConnections(stores)
         }
         .commands { GoCommands() }
     }

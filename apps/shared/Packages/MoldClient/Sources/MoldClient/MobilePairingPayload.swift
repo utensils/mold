@@ -1,8 +1,8 @@
 import Foundation
 
-/// The QR payload, ported from `studio/api/pairing.ts:36-56`. This app is
-/// never a pairing CLAIMANT (decision 14) -- it has manual host-and-key entry
-/// and only ever PRODUCES a code, so there is no parser here, only `url`.
+/// The QR payload, ported from `studio/api/pairing.ts:36-56`. The Mac only
+/// PRODUCES a code (`url`); the iPhone companion reads one (`parse`, in
+/// `MobilePairingPayload+Parse.swift`) and redeems it (`HTTPBackend.claimPairing`).
 public struct MobilePairingPayload: Hashable, Sendable {
     static let version = 1
 
@@ -11,6 +11,14 @@ public struct MobilePairingPayload: Hashable, Sendable {
     public let expiresAt: UInt64?
     public let instanceId: String
     public let name: String
+
+    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String) {
+        self.baseURL = baseURL
+        self.token = token
+        self.expiresAt = expiresAt
+        self.instanceId = instanceId
+        self.name = name
+    }
 
     /// `nil` when `session.token == nil` -- a code with no token redeems
     /// nothing, so there is nothing honest to show.

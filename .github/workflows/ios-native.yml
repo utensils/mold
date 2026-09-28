@@ -14,12 +14,19 @@ on:
       - "apps/ios/**"
       - "apps/shared/**"
       - ".github/workflows/ios-native.yml"
+      # The version stamp the Makefile reads.
+      - "apps/macos/scripts/workspace-version.sh"
+      # The pairing claim contract the phone redeems.
+      - "crates/mold-server/src/auth.rs"
+      - "studio/api/pairing.ts"
   pull_request:
     paths:
       - "apps/ios/**"
       - "apps/shared/**"
       - ".github/workflows/ios-native.yml"
-      # The pairing claim contract the phone redeems (M3).
+      # The version stamp the Makefile reads.
+      - "apps/macos/scripts/workspace-version.sh"
+      # The pairing claim contract the phone redeems.
       - "crates/mold-server/src/auth.rs"
       - "studio/api/pairing.ts"
   workflow_dispatch:

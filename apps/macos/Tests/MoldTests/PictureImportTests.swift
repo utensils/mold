@@ -3,6 +3,7 @@ import ImageIO
 import Testing
 import UniformTypeIdentifiers
 
+import MoldClient
 @testable import Mold
 
 /// Conforming an imported picture to something the host can read

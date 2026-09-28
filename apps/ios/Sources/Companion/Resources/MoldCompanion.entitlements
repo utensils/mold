@@ -6,9 +6,5 @@
 	<array>
 		<string>group.io.utensils.mold.companion</string>
 	</array>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)io.utensils.mold.companion.shared</string>
-	</array>
 </dict>
 </plist>

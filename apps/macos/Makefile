@@ -144,6 +144,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/engine-freshness.sh
 	@cd $(PACKAGES)/MoldClient && swift test
 	@cd $(PACKAGES)/MoldStyle && swift test
+	@cd $(PACKAGES)/MoldMesh && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
 	@# Every failing test and its issue, then the verdict -- `tail -5` alone
@@ -179,13 +180,13 @@ SWIFT_LINT := ../shared/scripts/swift-lint.sh
 TYPE_MAX ?= 600
 
 lint-color: ## No literal colors -- the system owns the palette
-	@$(SWIFT_LINT) color Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
+	@$(SWIFT_LINT) color Sources $(PACKAGES)/*/Sources
 
 lint-size: ## Advisory: flag files over 150 lines
-	@$(SWIFT_LINT) size Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
+	@$(SWIFT_LINT) size Sources $(PACKAGES)/*/Sources
 
 lint-type-size: ## Advisory: flag a type whose files together exceed $(TYPE_MAX) lines
-	@TYPE_MAX=$(TYPE_MAX) $(SWIFT_LINT) type-size Sources $(PACKAGES)/MoldClient/Sources $(PACKAGES)/MoldStyle/Sources
+	@TYPE_MAX=$(TYPE_MAX) $(SWIFT_LINT) type-size Sources $(PACKAGES)/*/Sources
 
 lint-a11y: ## Every file with a systemName image must name or opt out of it
 	@$(SWIFT_LINT) a11y Sources/Mold

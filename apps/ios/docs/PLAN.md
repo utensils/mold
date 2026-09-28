@@ -96,7 +96,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 
 | Target | Bundle ID | Entitlements |
 |---|---|---|
-| MoldCompanion (app, `PRODUCT_NAME` Mold Studio) | `io.utensils.mold.companion` | App Group, Keychain group |
+| MoldCompanion (app, `PRODUCT_NAME` Mold Studio) | `io.utensils.mold.companion` | App Group (keys in the app's own Keychain group) |
 | MoldCompanionWidgets (WidgetKit + ActivityKit) | `…companion.widgets` | App Group only; no networking or Keychain (enforced by lint) |
 | MoldCompanionShare | `…companion.share` | App Group only (staging; no network) |
 | MoldCompanionTests (hosted) / MoldCompanionUITests | — | — |
@@ -458,10 +458,10 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 | D | DESIGN.md plus the mockup artifact (16 frames); review with James | Artifact renders in light and dark, iPhone and iPad frames |
 | M0 ✅ | Move packages to `apps/shared`; iOS 26 platform; `#if os(macOS)` on `MoldHome*` only (`SecretStore.applicationSupport` made portable instead, because `DraftStore` needs it on the phone); `CredentialStore` protocol keyed by host UUID, with `SecretStore` conforming; MoldStyle `hairline` branch; `lint-layers` also bans UIKit | Mac `make lint test` green; MoldClient (996 tests) and MoldStyle green on the iOS 26.5 sim. Two wall-clock `RefusalBodyTests` bounds widened: they measured parallel-run starvation on the sim |
 | M1 ✅ | `apps/ios` skeleton: 5 targets (app, WidgetKit, Share, unit tests, UI tests), entitlements, Info.plist, `.sidebarAdaptable` shell (Models only at regular width: iPhone ignores `defaultVisibility` and pushed Machines into "More"), `EmptyState` + `RowAxis`, Settings sheet, Go menu ⌘1–⌘5, Makefile, devshell `companion-*`, `ios-native.yml`, `.claude/rules/ios-native.md`, `apps/shared/scripts/swift-lint.sh` (+ its own test) used by both Makefiles | 7 unit tests; `make packages-test` (997 + 11 on iOS); `make uitest` audit clean at xSmall/Large/AX5 in light and dark after three real fixes (AccentColor, ProminentFill, SecondaryText) |
-| M2 | Machines: `KeychainCredentialStore`, `MoldClientTesting` public-API `FakeBackend` (moved from M0: built with its first store), `HostStore`, `ConnectionSupervisor`, manual add, Bonjour, fleet cards, detail | FakeBackend store tests; hosted Keychain tests; UAT against a real `mold serve` and hal9000 |
-| M3 | Pairing: parse, claim, instance check, DataScanner, paste; `testflight-ios-native.yml` (second App Store Connect record, never internal-only) | Parser fixtures match `pairing.ts`; scan the Mac app's Pair a Phone QR; build appears in TestFlight |
-| M4 | Library read: merge, thumbnail pipeline, viewer, AVPlayer, MoldMesh extraction plus the iOS view | Cache-cap tests; media-token tests; Mac mesh tests green; device UAT |
-| M5 | Library V3: favourite, tags, collections, trash, Info sheet, `MutationOutbox` fan-out, Photos and Share, search tokens | Fan-out tests with a partly failing machine |
+| M2 ✅ | Machines: `KeychainCredentialStore` (app access group only: the Share extension never networks, so no shared Keychain group), `MoldClientTesting.FakeBackend` (97 routes, generated), `HostStore` (+ Editing, Reachability, Events, Pairing), `ConnectionSupervisor` (scene phase), `NearbyBrowser` (`NWBrowser`, TXT `id=` dedupe), fleet cards, detail with per-GPU switches, Add/Edit sheets, per-window `AppRouter`; `ServerStatus.hardware` and `DeviceWords` moved into MoldClient | FakeBackend + in-memory credential store tests; hosted Keychain tests; audit on the new screens |
+| M3 ✅ | Pairing: `MobilePairingPayload.parse` (byte port of `pairing.ts`), `HTTPBackend.claimPairing` (no key sent, 401 → expired, instance check), DataScanner + paste, re-key instead of duplicate; `testflight-ios-native.yml` gated on `vars.COMPANION_TESTFLIGHT` until the App Store Connect record exists (Apple has no API to create one); `make archive` refuses an iconless archive | Parser + claim URLProtocol tests; round trip with the Mac `url` producer; shipped with M2 in one PR |
+| M4 ✅ | Library read: `LibraryStore` (ETag listings per machine, `LibraryMerge`, collections by slug, Recently Deleted, event-driven reloads), `ThumbnailLoader` + `DiskThumbnailStore` (MoldClient; 4,000 / 256 MiB / 2 MiB LRU, media-version keys), day-sectioned grid with pinch tile sizes, shelf title menu, search tokens, zoom-transition viewer (UIScrollView zoom, `playableURL` clips, `MoldMesh` 3-D), Info sheet from `PrintDetails`; `MoldMesh` package extracted from the Mac (shaders compiled at runtime from source: `swift build` never makes a default metallib); `LibraryScope` + `GenerationRecipe.makes` moved into MoldClient | 1,044 MoldClient + MoldMesh tests; Mac `build-for-testing` green; LibraryStore tests; audit on the Library |
+| M5 ✅ | Library V3: favourite / tags / title / collections through the shared `MutationOutbox` on EVERY copy (optimistic, 1s/2s/4s, operation-id fenced, re-read on give-up), one-step undo from `PrintEdit.inverse`, trash / Put Back / Delete Immediately / Empty (a machine without a trash deletes for good), selection bar, `PrintMenu` in the Mac order, Tags / Rename / New Collection sheets (`CollectionShelf.slug` ported from `collection_slug`), Share, Save to Photos (add-only), Copy | Fan-out + undo + refusal tests against FakeBackend |
 | M6 | Generate stills: capability-driven picker, `RenderDraft`, wells, More options, submission background task, batch SSE and preview, draft persistence | Admission and ledger tests; AX5 audit on Generate |
 | M7 | Clips and 3-D generate; Camera / Photos / Files sources; Use These Settings | Capability-gating tests |
 | M8 | Queue: list, batches, held rows, cancel, reorder, pause, reconcile | Supervisor phase tests |
@@ -473,7 +473,7 @@ When finished, it shows the thumbnail with "Finished on workstation" and View.
 
 Each user-visible PR gets a `changelog.d/companion-*.md` fragment. M0, M1 and the CI-only PRs use `skip-changelog`. PRs are serialized: one open at a time, rebased right before merge.
 
-All milestones are implemented in full; nothing is deferred (goal set 2026-09-27).
+Goal (set by James, 2026-09-27): implement every milestone in full, with nothing deferred. The learning-mode contribution points were dropped under that goal; `RowAxis` shipped its tested rule (stack from AX1) in M1.
 
 ## Critical files
 
