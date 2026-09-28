@@ -75,8 +75,10 @@ extension MobilePairingPayload {
             return url.percentEncodedQuery ?? ""
         case link.scheme:
             let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
-            guard url.host?.lowercased() == link.host, url.port == nil, path == link.path,
-                  url.query == nil else { return nil }
+            // `:443` is the default port and an empty `?` sends nothing:
+            // both read as `pairing.ts`'s WHATWG URL does.
+            guard url.host?.lowercased() == link.host, url.port == nil || url.port == 443, path == link.path,
+                  url.query?.isEmpty ?? true else { return nil }
             return url.percentEncodedFragment ?? ""
         default:
             return nil

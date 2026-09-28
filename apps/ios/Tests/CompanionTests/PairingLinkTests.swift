@@ -20,6 +20,20 @@ struct PairingLinkTests {
         #expect(router.pairingLink?.payload?.baseURL == "http://studio.local:7680")
     }
 
+    /// UIKit presents nothing over a sheet that is already up: a link that
+    /// arrives with Add a Machine (or Settings, or a print) open closes it.
+    @Test func aLinkClosesWhateverSheetIsUp() {
+        let router = AppRouter()
+        router.addMachine()
+        router.showsSettings = true
+        router.openedPrint = AppRouter.OpenedPrint(id: PrintID(host: UUID(), filename: "a.png"))
+        router.open(url: link)
+        #expect(!router.showsAddMachine)
+        #expect(!router.showsSettings)
+        #expect(router.openedPrint == nil)
+        #expect(router.pairingLink != nil)
+    }
+
     @Test func aBrokenCodeSaysWhy() {
         let router = AppRouter()
         router.open(url: URL(string: "https://utensils.io/mold/pair#version=9")!)

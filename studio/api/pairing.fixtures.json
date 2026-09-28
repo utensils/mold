@@ -12,7 +12,9 @@
       "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
       "legacy": [
         "mold://pair?version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
-        "https://utensils.io/mold/pair/#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio%20Mac"
+        "https://utensils.io/mold/pair/#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio%20Mac",
+        "https://utensils.io:443/mold/pair#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac",
+        "https://utensils.io/mold/pair?#version=1&base_url=http%3A%2F%2Fstudio.local%3A7680&token=one-time&expires_at=4000000000&instance_id=inst-1&name=Studio+Mac"
       ]
     },
     {

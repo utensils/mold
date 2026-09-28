@@ -62,6 +62,10 @@ final class AppRouter {
     /// `moldstudio://` link. Anything else is ignored.
     func open(url: URL) {
         if MobilePairingPayload.isPairingLink(url) {
+            // UIKit presents nothing over a sheet already up: close it.
+            showsAddMachine = false
+            showsSettings = false
+            openedPrint = nil
             selection = .go(.machines)
             do {
                 pairingLink = PairingLink(payload: try MobilePairingPayload.parse(url.absoluteString), failure: nil)

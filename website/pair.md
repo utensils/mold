@@ -11,14 +11,21 @@ import { onMounted, ref } from 'vue'
 
 // The pairing code rides in the fragment (#...), which the browser never
 // sends to this site. It is read here, in the page, and never shown: only
-// the machine's name, and a button that hands the code to the Mold app.
+// the machine's name and address, and a button that hands the code to the
+// Mold app.
 const machine = ref('')
+const address = ref('')
 const appLink = ref('')
 
 onMounted(() => {
   const fields = new URLSearchParams(window.location.hash.slice(1))
   if (fields.get('version') === '1' && /^https?:\/\//i.test(fields.get('base_url') ?? '')) {
     machine.value = fields.get('name') ?? ''
+    try {
+      address.value = new URL(fields.get('base_url')).host
+    } catch {
+      address.value = ''
+    }
     appLink.value = `mold://pair?${fields.toString()}`
   }
   // Out of the address bar, history and any screenshot of this page.
@@ -31,7 +38,8 @@ onMounted(() => {
 # Pair a phone
 
 <p v-if="appLink">
-  This is a pairing code for <strong>{{ machine || 'a mold machine' }}</strong>.
+  This is a pairing code for <strong>{{ machine || 'a mold machine' }}</strong>
+  at <code>{{ address }}</code>.
   Your phone opened it in the browser because no app that reads it is installed.
 </p>
 <p v-else>
@@ -50,9 +58,15 @@ tap **Pair**. You can also scan it inside the app: **Machines ▸ Add a Machine�
 
 The older [Mold app](/guide/iphone) reads the same code.
 
-<p v-if="appLink">
-  <a :href="appLink" class="pair-open">Open in Mold</a>
-</p>
+<template v-if="appLink">
+  <p>
+    Open it only if you made this code yourself: the phone will send what you
+    make to <code>{{ address }}</code>.
+  </p>
+  <p>
+    <a :href="appLink" class="pair-open">Open in Mold</a>
+  </p>
+</template>
 <p v-else>
   In the app, open <strong>Add a machine ▸ Scan pairing code</strong>.
 </p>

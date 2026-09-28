@@ -25,7 +25,7 @@ The goal is a **fully native SwiftUI iOS/iPadOS app, "Mold Studio Companion"**, 
   - Only the pairing **claim** is missing.
 - `MoldStyle` needs a single `nsColor` branch.
 - The server has **no push, APNs or webhooks**. Live Activities and notifications are therefore driven locally: by the app in the foreground, then by `BGAppRefreshTask`.
-- The Tauri app owns `mold://`. The companion must not register it, because when two apps claim the same scheme iOS picks between them unpredictably. Pairing is redeemed by an in-app scanner that parses the unchanged `mold://pair` QR.
+- The Tauri app owns `mold://`. The companion must not register it, because when two apps claim the same scheme iOS picks between them unpredictably. Pairing QRs are universal links (`https://utensils.io/mold/pair#…`, see below); the in-app scanner also reads older `mold://pair` codes.
 - Users re-pair: the Tauri app's Keychain items are in a different access group.
 
 ---
@@ -127,7 +127,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 
 **MoldClient additions (TDD'd)**
 
-- `MobilePairingPayload.parse(_:)` is a byte-level port of `parseMobilePairingPayload` in `studio/api/pairing.ts`. It accepts both the JSON and the `mold://pair` form, requires `version == 1` and an `http(s)` `base_url`, and round-trips with the existing `url` producer.
+- `MobilePairingPayload.parse(_:)` is a byte-level port of `parseMobilePairingPayload` in `studio/api/pairing.ts`. It accepts the JSON, the `https://utensils.io/mold/pair#…` universal link and the older `mold://pair` form (all held to `studio/api/pairing.fixtures.json`), requires `version == 1` and an `http(s)` `base_url`, and round-trips with the existing `url` producer.
 - `claim(token:clientName:clientKind:)` calls `POST /api/pairing/claim`. The request carries no key and goes through `RedirectGuard`. The contract is in `crates/mold-server/src/auth.rs:399`. The caller verifies `instance_id` and refuses a mismatch. `client_kind` is `iphone` or `ipad`, passed in by the caller.
 - Thumbnails:
   - `ThumbnailKey(instanceID, filename, mediaVersion, size)`
