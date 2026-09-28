@@ -23,6 +23,15 @@ struct DiskThumbnailStoreTests {
         #expect(await cache.data(for: key("a.png")) == Data([1, 2, 3]))
     }
 
+    @Test func theTotalIsWhatIsOnDiskAndPurgeEmptiesIt() async {
+        let cache = store()
+        await cache.store(Data(count: 10), for: key("a.png"))
+        await cache.store(Data(count: 5), for: key("b.png"))
+        #expect(await cache.totalBytes == 15)
+        await cache.purge()
+        #expect(await cache.totalBytes == 0)
+    }
+
     @Test func aNewMediaVersionIsANewThumbnail() async {
         let cache = store()
         await cache.store(Data([1]), for: key("a.png", version: "v1"))

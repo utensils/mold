@@ -133,9 +133,9 @@ lint-type: ## Text styles only -- a fixed point size breaks Dynamic Type (DESIGN
 	@echo "  type ok"
 
 lint-widgets: ## The widget extension reads the App Group only: no network, no Keychain
-	@! grep -rnE 'URLSession|HTTPBackend|SecItem|KeychainCredentialStore|import MoldClient' Sources/Widgets --include='*.swift' \
+	@! grep -rnE 'URLSession|HTTPBackend|SecItem|KeychainCredentialStore|import MoldClient' Sources/Widgets Sources/Shared --include='*.swift' \
 	  || { echo "WIDGET VIOLATION: widgets read the App Group snapshot, nothing else"; exit 1; }
-	@! grep -rnE 'URLSession|HTTPBackend|SecItem' Sources/Share --include='*.swift' \
+	@! grep -rnE 'URLSession|HTTPBackend|SecItem' Sources/Share Sources/Shared --include='*.swift' \
 	  || { echo "SHARE VIOLATION: the Share extension stages in the App Group and never networks"; exit 1; }
 	@echo "  widgets ok"
 

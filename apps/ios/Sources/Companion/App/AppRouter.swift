@@ -25,6 +25,26 @@ final class AppRouter {
         selection = .go(.generate)
     }
 
+    /// A print opened by a link (widget, notification), over whatever is up.
+    var openedPrint: OpenedPrint?
+    /// A Share-extension photo Generate should offer next.
+    var pendingInbox: String?
+
+    struct OpenedPrint: Identifiable, Equatable { let id: PrintID }
+
+    /// Where a `moldstudio://` link goes.
+    func open(_ link: DeepLink) {
+        switch link {
+        case let .print(host, filename):
+            openedPrint = OpenedPrint(id: PrintID(host: host, filename: filename))
+        case .queue:
+            selection = .go(.queue)
+        case let .generate(inbox):
+            pendingInbox = inbox
+            selection = .go(.generate)
+        }
+    }
+
     /// "Add a Machine…" from anywhere: Machines, with the sheet up.
     func addMachine(_ prefill: AddPrefill? = nil) {
         selection = .go(.machines)

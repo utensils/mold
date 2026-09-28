@@ -13,5 +13,8 @@ struct MoldCompanionApp: App {
                 .supervisesConnections(stores)
         }
         .commands { GoCommands() }
+        .backgroundTask(.appRefresh(CompanionStores.refreshTask)) {
+            await stores.backgroundRefresh()
+        }
     }
 }

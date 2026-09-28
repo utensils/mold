@@ -91,9 +91,3 @@ struct SectionHeader: View {
             .accessibilityAddTraits(.isHeader)
     }
 }
-
-/// The sections later milestones add (Library, Notifications, Live
-/// Activities); empty until they land.
-struct SettingsSections: View {
-    var body: some View { EmptyView() }
-}

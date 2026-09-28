@@ -40,7 +40,12 @@ struct GenerateView: View {
             }
         }
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }
-        .overlay(alignment: .top) { FailureBanner() }
+        .overlay(alignment: .top) {
+            VStack(spacing: 8) {
+                FailureBanner()
+                if !hosts.hosts.isEmpty { FromShareCard() }
+            }
+        }
         .onChange(of: router.pendingReuse) { _, entry in
             guard let entry else { return }
             generate.reuse(entry)

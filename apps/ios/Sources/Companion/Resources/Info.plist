@@ -58,6 +58,16 @@
 	<string>Mold Studio saves the pictures you make to your photo library when you ask it to.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<!-- Background refresh asks each machine how a pending render went:
+	     the server has no push (DESIGN.md §A). -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>io.utensils.mold.companion.refresh</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

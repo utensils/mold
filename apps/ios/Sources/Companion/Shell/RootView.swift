@@ -16,6 +16,7 @@ struct RootView: View {
     }
     @Environment(\.horizontalSizeClass) private var width
     @Environment(QueueStore.self) private var queue
+    @Environment(Notifier.self) private var notifier
 
     /// Models joins the list only where there is a sidebar. On iPhone
     /// `.defaultVisibility(.hidden, for: .tabBar)` is ignored, and a sixth tab
@@ -48,6 +49,13 @@ struct RootView: View {
         }
         .sheet(isPresented: $router.showsSettings) { SettingsSheet() }
         .printSheets()
+        .fullScreenCover(item: $router.openedPrint) { opened in LinkedPrint(id: opened.id) }
+        .onOpenURL { url in DeepLink(url).map(router.open) }
+        .onChange(of: notifier.link) { _, link in
+            guard let link else { return }
+            router.open(link)
+            notifier.link = nil
+        }
         .environment(router)
         .environment(actions)
         .focusedSceneValue(\.tabSelection, $router.selection)

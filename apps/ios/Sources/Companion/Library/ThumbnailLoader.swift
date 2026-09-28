@@ -45,6 +45,8 @@ final class ThumbnailLoader {
         await disk.evict(host: host.uuidString)
     }
 
+    func diskBytes() async -> Int64 { Int64(await disk.totalBytes) }
+
     func emptyCaches() async {
         memory.removeAllObjects()
         await disk.purge()

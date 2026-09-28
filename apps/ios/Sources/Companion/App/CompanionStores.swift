@@ -15,6 +15,9 @@ final class CompanionStores {
     let transfers: TransferStore
     let models: ModelStore
     let catalog: CatalogStore
+    let notifier: Notifier
+    let activities: ActivityCoordinator
+    let widgets: WidgetSnapshotWriter
     let nearby: NearbyBrowser
     let claimPairing: PairingClaimer
 
@@ -31,6 +34,15 @@ final class CompanionStores {
         transfers = TransferStore(hosts: hosts, queue: queue)
         models = ModelStore(hosts: hosts, queue: queue)
         catalog = CatalogStore(hosts: hosts)
+        notifier = Notifier()
+        activities = ActivityCoordinator(generate: generate, hosts: hosts, notifier: notifier, library: library)
+        widgets = WidgetSnapshotWriter(hosts: hosts, library: library, queue: queue, generate: generate,
+                                       thumbnails: thumbnails)
+        notifier.favourite = { [library] id in
+            await library.reload(id.host)
+            guard let entry = library.pool.first(where: { $0.id == id }) else { return }
+            library.apply(.favorite(true), to: [entry])
+        }
         nearby = NearbyBrowser()
     }
 
@@ -42,12 +54,20 @@ final class CompanionStores {
         async let queue: Void = queue.reload()
         async let models: Void = models.resume()
         _ = await (library, queue, models)
+        // What finished while the app was away, then what the widgets show.
+        for batch in generate.ledger.batches where batch.clientBatchId != generate.activeBatch?.clientBatchId {
+            await reconcile(batch)
+        }
+        await widgets.refresh()
     }
 
     func enteredBackground() {
         generate.saveDraft()
         hosts.stopWatching()
         models.stop()
+        activities.enteredBackground()
+        scheduleRefresh()
+        Task { await widgets.refresh() }
         nearby.stop()
     }
 }
@@ -64,6 +84,7 @@ extension View {
             .environment(stores.transfers)
             .environment(stores.models)
             .environment(stores.catalog)
+            .environment(stores.notifier)
             .environment(stores.nearby)
     }
 }

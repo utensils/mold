@@ -26,7 +26,7 @@ public extension LibraryEntry {
 
     /// Their own title if they gave one; otherwise what they asked for, which
     /// says far more than a generated filename; otherwise the filename.
-    private var spokenName: String {
+    var spokenName: String {
         if print.title?.trimmingCharacters(in: .whitespaces).isEmpty == false {
             return print.displayName
         }

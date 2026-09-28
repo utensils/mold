@@ -79,6 +79,9 @@ public actor DiskThumbnailStore {
 
     public func purge() { remove { _ in true } }
 
+    /// What the cache holds on disk, for Settings.
+    public var totalBytes: Int { loaded().values.reduce(0) { $0 + $1.bytes } }
+
     public var totals: (count: Int, bytes: Int) {
         let all = loaded()
         return (all.count, all.values.reduce(0) { $0 + $1.bytes })
