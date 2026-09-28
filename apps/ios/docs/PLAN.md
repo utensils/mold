@@ -123,7 +123,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
   - `moldstudio://print/<host>/<file>`
   - `moldstudio://queue/<job>`
   - `moldstudio://generate?inbox=<id>`
-- Deferred: a universal-link pairing QR (`https://utensils.io/mold/pair#…`). It is cross-product work.
+- Not in this app: a universal-link pairing QR (`https://utensils.io/mold/pair#…`). It needs an `apple-app-site-association` file at the utensils.io root (outside this repository) and a new QR format in the Mac, desktop and web apps; the in-app scanner reads today's `mold://pair` codes.
 
 **MoldClient additions (TDD'd)**
 
@@ -192,7 +192,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 **iPad sidebar** (`TabSection`s mirror the Mac sidebar)
 
 - Generate
-- Library: All Prints, Favourites, the collections plus New Collection…, Recently Deleted
+- Library: All Prints, Favourites, the collections (drop prints on one to file them), Recently Deleted. New Collection… lives in a print's Add to Collection menu: machines store no empty collection.
 - Queue
 - Models
 - Machines: one row per machine with a status dot, plus Add a Machine…

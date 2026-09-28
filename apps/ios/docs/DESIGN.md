@@ -102,7 +102,7 @@ The native Mac app's vocabulary governs. `docs/design/README.md`'s web lexicon
 
 ```
 Generate
-Library            All Prints · Favourites · ▸ Collections (…, New Collection…) · Recently Deleted
+Library            All Prints · Favourites · ▸ Collections (drop prints on one to file them) · Recently Deleted
 Queue
 Models             (follows the Default machine; switch in its toolbar)
 Machines           ● workstation · ● hal9000 · ○ studio-mini · Add a Machine…
@@ -237,7 +237,10 @@ Large).
 **Toolbar.**
 
 - `.toolbarTitleMenu` switches the shelf: All Prints · Favourites ·
-  Collections ▸ (each, plus New Collection…) · Recently Deleted.
+  Collections ▸ (each) · Recently Deleted. A collection exists only once a
+  print is filed in it (no machine stores an empty one), so it is started
+  from a print's Add to Collection ▸ New Collection…, never from the
+  sidebar.
 - Trailing: Select, and ⋯ (Sort By, Tile Size, Machine).
 
 **Search.** The Search tab, or pulling Library down. Uses
