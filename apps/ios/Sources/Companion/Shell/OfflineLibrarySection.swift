@@ -31,7 +31,9 @@ struct OfflineLibrarySection: View {
                 Button("Save All Thumbnails for Offline") { thumbnails.save(library.pool) }
                     .disabled(library.pool.isEmpty)
             }
-            Button("Empty Now", role: .destructive) {
+            // Not red: nothing is lost (it all comes back from the machines),
+            // and red text on a grouped row was under 4.5:1.
+            Button("Empty Now") {
                 Task {
                     await thumbnails.emptyCaches()
                     await measure()

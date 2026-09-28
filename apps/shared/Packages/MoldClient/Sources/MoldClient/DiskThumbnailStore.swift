@@ -1,14 +1,16 @@
 import CryptoKit
 import Foundation
 
-/// Thumbnails on disk, bounded, least-recently-used first out.
+/// Pictures on disk, bounded, least-recently-used first out.
 ///
-/// Keyed on (machine, filename, `media_version`, pixel size): the same
-/// `media_version` the server builds its ETag from, so a re-rendered print
-/// never shows a stale picture -- and a print WITHOUT a media version is never
-/// stored here at all (the caller keeps it in memory only). The caps are the
-/// phone's (`.claude/rules/mobile.md`): 4,000 items, 256 MiB, 2 MiB each. A
-/// thumbnail over the per-item cap is refused rather than stored and evicted.
+/// Keyed on (machine, filename, version, pixel size). The version is the
+/// caller's: the machine's `media_version` (what its ETag is built from) or,
+/// for a machine that sends none, something that still changes when a print
+/// is re-rendered -- a caller with nothing trustworthy keeps that print in
+/// memory and never asks this store. The caps are set at creation and can
+/// be changed (`setLimits`); an item over the per-item cap is refused rather
+/// than stored and evicted. Over a cap, the oldest go until the store is at
+/// 90% of it, so the writes after a trim do not each pay for another sort.
 ///
 /// Access time is the file's modification date, touched on every read, so the
 /// order survives a relaunch without an index file to keep consistent.
@@ -123,8 +125,9 @@ public actor DiskThumbnailStore {
     private func trim() {
         guard var all = index, all.count > maxItems || bytesUsed > maxBytes else { return }
         var bytes = bytesUsed
+        let itemGoal = maxItems - maxItems / 10, byteGoal = maxBytes - maxBytes / 10
         let oldestFirst = all.sorted { $0.value.used < $1.value.used }.map(\.key)
-        for name in oldestFirst where all.count > maxItems || bytes > maxBytes {
+        for name in oldestFirst where all.count > itemGoal || bytes > byteGoal {
             bytes -= all[name]?.bytes ?? 0
             all[name] = nil
             try? files.removeItem(at: url(name))

@@ -39,9 +39,16 @@ enum TileSize: String, CaseIterable, Identifiable {
 
     /// Where a pinch that began at `start` has got to: one step per 35% of
     /// spread or squeeze, so a single long pinch can cross several sizes.
-    static func pinched(from start: TileSize, magnification: CGFloat) -> TileSize {
+    /// `current` is the size on screen: it holds until the fingers move a
+    /// tenth of a step past a boundary, so resting on one never flickers.
+    static func pinched(from start: TileSize, magnification: CGFloat, current: TileSize? = nil) -> TileSize {
         guard magnification > 0 else { return start }
-        let steps = Int((log(magnification) / log(1.35)).rounded(.towardZero))
-        return start.offset(by: steps)
+        let raw = log(magnification) / log(1.35)
+        let target = start.offset(by: Int(raw.rounded(.towardZero)))
+        guard let current, current != target else { return target }
+        let all = allCases
+        let shown = Double((all.firstIndex(of: current) ?? 0) - (all.firstIndex(of: start) ?? 0))
+        // Within 1.1 steps of the size on screen: keep it.
+        return abs(raw - shown) < 1.1 ? current : target
     }
 }

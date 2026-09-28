@@ -18,8 +18,20 @@ final class LibraryStore {
     /// Machines whose prints are showing from this device's saved copy
     /// because they are not answering right now.
     var offlineHosts: [MoldHost] {
-        hosts.hosts.filter { !hosts.isUp($0) && !(live[$0.id] ?? []).isEmpty }
+        hosts.hosts.filter { host in
+            // Only a definite answer: before a machine has been asked
+            // (launch, return to the app) it is not "down".
+            switch hosts.reachability(of: host) {
+            case .down, .needsKey: !(live[host.id] ?? []).isEmpty
+            case .unknown, .checking, .up: false
+            }
+        }
     }
+    /// Told when a machine's library is dropped (the machine was removed).
+    @ObservationIgnored var forgot: ((MoldHost.ID) -> Void)?
+    /// The last snapshot write per machine: the next waits for it, so two
+    /// quick listings can never land on disk in the wrong order.
+    @ObservationIgnored private var writes: [MoldHost.ID: Task<Void, Never>] = [:]
 
     @ObservationIgnored let hosts: HostStore
     @ObservationIgnored private var live: [MoldHost.ID: [GalleryPrint]] = [:]
@@ -47,7 +59,10 @@ final class LibraryStore {
     /// The saved copy of every machine's library, shown before any machine is
     /// asked (and when none answers). Decoded off the main thread.
     func restoreSaved() async {
-        let ids = hosts.hosts.map(\.id)
+        // Only machines not already listed: after the first launch this is
+        // nothing, and nothing is decoded.
+        let ids = hosts.hosts.map(\.id).filter { live[$0] == nil }
+        guard !ids.isEmpty else { return }
         let snapshots = snapshots
         let saved = await Task.detached(priority: .userInitiated) {
             ids.compactMap { id in snapshots.load(id).map { (id, $0) } }
@@ -119,6 +134,7 @@ final class LibraryStore {
         live[id] = nil; trashed[id] = nil; collections[id] = nil
         etags[id] = nil; trashEtags[id] = nil
         snapshots.remove(id)
+        forgot?(id)
     }
 
     /// Written off the main thread; a listing is small, but not free.
@@ -127,7 +143,11 @@ final class LibraryStore {
         let snapshot = LibrarySnapshot(prints: prints, trashed: trashed[id], collections: collections[id],
                                        etag: etags[id], trashEtag: trashEtags[id])
         let snapshots = snapshots
-        Task.detached(priority: .utility) { snapshots.save(snapshot, for: id) }
+        let previous = writes[id]
+        writes[id] = Task.detached(priority: .utility) {
+            await previous?.value
+            snapshots.save(snapshot, for: id)
+        }
     }
 
     /// For an edit shown before the machine confirms it.
