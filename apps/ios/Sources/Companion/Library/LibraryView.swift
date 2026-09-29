@@ -57,6 +57,8 @@ struct LibraryView: View {
                 } label: {
                     Label(scope.title(in: library.shelves), systemImage: scope.symbol)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityIdentifier("library-collections")
                 .padding(.horizontal, 16)

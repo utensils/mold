@@ -124,6 +124,9 @@ struct KindMenu: View {
         } label: {
             Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
                 .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(.primary)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
     }
 }

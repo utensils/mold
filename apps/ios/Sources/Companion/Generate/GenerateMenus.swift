@@ -147,6 +147,8 @@ struct MachineMenu: View {
                 Text(size >= .xxLarge && generate.machine == .auto ? String(localized: "Auto") : label)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .accessibilityLabel(String(localized: "Machine, \(label)"))
     }
