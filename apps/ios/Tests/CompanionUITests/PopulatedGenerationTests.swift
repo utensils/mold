@@ -3,6 +3,11 @@ import XCTest
 /// Populated screens need populated regression tests: first-run empty states
 /// cannot reveal compressed option controls or a misleading model search.
 final class PopulatedGenerationTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        acceptCompanionPermissions()
+    }
+
     @MainActor func testOptionsAndModelSearchWithAnInstalledModel() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine()
@@ -14,13 +19,13 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
-        let address = app.textFields["machine-address"]
-        XCTAssertTrue(address.waitForExistence(timeout: 5))
-        address.tap()
-        address.typeText("127.0.0.1:\(port)")
         let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap()
         name.typeText("Fixture Machine")
+        let address = app.textFields["machine-address"]
+        address.tap()
+        address.typeText("127.0.0.1:\(port)")
         app.buttons["Add"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         let chooser = app.buttons["choose-model"]
@@ -35,6 +40,17 @@ final class PopulatedGenerationTests: XCTestCase {
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        reveal(chooser, in: app)
+        chooser.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("zzzznomodel")
+        XCTAssertTrue(app.staticTexts["No matching models"].waitForExistence(timeout: 5))
+        let closeSearch = app.buttons["model-chooser-close"]
+        XCTAssertTrue(closeSearch.isHittable, "Model search must have a visible exit with the keyboard open")
+        attach(app)
+        closeSearch.tap()
         let options = app.buttons["Options"].firstMatch
         reveal(options, in: app)
         options.tap()
@@ -50,14 +66,6 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertFalse(app.buttons["More Options"].exists, "The sheet must not offer an inert button to reopen itself")
         attach(app)
         app.buttons["Done"].firstMatch.tap()
-        reveal(chooser, in: app)
-        chooser.tap()
-        let search = app.searchFields.firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: 5))
-        search.tap()
-        search.typeText("zzzznomodel")
-        XCTAssertTrue(app.staticTexts["No matching models"].waitForExistence(timeout: 5))
-        attach(app)
 
         // Remove only this test's local pairing; no remote mutation is possible.
         app.terminate()
@@ -78,7 +86,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: rotated, object: app)], timeout: 5), .completed)
         // Rotation delivers its new geometry before the composer settles.
         try awaitRotationLayout()
-        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        let composer = app.scrollViews["phone-generate-form"]
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
         for _ in 0..<6 where !prompt.isHittable { composer.swipeDown() }
         XCTAssertTrue(prompt.isHittable)
@@ -88,10 +96,10 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue((prompt.value as? String)?.contains("Landscape lighthouse") == true)
         app.buttons["Done"].firstMatch.tap()
         let submit = app.buttons["submit-generation"]
-        for _ in 0..<8 where !submit.isHittable { composer.swipeUp() }
+        for _ in 0..<12 where !submit.isHittable { composer.swipeUp() }
         XCTAssertTrue(submit.isHittable, "Generate must be reachable in landscape; never tap it in UAT")
         let options = app.buttons.matching(NSPredicate(format: "label == 'Options' OR label == 'More Options'")).firstMatch
-        for _ in 0..<8 where !options.isHittable { composer.swipeDown() }
+        for _ in 0..<12 where !options.isHittable { composer.swipeDown() }
         XCTAssertTrue(options.isHittable)
         options.tap()
         XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
@@ -105,11 +113,31 @@ final class PopulatedGenerationTests: XCTestCase {
     }
 
     @MainActor private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<8 where !element.isHittable {
-            if element.exists, element.frame.minY < app.frame.height * 0.25 { app.swipeDown() }
-            else { app.swipeUp() }
+        let form = app.scrollViews["phone-generate-form"]
+        for _ in 0..<12 {
+            if !form.exists {
+                if element.isHittable { break }
+                app.swipeUp()
+                continue
+            }
+            if app.navigationBars["More Options"].exists {
+                if element.isHittable { break }
+                app.swipeUp()
+                continue
+            }
+            let top = app.navigationBars.firstMatch.frame.maxY + 12
+            let bottom = app.buttons["submit-generation"].frame.minY - 12
+            if element.isHittable, element.frame.midY >= top + 20, element.frame.midY <= bottom - 20 { break }
+            // Swipe the clear right edge. A centered swipe lands in the
+            // horizontal picture wells and leaves the form where it was.
+            let down = element.exists && element.frame.midY < top + 20
+            let origin = form.coordinate(withNormalizedOffset: .zero)
+            let x = app.frame.width - 24
+            let start = origin.withOffset(CGVector(dx: x, dy: app.frame.height * (down ? 0.34 : 0.70)))
+            let end = origin.withOffset(CGVector(dx: x, dy: app.frame.height * (down ? 0.70 : 0.34)))
+            start.press(forDuration: 0.05, thenDragTo: end)
         }
-        XCTAssertTrue(element.isHittable)
+        XCTAssertTrue(element.isHittable, "The control must be reachable within the Generate form")
     }
 
     @MainActor private func attach(_ app: XCUIApplication) {

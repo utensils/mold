@@ -2,7 +2,7 @@ import MoldClient
 import SwiftUI
 
 /// A print's picture at the size it is drawn, from the loader; a quiet
-/// placeholder until it arrives (never a spinner per tile), faded in once.
+/// placeholder until it arrives (never a spinner or animation per tile).
 struct PrintThumbnail: View {
     @Environment(ThumbnailLoader.self) private var loader
     @Environment(\.displayScale) private var scale
@@ -16,12 +16,13 @@ struct PrintThumbnail: View {
             Rectangle().fill(.fill.tertiary)
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
-                    .transition(.opacity)
             }
         }
-        .task(id: "\(entry.id.filename)|\(ThumbnailLoader.version(entry.print))|\(ThumbnailLoader.bucket(Int(points * scale)))") {
+        .task(id: "\(entry.hostID)|\(entry.id.filename)|\(ThumbnailLoader.version(entry.print))|\(ThumbnailLoader.bucket(Int(points * scale)))|\(trashed)") {
+            image = loader.cachedThumbnail(for: entry)
             let loaded = await loader.image(for: entry, pixels: Int(points * scale), trashed: trashed)
-            withAnimation(.easeOut(duration: 0.15)) { image = loaded }
+            guard !Task.isCancelled else { return }
+            image = loaded
         }
     }
 }

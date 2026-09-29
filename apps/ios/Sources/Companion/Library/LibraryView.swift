@@ -7,12 +7,14 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(HostStore.self) private var hosts
+    @Environment(AppRouter.self) private var router
     @SceneStorage("library.scope") private var storedScope = ""
     @SceneStorage("library.tile") private var tile = TileSize.medium
     @SceneStorage("library.sort") private var sort = LibrarySort.newest
     @State private var query = LibraryQuery()
     @State private var selecting = false
     @State private var selection: Set<PrintID> = []
+    @State private var showingCache = LibraryShowingCache()
     @Namespace private var zoom
 
     /// Search opens with a query already in it; the Library tab opens empty.
@@ -35,7 +37,9 @@ struct LibraryView: View {
         Group {
             if hosts.hosts.isEmpty {
                 EmptyState(title: String(localized: "No prints yet"), symbol: Destination.library.symbol,
-                           message: String(localized: "What you generate on any machine appears here."))
+                           message: String(localized: "What you generate on any machine appears here.")) {
+                    Button("Add a Machine…") { router.addMachine() }.prominentAction()
+                }
             } else if showing.visible.isEmpty {
                 empty
             } else {
@@ -44,7 +48,21 @@ struct LibraryView: View {
             }
         }
         .navigationTitle(scope.title(in: library.shelves))
-        .modifier(ShelfTitleMenu(enabled: fixedScope == nil, scope: scope, choose: setScope))
+        .modifier(ShelfTitleMenu(enabled: fixedScope == nil && UIDevice.current.userInterfaceIdiom != .phone,
+                                 scope: scope, choose: setScope))
+        .safeAreaInset(edge: .top) {
+            if fixedScope == nil && UIDevice.current.userInterfaceIdiom == .phone {
+                Menu {
+                    ShelfMenu(scope: scope, choose: setScope)
+                } label: {
+                    Label(scope.title(in: library.shelves), systemImage: scope.symbol)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityIdentifier("library-collections")
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+        }
         .toolbar { toolbar(showing) }
         .modifier(LibrarySearch(enabled: searchFocused, query: $query, machines: machines, tags: tags))
         .onSubmit(of: .search) {
@@ -84,15 +102,15 @@ struct LibraryView: View {
     }
 
     private var machines: [(id: MoldHost.ID, name: String)] { hosts.hosts.map { ($0.id, $0.name) } }
-    private var tags: [String] { Array(Set(library.pool.flatMap(\.print.tagList))).sorted() }
+    private var tags: [String] { library.knownTags }
 
     private func showing() -> LibraryShowing {
         var narrowed = query
         if let token = scope.token(in: library.shelves), !narrowed.tokens.contains(token) {
             narrowed.tokens.append(token)
         }
-        return LibraryShowing(pool: scope.isTrash ? library.trashPool : library.pool,
-                              query: narrowed, selection: selection)
+        return showingCache.showing(pool: scope.isTrash ? library.trashPool : library.pool,
+                                    revision: library.revision, query: narrowed, selection: selection)
     }
 
     @ViewBuilder private var empty: some View {

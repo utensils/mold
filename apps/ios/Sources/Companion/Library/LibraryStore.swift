@@ -12,6 +12,7 @@ final class LibraryStore {
     private(set) var pool: [LibraryEntry] = []
     private(set) var trashPool: [LibraryEntry] = []
     private(set) var shelves: [CollectionShelf] = []
+    private(set) var knownTags: [String] = []
     /// Bumped whenever the pool changes; `LibraryShowingCache` keys on it.
     private(set) var revision = 0
     private(set) var isLoading = false
@@ -32,6 +33,7 @@ final class LibraryStore {
     /// The last snapshot write per machine: the next waits for it, so two
     /// quick listings can never land on disk in the wrong order.
     @ObservationIgnored private var writes: [MoldHost.ID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var cacheEpoch = 0
 
     @ObservationIgnored let hosts: HostStore
     @ObservationIgnored private var live: [MoldHost.ID: [GalleryPrint]] = [:]
@@ -63,10 +65,18 @@ final class LibraryStore {
         // nothing, and nothing is decoded.
         let ids = hosts.hosts.map(\.id).filter { live[$0] == nil }
         guard !ids.isEmpty else { return }
+        let epoch = cacheEpoch
         let snapshots = snapshots
         let saved = await Task.detached(priority: .userInitiated) {
             ids.compactMap { id in snapshots.load(id).map { (id, $0) } }
         }.value
+        acceptRestored(saved, from: epoch)
+    }
+
+    /// The detached decoder may finish after Clear Cache. Only its original
+    /// cache generation is allowed to put those rows and ETags back in memory.
+    func acceptRestored(_ saved: [(MoldHost.ID, LibrarySnapshot)], from epoch: Int) {
+        guard epoch == cacheEpoch else { return }
         for (id, snapshot) in saved where live[id] == nil {
             live[id] = snapshot.prints
             trashed[id] = snapshot.trashed
@@ -98,12 +108,35 @@ final class LibraryStore {
         rebuild()
     }
 
+    /// Clear the device's saved listings, including their ETags. Prints from
+    /// machines still answering remain on screen until the next refresh;
+    /// offline-only prints leave immediately because their saved copy is gone.
+    func clearOfflineCache() async {
+        cacheEpoch += 1
+        for task in pending.values { task.cancel() }
+        pending.removeAll()
+        for task in writes.values { await task.value }
+        writes.removeAll()
+        snapshots.purge()
+        etags.removeAll()
+        trashEtags.removeAll()
+        for host in hosts.hosts where !hosts.isUp(host) {
+            live[host.id] = nil
+            trashed[host.id] = nil
+            collections[host.id] = nil
+        }
+        rebuild()
+    }
+
     private func fetch(_ host: MoldHost) async {
         let client = hosts.backend(for: host)
+        let epoch = cacheEpoch
         var changed = false
-        defer { if changed { saveSnapshot(host.id) } }
+        defer { if changed && epoch == cacheEpoch { saveSnapshot(host.id) } }
         do {
-            switch try await client.gallery(etag: etags[host.id]) {
+            let gallery = try await client.gallery(etag: etags[host.id])
+            guard epoch == cacheEpoch else { return }
+            switch gallery {
             case let .fresh(prints, etag):
                 live[host.id] = prints
                 etags[host.id] = etag
@@ -112,7 +145,9 @@ final class LibraryStore {
                 break
             }
             if hosts.capabilities[host.id]?.trashEnabled == true {
-                switch try await client.trashedPrints(etag: trashEtags[host.id]) {
+                let trash = try await client.trashedPrints(etag: trashEtags[host.id])
+                guard epoch == cacheEpoch else { return }
+                switch trash {
                 case let .fresh(prints, etag):
                     trashed[host.id] = prints
                     trashEtags[host.id] = etag
@@ -123,6 +158,7 @@ final class LibraryStore {
             }
             if hosts.capabilities[host.id]?.canOrganize == true {
                 let fresh = try await client.collections()
+                guard epoch == cacheEpoch else { return }
                 if fresh != collections[host.id] { collections[host.id] = fresh; changed = true }
             }
         } catch {
@@ -162,6 +198,8 @@ final class LibraryStore {
         pool = merged(live)
         trashPool = merged(trashed)
         shelves = CollectionShelf.merge(collections)
+        knownTags = Array(Set(pool.flatMap(\.print.tagList)))
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         revision += 1
     }
 

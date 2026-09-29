@@ -58,3 +58,28 @@ physical speaker output, camera pairing, or device-only extension delivery.
   device-only extension delivery remain outside Simulator verification.
 - Full light/dark accessibility results and exact-head CI are recorded on the
   pull request. The audit includes xSmall, Large and AX5.
+
+## Phone layout, library and cache follow-up (2026-09-29)
+
+The TestFlight screenshot exposed an idle Generate canvas that left too little
+room for the composer. At AX5 on iPhone SE, Options was initially covered by
+the pinned Generate action, and the model search sheet had no visible exit
+while the keyboard was open. The final phone form has Kind and Machine at the
+top, full-width Generate above the tabs in portrait, extra bottom scroll travel,
+and a Close Model Search action above the keyboard. Compact-height landscape
+keeps Generate inside the scrollable form.
+
+The phone Library now shows its shelf menu above the grid. Settings is directly
+reachable from the main destinations; it reports image and listing storage
+separately, and clearing it drops saved listings, images and stale ETags. Gallery
+work avoids repeated tag extraction, per-tile host scans and tile fade
+animations. The viewer keeps back navigation visible.
+
+- Native unit suite: 110 tests in 21 suites passed; native lint passed.
+- iPhone SE at AX5: first-run offline Queue explanation and Machines return
+  passed; populated fixture regression passed with landscape prompt/Options,
+  portrait model search, visible Close action, Options controls and cleanup.
+- No generation submission was made. The fixture is loopback only.
+- Peer review found and fixed races in clearing a replaced thumbnail save and
+  clearing during a detached listing restore. Settings now separates listing
+  size from the image cache limit.

@@ -98,6 +98,14 @@ struct ModelChooser: View {
             .navigationTitle("Choose a Model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .safeAreaInset(edge: .bottom) {
+                Button("Close Model Search") { dismiss() }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    .padding(8)
+                    .background(Color(uiColor: .systemBackground))
+                    .accessibilityIdentifier("model-chooser-close")
+            }
         }
         .accessibilityIdentifier("model-chooser")
         .presentationDetents([.large])
@@ -121,6 +129,7 @@ struct ModelChooser: View {
 struct MachineMenu: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         Menu {
@@ -133,8 +142,10 @@ struct MachineMenu: View {
             }
         } label: {
             HStack(spacing: 6) {
+                Image(systemName: "desktopcomputer").accessibilityHidden(true)
                 StatusDot(reachability: generate.target.map { hosts.reachability(of: $0) } ?? .unknown)
-                Text(label).fixedSize(horizontal: false, vertical: true)
+                Text(size >= .xxLarge && generate.machine == .auto ? String(localized: "Auto") : label)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityLabel(String(localized: "Machine, \(label)"))

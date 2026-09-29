@@ -40,7 +40,7 @@ struct TagsSheet: View {
 
     /// Every tag in the Library, so a tag used elsewhere is one tap away.
     private var known: [String] {
-        Array(Set(library.pool.flatMap(\.print.tagList))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        library.knownTags
     }
 
     /// A leading `#` is typing, not part of the tag (the Mac's rule).

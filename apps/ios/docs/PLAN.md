@@ -181,13 +181,13 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 | Tab | SF Symbol | Notes |
 |---|---|---|
 | Generate | `wand.and.sparkles` | |
-| Library | `photo.on.rectangle.angled` | |
-| Queue | `list.bullet.indent` | Badge counts running and held jobs |
-| Machines | `server.rack` | Also holds Models |
+| Library | `square.grid.2x2` | Visible shelves above the grid |
+| Queue | `list.bullet` | Badge counts running and held jobs |
+| Machines | `desktopcomputer` | Also holds Models |
 | Search | `Tab(role: .search)` | Library search |
 
 - **Models** is reached from Machines: a "Models" row for the default machine, and Machine detail ▸ Models. On the Mac, the Models pane already follows the chosen machine.
-- **Settings** is a sheet opened from a gear in the Machines toolbar.
+- **Settings** is a sheet opened from a gear in the Generate, Library or Machines toolbar.
 
 **iPad sidebar** (`TabSection`s mirror the Mac sidebar)
 
@@ -334,7 +334,7 @@ A section appears only when the model's capabilities allow it. Shape, Steps and 
 
 - Machines
 - Generation defaults
-- Library: auto-save to Photos (off by default), cache size, Empty Now
+- Library: auto-save to Photos (off by default), cache size, Clear Library Cache with offline warning
 - Notifications: Finished, Failed, Held
 - Live Activities
 - About, including the privacy link

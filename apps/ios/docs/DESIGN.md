@@ -86,16 +86,16 @@ The native Mac app's vocabulary governs. `docs/design/README.md`'s web lexicon
 | Tab | Symbol | Notes |
 | --- | --- | --- |
 | Generate | `wand.and.sparkles` | |
-| Library | `photo.on.rectangle.angled` | The shelf is picked from the title menu |
-| Queue | `list.bullet.indent` | Badge = running + held count; no badge at 0 |
-| Machines | `server.rack` | Holds Models, and the Settings gear |
+| Library | `square.grid.2x2` | The shelf is visible above the grid |
+| Queue | `list.bullet` | Badge = running + held count; no badge at 0 |
+| Machines | `desktopcomputer` | Holds Models, and the Settings gear |
 | Search | `Tab(role: .search)` | Library search; the separate glass button |
 
 - **Models is not an iPhone tab.** On the Mac, "the machine picked here is the
   one the Models pane shows", so Models already belongs to a machine. The
   Machines list starts with a "Models" row for the Default machine, and Machine
   detail ▸ Models opens any other machine's.
-- **Settings** is a sheet, opened from the Machines toolbar gear (and ⌘,); the
+- **Settings** is a sheet, opened from the Generate, Library or Machines toolbar gear (and ⌘,); the
   iPad sidebar also lists it as a row that shows it as a page.
 
 ### iPad sidebar (mirrors the Mac sidebar through `TabSection`)
@@ -152,13 +152,18 @@ menu at every text size on iPhone and iPad, preserving its accessibility
 hierarchy as text size changes. The model chooser uses a page-sized sheet so its first and last rows
 remain clear of the form-sheet scroll-edge fades. Auto follows the default online machine that holds the selected model.
 
-**Canvas.** Fills the rest of the screen.
+**Canvas.** Fills the rest of the screen while generating or showing a result.
+On iPhone while idle, the controls are one scrolling form, with Kind and Machine
+visible above the prompt. They stack at xxLarge and above. A full-width Generate
+action remains above the tab bar while the form scrolls, with enough bottom
+scroll travel to lift Options above it. In compact-height landscape the action
+scrolls with the form. This leaves no empty canvas compressing the controls.
 
 - Empty: a faint `wand.and.sparkles` and "Describe a picture below."
 - Transparent prints sit on the AlphaBed checkerboard.
 - Tapping the canvas while the keyboard is up dismisses it.
 
-**Composer.** An opaque system-background panel (radius 16) above the tab bar
+**Composer.** On iPad and during a phone render, an opaque system-background panel (radius 16) above the tab bar
 keeps text legible over the canvas. One stable scroll
 view is capped to 55% of the current window's available height. While idle at
 accessibility sizes it uses up to 90%, replacing the redundant empty-canvas
@@ -182,9 +187,12 @@ caps account for keyboard avoidance and iPad resizing; its prompt never moves be
    - HEIC and WebP are converted on the phone. Alpha is never flattened.
 5. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
    (`slider.horizontal.3`).
+   The idle phone form uses a single labeled Options button; the controls
+   remain in the sheet.
 6. **Last row:** the estimate ("about 40s", mono) at the leading edge.
    **Generate** sits at the trailing edge: `.buttonStyle(.glassProminent)`,
-   `.controlSize(.large)`, ⌘↩.
+   `.controlSize(.large)`, ⌘↩. On iPhone it is pinned full width above the tabs;
+   on iPad it takes a full-width row from xxLarge onward.
 
 **More options.** A sheet with `.medium` and `.large` detents, containing a
 `Form`. Its sections mirror the Mac inspector, and each is present only when the
@@ -517,6 +525,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 4. **Progressive collapse.** The composer chip row uses
    `ViewThatFits(in: .horizontal)` with three stages: full chips, then icon plus
    a short label, then a single **Options** button that opens More options.
+   At xxLarge and above it goes directly to Options so the action stays legible.
 5. **No truncation of meaning.** Every label and sentence has
    `lineLimit(nil)`. Only prompt previews on tiles and rows may truncate, and
    their full text is exposed to VoiceOver and the Large Content Viewer.

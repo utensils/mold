@@ -18,4 +18,12 @@ struct RowAxisTests {
             #expect(RowAxis.for(size) == .vertical, "\(size)")
         }
     }
+
+    @Test func phoneGenerateControlsStackBeforeAccessibilitySizes() {
+        #expect(GenerateRow.stacks(at: .large) == false)
+        #expect(GenerateRow.stacks(at: .xxLarge))
+        #expect(GenerateRow.stacks(at: .xxxLarge))
+        #expect(GenerateRow.stacks(at: .accessibility1))
+        #expect(GenerateRow.stacks(at: .large, phone: true))
+    }
 }

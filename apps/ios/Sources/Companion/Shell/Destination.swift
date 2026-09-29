@@ -27,10 +27,10 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .generate: "wand.and.sparkles"
-        case .library: "photo.on.rectangle.angled"
-        case .queue: "list.bullet.indent"
+        case .library: "square.grid.2x2"
+        case .queue: "list.bullet"
         case .models: "cube"
-        case .machines: "server.rack"
+        case .machines: "desktopcomputer"
         }
     }
 

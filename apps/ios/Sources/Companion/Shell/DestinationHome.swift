@@ -14,7 +14,7 @@ struct DestinationHome: View {
             content
                 .navigationTitle(destination.title)
                 .toolbar {
-                    if destination == .machines {
+                    if destination == .machines || UIDevice.current.userInterfaceIdiom == .phone {
                         ToolbarItem(placement: .topBarLeading) {
                             Button { router.showsSettings = true } label: {
                                 Label("Settings", systemImage: "gearshape")
@@ -43,7 +43,18 @@ struct DestinationHome: View {
 
 /// The Search tab: the Library, searched -- the same grid, tokens and all.
 struct SearchHome: View {
+    @Environment(AppRouter.self) private var router
+
     var body: some View {
-        NavigationStack { LibraryView(searchFocused: true) }
+        NavigationStack {
+            LibraryView(searchFocused: true)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { router.showsSettings = true } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+                    }
+                }
+        }
     }
 }

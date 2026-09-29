@@ -40,7 +40,9 @@ final class ShellAccessibilityTests: XCTestCase {
                 app.buttons["Generate"].firstMatch.tap()
                 let chooser = app.buttons["choose-model"]
                 if chooser.exists {
-                    let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+                    let composer = app.scrollViews["phone-generate-form"].exists
+                        ? app.scrollViews["phone-generate-form"]
+                        : app.descendants(matching: .any)["bottom-chrome"].firstMatch
                     for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
                     XCTAssertTrue(chooser.isHittable)
                     chooser.tap()
@@ -137,7 +139,9 @@ final class ShellAccessibilityTests: XCTestCase {
     /// outside the scroll view. Coverage is mandatory, not an exemption: a
     /// control that cannot be brought fully into view fails this test.
     @MainActor private func auditComposer(_ app: XCUIApplication, size: String) throws {
-        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        let composer = app.scrollViews["phone-generate-form"].exists
+            ? app.scrollViews["phone-generate-form"]
+            : app.descendants(matching: .any)["bottom-chrome"].firstMatch
         guard composer.exists else { return }
         let types: [XCUIElement.ElementType] = [.staticText, .button, .textField, .textView]
         func elements() -> [XCUIElement] {
