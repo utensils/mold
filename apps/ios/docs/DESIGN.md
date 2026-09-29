@@ -262,6 +262,7 @@ iPhone).
   kept too (Application Support, excluded from backup), within Settings'
   storage limit; the newest 200 prints' thumbnails are always saved.
 - Day sections have pinned headers: "Today", "Thursday 24 September".
+- Changing shelf, search or sort starts the new result set at the top.
 
 **Tile.** Square, radius 5.
 
@@ -296,7 +297,9 @@ iPhone).
 
 - Opens with a zoom navigation transition from the tile. Full screen, paging in
   the grid's order. Pinch or double-tap to zoom; swipe down to close; tap to hide
-  or show the chrome.
+  or show the chrome. A clip plays as soon as its page is selected and pauses
+  when paging away or closing the viewer. Returning to the grid restores the
+  last visible print, including after the viewer's navigation transition.
 - The main tab bar is hidden in the viewer so its actions remain reachable.
 - Bottom bar: Share · Favourite · Info · Delete.
 - ⋯ menu: Use These Settings · Save to Photos · Copy · Add to Collection ·

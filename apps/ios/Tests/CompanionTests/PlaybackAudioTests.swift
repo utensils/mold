@@ -75,4 +75,20 @@ struct PlaybackAudioTests {
         #expect(controller.player == nil)
     }
 
+    @Test func selectedLibraryClipAutoplaysAndStopsWhenPagedAway() async throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appending(path: "Fixtures/playback-tone.mp4")
+        let player = AVPlayer(playerItem: AVPlayerItem(url: url))
+        defer { player.pause() }
+
+        ClipPlayback.sync(player, isSelected: true)
+        for _ in 0..<50 where player.currentTime().seconds < 0.25 {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(player.currentTime().seconds >= 0.25)
+
+        ClipPlayback.sync(player, isSelected: false)
+        #expect(player.rate == 0)
+    }
+
 }

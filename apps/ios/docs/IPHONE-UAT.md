@@ -83,3 +83,19 @@ animations. The viewer keeps back navigation visible.
 - Peer review found and fixed races in clearing a replaced thumbnail save and
   clearing during a detached listing restore. Settings now separates listing
   size from the image cache limit.
+
+## Library viewer follow-up (2026-09-29)
+
+The full-screen clip page previously loaded in a paused state on first entry.
+Playback now begins when that page is selected and pauses on page change or
+viewer dismissal. The Library retains the last visible print while a viewer is
+open and scrolls the opened tile back into view on return.
+
+- A local audio/video fixture advanced under the selected-page playback action
+  and paused when deselected.
+- An iPhone SE Simulator UI run opened print 50 in a 60-print loopback gallery,
+  returned with Back, found print 50 still visible, then changed to a populated
+  Favourites shelf and found its first print at the top. The temporary machine
+  was removed. No generation or remote mutation was used.
+- Physical-device audio output and playback on a remote machine still require
+  acceptance in TestFlight; Simulator confirms the page and player behavior.

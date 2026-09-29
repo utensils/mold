@@ -8,6 +8,8 @@ import SwiftUI
 struct LibraryGrid: View {
     let sections: [LibrarySection]
     @Binding var tile: TileSize
+    @Binding var position: LibraryScrollPosition
+    let returnToPrint: PrintID?
     let selecting: Bool
     @Binding var selection: Set<PrintID>
     let trashed: Bool
@@ -21,53 +23,63 @@ struct LibraryGrid: View {
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
     /// The size a pinch began at; `nil` between pinches.
     @State private var pinchStart: TileSize?
-    /// The print at the top of the screen, kept there across size changes.
-    @State private var anchor: PrintID?
     /// `anchor` as the pinch began: the print to bring back into place.
     @State private var pinchAnchor: PrintID?
 
     var body: some View {
         let minimum = tile.basePoints * scale
         let showsHost = Set(visible.flatMap(\.hostNames)).count > 1
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum, maximum: minimum * 2), spacing: 3)],
-                      spacing: 3) {
-                ForEach(sections) { section in
-                    Section {
-                        ForEach(section.items) { entry in
-                            cell(entry, points: minimum * 1.25, showsHost: showsHost)
-                                .id(entry.id)
-                        }
-                    } header: {
-                        if let day = section.day {
-                            Text(LibraryGrouping.title(for: day))
-                                .font(.headline)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                // Opaque: prints scroll under a pinned header,
-                                // and a translucent bar let them show through
-                                // the text.
-                                .background(Color(uiColor: .systemBackground))
-                                .accessibilityAddTraits(.isHeader)
-                                .accessibilityIdentifier(Self.dayHeader)
+        ScrollViewReader { reader in
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum, maximum: minimum * 2), spacing: 3)],
+                          spacing: 3) {
+                    ForEach(sections) { section in
+                        Section {
+                            ForEach(section.items) { entry in
+                                cell(entry, points: minimum * 1.25, showsHost: showsHost)
+                                    .id(entry.id)
+                            }
+                        } header: {
+                            if let day = section.day {
+                                Text(LibraryGrouping.title(for: day))
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    // Opaque: prints scroll under a pinned header,
+                                    // and a translucent bar let them show through
+                                    // the text.
+                                    .background(Color(uiColor: .systemBackground))
+                                    .accessibilityAddTraits(.isHeader)
+                                    .accessibilityIdentifier(Self.dayHeader)
+                            }
                         }
                     }
                 }
+                .scrollTargetLayout()
             }
-            .scrollTargetLayout()
-        }
-        .scrollPosition(id: $anchor, anchor: .top)
-        .gesture(PinchRecognizer(changed: pinched, ended: { pinchStart = nil; pinchAnchor = nil }))
-        .sensoryFeedback(.selection, trigger: tile)
-        .accessibilityRotor("Days") {
-            ForEach(sections.filter { $0.day != nil }) { section in
-                AccessibilityRotorEntry(Text(LibraryGrouping.title(for: section.day ?? .now)), id: section.id)
+            .scrollPosition(id: Binding(get: { position.id }, set: { position.report($0) }), anchor: .top)
+            .gesture(PinchRecognizer(changed: pinched, ended: { pinchStart = nil; pinchAnchor = nil }))
+            .sensoryFeedback(.selection, trigger: tile)
+            .accessibilityRotor("Days") {
+                ForEach(sections.filter { $0.day != nil }) { section in
+                    AccessibilityRotorEntry(Text(LibraryGrouping.title(for: section.day ?? .now)), id: section.id)
+                }
             }
-        }
-        .accessibilityRotor("Favourites") {
-            ForEach(visible.filter(\.print.isFavorite)) { entry in
-                AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id)
+            .accessibilityRotor("Favourites") {
+                ForEach(visible.filter(\.print.isFavorite)) { entry in
+                    AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id)
+                }
+            }
+            .onChange(of: returnToPrint) { _, id in
+                guard let id else { return }
+                // The navigation transition can recreate the grid at an earlier
+                // offset even while its scroll binding still holds a valid print.
+                // Ask the live scroll view to reveal the tile once the viewer ends.
+                Task { @MainActor in
+                    reader.scrollTo(id, anchor: .top)
+                    position.report(id)
+                }
             }
         }
     }
@@ -102,7 +114,7 @@ struct LibraryGrid: View {
         let start = pinchStart ?? tile
         if pinchStart == nil {
             pinchStart = start
-            pinchAnchor = anchor
+            pinchAnchor = position.id
         }
         let next = TileSize.pinched(from: start, magnification: scale, current: tile)
         guard next != tile else { return }
@@ -111,8 +123,8 @@ struct LibraryGrid: View {
         // layout exists (writing the same id in the same pass does nothing).
         if let keep = pinchAnchor {
             Task { @MainActor in
-                anchor = nil
-                anchor = keep
+                position.reset()
+                position.report(keep)
             }
         }
     }
@@ -120,4 +132,17 @@ struct LibraryGrid: View {
     private func toggle(_ id: PrintID) {
         if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
     }
+}
+
+/// A navigation push may make SwiftUI report no visible scroll target while
+/// the grid is covered. Keep the last real print so popping the viewer restores
+/// it; an explicit shelf or search change starts from the top instead.
+struct LibraryScrollPosition {
+    private(set) var id: PrintID?
+
+    mutating func report(_ visible: PrintID?) {
+        if let visible { id = visible }
+    }
+
+    mutating func reset() { id = nil }
 }

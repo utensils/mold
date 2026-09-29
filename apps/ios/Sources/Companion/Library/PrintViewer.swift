@@ -25,9 +25,11 @@ struct PrintViewer: View {
                 Group {
                     if page.print.kind == .clip || page.print.kind == .mesh {
                         // AVKit and the mesh viewer own their gestures.
-                        PrintPage(entry: page, trashed: trashed)
+                        PrintPage(entry: page, trashed: trashed,
+                                  isSelected: (current ?? start) == page.id)
                     } else {
-                        PrintPage(entry: page, trashed: trashed)
+                        PrintPage(entry: page, trashed: trashed,
+                                  isSelected: (current ?? start) == page.id)
                             .onTapGesture { withAnimation { chrome.toggle() } }
                     }
                 }

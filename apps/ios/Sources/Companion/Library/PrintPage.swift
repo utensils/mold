@@ -8,10 +8,11 @@ import SwiftUI
 struct PrintPage: View {
     let entry: LibraryEntry
     let trashed: Bool
+    let isSelected: Bool
 
     var body: some View {
         switch entry.print.kind {
-        case .clip: ClipPlayer(entry: entry)
+        case .clip: ClipPlayer(entry: entry, isSelected: isSelected)
         case .mesh: MeshPage(entry: entry)
         default: ZoomableStill(entry: entry, trashed: trashed)
         }
@@ -114,6 +115,7 @@ private struct ZoomingImage: UIViewRepresentable {
 struct ClipPlayer: View {
     @Environment(HostStore.self) private var hosts
     let entry: LibraryEntry
+    let isSelected: Bool
     @State private var player: AVPlayer?
     @State private var problem: String?
 
@@ -127,8 +129,13 @@ struct ClipPlayer: View {
                 ProgressView().tint(.white)
             }
         }
-        .task(id: entry.id) { await load() }
-        .onDisappear { player?.pause() }
+        // Page-style TabView prepares neighbouring pages. Only the selected
+        // clip may fetch a stream or play audio; a swipe cancels that task.
+        .task(id: isSelected) {
+            if isSelected { await load() }
+            else { ClipPlayback.sync(player, isSelected: false) }
+        }
+        .onDisappear { ClipPlayback.sync(player, isSelected: false) }
     }
 
     private func load() async {
@@ -156,11 +163,9 @@ struct ClipPlayer: View {
             return
         }
         if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
-        if let time {
-            await player?.seek(to: time)
-            guard !Task.isCancelled else { player?.pause(); return }
-            player?.play()
-        }
+        if let time { await player?.seek(to: time) }
+        guard !Task.isCancelled, isSelected else { player?.pause(); return }
+        ClipPlayback.sync(player, isSelected: true)
         for await status in item.publisher(for: \.status).values where status == .failed {
             guard !Task.isCancelled else { return }
             guard !reminted else {
@@ -171,6 +176,15 @@ struct ClipPlayer: View {
             await play(from: player?.currentTime(), reminted: true)
             return
         }
+    }
+}
+
+/// Keep page selection, rather than AVKit's neighbouring page preparation,
+/// authoritative for playback. The native player keeps its transport controls.
+enum ClipPlayback {
+    static func sync(_ player: AVPlayer?, isSelected: Bool) {
+        guard let player else { return }
+        if isSelected { player.play() } else { player.pause() }
     }
 }
 

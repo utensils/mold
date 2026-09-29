@@ -7,8 +7,9 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
+    private let gallery: Data
 
-    init() throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0) throws {
         var root = URL(fileURLWithPath: #filePath)
         while root.pathComponents.count > 1,
               !FileManager.default.fileExists(atPath: root.appending(path: "docs/generated").path) {
@@ -22,6 +23,11 @@ final class FixtureMachine: @unchecked Sendable {
             let row = profiles.first { ($0["models"] as! [[String: Any]]).contains { $0["model"] as? String == name } }!
             return ["name": name, "family": name.hasPrefix("flux") ? "flux" : "ltx",
                     "description": name, "downloaded": true, "generation_profile": row["profile"]!]
+        })
+        gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
+            ["filename": "fixture-\(index).png", "timestamp": 1_790_000_000 - index,
+             "favorite": index < galleryFavorites,
+             "metadata": ["prompt": "Fixture \(index)"]] as [String: Any]
         })
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -80,7 +86,8 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/status": json = #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/capabilities": json = #"{"max_batch_outputs":4}"#
         case "/api/queue": json = #"{"entries":[]}"#
-        case "/api/gallery", "/api/gallery/collections", "/api/gallery/tags": json = "[]"
+        case "/api/gallery": return gallery
+        case "/api/gallery/collections", "/api/gallery/tags": json = "[]"
         case "/api/history": json = #"{"entries":[]}"#
         default: json = "{}"
         }
