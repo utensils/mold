@@ -15,6 +15,8 @@ struct LibraryView: View {
     @State private var selecting = false
     @State private var selection: Set<PrintID> = []
     @State private var showingCache = LibraryShowingCache()
+    @State private var scrollPosition = LibraryScrollPosition()
+    @State private var returnToPrint: PrintID?
     @Namespace private var zoom
 
     /// Search opens with a query already in it; the Library tab opens empty.
@@ -30,6 +32,7 @@ struct LibraryView: View {
     private func setScope(_ new: LibraryScope) {
         storedScope = (try? JSONEncoder().encode(new)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         selection = []
+        scrollPosition.reset()
     }
 
     var body: some View {
@@ -43,8 +46,12 @@ struct LibraryView: View {
             } else if showing.visible.isEmpty {
                 empty
             } else {
-                LibraryGrid(sections: showing.sections, tile: $tile, selecting: selecting,
+                LibraryGrid(sections: showing.sections, tile: $tile, position: $scrollPosition,
+                            returnToPrint: returnToPrint, selecting: selecting,
                             selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible)
+                    // A different shelf or search is a new scroll context.
+                    // Clearing the bound target alone leaves the old offset.
+                    .id(LibraryGridContext(scope: scope, query: query))
             }
         }
         .navigationTitle(scope.title(in: library.shelves))
@@ -78,6 +85,8 @@ struct LibraryView: View {
         .navigationDestination(for: PrintID.self) { id in
             PrintViewer(start: id, entries: showing.visible, trashed: scope.isTrash)
                 .navigationTransition(.zoom(sourceID: id, in: zoom))
+                .onAppear { returnToPrint = nil }
+                .onDisappear { returnToPrint = id }
         }
         .safeAreaInset(edge: .bottom) {
             if selecting { SelectionBar(scope: scope, selected: showing.selected) { selection = [] } }
@@ -100,6 +109,7 @@ struct LibraryView: View {
             }
         }
         .onChange(of: sort) { query.sort = sort }
+        .onChange(of: query) { scrollPosition.reset() }
         .onAppear { query.sort = sort }
     }
 
@@ -171,6 +181,11 @@ struct LibraryView: View {
             }
         }
     }
+}
+
+private struct LibraryGridContext: Hashable {
+    let scope: LibraryScope
+    let query: LibraryQuery
 }
 
 /// Search lives on the Search tab (the iOS 26 search role), with the system's

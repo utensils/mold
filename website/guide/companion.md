@@ -57,7 +57,9 @@ Stop is its own small button beside the progress sentence, e.g.
 
 The full-screen viewer hides the main tabs so **Share**, **Favourite**, **Info**
 and **Delete** remain reachable; use Back to return to the Library. Info has a
-**Done** button. Shared media keeps its original filename and file type.
+**Done** button. Clips play when their page appears and pause when you page
+away. Returning to the Library keeps your place in the grid. Shared media
+keeps its original filename and file type.
 
 ## Library, Queue and Models
 

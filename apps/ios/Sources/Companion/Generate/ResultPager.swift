@@ -23,7 +23,8 @@ struct ResultPager: View {
             TabView(selection: $page) {
                 ForEach(Array(entries.enumerated()), id: \.offset) { index, entry in
                     Group {
-                        if let entry { PrintPage(entry: entry, trashed: false) } else { ProgressView() }
+                        if let entry { PrintPage(entry: entry, trashed: false, isSelected: page == index) }
+                        else { ProgressView() }
                     }
                     .tag(index)
                 }

@@ -41,7 +41,9 @@ machine returns to the list. See the [iPhone UAT record](docs/IPHONE-UAT.md).
 
 The iPhone Library shows its shelves above the grid: All Prints, Favourites,
 collections and Recently Deleted. Its cached listing and images load before
-the machines respond. Settings is available from Generate, Library and Machines;
+the machines respond. Opening a print keeps the grid's scroll position when
+you return; clips play automatically only while their page is selected in the
+viewer. Settings is available from Generate, Library and Machines;
 Library settings show image storage against its limit and saved listing size,
 offer offline thumbnail saving, and
 can clear both pictures and saved listings after explaining the offline effect.
