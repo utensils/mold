@@ -34,8 +34,9 @@ A machine that is offline keeps its place, dimmed, with the reason.
 
 ## Generate
 
-Pick a model from the title menu and a machine from the machine menu (or leave
-it on Auto). The controls come from the model itself: a model that reads a
+Tap **Model** below the prompt to open **Choose a Model**. Search the installed
+models, choose Still picture / Short clip / 3-D object, and select a machine
+(or leave it on Auto). **Get More Models…** opens model management directly. The controls come from the model itself: a model that reads a
 starting picture shows **Start from**; one that takes references shows
 numbered wells (**image 1**, **image 2**) matching how the prompt names them;
 clips add a length; 3-D objects say when the prompt is ignored. **More
@@ -104,3 +105,14 @@ empty screens keep their one action above the tab bar.
 The app talks only to the machines you add. Keys live in this device's
 Keychain. See the [privacy policy](/privacy) for the camera, local network,
 Photos and notification permissions and what each is used for.
+
+## Native development
+
+`nix develop -c companion-dev` watches Swift sources and rebuilds/relaunches
+the native app in Simulator. Use `companion-run` to launch once and
+`companion-build` to build only. Pass `SIM=<UDID>` and `BUILD=<directory>`
+through any helper. These commands are separate from Tauri's `ios-dev`.
+
+The prompt panel scrolls at large text sizes and stays above the keyboard.
+Video playback uses the media audio session, so clips with audio can be heard
+even when the phone's silent switch is on. Clips without an audio track remain silent.

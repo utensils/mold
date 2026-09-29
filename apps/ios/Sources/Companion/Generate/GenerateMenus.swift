@@ -1,59 +1,101 @@
 import MoldClient
 import SwiftUI
 
-/// The model, as the toolbar's title: its plain name, and its id in mono
-/// underneath (dropped into the menu itself at accessibility sizes, where two
-/// lines would crowd the bar). The menu lists what the fleet has installed
-/// for this kind, by family.
+/// An explicit, full-width model control. Long names wrap in the composer
+/// instead of competing with Kind and Machine in a fixed-height toolbar.
 struct ModelMenu: View {
     @Environment(GenerateController.self) private var generate
-    @Environment(AppRouter.self) private var router
-    @Environment(\.dynamicTypeSize) private var size
+    @State private var choosing = false
 
     var body: some View {
-        Menu {
-            ForEach(generate.families, id: \.family) { group in
-                Section(group.family) {
-                    ForEach(group.models) { model in
-                        Button { generate.choose(model) } label: {
-                            if model.name == generate.modelName {
-                                Label(model.headline, systemImage: "checkmark")
-                            } else {
-                                Text(model.headline)
-                            }
-                            Text(verbatim: model.name)
-                        }
-                    }
+        Button { choosing = true } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model").font(.caption).foregroundStyle(.secondaryText)
+                    Text(generate.model?.headline ?? String(localized: "Choose a Model"))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                Spacer(minLength: 8)
+                // a11y: decorative -- the button's label names its action.
+                Image(systemName: "chevron.up.chevron.down").accessibilityHidden(true)
             }
-            if generate.recipes.count > 1 {
-                Section("Recipe") {
-                    ForEach(generate.recipes) { recipe in
-                        Button { generate.chooseRecipe(recipe.id) } label: {
-                            if recipe.id == generate.recipe?.id {
-                                Label(recipe.label, systemImage: "checkmark")
-                            } else {
-                                Text(recipe.label)
-                            }
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button { router.selection = .go(.machines) } label: {
-                Label("Get More Models…", systemImage: "arrow.down.circle")
-            }
-        } label: {
-            VStack(spacing: 0) {
-                Text(generate.model?.headline ?? String(localized: "Choose a Model"))
-                    .font(.headline)
-                if let name = generate.modelName, !size.isAccessibilitySize {
-                    Text(verbatim: name).font(.caption.monospaced()).foregroundStyle(.secondaryText)
-                }
-            }
-            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(.rect)
         }
-        .accessibilityLabel(String(localized: "Model, \(generate.model?.headline ?? String(localized: "none chosen"))"))
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("choose-model")
+        .accessibilityHint("Choose the kind, model, recipe and machine")
+        .sheet(isPresented: $choosing) { ModelChooser() }
+    }
+}
+
+struct ModelChooser: View {
+    @Environment(GenerateController.self) private var generate
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    KindMenu().labelStyle(.titleAndIcon)
+                    MachineMenu()
+                }
+                Section {
+                    NavigationLink { ModelsView().navigationTitle("Models") } label: {
+                        Text("Get More Models…").fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                ForEach(generate.families, id: \.family) { group in
+                    let models = group.models.filter {
+                        search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
+                            || $0.headline.localizedCaseInsensitiveContains(search)
+                    }
+                    if !models.isEmpty {
+                        Section {
+                            Text(group.family).font(.headline)
+                                .foregroundStyle(.primary)
+                                .accessibilityAddTraits(.isHeader)
+                            ForEach(models) { model in
+                                Button { generate.choose(model); dismiss() } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Label(model.headline, systemImage: model.name == generate.modelName ? "checkmark.circle.fill" : "circle")
+                                        Text(verbatim: model.name).font(.caption.monospaced()).foregroundStyle(.secondaryText)
+                                    }
+                                    .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .accessibilityIdentifier("model-" + model.name)
+                            }
+                        }
+                    }
+                }
+                if generate.families.isEmpty {
+                    Section {
+                        Text("No installed models for this kind on an online machine. Choose another kind, check Machines, or use Get More Models.")
+                            .foregroundStyle(.secondaryText)
+                    }
+                }
+                if generate.recipes.count > 1 {
+                    Section {
+                        ForEach(generate.recipes) { recipe in
+                            Button { generate.chooseRecipe(recipe.id); dismiss() } label: {
+                                Label(recipe.label, systemImage: recipe.id == generate.recipe?.id ? "checkmark.circle.fill" : "circle")
+                            }
+                        }
+                    } header: {
+                        Text("Recipe").foregroundStyle(.secondaryText)
+                    }
+                }
+            }
+            .scrollEdgeEffectHidden(true)
+            .searchable(text: $search, prompt: "Find a model")
+            .navigationTitle("Choose a Model")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .accessibilityIdentifier("model-chooser")
+        .presentationDetents([.large])
+        .presentationSizing(.page)
     }
 }
 
@@ -75,7 +117,7 @@ struct MachineMenu: View {
         } label: {
             HStack(spacing: 6) {
                 StatusDot(reachability: generate.target.map { hosts.reachability(of: $0) } ?? .unknown)
-                Text(label).lineLimit(1)
+                Text(label).fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityLabel(String(localized: "Machine, \(label)"))

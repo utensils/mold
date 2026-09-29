@@ -21,10 +21,28 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Models | Installed per machine, Discover, downloads, licences |
 | Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension |
 
+## Generation and playback
+
+Tap **Model** in the composer to search installed models and choose the kind,
+recipe or machine. **Get More Models…** opens model management directly.
+The prompt stays in one scrollable panel as the keyboard and text size change.
+Video playback uses the media audio session, including in silent mode.
+
 ## Building
 
 Everything goes through the Makefile. `make help` lists the targets, and inside
 `nix develop` the `companion-*` commands wrap them.
+
+Run `nix develop -c companion-dev` to watch iOS and shared Swift sources,
+rebuild, install and relaunch after edits. Ctrl-C stops watching.
+`companion-run` launches once; `companion-build` only builds. The equivalent
+script is `nix develop -c ./scripts/companion.sh dev` (also `run`, `build`,
+`gen`, `test`, `uitest`, `packages-test`, and `lint`). These commands serve
+the native app; `ios-dev` and `scripts/ios.sh` still serve Tauri.
+
+Every helper accepts Make overrides, for example
+`companion-dev SIM=<UDID> BUILD=/Volumes/ExternalStorage/mold-ios-build`.
+Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 
 | Target | What |
 | --- | --- |
@@ -35,10 +53,16 @@ Everything goes through the Makefile. `make help` lists the targets, and inside
 | `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
 | `make lint` | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`) |
 
+On iPad, the audit checks the Settings form through its sidebar page, while
+interaction tests cover the sheet’s Done and Add a Machine actions. This avoids
+a UIKit floating-tab loop triggered by the auditor’s private text-size cycling
+over a sheet; ordinary system text-size changes are verified separately.
+
 On a disk that fills up, put build output elsewhere:
 `make test BUILD=/Volumes/ExternalStorage/mold-ios-build`.
 The simulator defaults to an iPhone 17 Pro when one exists (`scripts/pick-simulator.sh`).
-To choose another, set `SIM="iPhone Air"`.
+To choose another, pass `SIM=<UDID>` from `xcrun simctl list devices available`.
+The Makefile accepts simulator UDIDs, not names.
 
 ## Layout
 

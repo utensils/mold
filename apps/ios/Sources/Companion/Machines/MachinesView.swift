@@ -57,33 +57,35 @@ struct MachinesView: View {
     }
 
     private var fleet: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                FailureBanner()
-                if let preferred = hosts.preferredHost {
-                    // On iPhone Models has no tab: it belongs to a machine.
-                    NavigationLink(value: ModelsRoute(host: preferred.id)) {
-                        Label {
-                            AdaptiveRow { Text("Models") } value: { Text(preferred.name) }
-                        } icon: { Image(systemName: Destination.models.symbol) }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.background.secondary, in: .rect(cornerRadius: 8))
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    FailureBanner()
+                    if let preferred = hosts.preferredHost {
+                        // On iPhone Models has no tab: it belongs to a machine.
+                        NavigationLink(value: ModelsRoute(host: preferred.id)) {
+                            Label {
+                                AdaptiveRow { Text("Models") } value: { Text(preferred.name) }
+                            } icon: { Image(systemName: Destination.models.symbol) }
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.background.secondary, in: .rect(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 16)
                     }
-                    .buttonStyle(.plain)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: min(cardWidth, max(1, geometry.size.width - 32))), spacing: 16)], spacing: 16) {
+                        ForEach(hosts.hosts) { host in
+                            NavigationLink(value: host.id) { MachineCard(host: host) }
+                                .buttonStyle(.plain)
+                                .contextMenu { menu(for: host) }
+                        }
+                    }
                     .padding(.horizontal, 16)
+                    NearbySection()
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: min(cardWidth, 600)), spacing: 16)], spacing: 16) {
-                    ForEach(hosts.hosts) { host in
-                        NavigationLink(value: host.id) { MachineCard(host: host) }
-                            .buttonStyle(.plain)
-                            .contextMenu { menu(for: host) }
-                    }
-                }
-                .padding(.horizontal, 16)
-                NearbySection()
+                .padding(.vertical, 8)
             }
-            .padding(.vertical, 8)
         }
     }
 

@@ -112,10 +112,11 @@ Shelves            Favourites · each collection (drop prints on one to file the
 Your Machines      workstation · hal9000 "Offline" · studio-mini "Key"
 ```
 
-The floating tab bar (the sidebar put away) carries only the five
-destinations and Search. The sections live in the sidebar alone: listed in
-the bar they made UIKit page and re-lay it out on every text-size change
-until the app stopped answering. A machine that is not answering says so in
+The floating tab bar (the sidebar put away) carries Generate, Library, Queue,
+Machines and Search. Models and the sections live in the sidebar alone so the
+floating bar fits at large text sizes. This does not resolve the separate UIKit
+pagination loop triggered by the accessibility auditor's private text-size cycling
+over a presented sheet. A machine that is not answering says so in
 words beside its name, never by colour alone.
 
 ### State and links
@@ -140,17 +141,16 @@ words beside its name, never by colour alone.
 
 ### 5.1 Generate
 
-**Toolbar**
+**Model selection**
 
-- **Principal:** the Model menu. The model's plain name is shown in `.headline`,
-  with its id (`flux-dev:q4`) in mono `.caption` underneath. The menu lists
-  models grouped by family, filtered to the current kind, with availability for
-  each machine.
-- **Trailing:** the Machine menu (status dot + name). "Auto" follows the
-  Default machine, or the first one that is up. Any machine that is up can be
-  pinned.
-- **Leading:** Kind. It is a menu on iPhone (Still picture · Short clip ·
-  3-D object) and a segmented control on iPad.
+The composer has a full-width **Model** button with a wrapping model name and
+chevron. It opens a searchable **Choose a Model** sheet. The sheet groups
+installed models by family and includes Kind, Machine, Recipe, and a direct
+**Get More Models…** navigation link. These controls no longer compete for a
+fixed-height navigation title; the navigation bar says Generate. Kind uses a
+menu at every text size on iPhone and iPad, preserving its accessibility
+hierarchy as text size changes. The model chooser uses a page-sized sheet so its first and last rows
+remain clear of the form-sheet scroll-edge fades. Auto follows the default online machine that holds the selected model.
 
 **Canvas.** Fills the rest of the screen.
 
@@ -158,11 +158,21 @@ words beside its name, never by colour alone.
 - Transparent prints sit on the AlphaBed checkerboard.
 - Tapping the canvas while the keyboard is up dismisses it.
 
-**Composer.** A glass panel (radius 16), attached with
-`.safeAreaBar(edge: .bottom)` above the tab bar. It rides the keyboard. Top to
-bottom:
+**Composer.** An opaque system-background panel (radius 16) above the tab bar
+keeps text legible over the canvas. One stable scroll
+view is capped to 55% of the current window's available height. While idle at
+accessibility sizes it uses up to 90%, replacing the redundant empty-canvas
+guidance. Submitting, progress, results and failures retain the canvas. Both
+caps account for keyboard avoidance and iPad resizing; its prompt never moves between
+`ViewThatFits` alternatives. Top to bottom:
 
-1. **Picture wells**, shown only when the recipe reads them:
+1. **Prompt:** `TextField(axis: .vertical)` with up to six lines (three at
+   accessibility sizes). Keyboard toolbar: Expand, Done.
+2. **Expand** (`text.badge.star`), beside the prompt. Tapping it rewrites the
+   prompt in place, and the original is kept for undo. Its menu offers
+   "Suggest other ways", which opens a list sheet with Use.
+3. **Model** opens the chooser described above.
+4. **Picture wells**, shown only when the recipe reads them:
    - **Start from** (the source picture). Strength lives in More options.
    - **image 1, image 2, …** (references). These numbers are how the prompt
      refers to them. On Qwen Image 2.1 the last reference sets the canvas
@@ -170,14 +180,9 @@ bottom:
    - Each well's menu: Photos, Camera, Files, Choose from Library…, Paste. A
      staged tile's menu adds Move Left, Move Right and Remove.
    - HEIC and WebP are converted on the phone. Alpha is never flattened.
-2. **Prompt:** `TextField(axis: .vertical)` with `.lineLimit(1...6)`. Keyboard
-   toolbar: Expand, Done.
-3. **Expand** (`text.badge.star`). Tapping it rewrites the prompt in place, and
-   the original is kept for undo. Its menu offers "Suggest other ways", which
-   opens a list sheet with Use.
-4. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
+5. **Chip row:** Shape · Steps · Batch · Length (clips only) · More options
    (`slider.horizontal.3`).
-5. **Last row:** the estimate ("about 40s", mono) at the leading edge.
+6. **Last row:** the estimate ("about 40s", mono) at the leading edge.
    **Generate** sits at the trailing edge: `.buttonStyle(.glassProminent)`,
    `.controlSize(.large)`, ⌘↩.
 
@@ -513,9 +518,9 @@ foreground, Generate shows a **From Share** card with the same three choices.
    (Generate, chips, the viewer bar) add `.accessibilityShowsLargeContentViewer`.
 7. **Targets** are at least 44×44 pt, via `.contentShape` and a scaled minimum
    frame.
-8. **The composer** is capped at 55% of the screen height and scrolls inside that
-   cap. The canvas never drops below 30% of the height; below that, the composer
-   scrolls.
+8. **The composer** scrolls within 55% of the available window height, or 90%
+   while idle at accessibility sizes. Active generation and results retain
+   their canvas; the idle hint gives way to readable controls.
 9. **Colour that the audit proved.** The palette is the system's, with three
    asset-catalog colours added after the shell's contrast audit failed on the
    system defaults:
@@ -557,7 +562,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 
 | Screen | xSmall | Large (default) | xxxLarge | AX5 |
 | --- | --- | --- | --- | --- |
-| Generate | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the title wraps to 2 lines |
+| Generate | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
 | Library | 5 columns | 3 columns | 3 columns, larger headers | 1–2 columns; headers wrap; machine badges hidden on tiles (still spoken, and shown in Info) |
 | Viewer | Icon bar | Icon bar | Icon bar | Icon bar with the Large Content Viewer; Info opens straight to `.large` |
 | Queue | Thumbnail beside text | same | same | Thumbnail above text; held-row buttons stacked full width; ETA on its own line |

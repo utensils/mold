@@ -1,14 +1,14 @@
 import MoldClient
 import SwiftUI
 
-/// Generate (DESIGN.md §5.1): the canvas fills the screen; the composer --
-/// wells, prompt, chips, estimate and Generate -- is a glass panel above the
-/// tab bar that rides the keyboard. The toolbar holds the kind, the model
-/// (plain name over its id in mono) and the machine.
+/// Generate (DESIGN.md §5.1): the canvas and a bounded composer above the
+/// tab bar. The prompt stays in one hierarchy as the keyboard appears;
+/// the model button opens the kind, model, recipe and machine chooser.
 struct GenerateView: View {
     @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
+    @Environment(\.dynamicTypeSize) private var size
     @State private var showsOptions = false
     @State private var estimate: String?
 
@@ -21,24 +21,27 @@ struct GenerateView: View {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
             } else {
-                GenerateCanvas()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(.rect)
-                    .onTapGesture { hideKeyboard() }
-                    .safeAreaBar(edge: .bottom) {
-                        Composer(showsOptions: $showsOptions, estimate: estimate)
+                GeometryReader { geometry in
+                    Group {
+                        if generate.run == .idle && size.isAccessibilitySize {
+                            Color.clear
+                        } else {
+                            GenerateCanvas()
+                        }
                     }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(.rect)
+                        .onTapGesture { hideKeyboard() }
+                        .safeAreaBar(edge: .bottom) {
+                            Composer(showsOptions: $showsOptions, estimate: estimate,
+                                     maximumHeight: geometry.size.height * Self.composerHeightFraction(
+                                        run: generate.run, accessibility: size.isAccessibilitySize))
+                        }
+                }
             }
         }
         .navigationTitle(Destination.generate.title)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if !hosts.hosts.isEmpty {
-                ToolbarItem(placement: .topBarLeading) { KindMenu() }
-                ToolbarItem(placement: .principal) { ModelMenu() }
-                ToolbarItem(placement: .topBarTrailing) { MachineMenu() }
-            }
-        }
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }
         .overlay(alignment: .top) {
             VStack(spacing: 8) {
@@ -51,8 +54,14 @@ struct GenerateView: View {
             generate.reuse(entry)
             router.pendingReuse = nil
         }
-        .task(id: hosts.upHosts.map(\.id)) { generate.settleChoice() }
+        .onChange(of: generate.families.flatMap(\.models), initial: true) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
+    }
+
+    /// Idle accessibility text gets the canvas space it needs; submitting,
+    /// progress, results and failures keep their visible canvas.
+    static func composerHeightFraction(run: RunState, accessibility: Bool) -> CGFloat {
+        accessibility && run == .idle ? 0.9 : 0.55
     }
 
     private var estimateKey: String {
@@ -76,30 +85,22 @@ struct GenerateView: View {
     }
 }
 
-/// Still picture / Short clip / 3-D object. A menu on iPhone; the iPad has
-/// the room, so it shows the same three as a segmented control.
+/// A stable menu at every text size: changing to a segmented picker during
+/// Dynamic Type changes replaces the selected label's accessibility node.
 struct KindMenu: View {
     @Environment(GenerateController.self) private var generate
-    @Environment(\.horizontalSizeClass) private var width
 
     var body: some View {
         let binding = Binding(get: { generate.kind }, set: { generate.setKind($0) })
-        if width == .regular {
+        Menu {
             Picker("Kind", selection: binding) {
-                ForEach(PrintKind.allCases, id: \.self) { Text($0.makeTitle).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-        } else {
-            Menu {
-                Picker("Kind", selection: binding) {
-                    ForEach(PrintKind.allCases, id: \.self) { kind in
-                        Label(kind.makeTitle, systemImage: kind.makeSymbol).tag(kind)
-                    }
+                ForEach(PrintKind.allCases, id: \.self) { kind in
+                    Label(kind.makeTitle, systemImage: kind.makeSymbol).tag(kind)
                 }
-            } label: {
-                Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
             }
+        } label: {
+            Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

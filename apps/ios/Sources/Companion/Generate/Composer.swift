@@ -1,31 +1,34 @@
 import MoldClient
 import SwiftUI
 
-/// The composer (DESIGN.md §5.1): picture wells when the recipe reads them,
-/// the prompt, Expand, the chip row, then the estimate and Generate. At
+/// The composer (DESIGN.md §5.1): prompt, model, picture wells, the chip
+/// row, then the estimate and Generate. At
 /// accessibility sizes the chips fold into one Options button and Generate
-/// takes the full width under the estimate; the panel never takes more than
-/// 55% of the screen, and scrolls inside that.
+/// takes the full width under the estimate. The window supplies a bounded
+/// viewport, enlarged for idle accessibility text.
 struct Composer: View {
     @Environment(GenerateController.self) private var generate
     @Environment(\.dynamicTypeSize) private var size
     @Binding var showsOptions: Bool
     let estimate: String?
+    let maximumHeight: CGFloat
     @FocusState private var editing: Bool
 
     var body: some View {
-        @Bindable var generate = generate
-        ViewThatFits(in: .vertical) {
-            content
-            ScrollView { content }.frame(maxHeight: UIScreen.main.bounds.height * 0.55)
-        }
-        .padding(14)
-        .background {
-            if size.isAccessibilitySize {
-                RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground))
+        ScrollViewReader { proxy in
+            ScrollView {
+                content.padding(14)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollEdgeEffectHidden(true)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: editing) { _, focused in
+                if focused { proxy.scrollTo("prompt", anchor: .top) }
             }
         }
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .frame(maxHeight: maximumHeight)
+        .clipped()
+        .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 16))
         // The chrome the canvas scrolls under: what is behind it is judged
         // there, not through it (the accessibility audit's rule).
         .accessibilityElement(children: .contain)
@@ -44,36 +47,49 @@ struct Composer: View {
     private var content: some View {
         @Bindable var generate = generate
         return VStack(alignment: .leading, spacing: 12) {
-            PictureWells()
-            if let blocker = generate.blocker, !generate.run.isBusy {
-                Label(blocker, systemImage: "exclamationmark.circle")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondaryText)
-            }
             if generate.recipe?.capabilities.promptRequirement != .ignored {
                 HStack(alignment: .top, spacing: 8) {
-                    TextField(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…",
-                              text: $generate.draft.prompt, axis: .vertical)
+                    TextField("Prompt", text: $generate.draft.prompt,
+                              prompt: Text(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…")
+                                .foregroundStyle(.secondaryText), axis: .vertical)
                         // At the smallest text one line is too short a
                         // target to hit; two reserved lines are not.
                         .lineLimit((size <= .small ? 2 : 1) ... (size.isAccessibilitySize ? 3 : 6))
                         .focused($editing)
+                        .accessibilityIdentifier("generation-prompt")
+                        .id("prompt")
+                        .frame(minHeight: 44)
                     ExpandButton().labelStyle(.iconOnly)
                 }
             } else {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
             }
-            ViewThatFits(in: .horizontal) {
-                ChipRow(style: .full, showsOptions: $showsOptions)
-                ChipRow(style: .short, showsOptions: $showsOptions)
-                Button { showsOptions = true } label: {
-                    Label("Options", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+            ModelMenu()
+            PictureWells()
+            if let blocker = generate.blocker, !generate.run.isBusy {
+                Label(blocker, systemImage: "exclamationmark.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondaryText)
+            }
+            if size.isAccessibilitySize {
+                optionsButton
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    ChipRow(style: .full, showsOptions: $showsOptions)
+                    ChipRow(style: .short, showsOptions: $showsOptions)
+                    optionsButton
                 }
-                .buttonStyle(.bordered)
             }
             GenerateRow(estimate: estimate)
         }
+    }
+
+    private var optionsButton: some View {
+        Button { showsOptions = true } label: {
+            Label("Options", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
     }
 }
 
@@ -101,6 +117,7 @@ struct GenerateRow: View {
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(generate.blocker != nil)
+            .accessibilityIdentifier("submit-generation")
             .accessibilityShowsLargeContentViewer()
             .sensoryFeedback(.impact(weight: .light), trigger: generate.queued.count + (generate.run.isBusy ? 1 : 0))
         }

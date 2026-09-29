@@ -23,19 +23,43 @@ final class ShellAccessibilityTests: XCTestCase {
         for (index, tab) in ["Generate", "Library", "Queue", "Models", "Machines"].enumerated() {
             let button = app.buttons[tab].firstMatch
             // Models is a sidebar destination: present on iPad, absent on iPhone.
-            if tab == "Models", !button.waitForExistence(timeout: 2) { continue }
-            // At AX sizes the iPad's floating tab bar pages its tabs, and its
-            // sidebar names the Library's first shelf "All Prints"; the Go
-            // menu's ⌘1–⌘5 is the way there that never scrolls -- and using
-            // it tests those shortcuts too.
-            if button.waitForExistence(timeout: 3), button.isHittable {
-                button.tap()
-            } else {
-                app.typeKey("\(index + 1)", modifierFlags: .command)
-            }
+            if tab == "Models", !button.waitForExistence(timeout: 2), !app.buttons["ToggleSideBar"].exists { continue }
+            // Restore the requested size after the prior size-changing audit.
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination(tab, shortcut: "\(index + 1)"))
             settle(app.navigationBars.firstMatch)
+            if tab == "Generate" { try auditComposer(app, size: size) }
             try check(app, "\(tab) at \(size)")
+
+            if tab == "Generate" {
+                // The Dynamic Type auditor changes layout while probing sizes.
+                // Restore the requested size before interacting with the sheet.
+                app.terminate()
+                app.launch()
+                app.buttons["Generate"].firstMatch.tap()
+                let chooser = app.buttons["choose-model"]
+                if chooser.exists {
+                    let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+                    for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
+                    XCTAssertTrue(chooser.isHittable)
+                    chooser.tap()
+                    XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
+                    settle(app.navigationBars["Choose a Model"])
+                    try check(app, "Model chooser at \(size)",
+                              within: app.descendants(matching: .any)["model-chooser"].firstMatch)
+                    // Size probing can leave UIKit exporting the presenting
+                    // hierarchy until another presentation. Restore a fresh
+                    // launch-size screen for the remaining destinations.
+                    app.terminate()
+                    app.launch()
+                }
+            }
         }
+
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
 
         // iPad: the sidebar, opened over the content -- its shelves and
         // machines are drawn nowhere else. What it dims behind it is exempt
@@ -46,35 +70,54 @@ final class ShellAccessibilityTests: XCTestCase {
             let row = app.descendants(matching: .any)["Favourites"].firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
             settle(row)
-            // The sidebar is the column from the left edge to its rows' end.
-            try check(app, "Sidebar at \(size)",
-                      region: CGRect(x: 0, y: 0, width: row.frame.maxX + 16, height: .greatestFiniteMagnitude))
+            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
+            XCTAssertTrue(sidebar.exists, app.debugDescription)
+            try check(app, "Sidebar at \(size)", within: sidebar)
             let hide = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
             if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
         }
 
-        // Settings: the Machines toolbar button, or ⌘, where it is not on screen.
-        let settings = app.buttons["Settings"].firstMatch
-        if settings.waitForExistence(timeout: 3), settings.isHittable {
+        // UIKit's iPad floating bar loops inside the auditor's private
+        // text-size cycling when Settings is presented over it. Audit the
+        // identical Form through its native sidebar page on iPad instead.
+        // Sheet presentation/dismissal has separate interaction coverage.
+        let settingsInSidebar = app.buttons["ToggleSideBar"].exists
+        if settingsInSidebar {
+            app.terminate()
+            app.launch()
+            let favourites = app.descendants(matching: .any)["Favourites"].firstMatch
+            if !favourites.exists || !favourites.isHittable { app.buttons["ToggleSideBar"].tap() }
+            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
+            let settings = sidebar.descendants(matching: .any).matching(NSPredicate(format: "label == 'Settings'")).firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 5))
             settings.tap()
+            XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         } else {
-            app.typeKey(",", modifierFlags: .command)
+            let settings = app.buttons["Settings"].firstMatch
+            if settings.waitForExistence(timeout: 3), settings.isHittable {
+                settings.tap()
+            } else {
+                app.typeKey(",", modifierFlags: .command)
+            }
+            // At huge text iPadOS folds toolbar items into the bar's overflow menu.
+            if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
+                let overflow = app.navigationBars.buttons["More"].firstMatch
+                if overflow.exists { overflow.tap(); app.buttons["Settings"].firstMatch.tap() }
+            }
+            // The Go menu's ⌘, is the way that never scrolls or folds.
+            if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
+                app.typeKey(",", modifierFlags: .command)
+            }
+            XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         }
-        // At huge text iPadOS folds toolbar items into the bar's overflow menu.
-        if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
-            let overflow = app.navigationBars.buttons["More"].firstMatch
-            if overflow.exists { overflow.tap(); app.buttons["Settings"].firstMatch.tap() }
-        }
-        // The Go menu's ⌘, is the way that never scrolls or folds.
-        if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
-            app.typeKey(",", modifierFlags: .command)
-        }
-        XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
-        let sheetBar = app.navigationBars["Settings"].firstMatch
-        settle(sheetBar)
+        settle(app.navigationBars["Settings"])
         try check(app, "Settings at \(size)", within: app.descendants(matching: .any)["settings-sheet"].firstMatch,
                   lazyForm: true)
-        app.buttons["Done"].firstMatch.tap()
+        if settingsInSidebar {
+            XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        } else {
+            app.buttons["Done"].firstMatch.tap()
+        }
 
         // Search is its own tab role, drawn as the separate glass button.
         let search = app.buttons["Search"].firstMatch
@@ -89,17 +132,54 @@ final class ShellAccessibilityTests: XCTestCase {
         try check(app, "Search at \(size)")
     }
 
+    /// Audit every exported composer label/control while fully inside the
+    /// viewport. Pixel auditing a partly clipped AX node samples blank pixels
+    /// outside the scroll view. Coverage is mandatory, not an exemption: a
+    /// control that cannot be brought fully into view fails this test.
+    @MainActor private func auditComposer(_ app: XCUIApplication, size: String) throws {
+        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        guard composer.exists else { return }
+        let types: [XCUIElement.ElementType] = [.staticText, .button, .textField, .textView]
+        func elements() -> [XCUIElement] {
+            types.flatMap { composer.descendants(matching: $0).allElementsBoundByIndex }
+                .filter { !$0.label.isEmpty && $0.frame.height > 0 }
+        }
+        func key(_ element: XCUIElement) -> String { "\(element.elementType):\(element.label)" }
+        let expected = Set(elements().map(key))
+        var seen = Set<String>()
+        for step in 0..<20 {
+            settle(composer)
+            let visible = elements().filter { composer.frame.contains($0.frame) }
+            try check(app, "Composer scroll \(step) at \(size)", contrastOnly: true)
+            seen.formUnion(visible.map(key))
+            if expected.isSubset(of: seen) { break }
+            // Small, non-flinging steps ensure even tall wrapped guidance is
+            // sampled in full, rather than skipped between the two endpoints.
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                .press(forDuration: 0.1, thenDragTo: composer.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)),
+                       withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTAssertTrue(expected.isSubset(of: seen), "Composer content never fully visible: \(expected.subtracting(seen).sorted())")
+        let submit = app.buttons["submit-generation"]
+        XCTAssertTrue(submit.exists)
+        // Return to the prompt before the size-changing audit.
+        for _ in 0..<5 { composer.swipeDown() }
+        settle(composer)
+    }
+
     /// `region`: a presented sheet or the iPad sidebar. Everything outside it
     /// is the dimmed screen behind -- unreachable, and measured by
     /// the auditor through the scrim.
     @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
-                                  within container: XCUIElement? = nil, lazyForm: Bool = false) throws {
+                                  within container: XCUIElement? = nil, lazyForm: Bool = false,
+                                  contrastOnly: Bool = false) throws {
         do {
-            try audit(app, place, region: region, within: container, lazyForm: lazyForm)
+            try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly)
         } catch where Self.isTimeout(error) {
             // "Audit failed to complete in time" is the harness, not a
             // finding: once more, and if it still cannot finish, say where.
-            do { try audit(app, place, region: region, within: container, lazyForm: lazyForm) } catch where Self.isTimeout(error) {
+            do { try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly) } catch where Self.isTimeout(error) {
                 XCTFail("\(place): the audit could not finish (\(error.localizedDescription))")
             }
         }
@@ -112,91 +192,97 @@ final class ShellAccessibilityTests: XCTestCase {
     }
 
     @MainActor private func audit(_ app: XCUIApplication, _ place: String, region: CGRect?,
-                                  within container: XCUIElement?, lazyForm: Bool) throws {
-        try app.performAccessibilityAudit(for: [
-            .dynamicType, .textClipped, .hitRegion, .contrast, .sufficientElementDescription,
-        ]) { issue in
-            // Text scrolled UNDER the glass tab bar or a pinned action is
-            // measured through the glass; scrolled into view it is plain text
-            // on the background. Only that is skipped -- never a control that
-            // lives in the chrome itself.
-            if issue.auditType == .contrast, let element = issue.element,
-               self.isUnderChrome(element, in: app) {
+                                  within container: XCUIElement?, lazyForm: Bool, contrastOnly: Bool) throws {
+        // Dynamic Type temporarily resizes the entire hierarchy. Sample pixels
+        // first at the settled launch size, before that audit changes frames.
+        // Combining both checks can measure contrast against stale geometry.
+        let passes: [XCUIAccessibilityAuditType] = contrastOnly ? [.contrast] : [
+            [.contrast], [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription],
+        ]
+        for types in passes {
+            try app.performAccessibilityAudit(for: types) { issue in
+                // Text scrolled UNDER the glass tab bar or a pinned action is
+                // measured through the glass; scrolled into view it is plain text
+                // on the background. Only that is skipped -- never a control that
+                // lives in the chrome itself.
+                if issue.auditType == .contrast, let element = issue.element,
+                   self.isUnderChrome(element, in: app) {
+                    return true
+                }
+                // Behind a sheet: the iPad's sidebar beside a form sheet, and --
+                // with no element at all -- the status bar under the light
+                // scrim above an iPhone page sheet (the test's screen recording
+                // shows nothing else unnamed on screen). Every view inside the
+                // sheet is named, so an unnamed node cannot hide a real failure.
+                if issue.auditType == .contrast, let region,
+                   issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
+                    return true
+                }
+                // A presented sheet: anything that is not its descendant is the
+                // screen behind (on iPhone the sheet spans the whole width, so
+                // the Machines title under it sits "inside" any column).
+                if issue.auditType == .contrast, let container, container.exists,
+                   issue.element.map({ !self.isDescendant($0, of: container) }) ?? true {
+                    return true
+                }
+                // Settings' Form lays its cells out lazily, and at xSmall and
+                // Large the auditor flags whichever rows it has not re-measured
+                // as "partially unsupported" -- a different row as the layout or
+                // scroll position changes, while the AX5 pass (every row laid
+                // out at 53 pt body text, nothing clipped) proves they scale.
+                // Only that check, only in the sheet; clipping and contrast
+                // there still fail.
+                if issue.auditType == .dynamicType, lazyForm, let container, container.exists,
+                   issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
+                    return true
+                }
+                // The Library grid is lazy too, and the auditor flags its day
+                // headers (headline) at xSmall and Large the same way; the AX5
+                // pass lays them out at full size. Tile badges (caption2, drawn
+                // at 48 pt tall at AX5) are flagged at every size: XCUITest lists
+                // them although VoiceOver never reaches them (hidden -- the
+                // tile's label says what they show). Only Dynamic Type; their
+                // contrast is still audited.
+                if issue.auditType == .dynamicType, let id = issue.element?.identifier,
+                   id == "tile-badge" || (id == "day-header" && !place.contains("AccessibilityXXXL")) {
+                    return true
+                }
+                // The iPad sidebar's rows are UIKit's single-line cells, and at
+                // xSmall and Large the auditor PREDICTS a long one ("Recently
+                // Deleted") "may be clipped at larger Dynamic Type sizes". The
+                // AX5 pass audits the sidebar at that size and reports real
+                // clipping there; only the prediction is skipped, only there.
+                if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
+                   issue.detailedDescription.contains("larger Dynamic Type sizes") {
+                    return true
+                }
+                // A disabled control (Generate before a model is chosen) is an
+                // inactive component, which WCAG 1.4.3 exempts from contrast.
+                if issue.auditType == .contrast, let element = issue.element, element.exists, !element.isEnabled {
+                    return true
+                }
+                // The system search field, grown out of the tab bar, reports its
+                // own placeholder as clipped at every size while the recording
+                // shows it whole; the app supplies only the prompt text.
+                if issue.auditType == .textClipped, issue.element?.elementType == .searchField {
+                    return true
+                }
+                // System bars (the tab bar, the iPad's floating tab bar, a
+                // navigation bar's Done) cap their text by design and offer the
+                // Large Content Viewer instead. Only their Dynamic Type issues are
+                // skipped -- never contrast, clipping or hit area -- and an
+                // element the auditor cannot even name is taken to be one, since
+                // every view this app draws is named.
+                if issue.auditType == .dynamicType,
+                   issue.element.map({ self.isSystemBar($0, in: app) }) ?? true {
+                    return true
+                }
+                // Name the element: "Contrast failed" alone says nothing in a CI log.
+                let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
+                    ?? "unnamed element (\(issue.detailedDescription))"
+                XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
                 return true
             }
-            // Behind a sheet: the iPad's sidebar beside a form sheet, and --
-            // with no element at all -- the status bar under the light
-            // scrim above an iPhone page sheet (the test's screen recording
-            // shows nothing else unnamed on screen). Every view inside the
-            // sheet is named, so an unnamed node cannot hide a real failure.
-            if issue.auditType == .contrast, let region,
-               issue.element.map({ !region.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }) ?? true {
-                return true
-            }
-            // A presented sheet: anything that is not its descendant is the
-            // screen behind (on iPhone the sheet spans the whole width, so
-            // the Machines title under it sits "inside" any column).
-            if issue.auditType == .contrast, let container, container.exists,
-               issue.element.map({ !self.isDescendant($0, of: container) }) ?? true {
-                return true
-            }
-            // Settings' Form lays its cells out lazily, and at xSmall and
-            // Large the auditor flags whichever rows it has not re-measured
-            // as "partially unsupported" -- a different row as the layout or
-            // scroll position changes, while the AX5 pass (every row laid
-            // out at 53 pt body text, nothing clipped) proves they scale.
-            // Only that check, only in the sheet; clipping and contrast
-            // there still fail.
-            if issue.auditType == .dynamicType, lazyForm, let container, container.exists,
-               issue.element.map({ self.isDescendant($0, of: container) }) ?? false {
-                return true
-            }
-            // The Library grid is lazy too, and the auditor flags its day
-            // headers (headline) at xSmall and Large the same way; the AX5
-            // pass lays them out at full size. Tile badges (caption2, drawn
-            // at 48 pt tall at AX5) are flagged at every size: XCUITest lists
-            // them although VoiceOver never reaches them (hidden -- the
-            // tile's label says what they show). Only Dynamic Type; their
-            // contrast is still audited.
-            if issue.auditType == .dynamicType, let id = issue.element?.identifier,
-               id == "tile-badge" || (id == "day-header" && !place.contains("AccessibilityXXXL")) {
-                return true
-            }
-            // The iPad sidebar's rows are UIKit's single-line cells, and at
-            // xSmall and Large the auditor PREDICTS a long one ("Recently
-            // Deleted") "may be clipped at larger Dynamic Type sizes". The
-            // AX5 pass audits the sidebar at that size and reports real
-            // clipping there; only the prediction is skipped, only there.
-            if issue.auditType == .textClipped, place.hasPrefix("Sidebar"),
-               issue.detailedDescription.contains("larger Dynamic Type sizes") {
-                return true
-            }
-            // A disabled control (Generate before a model is chosen) is an
-            // inactive component, which WCAG 1.4.3 exempts from contrast.
-            if issue.auditType == .contrast, let element = issue.element, element.exists, !element.isEnabled {
-                return true
-            }
-            // The system search field, grown out of the tab bar, reports its
-            // own placeholder as clipped at every size while the recording
-            // shows it whole; the app supplies only the prompt text.
-            if issue.auditType == .textClipped, issue.element?.elementType == .searchField {
-                return true
-            }
-            // System bars (the tab bar, the iPad's floating tab bar, a
-            // navigation bar's Done) cap their text by design and offer the
-            // Large Content Viewer instead. Only their Dynamic Type issues are
-            // skipped -- never contrast, clipping or hit area -- and an
-            // element the auditor cannot even name is taken to be one, since
-            // every view this app draws is named.
-            if issue.auditType == .dynamicType,
-               issue.element.map({ self.isSystemBar($0, in: app) }) ?? true {
-                return true
-            }
-            // Name the element: "Contrast failed" alone says nothing in a CI log.
-            let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
-                ?? "unnamed element (\(issue.detailedDescription))"
-            XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
-            return true
         }
     }
 
@@ -235,7 +321,11 @@ final class ShellAccessibilityTests: XCTestCase {
         let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch
         // A control IN the chrome is never skipped -- by descent, not frame:
         // at AX5 the composer's frame covers the canvas text behind it.
-        if pinned.exists, isDescendant(element, of: pinned) { return false }
+        if pinned.exists, isDescendant(element, of: pinned) {
+            // The explicit scroll coverage pass requires every composer
+            // label/control to be fully visible and audited at least once.
+            return !pinned.frame.contains(element.frame)
+        }
         var top = app.frame.maxY
         let bar = app.tabBars.firstMatch
         if bar.exists { top = min(top, bar.frame.minY) }

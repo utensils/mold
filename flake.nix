@@ -1967,27 +1967,39 @@
               }
               {
                 category = "companion";
+                name = "companion-dev";
+                help = "watch native iOS/shared Swift sources, rebuild and relaunch in Simulator";
+                command = "./scripts/companion.sh dev \"$@\"";
+              }
+              {
+                category = "companion";
+                name = "companion-build";
+                help = "build the native iOS app for Simulator";
+                command = "./scripts/companion.sh build \"$@\"";
+              }
+              {
+                category = "companion";
                 name = "companion-run";
                 help = "build Mold Studio Companion (native iOS) and launch it in the iPhone simulator";
-                command = "cd apps/ios && make run \"$@\"";
+                command = "./scripts/companion.sh run \"$@\"";
               }
               {
                 category = "companion";
                 name = "companion-test";
                 help = "run Mold Studio Companion's unit tests on the simulator";
-                command = "cd apps/ios && make test";
+                command = "./scripts/companion.sh test \"$@\"";
               }
               {
                 category = "companion";
                 name = "companion-uitest";
                 help = "run Mold Studio Companion's accessibility audit (xSmall/Large/AX5, light and dark)";
-                command = "cd apps/ios && make uitest";
+                command = "./scripts/companion.sh uitest \"$@\"";
               }
               {
                 category = "companion";
                 name = "companion-lint";
                 help = "run Mold Studio Companion's architecture lints";
-                command = "cd apps/ios && make lint";
+                command = "./scripts/companion.sh lint \"$@\"";
               }
               {
                 category = "companion";

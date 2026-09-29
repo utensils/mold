@@ -31,10 +31,9 @@ struct RootView: View {
         @Bindable var router = router
         TabView(selection: $router.selection) {
             if width == .regular {
-                // Both the floating tab bar and the sidebar list the five
-                // destinations; only the sidebar adds the sections
-                // (`SidebarSections`) -- in the bar they paged and re-laid it
-                // out until the app stopped answering.
+                // The sidebar lists all five destinations. Models and the
+                // extra sections stay out of the floating bar so it fits
+                // at large text sizes.
                 destinationTab(.generate)
                 destinationTab(.library)
                 destinationTab(.queue)
@@ -107,6 +106,7 @@ extension RootView {
             Label { Text(destination.title) } icon: { Image(systemName: destination.symbol) }
         }
         .badge(destination == .queue ? queue.badge : 0)
+        .defaultVisibility(destination.showsInTabBar ? .visible : .hidden, for: .tabBar)
     }
 
     /// What `@SceneStorage` keeps when the Search tab was last selected.

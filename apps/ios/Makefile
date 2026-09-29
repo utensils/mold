@@ -30,7 +30,7 @@ BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIM_SIGN := CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 
 XCB_BASE = xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-       -derivedDataPath $(BUILD)/DerivedData $(SIM_SIGN) \
+       -derivedDataPath "$(BUILD)/DerivedData" $(SIM_SIGN) \
        CURRENT_PROJECT_VERSION=$(BUILD_NUMBER) MARKETING_VERSION=$(MARKETING_VERSION)
 XCB = $(XCB_BASE) -destination '$(DEST)'
 
@@ -58,7 +58,7 @@ run: require-sim build ## Build, install and launch in the simulator
 	@xcrun simctl boot $(SIM_ID) 2>/dev/null || true
 	@open -a Simulator
 	@xcrun simctl install $(SIM_ID) "$(APP_PATH)"
-	@xcrun simctl launch $(SIM_ID) io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM_ID)"
+	@xcrun simctl launch --terminate-running-process $(SIM_ID) io.utensils.mold.companion >/dev/null && echo "  launched in $(SIM_ID)"
 
 test: require-sim gen ## Unit tests on the simulator (the shared packages' own suites run from their Makefiles)
 	@$(XCB) test -only-testing:MoldCompanionTests 2>&1 \
@@ -72,7 +72,7 @@ packages-test: require-sim ## MoldClient, MoldStyle and MoldMesh's own suites on
 	  (cd $(PACKAGES)/$$pkg && scheme=$$pkg && \
 	    { xcodebuild -list 2>/dev/null | grep -q "$$pkg-Package" && scheme=$$pkg-Package; true; } && \
 	    xcodebuild test -scheme $$scheme -destination '$(DEST)' \
-	    -derivedDataPath $(BUILD)/PackagesData 2>&1 \
+	    -derivedDataPath "$(BUILD)/PackagesData" 2>&1 \
 	    | grep -E '✘|recorded an issue|error:|Test run with|TEST (SUCCEEDED|FAILED)'; \
 	    exit $${PIPESTATUS[0]}) || exit 1; \
 	done
@@ -114,6 +114,7 @@ lint: lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-s
 
 lint-script: ## The shared lint script still catches what it exists to catch
 	@../shared/scripts/tests/swift-lint.sh
+	@../../scripts/tests/companion-helper.sh
 
 lint-layers: ## MoldClient stays UI-free; one composition root; keys only in the Keychain
 	@! grep -rlnE '^import (SwiftUI|AppKit|UIKit)' $(PACKAGES)/MoldClient/Sources \

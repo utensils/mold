@@ -179,6 +179,10 @@ Studio for Mac: pair by scanning the Mac's code, generate on your machines,
 and follow renders from the Lock Screen. It is in TestFlight while it is new.
 [Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
 
+Native iOS development: `nix develop -c companion-dev` watches Swift sources,
+builds and relaunches in Simulator. `companion-run` launches once; see the
+[native iOS developer guide](apps/ios/README.md) for simulator and build-directory overrides.
+
 Android uses the same remote-only Mold Studio mobile interface. Download the
 signed universal nightly APK directly; there is no zip to unpack:
 
