@@ -36,10 +36,25 @@ physical speaker output, camera pairing, or device-only extension delivery.
   installed/discover/search, Machines add/edit/cancel/offline/remove, invalid
   address/pairing and scanner fallback, and Settings in light/default and
   dark/AX5. The Library selection toolbar was correctly positioned.
-- After draft/audio reconciliation and offline inventory changes, all 100
-  native unit tests passed.
+- After the final draft, offline and export fixes, all 107 native unit tests
+  passed. Native architecture lints and documentation verification passed.
 - Populated SE AX5 Options/search regression passed, including test-machine
   removal. The updated viewer's actions are visible and Info opens in ordinary
   pushed navigation; the agent restored the original favourite state after
   testing a neutral existing print.
-- Post-fix exploratory UAT, peer review and exact-head CI are in progress.
+- Post-fix Pro/SE exploration verified all visible fixes, including Info Done,
+  video-aware Share, clip/audio cold restoration, first-run AX5 scrolling,
+  offline inventory/Generate guidance and machine-removal navigation.
+- The SE populated fixture regression also verified landscape prompt typing,
+  keyboard dismissal, reachable Generate (never pressed), and Options, followed
+  by portrait AX5 Options and no-match search.
+- The SE offline Queue regression reaches the complete explanation above the
+  pinned action at AX5. A generic full-screen swipe started on the action;
+  dragging the visible explanation proves that this was a test-gesture issue.
+- Independent peer review found and resolved staggered-host restoration,
+  explicit-choice cancellation, and partial-export alignment defects.
+- No generation submissions or observed crashes during exploratory UAT.
+  Existing-media browsing was used; physical audio, camera pairing and
+  device-only extension delivery remain outside Simulator verification.
+- Full light/dark accessibility results and exact-head CI are recorded on the
+  pull request. The audit includes xSmall, Large and AX5.

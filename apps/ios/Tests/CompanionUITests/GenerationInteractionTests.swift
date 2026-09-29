@@ -44,6 +44,26 @@ final class GenerationInteractionTests: XCTestCase {
         capture(app)
     }
 
+    @MainActor func testOfflineQueueExplanationScrollsAtLargestText() throws {
+        let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let message = app.staticTexts["Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh."]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        let action = app.buttons["Check Machines"]
+        for _ in 0..<8 where message.frame.maxY > action.frame.minY {
+            // A full-screen swipe starts on the pinned button on small phones.
+            // Drag the visible explanation instead, as a person would.
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: app.frame.midX, dy: action.frame.minY - 24))
+            let end = origin.withOffset(CGVector(dx: app.frame.midX, dy: app.navigationBars.firstMatch.frame.maxY + 24))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        capture(app)
+        XCTAssertLessThanOrEqual(message.frame.maxY, action.frame.minY,
+                                 "The final line must scroll above the pinned action")
+        XCTAssertTrue(action.isHittable)
+    }
+
     @MainActor func testFloatingBarKeepsModelsInSidebar() throws {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
         guard app.buttons["ToggleSideBar"].exists else { return }

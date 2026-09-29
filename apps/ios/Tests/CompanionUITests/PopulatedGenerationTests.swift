@@ -74,6 +74,10 @@ final class PopulatedGenerationTests: XCTestCase {
     @MainActor private func checkLandscapeComposer(_ app: XCUIApplication) throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
+        let rotated = NSPredicate { _, _ in app.frame.width > app.frame.height }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: rotated, object: app)], timeout: 5), .completed)
+        // Rotation delivers its new geometry before the composer settles.
+        try awaitRotationLayout()
         let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
         for _ in 0..<6 where !prompt.isHittable { composer.swipeDown() }
@@ -93,6 +97,11 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
         attach(app)
         app.buttons["Done"].firstMatch.tap()
+    }
+
+    @MainActor private func awaitRotationLayout() throws {
+        // UIKit's orientation animation is not included in XCTest's app-idle wait.
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
     }
 
     @MainActor private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
