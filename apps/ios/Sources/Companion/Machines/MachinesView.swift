@@ -17,19 +17,12 @@ struct MachinesView: View {
         Group {
             if hosts.hosts.isEmpty {
                 EmptyState(title: String(localized: "No machines yet"), symbol: Destination.machines.symbol,
-                           message: String(localized: "Mold makes pictures on a computer you own. Add one to begin.")) {
-                    VStack(spacing: 12) {
-                        Button("Add a Machine…") { router.showsAddMachine = true }
-                            .prominentAction()
-                        if !nearby.machines.isEmpty {
-                            // Arrives whenever Bonjour answers: shown at once,
-                            // never faded in (half-faded, it read as low
-                            // contrast to the audit, and to anyone glancing).
-                            Text("\(nearby.machines.count) found on this network")
-                                .foregroundStyle(.secondaryText)
-                                .transition(.identity)
-                        }
+                           message: firstRunMessage) {
+                    Button { router.showsAddMachine = true } label: {
+                        Text("Add a Machine…").fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity)
                     }
+                    .prominentAction()
                 }
             } else {
                 fleet
@@ -54,6 +47,12 @@ struct MachinesView: View {
         }
         .onAppear { nearby.start() }
         .refreshable { await hosts.refreshAll() }
+    }
+
+    private var firstRunMessage: String {
+        let explanation = String(localized: "Mold makes pictures on a computer you own. Add one to begin.")
+        guard !nearby.machines.isEmpty else { return explanation }
+        return explanation + " " + String(localized: "\(nearby.machines.count) found on this network.")
     }
 
     private var fleet: some View {

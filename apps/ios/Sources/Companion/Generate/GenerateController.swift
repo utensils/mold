@@ -34,6 +34,8 @@ final class GenerateController {
     @ObservationIgnored var settled: ((ActiveBatch, RunState) -> Void)?
     /// The model each kind last used, so switching kinds and back restores it.
     @ObservationIgnored var lastModel: [PrintKind: String] = [:]
+    /// Cold launch restores before the machines have supplied their profiles.
+    @ObservationIgnored var restoringChoice = false
 
     init(hosts: HostStore, ledger: PendingLedger = .shared,
          drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion"))) {
@@ -102,12 +104,14 @@ final class GenerateController {
     func setKind(_ new: PrintKind) {
         guard new != kind else { return }
         if let modelName { lastModel[kind] = modelName }
+        restoringChoice = false
         kind = new
         let remembered = lastModel[new].flatMap { name in families.flatMap(\.models).first { $0.name == name } }
         if let pick = remembered ?? families.first?.models.first { choose(pick) } else { modelName = nil }
     }
 
     func choose(_ model: Model) {
+        restoringChoice = false
         let isNew = model.name != modelName
         modelName = model.name
         lastModel[kind] = model.name
@@ -124,6 +128,17 @@ final class GenerateController {
     /// A model that has vanished (uninstalled, machine gone) gives way to the
     /// first one that can make this kind, rather than an empty menu.
     func settleChoice() {
+        if restoringChoice, let model, let profile = model.generationProfile {
+            let restoredRecipe = recipeID.flatMap { profile.recipe(named: $0) }
+                ?? profile.recipe(named: profile.defaultRecipeId)
+                ?? profile.recipes.first
+            if let restoredRecipe {
+                kind = restoredRecipe.makes
+                lastModel[kind] = model.name
+                draft = draft.adopting(restoredRecipe, isNewModel: false, for: model)
+            }
+            restoringChoice = false
+        }
         if model == nil, let first = families.first?.models.first { choose(first) }
     }
 

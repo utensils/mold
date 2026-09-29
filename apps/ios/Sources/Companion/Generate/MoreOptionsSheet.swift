@@ -14,7 +14,7 @@ struct MoreOptionsSheet: View {
             Form {
                 if let recipe = generate.recipe {
                     Section {
-                        ChipRow(style: .full, showsOptions: .constant(false)).labelStyle(.titleOnly)
+                        OptionsControls(recipe: recipe)
                     }
                     SamplerSection(recipe: recipe)
                     if generate.draft.media.sourceImage != nil, recipe.capabilities.supportsStrength != false {
@@ -63,7 +63,7 @@ private struct SamplerSection: View {
                 Text("Surprise me").tag(false)
                 Text("Keep").tag(true)
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.menu)
             if generate.draft.locksSeed {
                 AdaptiveRow { Text("Seed") } value: {
                     TextField("Seed", value: $generate.draft.seed, format: .number.grouping(.never))

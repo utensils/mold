@@ -63,7 +63,7 @@ extension GenerateController {
     /// The draft survives the app being terminated (DESIGN.md §4): written on
     /// every Generate and when the app goes to the background.
     func saveDraft() {
-        drafts.save(DraftDescriptor(draft, model: modelName, family: model?.family, recipeID: recipeID))
+        drafts.save(DraftDescriptor(draft, model: modelName, family: model?.family, recipeID: recipe?.id ?? recipeID))
     }
 
     func restoreDraft() {
@@ -71,10 +71,10 @@ extension GenerateController {
         saved.apply(to: &draft)
         modelName = saved.model
         recipeID = saved.recipeID
-        if let name = saved.model, let kindOf = model.flatMap({ $0.makes.first }) {
-            kind = kindOf
-            lastModel[kindOf] = name
-        }
+        restoringChoice = saved.model != nil
+        // Kind comes from the saved recipe once its profile arrives, without
+        // adopting defaults over the user's restored draft.
+        if model != nil { settleChoice() }
     }
 
     /// "Use These Settings": the print's whole recipe back in the composer,

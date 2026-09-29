@@ -56,6 +56,23 @@ final class ModelStore {
             .sorted { $0.family < $1.family }
     }
 
+    /// No answer is not an empty inventory. Say what can actually be known.
+    func emptyInventoryMessage(on host: MoldHost) -> String {
+        if hosts.models[host.id] == nil {
+            switch hosts.reachability(of: host) {
+            case .unknown, .checking:
+                return String(localized: "Checking installed models on \(host.name)…")
+            case .needsKey:
+                return String(localized: "Add an API key for \(host.name) to see its installed models.")
+            case .down:
+                return String(localized: "Connect to \(host.name) to see its installed models.")
+            case .up:
+                return String(localized: "The installed models on \(host.name) couldn't be read. Pull to refresh.")
+            }
+        }
+        return String(localized: "Nothing installed on \(host.name) yet. Discover has models to fetch.")
+    }
+
     // MARK: - Lifecycle
 
     /// Foreground: learn what each machine is fetching, and follow it.

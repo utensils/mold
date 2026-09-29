@@ -50,10 +50,11 @@ struct ModelsView: View {
             }
         }
         .safeAreaBar(edge: .top) {
-            Picker("Show", selection: $pane) {
+            Picker("Show models", selection: $pane) {
                 ForEach(Pane.allCases) { Text($0.title).tag($0) }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("models-pane")
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         }

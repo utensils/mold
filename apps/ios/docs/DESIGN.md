@@ -201,8 +201,12 @@ capability block allows it:
 - **File under:** title, tags, collection.
 - **Recent prompts.**
 
-Shape, Steps and Batch are repeated at the top of the sheet so they are still
-reachable when the chip row collapses at accessibility sizes.
+Shape, Steps, Batch and clip Length each have their own form row at the top
+of the sheet. Their values stack at accessibility sizes. There is no recursive
+More Options button in the sheet. Repeat this look uses a labeled menu that
+follows Dynamic Type. Empty model searches explain that no models match and
+offer Clear Search. Restored drafts resolve their kind from the saved recipe
+when model profiles arrive, without resetting authored options.
 
 **While running.**
 
@@ -285,6 +289,7 @@ iPhone).
 - Opens with a zoom navigation transition from the tile. Full screen, paging in
   the grid's order. Pinch or double-tap to zoom; swipe down to close; tap to hide
   or show the chrome.
+- The main tab bar is hidden in the viewer so its actions remain reachable.
 - Bottom bar: Share · Favourite · Info · Delete.
 - ⋯ menu: Use These Settings · Save to Photos · Copy · Add to Collection ·
   Rename · Export (whatever the machine advertises: OBJ, STL, PLY, Turntable).
@@ -363,7 +368,7 @@ button.
 - Queue: opens the Queue tab filtered to this machine
 - Models
 - Address, with Copy
-- Edit and Remove, at the bottom
+- Edit and Remove, at the bottom; removal returns to Machines
 
 **Add a Machine** is a sheet with its own navigation stack.
 
@@ -394,14 +399,15 @@ button.
 
 ### 5.5 Models (per machine)
 
-- The navigation title names the machine. A segmented control switches
-  Installed and Discover.
+- The navigation title names the machine. A labeled menu switches
+  Installed and Discover and follows Dynamic Type.
 - **Installed:** grouped by family. Each row shows the name, variant, the
   manifest's trade-off sentence and the size in mono.
   - Swipe: Delete.
   - Menu: Load · Unload · Repair · Components │ Delete….
   - Active downloads are listed first; the machine's disk figure is in the
-    footer.
+    footer. An unread inventory says it could not be checked; only a successful
+    empty response says nothing is installed. Unknown counts are omitted.
 - **Discover:** `.searchable`, plus Family and Sort menus.
   - Each row ends in **Get**, **Installed**, or **Open Page** when the machine
     cannot take it.
@@ -535,7 +541,9 @@ foreground, Generate shows a **From Share** card with the same three choices.
      is about 4.4:1 on white, and #6C6C70 still failed on the grouped
      background; `make lint` rejects `.foregroundStyle(.secondary)`.
 10. **An empty state's action is never under the glass.** At accessibility sizes
-    it is pinned above the tab bar while the explanation scrolls.
+    it wraps and is pinned above the tab bar in an opaque safe-area inset while
+    the explanation scrolls. Nearby-discovery counts belong to the scrolling
+    explanation, not the pinned action.
 
 ### VoiceOver
 

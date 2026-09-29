@@ -50,13 +50,27 @@ struct ShapeChip: View {
 
 /// A chip's face: a plain word, then a mono figure when there is room.
 func chipLabel(_ title: String, detail: String?) -> some View {
-    HStack(spacing: 4) {
-        Text(title)
-        if let detail {
-            Text(verbatim: detail).font(.caption.monospacedDigit()).foregroundStyle(.secondaryText)
+    ChipLabel(title: title, detail: detail)
+}
+
+private struct ChipLabel: View {
+    @Environment(\.dynamicTypeSize) private var size
+    let title: String
+    let detail: String?
+
+    var body: some View {
+        let layout = RowAxis.for(size) == .vertical
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(spacing: 4))
+        layout {
+            Text(title).fixedSize(horizontal: false, vertical: true)
+            if let detail {
+                Text(verbatim: detail).font(.caption.monospacedDigit()).foregroundStyle(.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .frame(minHeight: 44)
     }
-    .frame(minHeight: 36)
 }
 
 /// Steps or Batch: a menu of values across the recipe's range, reading as

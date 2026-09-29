@@ -149,6 +149,39 @@ struct GenerateControllerTests {
         #expect(generate.ledger.batches.isEmpty)
     }
 
+    @Test(arguments: ["ltx-2.5-22b-distilled:bf16", "hunyuan3d-2.1:fp16"])
+    func coldLaunchRestoresTheDraftKindAfterModelsArrive(_ name: String) async throws {
+        let (original, _) = try await setUp()
+        let savedModel = try model(name)
+        let host = try #require(original.hosts.hosts.first)
+        let expectedRecipe = try #require(savedModel.generationProfile?.recipes.first)
+        original.hosts.setModels([savedModel], for: host.id)
+        original.setKind(expectedRecipe.makes)
+        original.choose(savedModel)
+        original.draft.prompt = expectedRecipe.capabilities.promptRequirement == .ignored ? "" : "Keep this draft without generating"
+        original.draft.steps = expectedRecipe.steps.clamp(expectedRecipe.defaults.steps + 1)
+        let authored = original.draft
+        original.saveDraft()
+
+        // The composition root restores the draft before any machine answers.
+        original.hosts.setModels(nil, for: host.id)
+        original.hosts.setReachability(nil, for: host.id)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts)
+        restored.settleChoice()
+        original.hosts.setModels([savedModel], for: host.id)
+        original.hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
+            #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#.utf8))), for: host.id)
+        restored.settleChoice()
+
+        #expect(restored.kind == expectedRecipe.makes)
+        #expect(restored.modelName == name)
+        #expect(restored.recipe?.makes == expectedRecipe.makes)
+        #expect(restored.draft.prompt == authored.prompt)
+        #expect(restored.draft.steps == authored.steps, "restoration must not reset authored options")
+        #expect(restored.draft.offersAudioControl == authored.offersAudioControl)
+        #expect(restored.draft.enableAudio == authored.enableAudio)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())
