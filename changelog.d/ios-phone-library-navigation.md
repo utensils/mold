@@ -1,0 +1,1 @@
+- **Clearer iPhone creation and library.** Generate now presents its controls as a readable scrolling form on iPhone, with large-text actions that fit and a visible exit from model search. Library shelves and Settings are easier to find, the gallery avoids repeated filtering and per-tile host scans, and clearing the local cache removes saved listings as well as images.

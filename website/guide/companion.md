@@ -34,17 +34,22 @@ A machine that is offline keeps its place, dimmed, with the reason.
 
 ## Generate
 
-Tap **Model** below the prompt to open **Choose a Model**. Search the installed
-models, choose Still picture / Short clip / 3-D object, and select a machine
-(or leave it on Auto). **Get More Models…** opens model management directly. The controls come from the model itself: a model that reads a
+On iPhone, Generate is one scrolling form. Choose Still picture / Short clip /
+3-D object and a machine (or leave it on Auto) above the prompt. Tap **Model**
+to search installed models and recipes; **Get More Models…** opens model
+management directly. The controls come from the model itself: a model that reads a
 starting picture shows **Start from**; one that takes references shows
 numbered wells (**image 1**, **image 2**) matching how the prompt names them;
 clips add a length; 3-D objects say when the prompt is ignored. **More
 options** holds the sampler, seed, adapters, identity photos, ControlNet and
 the mask editor, and only what the model can use. Shape, Steps, Batch and clip
-Length have separate rows that remain readable at large text sizes. Clip and
+Length have separate rows that remain readable at large text sizes. At larger
+text sizes Kind and Machine stack. On iPhone Generate stays above the tabs as a
+full-width button, and the parameter chips become one **Options** button. Clip and
 3-D drafts keep their kind when you reopen the app. A model search with no
 matches offers **Clear Search**.
+Model search also keeps a **Close Model Search** action above the keyboard at
+large text sizes.
 
 **Generate** never turns into Stop. Pressing it again queues another render;
 Stop is its own small button beside the progress sentence, e.g.
@@ -60,10 +65,14 @@ and **Delete** remain reachable; use Back to return to the Library. Info has a
   when the machine isn't answering, and the prints you have opened. Pinch to
   change the tile size (five sizes, from seven columns to one). Settings ▸
   Library sets how much space it may use and can save every thumbnail ahead
-  of time.
+  of time. It reports image storage against its limit and lists saved listing
+  storage separately; **Clear
+  Library Cache** explains that prints on offline machines will disappear
+  from this phone until they reconnect.
 - **Library** shows every machine's prints as one grid, a print found on two
   machines once. Favourites, tags, collections and Recently Deleted work the
-  way they do on the Mac, across every machine that holds a copy. Search
+  way they do on the Mac, across every machine that holds a copy. On iPhone,
+  the shelf menu is visible above the grid. Search
   understands `is:video`, `is:mesh`, `tag:` and `on:`.
 - **Queue** lists what each machine is rendering and waiting on. A held job
   says why in words, with **Pull and Retry** when a model is missing, **Retry**

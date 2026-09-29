@@ -2,6 +2,11 @@ import XCTest
 
 /// Exercise a saved-machine screen, not just first-run empty states.
 final class GenerationInteractionTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        acceptCompanionPermissions()
+    }
+
     @MainActor private func launch(size: String = "UICTContentSizeCategoryL") -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -11,13 +16,13 @@ final class GenerationInteractionTests: XCTestCase {
         if app.buttons["Add a Machine…"].firstMatch.exists {
             app.buttons["Add a Machine…"].firstMatch.tap()
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
-            let address = app.textFields["machine-address"]
-            XCTAssertTrue(address.waitForExistence(timeout: 5))
-            address.tap()
-            address.typeText("127.0.0.1:9")
             let name = app.textFields["machine-name"]
+            XCTAssertTrue(name.waitForExistence(timeout: 5))
             name.tap()
             name.typeText("UAT Machine")
+            let address = app.textFields["machine-address"]
+            address.tap()
+            address.typeText("127.0.0.1:9")
             app.buttons["Add"].firstMatch.tap()
             app.buttons["Generate"].firstMatch.tap()
         }
@@ -32,9 +37,12 @@ final class GenerationInteractionTests: XCTestCase {
 
     @MainActor func testAccessibilityComposerAndMachineCardsFitTheScreen() throws {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
-        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
-        XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertLessThanOrEqual(composer.frame.height, app.frame.height * 0.9)
+        let form = app.scrollViews["phone-generate-form"]
+        XCTAssertTrue(form.waitForExistence(timeout: 5))
+        let submit = app.buttons["submit-generation"]
+        XCTAssertTrue(submit.isHittable)
+        XCTAssertGreaterThan(submit.frame.width, form.frame.width * 0.7,
+                             "Large-text Generate should occupy the form width")
         capture(app)
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         let card = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'machine-card-'")).firstMatch
@@ -46,6 +54,19 @@ final class GenerationInteractionTests: XCTestCase {
 
     @MainActor func testOfflineQueueExplanationScrollsAtLargestText() throws {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        let enterAddress = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch
+        XCTAssertTrue(enterAddress.waitForExistence(timeout: 5))
+        enterAddress.tap()
+        let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Offline Queue Test")
+        let address = app.textFields["machine-address"]
+        address.tap()
+        address.typeText("127.0.0.1:65534")
+        app.buttons["Add"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
         let message = app.staticTexts["Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh."]
         XCTAssertTrue(message.waitForExistence(timeout: 5))
@@ -62,6 +83,12 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertLessThanOrEqual(message.frame.maxY, action.frame.minY,
                                  "The final line must scroll above the pinned action")
         XCTAssertTrue(action.isHittable)
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        let card = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "127.0.0.1:65534")).firstMatch
+        for _ in 0..<8 where !card.isHittable { app.swipeUp() }
+        card.press(forDuration: 1)
+        app.buttons["Remove…"].firstMatch.tap()
+        app.buttons["Remove"].firstMatch.tap()
     }
 
     @MainActor func testFloatingBarKeepsModelsInSidebar() throws {
@@ -108,10 +135,26 @@ final class GenerationInteractionTests: XCTestCase {
         app.buttons["Cancel"].firstMatch.tap()
     }
 
+    @MainActor func testLibraryShelvesAndSettingsAreReachableOnPhone() throws {
+        let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let shelves = app.buttons["library-collections"]
+        XCTAssertTrue(shelves.waitForExistence(timeout: 5))
+        XCTAssertTrue(shelves.isHittable)
+        shelves.tap()
+        XCTAssertTrue(app.buttons["Favourites"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Favourites"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Favourites"].waitForExistence(timeout: 5))
+        app.buttons["Settings"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(shelves.exists)
+    }
+
     @MainActor func testModelChooserAndDownloadRoute() throws {
         let app = launch()
         let chooser = app.buttons["choose-model"]
-        for _ in 0..<4 where !chooser.isHittable { app.descendants(matching: .any)["bottom-chrome"].firstMatch.swipeUp() }
+        for _ in 0..<4 where !chooser.isHittable { app.scrollViews["phone-generate-form"].swipeUp() }
         XCTAssertTrue(chooser.isHittable)
         chooser.tap()
         XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))

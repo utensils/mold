@@ -18,7 +18,8 @@ struct PrintViewer: View {
 
     var body: some View {
         let entry = entries.first { $0.id == (current ?? start) }
-        let visibleChrome = Self.showsChrome(for: entry?.print.kind, requested: chrome)
+        let visibleChrome = UIDevice.current.userInterfaceIdiom == .phone
+            || Self.showsChrome(for: entry?.print.kind, requested: chrome)
         return TabView(selection: Binding(get: { current ?? start }, set: { current = $0 })) {
             ForEach(entries) { page in
                 Group {

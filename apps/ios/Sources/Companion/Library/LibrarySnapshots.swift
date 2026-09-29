@@ -38,5 +38,13 @@ nonisolated struct LibrarySnapshots: Sendable {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    nonisolated var diskBytes: Int64 {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else { return 0 }
+        return files.reduce(0) { total, file in
+            total + Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+    }
+
     nonisolated private func file(_ id: UUID) -> URL { directory.appending(path: "\(id.uuidString).json") }
 }

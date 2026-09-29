@@ -28,13 +28,14 @@ struct LibraryGrid: View {
 
     var body: some View {
         let minimum = tile.basePoints * scale
+        let showsHost = Set(visible.flatMap(\.hostNames)).count > 1
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum, maximum: minimum * 2), spacing: 3)],
                       spacing: 3) {
                 ForEach(sections) { section in
                     Section {
                         ForEach(section.items) { entry in
-                            cell(entry, points: minimum * 1.25)
+                            cell(entry, points: minimum * 1.25, showsHost: showsHost)
                                 .id(entry.id)
                         }
                     } header: {
@@ -71,10 +72,10 @@ struct LibraryGrid: View {
         }
     }
 
-    @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat) -> some View {
+    @ViewBuilder private func cell(_ entry: LibraryEntry, points: CGFloat, showsHost: Bool) -> some View {
         let tile = PrintTile(entry: entry, points: points, trashed: trashed,
                              selecting: selecting, selected: selection.contains(entry.id),
-                             showsHost: Set(visible.flatMap(\.hostNames)).count > 1, drawsBadges: false)
+                             showsHost: showsHost, drawsBadges: false)
         let tileView = tile.matchedTransitionSource(id: entry.id, in: zoom)
         if selecting {
             Button { toggle(entry.id) } label: { tileView }

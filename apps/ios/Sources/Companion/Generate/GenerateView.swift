@@ -9,6 +9,7 @@ struct GenerateView: View {
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
     @Environment(\.dynamicTypeSize) private var size
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var showsOptions = false
     @State private var estimate: String?
 
@@ -21,7 +22,27 @@ struct GenerateView: View {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
             } else {
-                GeometryReader { geometry in
+                if UIDevice.current.userInterfaceIdiom == .phone && generate.run == .idle {
+                    ScrollView {
+                        Composer(showsOptions: $showsOptions, estimate: estimate,
+                                 maximumHeight: .infinity, inline: true,
+                                 inlineAction: verticalSizeClass == .compact)
+                            // The pinned action overlays the scroll view on iOS;
+                            // leave enough travel to lift Options above it.
+                            .padding(.bottom, verticalSizeClass == .compact ? 0 : (size.isAccessibilitySize ? 160 : 112))
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .accessibilityIdentifier("phone-generate-form")
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if verticalSizeClass != .compact {
+                            GenerateRow(estimate: estimate)
+                                .padding(16)
+                                .frame(maxWidth: .infinity)
+                                .background(Color(uiColor: .systemBackground))
+                        }
+                    }
+                } else {
+                    GeometryReader { geometry in
                     Group {
                         if generate.run == .idle && size.isAccessibilitySize {
                             Color.clear
@@ -37,6 +58,7 @@ struct GenerateView: View {
                                      maximumHeight: geometry.size.height * Self.composerHeightFraction(
                                         run: generate.run, accessibility: size.isAccessibilitySize))
                         }
+                    }
                 }
             }
         }
@@ -102,6 +124,9 @@ struct KindMenu: View {
         } label: {
             Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
                 .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(.primary)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
     }
 }

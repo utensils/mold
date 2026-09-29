@@ -12,29 +12,35 @@ struct Composer: View {
     @Binding var showsOptions: Bool
     let estimate: String?
     let maximumHeight: CGFloat
+    var inline = false
+    var inlineAction = false
     @FocusState private var editing: Bool
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                content.padding(14)
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollEdgeEffectHidden(true)
-            .scrollDismissesKeyboard(.interactively)
-            .onChange(of: editing) { _, focused in
-                if focused { proxy.scrollTo("prompt", anchor: .top) }
+        Group {
+            if inline {
+                content.padding(16)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        content.padding(14)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollEdgeEffectHidden(true)
+                    .scrollDismissesKeyboard(.interactively)
+                    .onChange(of: editing) { _, focused in
+                        if focused { proxy.scrollTo("prompt", anchor: .top) }
+                    }
+                }
+                .frame(maxHeight: maximumHeight)
+                .clipped()
+                .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 16))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("bottom-chrome")
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
             }
         }
-        .frame(maxHeight: maximumHeight)
-        .clipped()
-        .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 16))
-        // The chrome the canvas scrolls under: what is behind it is judged
-        // there, not through it (the accessibility audit's rule).
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("bottom-chrome")
-        .padding(.horizontal, 12)
-        .padding(.bottom, 6)
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 ExpandButton()
@@ -47,6 +53,20 @@ struct Composer: View {
     private var content: some View {
         @Bindable var generate = generate
         return VStack(alignment: .leading, spacing: 12) {
+            if inline {
+                if size >= .xxLarge {
+                    VStack(alignment: .leading, spacing: 12) {
+                        KindMenu()
+                        MachineMenu()
+                    }
+                } else {
+                    HStack {
+                        KindMenu()
+                        Spacer(minLength: 8)
+                        MachineMenu()
+                    }
+                }
+            }
             if generate.recipe?.capabilities.promptRequirement != .ignored {
                 HStack(alignment: .top, spacing: 8) {
                     TextField("Prompt", text: $generate.draft.prompt,
@@ -72,7 +92,7 @@ struct Composer: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondaryText)
             }
-            if size.isAccessibilitySize {
+            if inline || size >= .xxLarge {
                 optionsButton
             } else {
                 ViewThatFits(in: .horizontal) {
@@ -81,7 +101,7 @@ struct Composer: View {
                     optionsButton
                 }
             }
-            GenerateRow(estimate: estimate)
+            if !inline || inlineAction { GenerateRow(estimate: estimate) }
         }
     }
 
@@ -100,8 +120,10 @@ struct GenerateRow: View {
     @Environment(\.dynamicTypeSize) private var size
     let estimate: String?
 
+    static func stacks(at size: DynamicTypeSize, phone: Bool = false) -> Bool { phone || size >= .xxLarge }
+
     var body: some View {
-        let stacked = RowAxis.for(size) == .vertical
+        let stacked = Self.stacks(at: size, phone: UIDevice.current.userInterfaceIdiom == .phone)
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 12))
         layout {

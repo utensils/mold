@@ -23,18 +23,28 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 
 ## Generation and playback
 
-Tap **Model** in the composer to search installed models and choose the kind,
-recipe or machine. **Get More Models…** opens model management directly.
-The prompt stays in one scrollable panel as the keyboard and text size change.
+On iPhone, Generate opens as a scrolling form: choose the kind and machine,
+describe the result, then choose a model. Tap **Model** to search installed
+models and recipes; **Get More Models…** opens model management directly.
+The prompt stays in one scrollable form as the keyboard and text size change;
+Generate stays visible above the phone tabs.
+The model search sheet keeps a Close action visible when its keyboard is open.
 More Options gives Shape, Steps, Batch and Length their own rows, including at
 large accessibility text sizes. Clip and 3-D drafts restore their kind after
 machines reconnect. A model search with no matches offers Clear Search.
 Video playback uses the media audio session, including in silent mode. The
 viewer hides the main tabs so its Share, Favourite, Info and Delete controls
-remain accessible. Info has a Done button, and shared files retain their original
+remain accessible, while keeping phone back navigation visible. Info has a Done button, and shared files retain their original
 filename and media extension. Models uses a text-scaling Installed/Discover menu and
 explains when an offline machine's inventory could not be read. Removing a
 machine returns to the list. See the [iPhone UAT record](docs/IPHONE-UAT.md).
+
+The iPhone Library shows its shelves above the grid: All Prints, Favourites,
+collections and Recently Deleted. Its cached listing and images load before
+the machines respond. Settings is available from Generate, Library and Machines;
+Library settings show image storage against its limit and saved listing size,
+offer offline thumbnail saving, and
+can clear both pictures and saved listings after explaining the offline effect.
 
 ## Building
 

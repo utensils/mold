@@ -22,7 +22,9 @@ final class ThumbnailLoader {
     @ObservationIgnored let originals: DiskThumbnailStore
     @ObservationIgnored private let memory = NSCache<NSString, UIImage>()
     @ObservationIgnored private var inflight: [String: Task<UIImage?, Never>] = [:]
-    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Keep cancelled predecessors until they finish: one may already be
+    /// inside a disk write when Save All is restarted or caches are cleared.
+    @ObservationIgnored private var saveTasks: [Int: Task<Void, Never>] = [:]
     /// Which save run owns `saving`: a cancelled run's last word must not
     /// clear the progress of the run that replaced it.
     @ObservationIgnored private var saveRun = 0
@@ -96,10 +98,10 @@ final class ThumbnailLoader {
         let left = max(0, (waiters[key] ?? 1) - 1)
         waiters[key] = left == 0 ? nil : left
         if left == 0, inflight[key] == task { inflight[key] = nil }
-        if let image {
+        if let image, !task.isCancelled {
             memory.setObject(image, forKey: key as NSString, cost: Int(image.size.width * image.size.height * 4))
         }
-        return image
+        return task.isCancelled ? nil : image
     }
 
     /// The last caller waiting on a load gave up: stop downloading.
@@ -122,6 +124,7 @@ final class ThumbnailLoader {
         guard let client = reachableBackend(for: entry),
               let data = try? await client.thumbnail(entry.print.filename, size: size, trashed: trashed)
         else { return nil }
+        guard !Task.isCancelled else { return nil }
         if let key = Self.diskKey(entry, size: size) { await disk.store(data, for: key) }
         return await Self.decoded(data, pixels: size)
     }
@@ -143,6 +146,7 @@ final class ThumbnailLoader {
               let data = try? await client.media(entry.print.filename, trashed: trashed),
               !Task.isCancelled
         else { return nil }
+        guard !Task.isCancelled else { return nil }
         if let key { await originals.store(data, for: key) }
         return await Self.decoded(data, pixels: Self.viewerPixels)
     }
@@ -153,13 +157,12 @@ final class ThumbnailLoader {
     /// at a time, skipping what is already on disk. A new call replaces the one
     /// running; `cancelSaving()` stops it.
     func save(_ entries: [LibraryEntry], size: Int = 512) {
-        saveTask?.cancel()
-        saveRun += 1
+        cancelSaving()
         let run = saveRun
         let size = Self.bucket(size)
         let work = entries
         saving = (0, work.count)
-        saveTask = Task { [weak self] in
+        saveTasks[run] = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
                 func enqueue() {
@@ -176,11 +179,12 @@ final class ThumbnailLoader {
                 }
             }
             if self?.saveRun == run { self?.saving = nil }
+            self?.saveTasks[run] = nil
         }
     }
 
     func cancelSaving() {
-        saveTask?.cancel()
+        for task in saveTasks.values { task.cancel() }
         saveRun += 1
         saving = nil
     }
@@ -194,6 +198,7 @@ final class ThumbnailLoader {
         guard !Task.isCancelled, let client = reachableBackend(for: entry),
               let data = try? await client.thumbnail(entry.print.filename, size: size, trashed: false)
         else { return }
+        guard !Task.isCancelled else { return }
         await disk.store(data, for: key)
     }
 
@@ -219,6 +224,13 @@ final class ThumbnailLoader {
 
     func emptyCaches() async {
         cancelSaving()
+        let savingTasks = Array(saveTasks.values)
+        let loadingTasks = Array(inflight.values)
+        for task in loadingTasks { task.cancel() }
+        for task in savingTasks { _ = await task.value }
+        for task in loadingTasks { _ = await task.value }
+        inflight.removeAll()
+        waiters.removeAll()
         memory.removeAllObjects()
         await disk.purge()
         await originals.purge()

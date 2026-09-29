@@ -19,6 +19,8 @@ struct AddressForm: View {
     var body: some View {
         Form {
             Section {
+                TextField("Name", text: $name, prompt: Text(suggestedName))
+                    .accessibilityIdentifier("machine-name")
                 TextField("Address", text: $address, prompt: Text(verbatim: "workstation.local"))
                     .accessibilityIdentifier("machine-address")
                     .keyboardType(.URL)
@@ -26,25 +28,18 @@ struct AddressForm: View {
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
                     .textContentType(.URL)
-                if let sentence = check.sentence {
-                    Label {
-                        Text(sentence).fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        StatusDot(reachability: check)
-                    }
-                    .foregroundStyle(.secondaryText)
-                }
-            } footer: {
-                Text("A name, an IP address, or a Tailscale address. Port 7680 is assumed.")
-                    .foregroundStyle(.secondaryText)
-            }
-            Section {
-                TextField("Name", text: $name, prompt: Text(suggestedName))
-                    .accessibilityIdentifier("machine-name")
                 SecureField("API key (optional)", text: $apiKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Toggle("Make this the Default machine", isOn: $makeDefault)
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("A name, an IP address, or a Tailscale address. Port 7680 is assumed.")
+                    if let sentence = check.sentence {
+                        Label(sentence, systemImage: "network")
+                    }
+                }
+                .foregroundStyle(.secondaryText)
             }
             if let problem {
                 Section { Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }

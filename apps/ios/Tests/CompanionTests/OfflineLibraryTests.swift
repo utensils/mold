@@ -14,6 +14,23 @@ import UniformTypeIdentifiers
 /// walks the tile sizes.
 @MainActor
 struct OfflineLibraryTests {
+    private actor ThumbnailGate {
+        private var arrivals = 0
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+
+        func pause() async {
+            arrivals += 1
+            await withCheckedContinuation { waiting.append($0) }
+        }
+
+        func count() -> Int { arrivals }
+
+        func open() {
+            for continuation in waiting { continuation.resume() }
+            waiting.removeAll()
+        }
+    }
+
     private func temp(_ name: String) -> URL {
         FileManager.default.temporaryDirectory.appending(path: "\(name)-\(UUID())")
     }
@@ -116,6 +133,37 @@ struct OfflineLibraryTests {
         #expect(store.load(id) == nil)
     }
 
+    @Test func clearingOfflineLibraryRemovesSavedListingsAndOfflineRows() async throws {
+        let fake = FakeBackend()
+        let hosts = try await hosts(fake, up: false)
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let id = hosts.hosts[0].id
+        snapshots.save(LibrarySnapshot(prints: [try print("owl.png", version: "v1")], trashed: nil,
+                                       collections: nil, etag: "e1", trashEtag: nil), for: id)
+        let library = LibraryStore(hosts: hosts, snapshots: snapshots)
+        await library.restoreSaved()
+        #expect(library.pool.count == 1)
+        #expect(snapshots.diskBytes > 0)
+        await library.clearOfflineCache()
+        #expect(snapshots.load(id) == nil)
+        #expect(snapshots.diskBytes == 0)
+        #expect(library.pool.isEmpty)
+        #expect(library.knownTags.isEmpty)
+    }
+
+    @Test func aRestoreStartedBeforeClearCannotBringOfflineRowsBack() async throws {
+        let fake = FakeBackend()
+        let hosts = try await hosts(fake, up: false)
+        let snapshots = LibrarySnapshots(directory: temp("snapshots"))
+        let library = LibraryStore(hosts: hosts, snapshots: snapshots)
+        let saved = LibrarySnapshot(prints: [try print("stale.png", version: "v1")], trashed: nil,
+                                    collections: nil, etag: "old", trashEtag: nil)
+        await library.clearOfflineCache()
+        library.acceptRestored([(hosts.hosts[0].id, saved)], from: 0)
+        #expect(library.pool.isEmpty)
+        #expect(library.knownTags.isEmpty)
+    }
+
     /// With the machine down, the Library still shows its saved prints and
     /// says it is doing so.
     @Test func aMachineThatIsDownStillShowsItsSavedPrints() async throws {
@@ -128,6 +176,7 @@ struct OfflineLibraryTests {
         await library.restoreSaved()
         await library.reload()
         #expect(library.pool.map(\.print.filename) == ["owl.png"])
+        #expect(library.knownTags == ["owls"])
         #expect(library.offlineHosts.map(\.name) == ["hal9000"])
     }
 
@@ -243,6 +292,51 @@ struct OfflineLibraryTests {
         #expect(loader.saving?.total == 12, "the old run's end did not clear the new run's progress")
         for _ in 0..<200 where loader.saving != nil { try await Task.sleep(for: .milliseconds(20)) }
         #expect(loader.saving == nil)
+    }
+
+    @Test func clearingWhileSavingLeavesNoThumbnailBehind() async throws {
+        let fake = FakeBackend()
+        let image = png()
+        fake.stub("thumbnail(_:size:trashed:)") { _ in
+            try await Task.sleep(for: .milliseconds(50))
+            return image
+        }
+        let hosts = try await hosts(fake, up: true)
+        let loader = ThumbnailLoader(hosts: hosts, directory: temp("offline"), limit: .mb250)
+        let entries = try (0..<8).map { LibraryEntry(host: hosts.hosts[0], print: try print("p\($0).png", version: "v1")) }
+        loader.save(entries)
+        await loader.emptyCaches()
+        #expect(await loader.diskBytes() == 0)
+        #expect(loader.saving == nil)
+    }
+
+    @Test func clearingWaitsForAReplacedSaveRun() async throws {
+        let fake = FakeBackend()
+        let gate = ThumbnailGate()
+        let image = png()
+        fake.stub("thumbnail(_:size:trashed:)") { _ in
+            await gate.pause()
+            return image
+        }
+        let hosts = try await hosts(fake, up: true)
+        let loader = ThumbnailLoader(hosts: hosts, directory: temp("offline"), limit: .mb250)
+        let first = LibraryEntry(host: hosts.hosts[0], print: try print("first.png", version: "v1"))
+        let next = LibraryEntry(host: hosts.hosts[0], print: try print("next.png", version: "v1"))
+        loader.save([first])
+        for _ in 0..<100 where await gate.count() == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(await gate.count() > 0)
+        loader.save([next])
+        var cleared = false
+        let clear = Task { @MainActor in
+            await loader.emptyCaches()
+            cleared = true
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!cleared, "Clear must wait even for a cancelled predecessor in flight")
+        await gate.open()
+        await clear.value
+        #expect(cleared)
+        #expect(await loader.diskBytes() == 0)
     }
 
     /// Lowering the limit applies at once.

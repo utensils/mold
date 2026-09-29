@@ -32,18 +32,21 @@ struct AddMachineSheet: View {
                     PairingScanView { dismiss() }
                 } label: {
                     ChoiceRow(title: String(localized: "Scan a Pairing Code"), symbol: "qrcode.viewfinder",
+                              compactTitle: String(localized: "Scan Code"),
                               detail: String(localized: "On your Mac, open Machines ▸ your machine ▸ Pair a Phone…"))
                 }
                 NavigationLink {
                     NearbyPicker { dismiss() }
                 } label: {
                     ChoiceRow(title: String(localized: "Nearby"), symbol: "wifi",
+                              compactTitle: String(localized: "Nearby"),
                               detail: String(localized: "Machines running mold on this network."))
                 }
                 NavigationLink {
                     AddressForm(initialName: "", initialAddress: "") { dismiss() }
                 } label: {
                     ChoiceRow(title: String(localized: "Enter an Address"), symbol: "keyboard",
+                              compactTitle: String(localized: "Enter Address"),
                               detail: String(localized: "A name, an IP address, or a Tailscale address."))
                 }
             }
@@ -55,20 +58,26 @@ struct AddMachineSheet: View {
 
 /// One of the three ways in: a symbol, a title, and a line on what it is for.
 struct ChoiceRow: View {
+    @Environment(\.dynamicTypeSize) private var size
     let title: String
     let symbol: String
+    let compactTitle: String
     let detail: String
 
     var body: some View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline)
-                Text(detail).font(.subheadline).foregroundStyle(.secondaryText)
+                Text(size.isAccessibilitySize ? compactTitle : title).font(.headline)
+                if !size.isAccessibilitySize {
+                    Text(detail).font(.subheadline).foregroundStyle(.secondaryText)
+                }
             }
         } icon: {
             Image(systemName: symbol).foregroundStyle(.tint)
         }
         .padding(.vertical, 6)
+        .accessibilityLabel(title)
+        .accessibilityHint(detail)
     }
 }
 

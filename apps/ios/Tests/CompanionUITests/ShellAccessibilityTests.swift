@@ -40,7 +40,9 @@ final class ShellAccessibilityTests: XCTestCase {
                 app.buttons["Generate"].firstMatch.tap()
                 let chooser = app.buttons["choose-model"]
                 if chooser.exists {
-                    let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+                    let composer = app.scrollViews["phone-generate-form"].exists
+                        ? app.scrollViews["phone-generate-form"]
+                        : app.descendants(matching: .any)["bottom-chrome"].firstMatch
                     for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
                     XCTAssertTrue(chooser.isHittable)
                     chooser.tap()
@@ -137,7 +139,9 @@ final class ShellAccessibilityTests: XCTestCase {
     /// outside the scroll view. Coverage is mandatory, not an exemption: a
     /// control that cannot be brought fully into view fails this test.
     @MainActor private func auditComposer(_ app: XCUIApplication, size: String) throws {
-        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        let composer = app.scrollViews["phone-generate-form"].exists
+            ? app.scrollViews["phone-generate-form"]
+            : app.descendants(matching: .any)["bottom-chrome"].firstMatch
         guard composer.exists else { return }
         let types: [XCUIElement.ElementType] = [.staticText, .button, .textField, .textView]
         func elements() -> [XCUIElement] {
@@ -149,23 +153,39 @@ final class ShellAccessibilityTests: XCTestCase {
         var seen = Set<String>()
         for step in 0..<20 {
             settle(composer)
-            let visible = elements().filter { composer.frame.contains($0.frame) }
+            let visible = elements().filter { composerViewport(composer, in: app).contains($0.frame) }
             try check(app, "Composer scroll \(step) at \(size)", contrastOnly: true)
             seen.formUnion(visible.map(key))
             if expected.isSubset(of: seen) { break }
             // Small, non-flinging steps ensure even tall wrapped guidance is
-            // sampled in full, rather than skipped between the two endpoints.
-            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+            // sampled in full. The right edge avoids the photo well, and the
+            // drag starts above the pinned Generate action.
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60))
                 .press(forDuration: 0.1, thenDragTo: composer.coordinate(
-                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)),
+                    withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28)),
                        withVelocity: .slow, thenHoldForDuration: 0.1)
         }
         XCTAssertTrue(expected.isSubset(of: seen), "Composer content never fully visible: \(expected.subtracting(seen).sorted())")
         let submit = app.buttons["submit-generation"]
         XCTAssertTrue(submit.exists)
         // Return to the prompt before the size-changing audit.
-        for _ in 0..<5 { composer.swipeDown() }
+        for _ in 0..<5 {
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28))
+                .press(forDuration: 0.1, thenDragTo: composer.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60)),
+                       withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
         settle(composer)
+    }
+
+    @MainActor private func composerViewport(_ composer: XCUIElement, in app: XCUIApplication) -> CGRect {
+        guard composer.identifier == "phone-generate-form" else { return composer.frame }
+        let top = max(composer.frame.minY, app.navigationBars.firstMatch.frame.maxY)
+        let submit = app.buttons["submit-generation"]
+        let bottom = submit.exists && !isDescendant(submit, of: composer)
+            ? submit.frame.minY : min(composer.frame.maxY, app.tabBars.firstMatch.frame.minY)
+        return CGRect(x: composer.frame.minX, y: top, width: composer.frame.width,
+                      height: max(0, bottom - top))
     }
 
     /// `region`: a presented sheet or the iPad sidebar. Everything outside it
@@ -317,6 +337,10 @@ final class ShellAccessibilityTests: XCTestCase {
 
     /// Scrolled beneath the bottom chrome, and not part of it.
     @MainActor private func isUnderChrome(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let phoneForm = app.scrollViews["phone-generate-form"]
+        if phoneForm.exists, isDescendant(element, of: phoneForm) {
+            return !composerViewport(phoneForm, in: app).contains(element.frame)
+        }
         // Any type: at AX5 the composer is a ScrollView, not a plain group.
         let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch
         // A control IN the chrome is never skipped -- by descent, not frame:

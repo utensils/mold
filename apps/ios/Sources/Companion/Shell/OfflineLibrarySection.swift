@@ -9,7 +9,9 @@ struct OfflineLibrarySection: View {
     @Environment(LibraryStore.self) private var library
     @Binding var autoSave: Bool
     @AppStorage(Preference.offlineLimit) private var limitMB = OfflineLimit.standard.rawValue
-    @State private var used: Int64?
+    @State private var imageBytes: Int64?
+    @State private var listingBytes: Int64?
+    @State private var confirmsClear = false
 
     private var limit: OfflineLimit { OfflineLimit(rawValue: limitMB) ?? .standard }
 
@@ -33,12 +35,8 @@ struct OfflineLibrarySection: View {
             }
             // Not red: nothing is lost (it all comes back from the machines),
             // and red text on a grouped row was under 4.5:1.
-            Button("Empty Now") {
-                Task {
-                    await thumbnails.emptyCaches()
-                    await measure()
-                }
-            }
+            Button("Clear Library Cache") { confirmsClear = true }
+                .disabled(imageBytes == 0 && listingBytes == 0)
         } header: {
             SectionHeader(String(localized: "Library"))
         } footer: {
@@ -53,18 +51,43 @@ struct OfflineLibrarySection: View {
             }
         }
         .onChange(of: thumbnails.saving?.done) { Task { await measure() } }
+        .confirmationDialog("Clear the library cache?", isPresented: $confirmsClear,
+                            titleVisibility: .visible) {
+            Button("Clear Cache", role: .destructive) {
+                Task {
+                    await thumbnails.emptyCaches()
+                    await library.clearOfflineCache()
+                    await measure()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Prints stay on their machines. This iPhone must fetch them again, which it cannot do while a machine is offline.")
+        }
     }
 
     private var usage: some View {
-        AdaptiveRow {
-            Text("Used")
-        } value: {
-            Text(used.map { String(localized: "\(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)) of \(limit.title)") }
-                 ?? String(localized: "Measuring…"))
-                .monospacedDigit()
+        Group {
+            AdaptiveRow {
+                Text("Images")
+            } value: {
+                Text(imageBytes.map { String(localized: "\(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)) of \(limit.title)") }
+                     ?? String(localized: "Measuring…"))
+                    .monospacedDigit()
+            }
+            AdaptiveRow {
+                Text("Saved listings")
+            } value: {
+                Text(listingBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+                     ?? String(localized: "Measuring…"))
+                    .monospacedDigit()
+            }
         }
         .accessibilityElement(children: .combine)
     }
 
-    private func measure() async { used = await thumbnails.diskBytes() }
+    private func measure() async {
+        imageBytes = await thumbnails.diskBytes()
+        listingBytes = library.snapshots.diskBytes
+    }
 }
