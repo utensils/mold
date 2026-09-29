@@ -75,6 +75,19 @@ final class GenerationInteractionTests: XCTestCase {
         capture(app)
     }
 
+    @MainActor func testSettingsPresentationAndAddMachineRoute() throws {
+        let app = launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Settings"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 5))
+        app.buttons["Settings"].firstMatch.tap()
+        app.buttons["Add a Machine…"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["Cancel"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].firstMatch.tap()
+    }
+
     @MainActor func testModelChooserAndDownloadRoute() throws {
         let app = launch()
         let chooser = app.buttons["choose-model"]

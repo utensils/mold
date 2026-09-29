@@ -77,28 +77,47 @@ final class ShellAccessibilityTests: XCTestCase {
             if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
         }
 
-        // Settings: the Machines toolbar button, or ⌘, where it is not on screen.
-        let settings = app.buttons["Settings"].firstMatch
-        if settings.waitForExistence(timeout: 3), settings.isHittable {
+        // UIKit's iPad floating bar loops inside the auditor's private
+        // text-size cycling when Settings is presented over it. Audit the
+        // identical Form through its native sidebar page on iPad instead.
+        // Sheet presentation/dismissal has separate interaction coverage.
+        let settingsInSidebar = app.buttons["ToggleSideBar"].exists
+        if settingsInSidebar {
+            app.terminate()
+            app.launch()
+            let favourites = app.descendants(matching: .any)["Favourites"].firstMatch
+            if !favourites.exists || !favourites.isHittable { app.buttons["ToggleSideBar"].tap() }
+            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
+            let settings = sidebar.descendants(matching: .any).matching(NSPredicate(format: "label == 'Settings'")).firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 5))
             settings.tap()
+            XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         } else {
-            app.typeKey(",", modifierFlags: .command)
+            let settings = app.buttons["Settings"].firstMatch
+            if settings.waitForExistence(timeout: 3), settings.isHittable {
+                settings.tap()
+            } else {
+                app.typeKey(",", modifierFlags: .command)
+            }
+            // At huge text iPadOS folds toolbar items into the bar's overflow menu.
+            if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
+                let overflow = app.navigationBars.buttons["More"].firstMatch
+                if overflow.exists { overflow.tap(); app.buttons["Settings"].firstMatch.tap() }
+            }
+            // The Go menu's ⌘, is the way that never scrolls or folds.
+            if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
+                app.typeKey(",", modifierFlags: .command)
+            }
+            XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         }
-        // At huge text iPadOS folds toolbar items into the bar's overflow menu.
-        if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
-            let overflow = app.navigationBars.buttons["More"].firstMatch
-            if overflow.exists { overflow.tap(); app.buttons["Settings"].firstMatch.tap() }
-        }
-        // The Go menu's ⌘, is the way that never scrolls or folds.
-        if !app.buttons["Done"].firstMatch.waitForExistence(timeout: 3) {
-            app.typeKey(",", modifierFlags: .command)
-        }
-        XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
-        let sheetBar = app.navigationBars["Settings"].firstMatch
-        settle(sheetBar)
+        settle(app.navigationBars["Settings"])
         try check(app, "Settings at \(size)", within: app.descendants(matching: .any)["settings-sheet"].firstMatch,
                   lazyForm: true)
-        app.buttons["Done"].firstMatch.tap()
+        if settingsInSidebar {
+            XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        } else {
+            app.buttons["Done"].firstMatch.tap()
+        }
 
         // Search is its own tab role, drawn as the separate glass button.
         let search = app.buttons["Search"].firstMatch

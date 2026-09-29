@@ -53,6 +53,11 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
 | `make lint` | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`) |
 
+On iPad, the audit checks the Settings form through its sidebar page, while
+interaction tests cover the sheet’s Done and Add a Machine actions. This avoids
+a UIKit floating-tab loop triggered by the auditor’s private text-size cycling
+over a sheet; ordinary system text-size changes are verified separately.
+
 On a disk that fills up, put build output elsewhere:
 `make test BUILD=/Volumes/ExternalStorage/mold-ios-build`.
 The simulator defaults to an iPhone 17 Pro when one exists (`scripts/pick-simulator.sh`).
