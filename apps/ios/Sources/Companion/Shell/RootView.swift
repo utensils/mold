@@ -32,8 +32,8 @@ struct RootView: View {
         TabView(selection: $router.selection) {
             if width == .regular {
                 // The sidebar lists all five destinations. Models and the
-                // extra sections stay out of the floating bar: pagination
-                // can loop during Dynamic Type changes behind a sheet.
+                // extra sections stay out of the floating bar so it fits
+                // at large text sizes.
                 destinationTab(.generate)
                 destinationTab(.library)
                 destinationTab(.queue)

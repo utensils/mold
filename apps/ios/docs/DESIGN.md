@@ -113,9 +113,10 @@ Your Machines      workstation · hal9000 "Offline" · studio-mini "Key"
 ```
 
 The floating tab bar (the sidebar put away) carries Generate, Library, Queue,
-Machines and Search. Models and the sections live in the sidebar alone: listed in
-the bar they made UIKit page and re-lay it out on every text-size change
-until the app stopped answering. A machine that is not answering says so in
+Machines and Search. Models and the sections live in the sidebar alone so the
+floating bar fits at large text sizes. This does not resolve the separate UIKit
+pagination loop triggered by the accessibility auditor's private text-size cycling
+over a presented sheet. A machine that is not answering says so in
 words beside its name, never by colour alone.
 
 ### State and links
@@ -147,8 +148,8 @@ chevron. It opens a searchable **Choose a Model** sheet. The sheet groups
 installed models by family and includes Kind, Machine, Recipe, and a direct
 **Get More Models…** navigation link. These controls no longer compete for a
 fixed-height navigation title; the navigation bar says Generate. Kind uses a
-menu on iPhone and at accessibility sizes, and a segmented control on a roomy
-iPad. The model chooser uses a page-sized sheet so its first and last rows
+menu at every text size on iPhone and iPad, preserving its accessibility
+hierarchy as text size changes. The model chooser uses a page-sized sheet so its first and last rows
 remain clear of the form-sheet scroll-edge fades. Auto follows the default online machine that holds the selected model.
 
 **Canvas.** Fills the rest of the screen.

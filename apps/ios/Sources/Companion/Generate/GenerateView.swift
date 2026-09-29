@@ -85,31 +85,22 @@ struct GenerateView: View {
     }
 }
 
-/// Still picture / Short clip / 3-D object. A menu on iPhone; the iPad has
-/// the room, so it shows the same three as a segmented control.
+/// A stable menu at every text size: changing to a segmented picker during
+/// Dynamic Type changes replaces the selected label's accessibility node.
 struct KindMenu: View {
     @Environment(GenerateController.self) private var generate
-    @Environment(\.horizontalSizeClass) private var width
-    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         let binding = Binding(get: { generate.kind }, set: { generate.setKind($0) })
-        if width == .regular && !size.isAccessibilitySize {
+        Menu {
             Picker("Kind", selection: binding) {
-                ForEach(PrintKind.allCases, id: \.self) { Text($0.makeTitle).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-        } else {
-            Menu {
-                Picker("Kind", selection: binding) {
-                    ForEach(PrintKind.allCases, id: \.self) { kind in
-                        Label(kind.makeTitle, systemImage: kind.makeSymbol).tag(kind)
-                    }
+                ForEach(PrintKind.allCases, id: \.self) { kind in
+                    Label(kind.makeTitle, systemImage: kind.makeSymbol).tag(kind)
                 }
-            } label: {
-                Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
             }
+        } label: {
+            Label(generate.kind.makeTitle, systemImage: generate.kind.makeSymbol)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
