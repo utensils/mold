@@ -58,6 +58,7 @@ final class QueueStore {
             return
         } catch {
             guard !Task.isCancelled else { return }
+            listings[id] = nil
             hosts.report(host, doing: String(localized: "list its queue"), error)
         }
     }
@@ -115,6 +116,11 @@ final class QueueStore {
     /// The Queue tab's badge: what is being made or held, fleet-wide.
     var badge: Int {
         listings.values.joined().filter { $0.state == .running || $0.state == .held }.count
+    }
+
+    /// An unanswered queue cannot establish that nothing is waiting.
+    var unavailableMachines: [MoldHost] {
+        hosts.hosts.filter { !hosts.isUp($0) || listings[$0.id] == nil }
     }
 
     var isEmpty: Bool { listings.values.allSatisfy(\.isEmpty) }

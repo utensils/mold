@@ -12,7 +12,7 @@ struct ModelMenu: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Model").font(.caption).foregroundStyle(.secondaryText)
-                    Text(generate.model?.headline ?? String(localized: "Choose a Model"))
+                    Text(generate.model?.headline ?? generate.modelName ?? String(localized: "Choose a Model"))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)

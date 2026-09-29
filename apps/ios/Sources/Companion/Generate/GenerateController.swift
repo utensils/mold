@@ -102,8 +102,8 @@ final class GenerateController {
     // MARK: - Choosing
 
     func setKind(_ new: PrintKind) {
-        guard new != kind else { return }
-        if let modelName { lastModel[kind] = modelName }
+        guard new != kind || restoringChoice else { return }
+        if !restoringChoice, let modelName { lastModel[kind] = modelName }
         restoringChoice = false
         kind = new
         let remembered = lastModel[new].flatMap { name in families.flatMap(\.models).first { $0.name == name } }
@@ -125,8 +125,8 @@ final class GenerateController {
         if let recipe { draft = draft.adopting(recipe, isNewModel: false, for: model) }
     }
 
-    /// A model that has vanished (uninstalled, machine gone) gives way to the
-    /// first one that can make this kind, rather than an empty menu.
+    /// Keep a saved choice while its machine reconnects; only an explicit
+    /// choice may replace a draft whose profile has not arrived yet.
     func settleChoice() {
         if restoringChoice, let model, let profile = model.generationProfile {
             let restoredRecipe = recipeID.flatMap { profile.recipe(named: $0) }
@@ -139,12 +139,17 @@ final class GenerateController {
             }
             restoringChoice = false
         }
+        guard !restoringChoice else { return }
         if model == nil, let first = families.first?.models.first { choose(first) }
     }
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }
+        if hosts.upHosts.isEmpty { return String(localized: "No machine is answering. Check Machines to reconnect.") }
+        if restoringChoice, model == nil {
+            return String(localized: "The saved model is unavailable. Check Machines or choose another model.")
+        }
         guard model != nil else { return String(localized: "Install a model that makes this under Models.") }
         guard target != nil else { return String(localized: "No machine that has this model is answering.") }
         // The draft's own refusal (MoldClient), the Mac's words exactly.

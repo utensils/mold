@@ -295,7 +295,8 @@ iPhone).
   Rename · Export (whatever the machine advertises: OBJ, STL, PLY, Turntable).
 
 **Info sheet.** Detents `.fraction(0.35)` and `.large`, with background
-interaction.
+interaction and a Done button at either detent. Shared files keep their original
+filename and extension, with temporary copies removed after the action ends.
 
 - An editable title (Return commits; blank clears it).
 - The prompt, selectable.
@@ -679,3 +680,5 @@ overlay:
 | 14 | Models: Discover download, plus the licence sheet | Large, light |
 | 15 | iPad landscape: sidebar and Library | Large, dark |
 | 16 | Live Activity, Dynamic Island, widgets | Light and dark |
+
+Offline Generate and Queue explain unavailable data and direct the person to Machines. A saved draft waits for its model profile rather than adopting the first responding machine's defaults; explicit kind/model choice cancels that restoration. Exports fail as one selection if a source machine has been removed, preserving each file's media kind.

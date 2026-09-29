@@ -31,7 +31,8 @@ large accessibility text sizes. Clip and 3-D drafts restore their kind after
 machines reconnect. A model search with no matches offers Clear Search.
 Video playback uses the media audio session, including in silent mode. The
 viewer hides the main tabs so its Share, Favourite, Info and Delete controls
-remain accessible. Models uses a text-scaling Installed/Discover menu and
+remain accessible. Info has a Done button, and shared files retain their original
+filename and media extension. Models uses a text-scaling Installed/Discover menu and
 explains when an offline machine's inventory could not be read. Removing a
 machine returns to the list. See the [iPhone UAT record](docs/IPHONE-UAT.md).
 
@@ -100,3 +101,5 @@ the simulator, use Xcode's Debug ▸ Simulate Background Fetch.
 Companion", `io.utensils.mold.companion`) has to be created by hand first:
 there is no API for it. The App Review note explains `NSAllowsArbitraryLoads`:
 this is a client for self-hosted servers at any address the owner chooses.
+
+When machines are offline, Generate and Queue explain that their data is unavailable instead of claiming no models or jobs exist. A saved draft keeps its model while that machine reconnects; choosing a different kind or model explicitly replaces the pending selection.

@@ -51,7 +51,8 @@ Stop is its own small button beside the progress sentence, e.g.
 "Adding detail — about 12s left" over `denoise 18/28`.
 
 The full-screen viewer hides the main tabs so **Share**, **Favourite**, **Info**
-and **Delete** remain reachable; use Back to return to the Library.
+and **Delete** remain reachable; use Back to return to the Library. Info has a
+**Done** button. Shared media keeps its original filename and file type.
 
 ## Library, Queue and Models
 
@@ -124,3 +125,5 @@ through any helper. These commands are separate from Tauri's `ios-dev`.
 The prompt panel scrolls at large text sizes and stays above the keyboard.
 Video playback uses the media audio session, so clips with audio can be heard
 even when the phone's silent switch is on. Clips without an audio track remain silent.
+
+When machines are offline, Generate and Queue explain that their data is unavailable instead of claiming no models or jobs exist. A saved draft keeps its model while that machine reconnects; choosing a different kind or model explicitly replaces the pending selection.

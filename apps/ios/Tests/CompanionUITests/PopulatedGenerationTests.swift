@@ -29,6 +29,7 @@ final class PopulatedGenerationTests: XCTestCase {
         let model = app.buttons["model-flux-dev:q4"]
         XCTAssertTrue(model.waitForExistence(timeout: 10))
         model.tap()
+        try checkLandscapeComposer(app)
 
         app.terminate()
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
@@ -68,6 +69,30 @@ final class PopulatedGenerationTests: XCTestCase {
         card.press(forDuration: 1)
         app.buttons["Remove…"].firstMatch.tap()
         app.buttons["Remove"].firstMatch.tap()
+    }
+
+    @MainActor private func checkLandscapeComposer(_ app: XCUIApplication) throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let composer = app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
+        for _ in 0..<6 where !prompt.isHittable { composer.swipeDown() }
+        XCTAssertTrue(prompt.isHittable)
+        prompt.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        prompt.typeText("Landscape lighthouse")
+        XCTAssertTrue((prompt.value as? String)?.contains("Landscape lighthouse") == true)
+        app.buttons["Done"].firstMatch.tap()
+        let submit = app.buttons["submit-generation"]
+        for _ in 0..<8 where !submit.isHittable { composer.swipeUp() }
+        XCTAssertTrue(submit.isHittable, "Generate must be reachable in landscape; never tap it in UAT")
+        let options = app.buttons.matching(NSPredicate(format: "label == 'Options' OR label == 'More Options'")).firstMatch
+        for _ in 0..<8 where !options.isHittable { composer.swipeDown() }
+        XCTAssertTrue(options.isHittable)
+        options.tap()
+        XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
+        attach(app)
+        app.buttons["Done"].firstMatch.tap()
     }
 
     @MainActor private func reveal(_ element: XCUIElement, in app: XCUIApplication) {

@@ -95,7 +95,7 @@ struct PrintSheets: ViewModifier {
 
     func body(content: Content) -> some View {
         @Bindable var actions = actions
-        content.sheet(item: $actions.sheet) { sheet in
+        content.sheet(item: $actions.sheet, onDismiss: { actions.shareFinished() }) { sheet in
             switch sheet {
             case let .share(urls): ShareSheet(items: urls).presentationDetents([.medium, .large])
             case let .tags(entries): TagsSheet(entries: entries)

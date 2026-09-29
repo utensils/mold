@@ -16,6 +16,11 @@ physical speaker output, camera pairing, or device-only extension delivery.
 | Models pane chooser ignores large text | Open Installed/Discover at AX5 | Use a labeled system menu that scales with the text | iPhone UAT |
 | Offline inventory falsely claims zero installed | Add an unreachable local test machine, open its detail and Models | Distinguish an unread inventory from a confirmed empty one; omit unknown counts | Model-store regression and UAT |
 | Removing a machine leaves a dead detail page | Remove the temporary machine from its detail | Return to Machines after removal | iPhone UAT |
+| Info has no explicit dismissal action | Open Info at its large detent | Add a standard Done button | Viewer UAT |
+| Shared video has an extensionless temporary filename | Share an existing clip | Preserve each original filename in an owned export directory; clean it after sharing/copying/saving | Failing-then-passing sharing test and system share-sheet UAT |
+| Slow machine responses replace the saved model | Restore a clip while another machine answers first | Keep the saved choice pending; explicit kind/model choice cancels restoration | Two-host failing-then-passing controller regressions |
+| Offline Generate and Queue claim missing models or an empty queue | Open both tabs with only unreachable machines | Explain unavailable data and direct the user to Machines; invalidate failed queue reads | Controller/queue tests and SE UAT |
+| A removed machine silently drops a selected export | Remove a source machine before an export begins | Abort the entire export and clean staged files, preserving entry/file alignment | Export regression |
 | Viewer actions are covered by the main tabs | Open an existing print, try Info at the bottom | Hide the main tab bar while the viewer is open, preserving its own controls and back navigation | Viewer UAT on iPhone |
 
 ## Verification record
@@ -33,4 +38,8 @@ physical speaker output, camera pairing, or device-only extension delivery.
   dark/AX5. The Library selection toolbar was correctly positioned.
 - After draft/audio reconciliation and offline inventory changes, all 100
   native unit tests passed.
+- Populated SE AX5 Options/search regression passed, including test-machine
+  removal. The updated viewer's actions are visible and Info opens in ordinary
+  pushed navigation; the agent restored the original favourite state after
+  testing a neutral existing print.
 - Post-fix exploratory UAT, peer review and exact-head CI are in progress.
