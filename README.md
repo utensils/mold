@@ -176,7 +176,8 @@ Linux desktop builds are source/CI distributions for now — `nix build
 
 On iPhone and iPad, **Mold Studio Companion** is the native app beside Mold
 Studio for Mac: pair by scanning the Mac's code, generate on your machines,
-and follow renders from the Lock Screen. It is in TestFlight while it is new.
+and follow renders from the Lock Screen. Generation options adapt to large text,
+and the full-screen viewer keeps its media actions accessible. It is in TestFlight while it is new.
 [Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
 
 Native iOS development: `nix develop -c companion-dev` watches Swift sources,

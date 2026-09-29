@@ -37,6 +37,7 @@ struct PrintViewer: View {
         .background(.black)
         .ignoresSafeArea(edges: visibleChrome ? [] : .all)
         .toolbar(visibleChrome ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .toolbarVisibility(.hidden, for: .tabBar)
         .navigationTitle(entry.map(title) ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

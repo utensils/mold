@@ -22,6 +22,20 @@ struct ModelStoreTests {
         try QueueStoreTests.decode(DownloadEvent.self, json)
     }
 
+    @Test func unreadInventoryDoesNotClaimNothingIsInstalled() async throws {
+        let (models, _, hosts, _) = try await setUp()
+        let host = hosts.hosts[0]
+        hosts.setModels(nil, for: host.id)
+        hosts.setReachability(.down("Offline"), for: host.id)
+        #expect(hosts.installed[host.id] == nil)
+        #expect(models.emptyInventoryMessage(on: host) == "Connect to \(host.name) to see its installed models.")
+        hosts.setReachability(.checking, for: host.id)
+        #expect(models.emptyInventoryMessage(on: host) == "Checking installed models on \(host.name)…")
+        hosts.setModels([], for: host.id)
+        #expect(hosts.installed[host.id] == 0)
+        #expect(models.emptyInventoryMessage(on: host).hasPrefix("Nothing installed"))
+    }
+
     @Test func getStartsADownloadAndShowsItsRow() async throws {
         let (models, _, hosts, fake) = try await setUp()
         fake.stub("startDownload(_:)", returning: try QueueStoreTests.decode(DownloadTicket.self, #"{"id":"d1"}"#))

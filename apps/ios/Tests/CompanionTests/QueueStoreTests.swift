@@ -38,6 +38,24 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func emptyQueuesMustHaveAnsweredBeforeTheyAreCalledEmpty() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let host = hosts.hosts[0]
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
+        await queue.reload()
+        #expect(queue.isEmpty)
+        #expect(queue.unavailableMachines.isEmpty)
+        hosts.setReachability(.down("Offline"), for: host.id)
+        #expect(queue.unavailableMachines.map(\.id) == [host.id])
+    }
+
+    @Test func failedQueueReadInvalidatesAnEarlierEmptyAnswer() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        fake.stub("queue()") { _ in throw MoldClientError.unreachable("Offline") }
+        await queue.reload()
+        #expect(queue.unavailableMachines.map(\.id) == hosts.hosts.map(\.id))
+    }
+
     @Test func theBadgeCountsRenderingAndHeldJobs() async throws {
         let (queue, hosts, _) = try await Self.setUp()
         #expect(queue.badge == 2)

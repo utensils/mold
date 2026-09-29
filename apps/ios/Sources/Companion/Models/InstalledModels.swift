@@ -37,7 +37,7 @@ struct InstalledModels: View {
                 } header: { SectionHeader(group.family) }
             }
             if models.installed(on: host.id).isEmpty, fetching.isEmpty {
-                Text("Nothing installed on \(host.name) yet. Discover has models to fetch.")
+                Text(models.emptyInventoryMessage(on: host))
                     .foregroundStyle(.secondaryText)
             }
             if case let .up(status) = hosts.reachability(of: host), let disk = status.modelsDisk {

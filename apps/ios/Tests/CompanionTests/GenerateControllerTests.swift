@@ -60,6 +60,12 @@ struct GenerateControllerTests {
         return (generate, fake)
     }
 
+    @Test func offlineInventoryIsNotAnInstructionToInstall() async throws {
+        let (generate, _) = try await setUp()
+        generate.hosts.setReachability(.down("Offline"), for: generate.hosts.hosts[0].id)
+        #expect(generate.blocker == "No machine is answering. Check Machines to reconnect.")
+    }
+
     @Test func choosingAModelAdoptsItsRecipeAndAutoFindsTheMachine() async throws {
         let (generate, _) = try await setUp()
         #expect(generate.modelName == "flux-dev:q4")
@@ -147,6 +153,75 @@ struct GenerateControllerTests {
         try await waitUntil { if case .finished = generate.run { true } else { false } }
         #expect(fake.count("submit(_:)") == 1)
         #expect(generate.ledger.batches.isEmpty)
+    }
+
+    @Test(arguments: ["ltx-2.5-22b-distilled:bf16", "hunyuan3d-2.1:fp16"])
+    func coldLaunchRestoresTheDraftKindAfterModelsArrive(_ name: String) async throws {
+        let (original, _) = try await setUp()
+        let savedModel = try model(name)
+        let host = try #require(original.hosts.hosts.first)
+        let expectedRecipe = try #require(savedModel.generationProfile?.recipes.first)
+        original.hosts.setModels([savedModel], for: host.id)
+        original.setKind(expectedRecipe.makes)
+        original.choose(savedModel)
+        original.draft.prompt = expectedRecipe.capabilities.promptRequirement == .ignored ? "" : "Keep this draft without generating"
+        original.draft.steps = expectedRecipe.steps.clamp(expectedRecipe.defaults.steps + 1)
+        let authored = original.draft
+        original.saveDraft()
+
+        // The composition root restores the draft before any machine answers.
+        original.hosts.setModels(nil, for: host.id)
+        original.hosts.setReachability(nil, for: host.id)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts)
+        restored.settleChoice()
+        original.hosts.setModels([savedModel], for: host.id)
+        original.hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
+            #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#.utf8))), for: host.id)
+        restored.settleChoice()
+
+        #expect(restored.kind == expectedRecipe.makes)
+        #expect(restored.modelName == name)
+        #expect(restored.recipe?.makes == expectedRecipe.makes)
+        #expect(restored.draft.prompt == authored.prompt)
+        #expect(restored.draft.steps == authored.steps, "restoration must not reset authored options")
+        #expect(restored.draft.offersAudioControl == authored.offersAudioControl)
+        #expect(restored.draft.enableAudio == authored.enableAudio)
+    }
+
+    @Test func restoredClipWaitsForItsMachineWithoutAdoptingAnotherMachinesDefaults() async throws {
+        let (original, _) = try await setUp()
+        let clip = try model("ltx-2.5-22b-distilled:bf16")
+        let slow = MoldHost(name: "Slow clip machine", baseURL: URL(string: "http://10.0.0.5:7680")!)
+        original.hosts.setHosts(original.hosts.hosts + [slow])
+        let up = try #require(original.hosts.reachability[original.hosts.hosts[0].id])
+        original.hosts.setReachability(up, for: slow.id)
+        original.hosts.setModels([clip], for: slow.id)
+        original.setKind(.clip)
+        original.choose(clip)
+        original.draft.prompt = "A saved clip"
+        original.saveDraft()
+        original.hosts.setReachability(.checking, for: slow.id)
+        original.hosts.setModels(nil, for: slow.id)
+
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts)
+        restored.settleChoice()
+        #expect(restored.modelName == clip.name, "the fast picture machine must not replace the saved clip")
+        original.hosts.setModels([clip], for: slow.id)
+        original.hosts.setReachability(up, for: slow.id)
+        restored.settleChoice()
+        #expect(restored.kind == .clip)
+        #expect(restored.modelName == clip.name)
+        #expect(restored.draft.prompt == "A saved clip")
+    }
+
+    @Test func explicitStillChoiceCancelsPendingClipRestoration() async throws {
+        let (generate, _) = try await setUp()
+        generate.restoringChoice = true
+        generate.modelName = "ltx-2.5-22b-distilled:bf16"
+        generate.setKind(.picture)
+        #expect(!generate.restoringChoice)
+        #expect(generate.modelName == "flux-dev:q4")
+        #expect(generate.recipe?.makes == .picture)
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {

@@ -54,7 +54,8 @@ struct GenerateView: View {
             generate.reuse(entry)
             router.pendingReuse = nil
         }
-        .onChange(of: generate.families.flatMap(\.models), initial: true) { _, _ in generate.settleChoice() }
+        .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }
+        .onChange(of: hosts.upHosts.map(\.id)) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
     }
 

@@ -17,6 +17,11 @@ struct QueueView: View {
                            message: String(localized: "Renders you start appear here. Add a machine to begin.")) {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
+            } else if queue.isEmpty, !queue.unavailableMachines.isEmpty {
+                EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
+                           message: String(localized: "Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh.")) {
+                    Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
+                }
             } else if queue.isEmpty {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
@@ -37,7 +42,7 @@ struct QueueView: View {
         .refreshable { await queue.reload() }
         // A job just held asks for a decision: a warning, as on Generate.
         .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
-        .task { await queue.reload() }
+        .task(id: hosts.upHosts.map(\.id)) { await queue.reload() }
         .task { await queue.followRunning() }
     }
 
@@ -52,6 +57,10 @@ struct QueueView: View {
             FailureBanner()
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
+            if !queue.unavailableMachines.isEmpty {
+                Text("Some machine queues are unavailable. Check Machines to reconnect.")
+                    .foregroundStyle(.secondaryText)
+            }
             if let summary = queue.summary {
                 Text(summary)
                     .foregroundStyle(.secondaryText)

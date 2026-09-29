@@ -12,7 +12,7 @@ struct ModelMenu: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Model").font(.caption).foregroundStyle(.secondaryText)
-                    Text(generate.model?.headline ?? String(localized: "Choose a Model"))
+                    Text(generate.model?.headline ?? generate.modelName ?? String(localized: "Choose a Model"))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
@@ -37,20 +37,19 @@ struct ModelChooser: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    KindMenu().labelStyle(.titleAndIcon)
-                    MachineMenu()
-                }
-                Section {
-                    NavigationLink { ModelsView().navigationTitle("Models") } label: {
-                        Text("Get More Models…").fixedSize(horizontal: false, vertical: true)
+                if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section {
+                        KindMenu().labelStyle(.titleAndIcon)
+                        MachineMenu()
+                    }
+                    Section {
+                        NavigationLink { ModelsView().navigationTitle("Models") } label: {
+                            Text("Get More Models…").fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-                ForEach(generate.families, id: \.family) { group in
-                    let models = group.models.filter {
-                        search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
-                            || $0.headline.localizedCaseInsensitiveContains(search)
-                    }
+                ForEach(matchingFamilies, id: \.family) { group in
+                    let models = group.models
                     if !models.isEmpty {
                         Section {
                             Text(group.family).font(.headline)
@@ -75,7 +74,14 @@ struct ModelChooser: View {
                             .foregroundStyle(.secondaryText)
                     }
                 }
-                if generate.recipes.count > 1 {
+                if !generate.families.isEmpty, matchingFamilies.isEmpty {
+                    Section {
+                        Text("No matching models").font(.headline)
+                        Text("Try another name or clear the search.").foregroundStyle(.secondaryText)
+                        Button("Clear Search") { search = "" }
+                    }
+                }
+                if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, generate.recipes.count > 1 {
                     Section {
                         ForEach(generate.recipes) { recipe in
                             Button { generate.chooseRecipe(recipe.id); dismiss() } label: {
@@ -96,6 +102,17 @@ struct ModelChooser: View {
         .accessibilityIdentifier("model-chooser")
         .presentationDetents([.large])
         .presentationSizing(.page)
+    }
+
+    private var matchingFamilies: [(family: String, models: [Model])] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return generate.families.compactMap { group in
+            let models = group.models.filter {
+                query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
+                    || $0.headline.localizedCaseInsensitiveContains(query)
+            }
+            return models.isEmpty ? nil : (group.family, models)
+        }
     }
 }
 

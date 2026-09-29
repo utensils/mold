@@ -1,0 +1,5 @@
+- **Native iPhone usability.** make generation options readable at large text sizes, remove an inert Options button, restore clip and 3-D drafts correctly after launch, explain empty model searches, and keep viewer actions clear of the main tab bar.
+- **Native iPhone usability.** scale the Installed/Discover selector, distinguish unavailable model inventories from empty ones, and return to Machines after removing a machine.
+- **Native iPhone usability.** keep first-run Machines text scrollable and its Add action readable at the largest accessibility text size, including when nearby machines are found.
+- **Native iPhone usability.** add Done to print Info and preserve original media filenames/extensions when sharing, with temporary-file cleanup after the action.
+- **Native iPhone usability.** preserve saved drafts across staggered machine reconnections, make offline Generate/Queue states honest, and prevent incomplete exports when a source machine has been removed.

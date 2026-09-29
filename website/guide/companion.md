@@ -41,11 +41,18 @@ starting picture shows **Start from**; one that takes references shows
 numbered wells (**image 1**, **image 2**) matching how the prompt names them;
 clips add a length; 3-D objects say when the prompt is ignored. **More
 options** holds the sampler, seed, adapters, identity photos, ControlNet and
-the mask editor, and only what the model can use.
+the mask editor, and only what the model can use. Shape, Steps, Batch and clip
+Length have separate rows that remain readable at large text sizes. Clip and
+3-D drafts keep their kind when you reopen the app. A model search with no
+matches offers **Clear Search**.
 
 **Generate** never turns into Stop. Pressing it again queues another render;
 Stop is its own small button beside the progress sentence, e.g.
 "Adding detail — about 12s left" over `denoise 18/28`.
+
+The full-screen viewer hides the main tabs so **Share**, **Favourite**, **Info**
+and **Delete** remain reachable; use Back to return to the Library. Info has a
+**Done** button. Shared media keeps its original filename and file type.
 
 ## Library, Queue and Models
 
@@ -61,6 +68,8 @@ Stop is its own small button beside the progress sentence, e.g.
 - **Queue** lists what each machine is rendering and waiting on. A held job
   says why in words, with **Pull and Retry** when a model is missing, **Retry**
   when the machine says it would help, and **Move to…** another machine.
+- **Models** uses the **Show models** menu to switch Installed and Discover.
+  An unreachable machine's unread inventory is shown as unavailable, not empty.
 - **Models** (Machines ▸ Models on iPhone, the sidebar on iPad) lists what a
   machine has installed and lets you discover, download, load and remove
   models. A gated model shows its licence first.
@@ -116,3 +125,5 @@ through any helper. These commands are separate from Tauri's `ios-dev`.
 The prompt panel scrolls at large text sizes and stays above the keyboard.
 Video playback uses the media audio session, so clips with audio can be heard
 even when the phone's silent switch is on. Clips without an audio track remain silent.
+
+When machines are offline, Generate and Queue explain that their data is unavailable instead of claiming no models or jobs exist. A saved draft keeps its model while that machine reconnects; choosing a different kind or model explicitly replaces the pending selection.

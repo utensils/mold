@@ -31,6 +31,7 @@ final class PrintActions {
     var status: String?
     var busy = false
 
+    @ObservationIgnored var sharedFiles: [URL] = []
     @ObservationIgnored let hosts: HostStore
     init(hosts: HostStore) { self.hosts = hosts }
 
@@ -38,6 +39,8 @@ final class PrintActions {
     func share(_ entries: [LibraryEntry]) {
         Task {
             guard let urls = await files(for: entries), !urls.isEmpty else { return }
+            shareFinished()
+            sharedFiles = urls
             sheet = .share(urls)
         }
     }
@@ -48,6 +51,7 @@ final class PrintActions {
         Task {
             let saveable = entries.filter { $0.print.kind != .mesh }
             guard let urls = await files(for: saveable), !urls.isEmpty else { return }
+            defer { Self.removeFiles(urls) }
             let allowed = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard allowed == .authorized || allowed == .limited else {
                 status = String(localized: "Mold Studio needs permission to add to Photos. Allow it in Settings.")
@@ -71,30 +75,20 @@ final class PrintActions {
     /// The still itself onto the pasteboard.
     func copy(_ entry: LibraryEntry) {
         Task {
-            guard let url = await files(for: [entry])?.first,
-                  let image = UIImage(contentsOfFile: url.path(percentEncoded: false)) else { return }
+            guard let urls = await files(for: [entry]), let url = urls.first else { return }
+            defer { Self.removeFiles(urls) }
+            guard let image = UIImage(contentsOfFile: url.path(percentEncoded: false)) else { return }
             UIPasteboard.general.image = image
             status = String(localized: "Copied.")
         }
     }
 
-    private func files(for entries: [LibraryEntry]) async -> [URL]? {
-        busy = true
-        defer { busy = false }
-        status = nil
-        var urls: [URL] = []
-        for entry in entries {
-            guard let host = hosts.host(entry.hostID) else { continue }
-            do {
-                urls.append(try await hosts.backend(for: host).mediaFile(entry.print.filename,
-                                                                          trashed: entry.print.trashedAt != nil))
-            } catch {
-                hosts.report(host, doing: String(localized: "send \(entry.print.displayName)"), error)
-                return nil
-            }
-        }
-        return urls
+    /// The share sheet retains its files until it is dismissed or completed.
+    func shareFinished() {
+        Self.removeFiles(sharedFiles)
+        sharedFiles = []
     }
+
 }
 
 /// UIKit's share sheet, for files already on this device.

@@ -6,6 +6,7 @@ import SwiftUI
 /// address -- then Edit, Default and Remove.
 struct MachineDetailView: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(\.dismiss) private var dismiss
     let id: MoldHost.ID
     @State private var devices: [DeviceInfo] = []
     @State private var editing = false
@@ -20,7 +21,7 @@ struct MachineDetailView: View {
                 Section {
                     NavigationLink(value: ModelsRoute(host: id)) {
                         AdaptiveRow { Text("Models") } value: {
-                            Text("\(hosts.models[id]?.filter { $0.downloaded == true }.count ?? 0) installed")
+                            if let count = hosts.installed[id] { Text("\(count) installed") }
                         }
                     }
                     NavigationLink(value: QueueRoute(host: id)) { Text("Queue") }
@@ -37,7 +38,7 @@ struct MachineDetailView: View {
             .task { await reload(host) }
             .sheet(isPresented: $editing) { EditMachineSheet(host: host) }
             .confirmationDialog("Remove \(host.name)?", isPresented: $confirmRemove, titleVisibility: .visible) {
-                Button("Remove", role: .destructive) { hosts.remove(id) }
+                Button("Remove", role: .destructive) { hosts.remove(id); dismiss() }
             } message: {
                 Text("Its key is removed from this iPhone too. Its prints stay on the machine.")
             }

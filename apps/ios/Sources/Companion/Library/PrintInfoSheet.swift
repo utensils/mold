@@ -8,6 +8,7 @@ import SwiftUI
 /// still visible above, or straight to full height at accessibility sizes.
 struct PrintInfoSheet: View {
     @Environment(LibraryStore.self) private var library
+    @Environment(\.dismiss) private var dismiss
     @Environment(HostStore.self) private var hosts
     @Environment(\.dynamicTypeSize) private var size
     let entry: LibraryEntry
@@ -53,6 +54,7 @@ struct PrintInfoSheet: View {
             }
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
         .presentationDetents([.fraction(0.35), .large], selection: $detent)
         .presentationBackgroundInteraction(.enabled(upThrough: .fraction(0.35)))

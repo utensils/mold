@@ -28,8 +28,10 @@ struct EmptyState<Actions: View>: View {
                 Text(title)
                     .font(.title2.bold())
                     .accessibilityAddTraits(.isHeader)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(message)
                     .foregroundStyle(.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !pinsActions {
                     actions
                         .padding(.top, 8)
@@ -41,13 +43,16 @@ struct EmptyState<Actions: View>: View {
             .frame(maxWidth: .infinity)
         }
         .defaultScrollAnchor(.center, for: .alignment)
+        .defaultScrollAnchor(.top, for: .initialOffset)
+        .defaultScrollAnchor(.top, for: .sizeChanges)
         .scrollBounceBehavior(.basedOnSize)
-        .safeAreaBar(edge: .bottom) {
+        .safeAreaInset(edge: .bottom) {
             if pinsActions {
                 actions
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
+                    .background(.background)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("bottom-chrome")
             }

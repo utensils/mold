@@ -34,6 +34,8 @@ final class GenerateController {
     @ObservationIgnored var settled: ((ActiveBatch, RunState) -> Void)?
     /// The model each kind last used, so switching kinds and back restores it.
     @ObservationIgnored var lastModel: [PrintKind: String] = [:]
+    /// Cold launch restores before the machines have supplied their profiles.
+    @ObservationIgnored var restoringChoice = false
 
     init(hosts: HostStore, ledger: PendingLedger = .shared,
          drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion"))) {
@@ -100,14 +102,16 @@ final class GenerateController {
     // MARK: - Choosing
 
     func setKind(_ new: PrintKind) {
-        guard new != kind else { return }
-        if let modelName { lastModel[kind] = modelName }
+        guard new != kind || restoringChoice else { return }
+        if !restoringChoice, let modelName { lastModel[kind] = modelName }
+        restoringChoice = false
         kind = new
         let remembered = lastModel[new].flatMap { name in families.flatMap(\.models).first { $0.name == name } }
         if let pick = remembered ?? families.first?.models.first { choose(pick) } else { modelName = nil }
     }
 
     func choose(_ model: Model) {
+        restoringChoice = false
         let isNew = model.name != modelName
         modelName = model.name
         lastModel[kind] = model.name
@@ -121,15 +125,31 @@ final class GenerateController {
         if let recipe { draft = draft.adopting(recipe, isNewModel: false, for: model) }
     }
 
-    /// A model that has vanished (uninstalled, machine gone) gives way to the
-    /// first one that can make this kind, rather than an empty menu.
+    /// Keep a saved choice while its machine reconnects; only an explicit
+    /// choice may replace a draft whose profile has not arrived yet.
     func settleChoice() {
+        if restoringChoice, let model, let profile = model.generationProfile {
+            let restoredRecipe = recipeID.flatMap { profile.recipe(named: $0) }
+                ?? profile.recipe(named: profile.defaultRecipeId)
+                ?? profile.recipes.first
+            if let restoredRecipe {
+                kind = restoredRecipe.makes
+                lastModel[kind] = model.name
+                draft = draft.adopting(restoredRecipe, isNewModel: false, for: model)
+            }
+            restoringChoice = false
+        }
+        guard !restoringChoice else { return }
         if model == nil, let first = families.first?.models.first { choose(first) }
     }
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }
+        if hosts.upHosts.isEmpty { return String(localized: "No machine is answering. Check Machines to reconnect.") }
+        if restoringChoice, model == nil {
+            return String(localized: "The saved model is unavailable. Check Machines or choose another model.")
+        }
         guard model != nil else { return String(localized: "Install a model that makes this under Models.") }
         guard target != nil else { return String(localized: "No machine that has this model is answering.") }
         // The draft's own refusal (MoldClient), the Mac's words exactly.
