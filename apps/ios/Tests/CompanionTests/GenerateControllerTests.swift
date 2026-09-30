@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import MoldClient
 import MoldClientTesting
@@ -88,6 +89,42 @@ struct GenerateControllerTests {
         #expect(admission.requests.count == 1)
         #expect(admission.requests.first?.prompt == "a lighthouse at dusk")
         #expect(generate.ledger.batches.isEmpty, "a settled batch leaves the ledger")
+    }
+
+    @Test func resetOptionsRestoresRandomSeedAndCenteredCrop() async throws {
+        let (generate, _) = try await setUp()
+        generate.draft.seed = 42
+        generate.draft.locksSeed = true
+        generate.draft.media.sourceFit = .padFit
+        generate.resetOptions()
+        #expect(!generate.draft.locksSeed)
+        #expect(generate.draft.seed == nil)
+        #expect(generate.draft.media.sourceFit == .default)
+    }
+
+    @Test func sourcePixelsAreFittedBeforeBatchAdmission() async throws {
+        let (generate, fake) = try await setUp()
+        let context = try #require(CGContext(data: nil, width: 128, height: 64,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try #require(context.makeImage())
+        let data = try #require(SourceFitRender.encodePNG(image))
+        generate.draft.width = 64
+        generate.draft.height = 64
+        generate.draft.canvasIntent = .manual
+        generate.draft.media.sourceImage = data.base64EncodedString()
+        generate.draft.media.sourceImageOriginal = data.base64EncodedString()
+        fake.stub("submit(_:)") { _ in try Self.batch("b1", state: "running") }
+        fake.stubStream("batchEvents(id:)") { _ -> AsyncThrowingStream<BatchStatus, Error> in AsyncThrowingStream { _ in } }
+        generate.generate()
+        try await waitUntil { fake.count("submit(_:)") == 1 }
+        let admission = try #require(fake.calls.first { $0.route == "submit(_:)" }?.arguments.first as? BatchAdmission)
+        let sent = try #require(admission.requests.first?.sourceImage.flatMap { Data(base64Encoded: $0) })
+        let pixels = try #require(PictureImport.pixelSize(of: sent))
+        #expect(pixels.width == 64 && pixels.height == 64)
+        #expect(admission.requests.first?.sourceFit == .default)
+        #expect(generate.draft.media.sourceImageOriginal == data.base64EncodedString())
+        generate.stop()
     }
 
     @Test func aSecondPressQueuesRatherThanReplacing() async throws {

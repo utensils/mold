@@ -118,6 +118,24 @@ struct LibraryStoreTests {
         #expect(hosts.failures.first?.text.contains("disk full") == true)
     }
 
+    @Test(arguments: ["gallery(etag:)", "trashedPrints(etag:)", "collections()"])
+    func aCancelledRefreshKeepsPrintsWithoutAFailureBanner(route: String) async throws {
+        let (library, hosts, one, _) = try await fleet(first: [try print("a.png")], second: [])
+        one.stub(route, throwing: CancellationError())
+        await library.reload(hosts.hosts[0].id)
+        #expect(library.pool.map(\.print.filename) == ["a.png"])
+        #expect(hosts.failures.isEmpty)
+        #expect(!library.isLoading)
+    }
+
+    @Test func aRealListingFailureStillShowsABanner() async throws {
+        let (library, hosts, one, _) = try await fleet(first: [try print("a.png")], second: [])
+        one.stub("gallery(etag:)", throwing: MoldClientError.http(status: 500, code: nil, message: "disk unavailable"))
+        await library.reload(hosts.hosts[0].id)
+        #expect(library.pool.map(\.print.filename) == ["a.png"])
+        #expect(hosts.failures.first?.text.contains("disk unavailable") == true)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())

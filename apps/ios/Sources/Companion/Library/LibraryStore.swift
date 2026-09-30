@@ -161,6 +161,9 @@ final class LibraryStore {
                 guard epoch == cacheEpoch else { return }
                 if fresh != collections[host.id] { collections[host.id] = fresh; changed = true }
             }
+        } catch is CancellationError {
+            // Foreground navigation and coalesced gallery events can end a
+            // refresh after prints loaded. Cancellation is not a host failure.
         } catch {
             hosts.report(host, doing: String(localized: "list its prints"), error)
         }

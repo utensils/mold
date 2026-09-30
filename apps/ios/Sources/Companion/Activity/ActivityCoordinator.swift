@@ -103,7 +103,7 @@ final class ActivityCoordinator {
         let first = outcome.results.first?.filename.map { PrintID(host: host, filename: $0) }
         if UIApplication.shared.applicationState != .active {
             notifier.post(.finished(count: outcome.results.count), batch: batch, machine: machine(batch),
-                          print: first, thumbnail: previewURL(batch))
+                          print: first)
         }
         if Preference.isOn(Preference.autoSaveToPhotos) {
             let names = outcome.results.compactMap(\.filename)

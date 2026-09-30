@@ -64,8 +64,7 @@ extension CompanionStores {
                 notifier.post(.failed(reason), batch: batch, machine: host.name, print: nil)
             } else {
                 let first = outcome.results.first?.filename.map { PrintID(host: batch.host, filename: $0) }
-                notifier.post(.finished(count: outcome.results.count), batch: batch, machine: host.name, print: first,
-                              thumbnail: AppGroup.activityPreviews.appending(path: "\(batch.clientBatchId).jpg"))
+                notifier.post(.finished(count: outcome.results.count), batch: batch, machine: host.name, print: first)
             }
             activities.end(batch.clientBatchId, with: ActivityProjection.state(
                 for: outcome.results.isEmpty ? .failed(outcome.failures.first ?? "") : .finished(outcome, host: batch.host),

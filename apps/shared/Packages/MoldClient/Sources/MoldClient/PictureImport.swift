@@ -90,7 +90,8 @@ public nonisolated enum PictureImport {
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int
         else { return nil }
-        return (width, height)
+        let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+        return (5...8).contains(orientation) ? (height, width) : (width, height)
     }
 
     /// Passes acceptable bytes through untouched; re-encodes anything else as

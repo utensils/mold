@@ -24,7 +24,11 @@ struct ShapeChip: View {
                             }
                         }
                     } label: {
-                        Label(group.label, systemImage: group.id == shape.aspect ? "checkmark" : "rectangle")
+                        Label { Text(group.label) } icon: {
+                            if let preset = group.presets.first {
+                                Image(uiImage: AspectRatioIcon.image(width: preset.width, height: preset.height))
+                            }
+                        }
                     }
                 }
             } label: {

@@ -1,7 +1,6 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import MoldClient
 import UniformTypeIdentifiers
 
 /// Putting a source picture onto the canvas, in pixels.
@@ -13,21 +12,28 @@ import UniformTypeIdentifiers
 /// `nonisolated` throughout, like `PictureImport`: the app defaults to
 /// MainActor isolation and a 50 MP still redrawn on every canvas change would
 /// stall the window.
-nonisolated enum SourceFitRender {
+public enum SourceFitRender {
     /// The fitted picture, or `nil` when there is nothing to do -- the source
     /// already fills the canvas, or the bytes will not decode. `nil` means
     /// "ship the original", never "fail silently": the ORIGINAL is always a
     /// picture the engine reads, and the engine resizes what it is given.
-    static func fit(
+    public static func fit(
         _ data: Data, name: String, target: (width: Int, height: Int), policy: SourceFit
     ) async -> ImportedPicture? {
         await Task.detached(priority: .userInitiated) {
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                  let size = PictureImport.pixelSize(of: data),
+                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                      kCGImageSourceCreateThumbnailFromImageAlways: true,
+                      kCGImageSourceCreateThumbnailWithTransform: true,
+                      kCGImageSourceThumbnailMaxPixelSize: max(size.width, size.height),
+                  ] as CFDictionary)
             else { return nil }
             let transform = SourceFitTransform.resolve(
                 source: (image.width, image.height), target: target, policy: policy)
-            guard !(image.width == target.width && image.height == target.height) else { return nil }
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            let orientation = properties?[kCGImagePropertyOrientation] as? Int ?? 1
+            guard orientation != 1 || !(image.width == target.width && image.height == target.height) else { return nil }
             guard let png = draw(image, transform) else { return nil }
             return ImportedPicture(
                 encoded: png.base64EncodedString(),
@@ -38,16 +44,11 @@ nonisolated enum SourceFitRender {
 
     /// The transform a given source lands on, for the mask to follow. Cheap:
     /// reads the header only, never the pixels.
-    static func transform(
+    public static func transform(
         of data: Data, target: (width: Int, height: Int), policy: SourceFit
     ) -> SourceFitTransform? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-                  as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int
-        else { return nil }
-        return SourceFitTransform.resolve(source: (width, height), target: target, policy: policy)
+        guard let size = PictureImport.pixelSize(of: data) else { return nil }
+        return SourceFitTransform.resolve(source: size, target: target, policy: policy)
     }
 
     private static func draw(_ image: CGImage, _ transform: SourceFitTransform) -> Data? {
@@ -72,7 +73,7 @@ nonisolated enum SourceFitRender {
         return encodePNG(fitted)
     }
 
-    static func encodePNG(_ image: CGImage) -> Data? {
+    public static func encodePNG(_ image: CGImage) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             data, UTType.png.identifier as CFString, 1, nil) else { return nil }

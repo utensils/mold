@@ -598,3 +598,5 @@ it a fake and nothing else changes.
 Every failure a machine reports goes through one funnel, `HostStore.report`,
 and shows in one place -- a dismissable line above the pane, never a modal --
 so one machine failing says nothing about the machines that worked.
+
+Source-image fitting pixels, mask composition and supported modes live in the shared MoldClient package, also used by the native iOS companion. The Mac keeps painting masks in fitted canvas coordinates.
