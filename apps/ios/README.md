@@ -21,6 +21,10 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Models | Installed per machine, Discover, downloads, licences |
 | Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension |
 
+A render notification opens its finished print when the app is in the background
+or closed. Notification activation and its system completion callback run on the
+main actor; dismissing an alert does not navigate.
+
 ## Generation and playback
 
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
@@ -83,6 +87,12 @@ On a disk that fills up, put build output elsewhere:
 The simulator defaults to an iPhone 17 Pro when one exists (`scripts/pick-simulator.sh`).
 To choose another, pass `SIM=<UDID>` from `xcrun simctl list devices available`.
 The Makefile accepts simulator UDIDs, not names.
+
+For notification UAT, Debug builds accept
+`--notification-fixture-link moldstudio://print/<host-UUID>/<filename>` and
+schedule one real system notification after ten seconds without rendering.
+`NotificationTapTests` exercises background and cold-launch taps. Release and
+TestFlight builds exclude the fixture.
 
 ## Layout
 
