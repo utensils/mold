@@ -42,6 +42,6 @@ final class NotificationTapTests: XCTestCase {
         screenshot.lifetime = .keepAlways
         add(screenshot)
         app.buttons["Done"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["choose-model"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
     }
 }
