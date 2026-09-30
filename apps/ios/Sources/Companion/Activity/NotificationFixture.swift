@@ -18,7 +18,7 @@ enum NotificationFixture {
             content.categoryIdentifier = Notifier.finishedCategory
             content.userInfo = ["link": url.absoluteString]
             try? await center.add(UNNotificationRequest(identifier: "notification-tap-fixture", content: content,
-                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 10, repeats: false)))
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 20, repeats: false)))
         }
     }
 }

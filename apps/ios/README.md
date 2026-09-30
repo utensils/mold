@@ -90,7 +90,7 @@ The Makefile accepts simulator UDIDs, not names.
 
 For notification UAT, Debug builds accept
 `--notification-fixture-link moldstudio://print/<host-UUID>/<filename>` and
-schedule one real system notification after ten seconds without rendering.
+schedule one real system notification after twenty seconds without rendering.
 `NotificationTapTests` exercises background and cold-launch taps. Release and
 TestFlight builds exclude the fixture.
 
