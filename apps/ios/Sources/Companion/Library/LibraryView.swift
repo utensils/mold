@@ -64,6 +64,8 @@ struct LibraryView: View {
                     ShelfMenu(scope: scope, choose: setScope)
                 } label: {
                     Label(scope.title(in: library.shelves), systemImage: scope.symbol)
+                        .font(.body)
+                        .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(minHeight: 44)
                         .contentShape(Rectangle())

@@ -12,8 +12,8 @@ final class HiddenCollectionTests: XCTestCase {
         continueAfterFailure = false
         let machine = try FixtureMachine(galleryPrints: 2, collectionFixture: true)
         let port = try await machine.start()
-        defer { machine.stop() }
         let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
@@ -50,18 +50,7 @@ final class HiddenCollectionTests: XCTestCase {
         toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         XCTAssertTrue(waitForValue(toggle, "0"))
         app.navigationBars["Collections"].buttons["Done"].tap()
-        // Selecting the main Library tab returns the general grid on iPad;
-        // phone keeps the chosen shelf, so use its shelf picker if present.
-        if app.buttons["library-collections"].exists {
-            app.buttons["library-collections"].tap()
-        } else {
-            app.navigationBars["UAT Drafts"].buttons["UAT Drafts"].tap()
-        }
-        // Native menu entries may expose Button or PopUpButton across size classes.
-        let allPrints = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == 'All Prints'")).firstMatch
-        XCTAssertTrue(allPrints.waitForExistence(timeout: 5))
-        allPrints.tap()
+        app.chooseLibraryShelf("All Prints")
         XCTAssertTrue(hiddenPrint.waitForExistence(timeout: 5))
         XCTAssertTrue(normalPrint.waitForExistence(timeout: 5))
         capture(app, "Showing collection restores All Prints")
@@ -84,8 +73,8 @@ final class HiddenCollectionTests: XCTestCase {
     @MainActor private func auditCollections(size: String) async throws {
         let machine = try FixtureMachine(galleryPrints: 2, collectionFixture: true)
         let port = try await machine.start()
-        defer { machine.stop() }
         let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", size]
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))

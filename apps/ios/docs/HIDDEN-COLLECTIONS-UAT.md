@@ -3,6 +3,10 @@
 2026-09-30. Native iOS/iPadOS 26.5 Simulator checks against a loopback fixture;
 no physical-device validation or live inference was performed. Collection PATCH
 requests change only `FixtureMachine`'s in-memory collection.
+Each fixture registers teardown before pairing: restore All Prints, remove the
+exact loopback machine, verify its card disappears, terminate the app, and stop
+the listener even when an interaction fails. This keeps the full shell audit
+free of stale pairings from earlier tests.
 
 ## Interaction coverage
 
@@ -43,6 +47,14 @@ Dynamic Type, clipping, or contrast exemption.
 The initial matrix caught an undersized collection-open target, small blue text
 contrast, and label sizing. The collection-open button now has a full-width
 44-point minimum target, primary body text, and a vertically flexible title.
+
+`LibraryCollectionPickerTests` separately checks the populated phone Library's
+inline shelf picker contrast at all three text sizes. The picker uses primary
+body text. These focused checks retain its root and actual descendants in the
+audit and leave unknown targets as failures.
+Run `apps/ios/scripts/audit-library-collection-picker.sh` for a disposable phone
+Simulator sweep in both appearances; its result bundles are retained and its
+Simulator is removed on exit.
 
 Light appearance results on the final sheet implementation:
 
