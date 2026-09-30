@@ -41,3 +41,5 @@ paths:
 **Media exports.** `mediaFile` returns an extensionless caller-owned temporary file. Stage it under its safe original filename before handing it to UIKit/Photos; remove the export directory on share dismissal or after copy/save, including partial failures. Info always has an explicit Done action.
 
 **Unavailable data.** Pending draft restoration must not fall back to the first responding machine; an explicit kind/model choice cancels it. Generate distinguishes offline machines from empty inventories. Queue marks unanswered/failed reads unavailable and reloads as machines reconnect. A missing export source fails the entire selection, never compresses the file list before Photos pairs it with entries.
+
+**Notification presentation and refresh cancellation.** Use the system notification banner (the app bundle supplies AppIcon), concise completion copy, and no prompt or media attachment. Preserve print/queue links and per-batch deduplication. A cancelled Library listing is routine lifecycle/event coalescing, not a host failure; keep loaded prints and never report it in FailureBanner. Genuine listing failures remain visible.

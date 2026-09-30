@@ -20,10 +20,26 @@ struct NotifierTests {
         let (notifier, _) = notifier()
         let print = PrintID(host: batch.host, filename: "a.png")
         let content = try #require(notifier.content(.finished(count: 1), batch: batch, machine: "workstation", print: print))
-        #expect(content.title == "Finished on workstation")
-        #expect(content.body == "a lighthouse at dusk")
+        #expect(content.title == "Render complete")
+        #expect(content.body == "Your print is ready on workstation.")
         #expect(content.threadIdentifier == batch.host.uuidString)
         #expect(content.userInfo["link"] as? String == DeepLink.print(host: batch.host, filename: "a.png").url.absoluteString)
+    }
+
+    @Test func aBatchUsesConciseCopyWithoutThePrompt() throws {
+        let (notifier, _) = notifier()
+        let content = try #require(notifier.content(.finished(count: 4), batch: batch, machine: "workstation", print: nil))
+        #expect(content.title == "Render complete")
+        #expect(content.body == "4 prints are ready on workstation.")
+        #expect(content.attachments.isEmpty)
+        #expect(content.userInfo["link"] as? String == DeepLink.queue(job: nil).url.absoluteString)
+    }
+
+    @Test func theAppBundleProvidesTheSystemNotificationIcon() throws {
+        let bundle = Bundle(for: Notifier.self)
+        let icons = try #require(bundle.object(forInfoDictionaryKey: "CFBundleIcons") as? [String: Any])
+        let primary = try #require(icons["CFBundlePrimaryIcon"] as? [String: Any])
+        #expect(primary["CFBundleIconName"] as? String == "AppIcon")
     }
 
     @Test func aKindSwitchedOffInSettingsSaysNothing() {

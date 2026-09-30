@@ -59,8 +59,9 @@ final class Notifier: NSObject {
         let (key, category, title, body, link): (String, String, String, String, DeepLink) = switch kind {
         case let .finished(count):
             (Preference.notifyFinished, Self.finishedCategory,
-             count > 1 ? String(localized: "\(count) prints finished on \(machine)") : String(localized: "Finished on \(machine)"),
-             batch.prompt, print.map { .print(host: $0.host, filename: $0.filename) } ?? .queue(job: nil))
+             String(localized: "Render complete"),
+             count > 1 ? String(localized: "\(count) prints are ready on \(machine).")
+                 : String(localized: "Your print is ready on \(machine)."), print.map { .print(host: $0.host, filename: $0.filename) } ?? .queue(job: nil))
         case let .failed(reason):
             (Preference.notifyFailed, Self.failedCategory, String(localized: "Didn't finish on \(machine)"), reason,
              .generate(inbox: nil))
@@ -77,17 +78,11 @@ final class Notifier: NSObject {
         return content
     }
 
-    func post(_ kind: Kind, batch: ActiveBatch, machine: String, print: PrintID?, thumbnail: URL? = nil) {
+    func post(_ kind: Kind, batch: ActiveBatch, machine: String, print: PrintID?) {
         guard let content = content(kind, batch: batch, machine: machine, print: print) else { return }
         remember(batch.clientBatchId)
-        // An attachment MOVES its file: hand it a copy.
-        if let thumbnail, FileManager.default.fileExists(atPath: thumbnail.path) {
-            let copy = FileManager.default.temporaryDirectory.appending(path: "\(UUID()).jpg")
-            if (try? FileManager.default.copyItem(at: thumbnail, to: copy)) != nil,
-               let attachment = try? UNNotificationAttachment(identifier: "preview", url: copy) {
-                content.attachments = [attachment]
-            }
-        }
+        // iOS supplies the app icon and native layout. No prompt or media
+        // attachment: keep the completion banner compact and private.
         center?.add(UNNotificationRequest(identifier: batch.clientBatchId, content: content, trigger: nil))
     }
 

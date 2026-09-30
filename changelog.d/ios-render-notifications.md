@@ -1,0 +1,1 @@
+- **iOS render notifications.** Keep loaded prints without a false error banner when a Library refresh is cancelled. Simplify completion notifications to a short readiness message with the native Mold Studio app icon.
