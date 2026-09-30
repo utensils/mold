@@ -89,7 +89,7 @@ keeps its original filename and file type.
 
 While a render runs, a **Live Activity** shows its preview, the progress
 sentence, the time left and a Stop button, on the Lock Screen and in the
-Dynamic Island. mold servers cannot push to a phone, so once the app is in the
+Dynamic Island. The translucent card keeps the prompt compact, gives progress its own row, and places the machine and waiting count together in the footer. Large text uses a simpler layout to keep the status and Stop control readable. mold servers cannot push to a phone, so once the app is in the
 background the activity is refreshed only when iOS lets Mold Studio run; it
 says "Open Mold Studio to refresh" when it may be out of date.
 
