@@ -94,7 +94,7 @@ struct LibraryPane: View {
                 navigation.rememberEdge()
             })
             .destructionDialog($pendingDestruction)
-            .sheet(isPresented: $library.localSaveAlertPresented) {
+            .deferredMenuSheet(isPresented: $library.localSaveAlertPresented) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Sync to This Mac").font(.title2.bold())
                     Text(library.localSaveReport)

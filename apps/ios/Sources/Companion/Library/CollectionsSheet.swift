@@ -18,9 +18,19 @@ struct CollectionsSheet: View {
                             choose(.collection(slug: shelf.slug))
                             dismiss()
                         } label: {
-                            Label(shelf.name, systemImage: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
+                            HStack(alignment: .firstTextBaseline) {
+                                Image(systemName: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
+                                    .accessibilityHidden(true)
+                                Text(shelf.name)
+                                    .font(.body)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         }
                         .buttonStyle(.borderless)
+                        .accessibilityLabel(shelf.name)
                         Toggle("Hide from All Prints", isOn: Binding(
                             get: { shelf.hidden },
                             set: { hidden in
@@ -34,6 +44,7 @@ struct CollectionsSheet: View {
                     }
                 }
             }
+            .accessibilityIdentifier("collections-sheet")
             .navigationTitle("Collections")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }

@@ -31,12 +31,17 @@ struct LibraryGrid: View {
         // selection once, not once per selected cell (quadratic for Select All).
         let selectedTargets = selection.items.isEmpty ? []
             : entries.filter { selection.items.contains($0.id) }
+        // One selection-wide snapshot, shared by every selected tile. Menu
+        // rows and share objects still materialize only upon opening a menu.
+        let selectedPlan = selectedTargets.isEmpty ? nil : LibraryMenu(
+            targets: selectedTargets, scope: scope, actions: actions, shelves: shelves,
+            enclosingShelf: enclosingShelf, trashCount: trashCount, open: {}).plan
         return ScrollViewReader { scroller in
             ScrollView {
                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 16) {
                     ForEach(sections) { section in
                         Section {
-                            ForEach(section.items) { cell($0, selectedTargets: selectedTargets) }
+                            ForEach(section.items) { cell($0, selectedTargets: selectedTargets, selectedPlan: selectedPlan) }
                         } header: {
                             // A section with no day is the whole list in one
                             // piece, under an order days cannot describe.
@@ -92,7 +97,8 @@ struct LibraryGrid: View {
     }
 
     @ViewBuilder private func cell(_ entry: LibraryEntry,
-                                   selectedTargets: [LibraryEntry]) -> some View {
+                                   selectedTargets: [LibraryEntry],
+                                   selectedPlan: LibraryMenuPlan?) -> some View {
         if let host = hosts.first(where: { $0.id == entry.hostID }) {
             LibraryCell(
                 entry: entry, host: host, edge: edge,
@@ -108,7 +114,8 @@ struct LibraryGrid: View {
                 LibraryMenu(targets: selection.items.contains(entry.id) ? selectedTargets : [entry],
                             scope: scope, actions: actions,
                             shelves: shelves, enclosingShelf: enclosingShelf,
-                            trashCount: trashCount, open: { onOpen(entry.id) }))
+                            trashCount: trashCount, open: { onOpen(entry.id) }),
+                snapshot: selection.items.contains(entry.id) ? selectedPlan : nil)
         }
     }
 
