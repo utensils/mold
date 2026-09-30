@@ -51,14 +51,7 @@ struct SourceFitRow: View {
     }
 
     static func policy(for mode: SourceFitMode, supportsMask: Bool) -> SourceFit {
-        switch mode {
-        case .cropFill: .default
-        case .padRepaint: supportsMask ? .padRepaint : .default
-        case .padFit: .padFit
-        case .lanczosResize: .lanczosResize
-        // Never authored here -- see `resolve` below, which does not offer it.
-        case .upscaleThenFit: .default
-        }
+        SourceFitOptions.policy(for: mode, supportsMask: supportsMask)
     }
 }
 
@@ -74,13 +67,6 @@ extension SourceFitRow {
     static func resolve(
         recipe: GenerationRecipe?, media: DraftMedia
     ) -> [SourceFitMode] {
-        guard let recipe, media.requestConditioning.carriesSource else { return [] }
-        // A recipe whose canvas comes FROM the source has nothing to fit onto.
-        guard recipe.resolution.domain != .sourceDriven, recipe.resolution.hasCanvas else {
-            return []
-        }
-        let maskless: [SourceFitMode] = [.cropFill, .padFit, .lanczosResize]
-        guard RefineGroup.maskCapable(recipe.capabilities) else { return maskless }
-        return [.padRepaint] + maskless
+        SourceFitOptions.resolve(recipe: recipe, media: media)
     }
 }

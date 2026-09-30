@@ -102,6 +102,7 @@ extension GenerateController {
         var fresh = RenderDraft()
         fresh.prompt = draft.prompt
         fresh.media = draft.media
+        fresh.media.sourceFit = .default
         fresh.title = draft.title
         fresh.tags = draft.tags
         fresh.collectionName = draft.collectionName

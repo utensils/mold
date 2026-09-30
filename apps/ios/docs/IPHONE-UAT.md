@@ -99,3 +99,13 @@ open and scrolls the opened tile back into view on return.
   was removed. No generation or remote mutation was used.
 - Physical-device audio output and playback on a remote machine still require
   acceptance in TestFlight; Simulator confirms the page and player behavior.
+
+## Render notifications and Generate options — 2026-09-29
+
+- Reproduced the reported CancellationError banner with failing gallery/trash/collection refresh tests. Cancellation now retains loaded prints and produces no failure banner; genuine server errors remain visible.
+- iPhone 17 Pro Simulator, iOS 26.5: opened the completed-print deep link against a loopback fixture and confirmed the viewer appeared. Notification copy/link/deduplication and the bundled AppIcon are verified by unit tests; physical-device notification delivery/presentation was not exercised.
+- Visually confirmed aspect-menu icons distinguish 1:1, 4:3, 3:4, 16:9 and 9:16 in their actual proportions.
+- Attached an existing picture without submitting a render; Options showed Seed = Random, Fit = Crop to fill and both alignment controls = Center. Changed to Fit with borders, then Reset restored centered Crop to fill while retaining Random.
+- All 123 companion unit tests and native architecture lints passed. All 1,077 shared MoldClient tests passed, including source-fit pixels before batch admission, painted source-space mask alignment, retained Mac canvas-space masks and rotated JPEG geometry.
+- The existing LibraryViewerTests scroll-position UAT failed to reach its viewer controls locally after a Simulator runner launch retry. This unrelated test is not counted as passing validation for this change.
+- Independent sub-agent review identified source-mask coordinates and JPEG orientation; both were repaired and the final re-review reported no actionable findings.

@@ -17,6 +17,7 @@ struct MoreOptionsSheet: View {
                         OptionsControls(recipe: recipe)
                     }
                     SamplerSection(recipe: recipe)
+                    SourceFitSection(recipe: recipe)
                     if generate.draft.media.sourceImage != nil, recipe.capabilities.supportsStrength != false {
                         Section {
                             LabeledSlider(title: String(localized: "How much to change it"),
@@ -59,9 +60,9 @@ private struct SamplerSection: View {
                 LabeledSlider(title: String(localized: "Stick to my words"), value: $generate.draft.guidance,
                               range: recipe.guidance.min ... recipe.guidance.max, step: recipe.guidance.step)
             }
-            Picker("Repeat this look", selection: $generate.draft.locksSeed) {
-                Text("Surprise me").tag(false)
-                Text("Keep").tag(true)
+            Picker("Seed", selection: $generate.draft.locksSeed) {
+                Text("Random").tag(false)
+                Text("Fixed").tag(true)
             }
             .pickerStyle(.menu)
             if generate.draft.locksSeed {

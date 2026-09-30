@@ -1,7 +1,6 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import MoldClient
 
 // Keeping a painted mask through a re-fit.
 //
@@ -20,7 +19,7 @@ extension SourceFitRender {
     /// The mask for a freshly fitted source: what was painted, plus the bands
     /// a `pad-repaint` added. `nil` only when there is neither -- a recipe
     /// with nothing to repaint must not grow an all-black mask.
-    static func mask(existing: Data?, transform: SourceFitTransform) async -> Data? {
+    public static func mask(existing: Data?, transform: SourceFitTransform, sourceSpace: Bool = false) async -> Data? {
         let padding = transform.maskPadding
         guard existing != nil || !padding.isEmpty else { return nil }
         return await Task.detached(priority: .userInitiated) {
@@ -38,13 +37,15 @@ extension SourceFitRender {
 
             if let existing, let source = CGImageSourceCreateWithData(existing as CFData, nil),
                let painted = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                // Drawn to the WHOLE canvas: this mask was painted over the
-                // fitted source, so it is already in canvas space. A canvas
-                // that has since changed size rescales it, which keeps the
-                // painted region where the person put it relative to the
-                // picture -- the alternative is throwing their work away.
+                // The Mac paints on the fitted canvas; iOS paints on the
+                // original source. Keep the two coordinate spaces explicit.
                 context.interpolationQuality = .none
-                context.draw(painted, in: CGRect(x: 0, y: 0, width: width, height: height))
+                let rect = sourceSpace
+                    ? CGRect(x: transform.offsetX,
+                             y: transform.outputHeight - transform.offsetY - transform.drawHeight,
+                             width: transform.drawWidth, height: transform.drawHeight)
+                    : CGRect(x: 0, y: 0, width: width, height: height)
+                context.draw(painted, in: rect)
             }
             context.setFillColor(gray: 1, alpha: 1)
             for rect in padding {

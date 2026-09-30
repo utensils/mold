@@ -50,11 +50,9 @@ extension GenerateController {
         guard blocker == nil, let host = target, let modelName else { return }
         let backend = hosts.backend(for: host)
         let copies = min(draft.batchSize, hosts.capabilities[host.id]?.maxBatchOutputs ?? draft.batchSize)
-        let requests = RenderRequest.batch(
-            draft, model: modelName, copies: max(1, copies),
-            randomBase: .random(in: 0 ... UInt64(UInt32.max)),
-            maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
-        let admission = BatchAdmission(requests: requests)
+        let snapshot = draft
+        let recipe = recipe
+        let maxIdentityPhotos = hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0
         let prompt = draft.prompt
         // Decided now, before the task: a second press right after this one
         // still queues, however the two tasks interleave.
@@ -75,6 +73,11 @@ extension GenerateController {
                 if background != .invalid { UIApplication.shared.endBackgroundTask(background) }
             }
             do {
+                let prepared = try await snapshot.fittingSource(recipe: recipe)
+                let requests = RenderRequest.batch(
+                    prepared, model: modelName, copies: max(1, copies),
+                    randomBase: .random(in: 0 ... UInt64(UInt32.max)), maxIdentityPhotos: maxIdentityPhotos)
+                let admission = BatchAdmission(requests: requests)
                 let accepted = try await backend.submit(admission)
                 guard let self else { return }
                 let active = ActiveBatch(id: accepted.id, clientBatchId: admission.clientBatchId,
