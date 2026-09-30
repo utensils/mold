@@ -94,7 +94,7 @@ struct LibraryMenuPlanUpscaleTests {
         for choices in [installed(["real-esrgan-x4plus:fp16"]), []] {
             let items = plan(canUpscale: true, upscalers: choices).items
             let plain = items.filter { $0.kind == .upscale(model: nil) }
-            let submenus = items.filter(\.isSubmenu)
+            let submenus = items.filter { $0.isSubmenu && $0.title == "Make Bigger" }
             #expect(plain.map(\.title) == ["Make Bigger…"])
             #expect(submenus.isEmpty)
         }

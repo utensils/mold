@@ -30,6 +30,8 @@ struct LibraryActions {
     /// it. Declared in the menu plan so both menus offer the three, and
     /// answered by whoever owns the sheet and the confirm.
     var collectionAction: ((LibraryAction) -> Void)?
+    /// Captures the menu selection before the naming sheet opens.
+    var newCollection: (([LibraryEntry]) -> Void)?
     /// Set by whoever owns the export sheet. A mesh export carries controls
     /// the host advertised -- a print size, an up axis, a turntable's frames
     /// -- so the ones that have any ASK before converting. Absent in contexts

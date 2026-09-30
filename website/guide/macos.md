@@ -43,12 +43,17 @@ for Macs that cannot run macOS 26, and remains the default desktop app on
   profile: stills and clips, source and reference images, batches, negative
   prompts, adapters, identity photos, masks, ControlNet, and prompt expansion.
   Live step progress and denoise preview; images, clips, and meshes are shown
-  in place.
+  in place. The controls stay anchored above the bottom edge and scroll
+  inside their capsule when the window is short.
 - **Library** — every machine's prints in one day-sectioned timeline, with a
   print held on several machines shown once. Favourites, collections, tags,
   search tokens (`is:video`, `tag:name`, `on:machine`), Quick Look, undo,
   interactive 3-D mesh viewing and export, and **Use These Settings** to
-  restore a print's full recipe.
+  restore a print's full recipe. Select prints and choose **Move to Collection →
+  New Collection…** to create a collection from the selection. Hidden collection
+  members stay out of general browsing even when a local copy leads; the
+  collection itself and Recently Deleted remain accessible. Context menus keep
+  their rows stable while background transfer status changes.
 - **Queue** — every machine's work live from its event stream: reorder,
   pause, resume, cancel, and move held jobs between machines.
 - **Models** — installed models grouped by family, catalog discovery, and

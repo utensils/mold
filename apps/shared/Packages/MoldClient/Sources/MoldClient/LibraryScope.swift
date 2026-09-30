@@ -59,3 +59,15 @@ public enum LibraryScope: Hashable, Identifiable, Codable, Sendable {
         }
     }
 }
+
+public extension LibraryScope {
+    /// Collection hiding affects browsing; trash always keeps every member
+    /// available for recovery. Both native apps resolve their query here.
+    func resolve(_ query: LibraryQuery, shelves: [CollectionShelf],
+                 hiddenCollectionIDs: [MoldHost.ID: Set<String>]) -> LibraryQuery {
+        var resolved = query
+        resolved.hiddenCollectionIDs = isTrash ? [:] : hiddenCollectionIDs
+        if let token = token(in: shelves), !resolved.tokens.contains(token) { resolved.tokens.append(token) }
+        return resolved
+    }
+}

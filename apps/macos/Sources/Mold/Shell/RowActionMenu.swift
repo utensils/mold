@@ -63,11 +63,9 @@ extension View {
         @ViewBuilder extra: @escaping () -> Extra = { EmptyView() }
     ) -> some View {
         contextMenu {
-            let offered = actions()
-            if RowAction.offersMenu(offered) {
-                RowActionMenu(actions: offered, perform: perform,
-                              extra: { AnyView(extra()) })
-            }
+            ContextualRowActionMenu(actions: actions(), perform: perform,
+                                   extra: AnyView(extra()))
+                .equatable()
         }
     }
 
@@ -88,7 +86,9 @@ extension View {
     ) -> some View {
         if RowAction.offersMenu(actions) {
             contextMenu {
-                RowActionMenu(actions: actions, perform: perform, extra: { AnyView(extra()) })
+                ContextualRowActionMenu(actions: actions, perform: perform,
+                                       extra: AnyView(extra()))
+                    .equatable()
             }
         } else {
             self
@@ -105,9 +105,31 @@ extension TableRowContent {
         _ actions: [RowAction<Kind>], perform: @escaping (Kind) -> Void
     ) -> some TableRowContent<TableRowValue> {
         if RowAction.offersMenu(actions) {
-            contextMenu { RowActionMenu(actions: actions, perform: perform) }
+            contextMenu { ContextualRowActionMenu(actions: actions, perform: perform).equatable() }
         } else {
             self
+        }
+    }
+}
+
+/// AppKit tracks an open contextual menu in its own run-loop mode. SwiftUI
+/// otherwise replaces that menu's hierarchy when the source row redraws,
+/// losing the highlighted submenu during background save/status updates.
+/// Keep the content boundary equal while tracking; outside that session every
+/// evaluation refreshes closures as well as titles and enabled states.
+struct ContextualRowActionMenu<Kind: Hashable>: View, Equatable {
+    let actions: [RowAction<Kind>]
+    let perform: (Kind) -> Void
+    var tracking: ContextMenuTracking = .shared
+    var extra = AnyView(EmptyView())
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        MainActor.assumeIsolated { lhs.tracking === rhs.tracking && lhs.tracking.isTracking }
+    }
+
+    var body: some View {
+        if RowAction.offersMenu(actions) {
+            RowActionMenu(actions: actions, perform: perform, extra: { extra })
         }
     }
 }

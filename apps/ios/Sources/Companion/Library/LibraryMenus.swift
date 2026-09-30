@@ -12,10 +12,10 @@ struct ShelfMenu: View {
             ForEach([LibraryScope.all, .favorites], id: \.self) { shelf in
                 Label(shelf.title(in: library.shelves), systemImage: shelf.symbol).tag(shelf)
             }
-            if !library.shelves.filter({ !$0.hidden }).isEmpty {
+            if !library.shelves.isEmpty {
                 Section("Collections") {
-                    ForEach(library.shelves.filter { !$0.hidden }) { shelf in
-                        Label(shelf.name, systemImage: "rectangle.stack")
+                    ForEach(library.shelves) { shelf in
+                        Label(shelf.name, systemImage: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
                             .tag(LibraryScope.collection(slug: shelf.slug))
                     }
                 }

@@ -24,6 +24,7 @@ public enum LibraryAction: Hashable, Sendable {
     case addAsReference
     case quickLook
     case favorite(Bool)
+    case newCollection
     case file(slug: String)
     case unfile(slug: String)
     /// Upscale this print on the machine that holds it. `nil` means the

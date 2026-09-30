@@ -13,6 +13,7 @@ struct LibraryView: View {
     @SceneStorage("library.sort") private var sort = LibrarySort.newest
     @State private var query = LibraryQuery()
     @State private var selecting = false
+    @State private var managingCollections = false
     @State private var selection: Set<PrintID> = []
     @State private var showingCache = LibraryShowingCache()
     @State private var scrollPosition = LibraryScrollPosition()
@@ -73,6 +74,11 @@ struct LibraryView: View {
             }
         }
         .toolbar { toolbar(showing) }
+        .sheet(isPresented: $managingCollections) {
+            CollectionsSheet { scope in
+                if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }
+            }
+        }
         .modifier(LibrarySearch(enabled: searchFocused, query: $query, machines: machines, tags: tags))
         .onSubmit(of: .search) {
             // Return turns `is:video`, `tag:owls` or `on:workstation` into a
@@ -117,10 +123,8 @@ struct LibraryView: View {
     private var tags: [String] { library.knownTags }
 
     private func showing() -> LibraryShowing {
-        var narrowed = query
-        if let token = scope.token(in: library.shelves), !narrowed.tokens.contains(token) {
-            narrowed.tokens.append(token)
-        }
+        let narrowed = scope.resolve(query, shelves: library.shelves,
+                                     hiddenCollectionIDs: library.hiddenCollectionIDs)
         return showingCache.showing(pool: scope.isTrash ? library.trashPool : library.pool,
                                     revision: library.revision, query: narrowed, selection: selection)
     }
@@ -160,6 +164,10 @@ struct LibraryView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                if !library.shelves.isEmpty {
+                    Button("Manage Collections…", systemImage: "rectangle.stack") { managingCollections = true }
+                    Divider()
+                }
                 Picker("Sort By", selection: $sort) {
                     ForEach(LibrarySort.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
