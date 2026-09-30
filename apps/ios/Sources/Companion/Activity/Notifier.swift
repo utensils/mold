@@ -45,6 +45,9 @@ final class Notifier: NSObject {
                 UNNotificationAction(identifier: Self.viewAction, title: String(localized: "View"), options: [.foreground]),
             ], intentIdentifiers: []),
         ])
+        #if DEBUG
+        NotificationFixture.schedule(center: center)
+        #endif
     }
 
     /// Asked once, the first time a render is sent: the moment the reason
@@ -96,6 +99,8 @@ final class Notifier: NSObject {
 
     fileprivate func handle(action: String, link: String?) async {
         guard let link = link.flatMap(URL.init(string:)).flatMap(DeepLink.init) else { return }
+        guard action == UNNotificationDefaultActionIdentifier || action == Self.viewAction || action == Self.favouriteAction
+        else { return }
         if action == Self.favouriteAction, case let .print(host, filename) = link {
             await favourite?(PrintID(host: host, filename: filename))
         } else {
@@ -105,16 +110,23 @@ final class Notifier: NSObject {
 }
 
 extension Notifier: UNUserNotificationCenterDelegate {
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification)
-        async -> UNNotificationPresentationOptions {
-        // In the foreground the result is already on screen.
-        []
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void) {
+        // UIKit resumes presentation inside this callback. The async delegate's
+        // synthesized Objective-C bridge completes on a cooperative thread.
+        Task { @MainActor in completionHandler([]) }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                            didReceive response: UNNotificationResponse) async {
-        let action = response.actionIdentifier == UNNotificationDefaultActionIdentifier ? Self.viewAction : response.actionIdentifier
+        didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
+        // Extract the Foundation payload before crossing actors; both routing
+        // AND completion belong on MainActor. Completing off-main crashes
+        // UIKit's notification activation / state-restoration snapshot.
+        let action = response.actionIdentifier
         let link = response.notification.request.content.userInfo["link"] as? String
-        await handle(action: action, link: link)
+        Task { @MainActor in
+            await handle(action: action, link: link)
+            completionHandler()
+        }
     }
 }

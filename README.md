@@ -180,7 +180,7 @@ and follow renders from the Lock Screen. Generation options adapt to large text,
 and the full-screen viewer keeps its media actions accessible. It is in TestFlight while it is new.
 [Mold Studio for iPhone & iPad guide](https://utensils.io/mold/guide/companion)
 
-The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print. Generate Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.
+The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print from the background or a cold launch, with notification activation completed on the main thread. Generate Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.
 
 Native iOS development: `nix develop -c companion-dev` watches Swift sources,
 builds and relaunches in Simulator. `companion-run` launches once; see the
