@@ -54,7 +54,10 @@ final class GenerationInteractionTests: XCTestCase {
 
     @MainActor func testOfflineQueueExplanationScrollsAtLargestText() throws {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
-        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        Self.removeOfflineQueueTestMachine(from: app)
+        addTeardownBlock {
+            await MainActor.run { Self.removeOfflineQueueTestMachine(from: app) }
+        }
         app.buttons["Add a Machine"].firstMatch.tap()
         let enterAddress = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch
         XCTAssertTrue(enterAddress.waitForExistence(timeout: 5))
@@ -67,6 +70,7 @@ final class GenerationInteractionTests: XCTestCase {
         address.tap()
         address.typeText("127.0.0.1:65534")
         app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(name.waitForNonExistence(timeout: 5), "Adding the test machine must dismiss its sheet")
         XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
         let message = app.staticTexts["Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh."]
         XCTAssertTrue(message.waitForExistence(timeout: 5))
@@ -83,12 +87,28 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertLessThanOrEqual(message.frame.maxY, action.frame.minY,
                                  "The final line must scroll above the pinned action")
         XCTAssertTrue(action.isHittable)
+    }
+
+    /// Use the detail page: a long press can select the card's address text
+    /// instead of opening its context menu. Clear stale fixtures before setup
+    /// and after every outcome so light/dark runs cannot share a duplicate.
+    @MainActor private static func removeOfflineQueueTestMachine(from app: XCUIApplication) {
+        if app.textFields["machine-name"].exists { app.buttons["Cancel"].firstMatch.tap() }
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         let card = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "127.0.0.1:65534")).firstMatch
         for _ in 0..<8 where !card.isHittable { app.swipeUp() }
-        card.press(forDuration: 1)
-        app.buttons["Remove…"].firstMatch.tap()
-        app.buttons["Remove"].firstMatch.tap()
+        guard card.exists else { return }
+        XCTAssertTrue(card.isHittable)
+        card.tap()
+        let remove = app.buttons["Remove…"].firstMatch
+        for _ in 0..<8 where !remove.isHittable { app.swipeUp() }
+        XCTAssertTrue(remove.isHittable)
+        remove.tap()
+        let confirm = app.buttons["Remove"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 5))
+        XCTAssertFalse(card.exists, "The offline queue fixture must not survive cleanup")
     }
 
     @MainActor func testFloatingBarKeepsModelsInSidebar() throws {
