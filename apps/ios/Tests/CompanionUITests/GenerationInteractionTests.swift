@@ -136,8 +136,15 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertTrue(prompt.waitForExistence(timeout: 5))
         prompt.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        prompt.typeText("A lighthouse at dusk")
-        XCTAssertTrue((prompt.value as? String)?.contains("A lighthouse at dusk") == true)
+        let text = "A lighthouse at dusk"
+        prompt.typeText(text)
+        // SwiftUI's accessibility value can lag synthesized keyboard input.
+        // Wait for the same text contract, without typing a second time.
+        let typed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", text), object: prompt
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [typed], timeout: 5), .completed,
+                       "Prompt must retain typed text; actual value: \(String(describing: prompt.value))")
         XCTAssertTrue(app.keyboards.firstMatch.exists, "Typing must not replace the focused composer")
         capture(app)
     }
