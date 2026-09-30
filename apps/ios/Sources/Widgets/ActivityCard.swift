@@ -12,7 +12,7 @@ struct LockScreenActivity: View {
             ActivityCard(context: context, compact: false)
             ActivityCard(context: context, compact: true)
         }
-        .frame(maxHeight: 128, alignment: .center)
+        .frame(maxHeight: ActivityCardLayout.contentHeight, alignment: .center)
     }
 }
 
@@ -22,10 +22,10 @@ private struct ActivityCard: View {
 
     var body: some View {
         let content = ActivityCardContent(state: context.state, machine: context.attributes.machine, isStale: context.isStale)
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: ActivityCardLayout.rowSpacing) {
             HStack(alignment: .center, spacing: 12) {
-                ActivityPreview(context: context).frame(width: 48, height: 48)
-                VStack(alignment: .leading, spacing: 3) {
+                ActivityPreview(context: context).frame(width: ActivityCardLayout.previewSide, height: ActivityCardLayout.previewSide)
+                VStack(alignment: .leading, spacing: ActivityCardLayout.titleSpacing) {
                     if !compact {
                         Text("Mold Studio").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                     }
@@ -61,7 +61,7 @@ struct ActivityStop: View {
     var body: some View {
         Button(intent: StopRenderIntent(clientBatchId: clientBatchId)) {
             Image(systemName: "stop.fill").font(.caption.weight(.semibold))
-                .frame(width: 44, height: 44)
+                .frame(width: ActivityCardLayout.stopSide, height: ActivityCardLayout.stopSide)
         }
         .buttonStyle(.plain)
         .foregroundStyle(.red)
@@ -76,9 +76,10 @@ private struct ActivityProgress: View {
     var body: some View {
         let content = ActivityCardContent(state: context.state, machine: context.attributes.machine, isStale: context.isStale)
         if context.state.phase == .running, !context.isStale {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: ActivityCardLayout.progressSpacing) {
                 if let progress = content.progress {
                     ProgressView(value: progress).tint(.cyan)
+                        .frame(height: ActivityCardLayout.progressHeight)
                         .accessibilityLabel("Render progress")
                 }
                 HStack {

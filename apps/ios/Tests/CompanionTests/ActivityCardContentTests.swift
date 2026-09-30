@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UIKit
 @testable import MoldCompanion
 
 struct ActivityCardContentTests {
@@ -39,5 +40,20 @@ struct ActivityCardContentTests {
         let content = ActivityCardContent(state: waiting, machine: "m", isStale: false)
         #expect(content.progress == nil)
         #expect(content.detail == "Waiting for memory")
+    }
+}
+
+@MainActor struct ActivityCardLayoutTests {
+    @Test func theThreeNormalRowsFitInsideTheSystemHeightIncludingPadding() {
+        let traits = UITraitCollection(preferredContentSizeCategory: .large)
+        let brand = UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: traits).lineHeight
+        let status = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits).lineHeight
+        let prompt = UIFont.preferredFont(forTextStyle: .caption1, compatibleWith: traits).lineHeight
+        let header = max(ActivityCardLayout.previewSide, brand + status + 2 * prompt + 2 * ActivityCardLayout.titleSpacing)
+        let progress = ActivityCardLayout.progressHeight + ActivityCardLayout.progressSpacing + brand
+        let rows = header + progress + brand + 2 * ActivityCardLayout.rowSpacing
+        #expect(rows <= ActivityCardLayout.contentHeight)
+        #expect(ActivityCardLayout.contentHeight + 2 * ActivityCardLayout.inset == ActivityCardLayout.maximumHeight)
+        #expect(ActivityCardLayout.stopSide >= 44)
     }
 }

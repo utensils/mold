@@ -8,7 +8,7 @@ struct GenerationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: GenerationActivityAttributes.self) { context in
             LockScreenActivity(context: context)
-                .padding(16)
+                .padding(ActivityCardLayout.inset)
                 .activityBackgroundTint(Color(uiColor: .systemBackground).opacity(0.88))
                 .widgetURL(link(context))
         } dynamicIsland: { context in

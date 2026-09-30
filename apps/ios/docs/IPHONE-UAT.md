@@ -128,3 +128,4 @@ open and scrolls the opened tile back into view on return.
 - Presentation contracts cover legacy step/machine separation, unknown progress, stale messaging and terminal controls. The ActivityKit payload and deep-link contract are unchanged.
 - UAT uses the Debug-only `--live-activity-fixture` launch argument; no render was submitted. Physical-device presentation remains to be confirmed in TestFlight.
 - All 129 iOS unit tests and architecture lints pass. The Release Simulator build passes, with both Debug UAT fixture types absent from the binary. Also visually checked a real preview image and the no-step "Working on it" state; the latter shows no fabricated progress bar.
+- The final suite has 130 passing tests, including a height invariant that measures all three normal rows with UIKit text metrics and accounts for the card padding. The final Release build also passes.
