@@ -88,7 +88,34 @@ async function digest(bytes: ArrayBuffer): Promise<string> {
   ).join("");
 }
 function requestHeaders(headers: Headers): Record<string, string> {
-  return Object.fromEntries(headers.entries());
+  const excluded = new Set([
+    "authorization",
+    "x-api-key",
+    "cookie",
+    "host",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "x-amz-content-sha256",
+    "x-mold-request-target",
+    ...(headers.get("connection") ?? "")
+      .split(",")
+      .map((name) => name.trim().toLowerCase()),
+  ]);
+  return Object.fromEntries(
+    [...headers.entries()].filter(
+      ([name]) =>
+        !excluded.has(name) &&
+        !name.startsWith("x-mold-viewer-") &&
+        !name.startsWith("x-mold-relay-"),
+    ),
+  );
 }
 async function relayInfo(
   origin: string,

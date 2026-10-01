@@ -1,4 +1,8 @@
 import { webcrypto } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   relayFetch,
@@ -66,6 +70,12 @@ it.each(["PATCH", "DELETE"])(
         method,
         headers: {
           "x-api-key": "secret",
+          authorization: "Bearer credential",
+          cookie: "credential=secret",
+          connection: "keep-alive, x-hop-secret",
+          "x-hop-secret": "connection-private",
+          "x-mold-viewer-secret": "private",
+          "x-mold-operation-id": "operation-1",
           "content-type": "application/octet-stream",
         },
         body,
@@ -84,6 +94,32 @@ it.each(["PATCH", "DELETE"])(
     expect(grant.path).toBe("/api/arbitrary?query=1");
     expect(grant.method).toBe(method);
     expect(grant.size).toBe(body.length);
+    expect(grant.headers).toEqual({
+      "content-type": "application/octet-stream",
+      "x-mold-operation-id": "operation-1",
+    });
+    const validatorPath = [
+      "relay/aws/transfers.mjs",
+      "../relay/aws/transfers.mjs",
+    ]
+      .map((path) => resolve(process.cwd(), path))
+      .find(existsSync)!;
+    const validator = pathToFileURL(validatorPath).href;
+    expect(
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import {validateUpload} from ${JSON.stringify(validator)}; process.stdout.write(JSON.stringify(validateUpload(JSON.parse(process.argv[1]))));`,
+          JSON.stringify(grant),
+        ],
+        { encoding: "utf8" },
+      ),
+    ).toBe(JSON.stringify(grant));
+    expect(new Headers(calls[1]?.init?.headers).get("x-api-key")).toBe(
+      "secret",
+    );
     expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({ id: "up1" });
   },
 );

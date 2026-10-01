@@ -62,7 +62,7 @@ extension HTTPBackend {
                 "method": original.httpMethod ?? "POST",
                 "path": url.path(percentEncoded: true)
                     + (url.query(percentEncoded: true).map { "?" + $0 } ?? ""),
-                "headers": prepared.allHTTPHeaderFields ?? [:], "size": size, "sha256": digest,
+                "headers": RelayTransport.stagedHeaders(prepared.allHTTPHeaderFields ?? [:]), "size": size, "sha256": digest,
             ], original: original)
         let (grantData, grantResponse) = try await session.data(
             for: grantRequest, delegate: RelayNoRedirect())

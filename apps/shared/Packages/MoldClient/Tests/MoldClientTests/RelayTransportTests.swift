@@ -9,6 +9,7 @@ private final class RelayTransportStub: StubTransport {
         + String(repeating: "a", count: 64) + "&X-Amz-Expires=900"
     nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var infoStatus = 200
+    nonisolated(unsafe) static var grantBody: Data?
     override class func response(for path: String) -> (status: Int, body: Data)? {
         let json: String
         switch path {
@@ -29,6 +30,21 @@ private final class RelayTransportStub: StubTransport {
     }
     override func startLoading() {
         Self.requests.append(request)
+        if request.url?.path == "/_mold/relay/uploads" {
+            Self.grantBody = request.httpBody
+            if Self.grantBody == nil, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var body = Data()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count <= 0 { break }
+                    body.append(buffer, count: count)
+                }
+                Self.grantBody = body
+            }
+        }
         if request.url?.path == "/api/object" {
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
@@ -68,11 +84,25 @@ struct RelayTransportTests {
         request.httpMethod = method
         request.httpBody = Data(repeating: 7, count: 2_097_153)
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer credential", forHTTPHeaderField: "Authorization")
+        request.setValue("credential=secret", forHTTPHeaderField: "Cookie")
+        request.setValue("keep-alive, x-hop-secret", forHTTPHeaderField: "Connection")
+        request.setValue("connection-private", forHTTPHeaderField: "X-Hop-Secret")
+        request.setValue("private", forHTTPHeaderField: "X-Mold-Viewer-Secret")
+        request.setValue("operation-1", forHTTPHeaderField: "X-Mold-Operation-Id")
         _ = try await backend.send(request)
         #expect(
             RelayTransportStub.requests.map { $0.url!.path }.filter { $0 != "/_mold/relay/info" } == [
                 "/_mold/relay/uploads", "/object", "/_mold/relay/request",
             ])
+        let grantRequest = try #require(RelayTransportStub.requests.first { $0.url?.path == "/_mold/relay/uploads" })
+        let grantBody = try #require(RelayTransportStub.grantBody)
+        #expect(grantRequest.value(forHTTPHeaderField: "X-Api-Key") == "secret")
+        let metadata = try #require(JSONSerialization.jsonObject(with: grantBody) as? [String: Any])
+        let metadataHeaders = try #require(metadata["headers"] as? [String: String])
+        let normalized = Dictionary(uniqueKeysWithValues: metadataHeaders.map { ($0.key.lowercased(), $0.value) })
+        // The TypeScript integration test submits this same wire metadata to the actual cloud validator.
+        #expect(normalized == ["content-type": "application/octet-stream", "x-mold-operation-id": "operation-1"])
         let upload = try #require(
             RelayTransportStub.requests.first {
                 $0.url?.host == "mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com"

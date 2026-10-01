@@ -91,6 +91,27 @@ enum RelayTransport {
     }
 }
 
+extension RelayTransport {
+    static func stagedHeaders(_ headers: [String: String]) -> [String: String] {
+        var excluded: Set<String> = [
+            "authorization", "x-api-key", "cookie", "host", "content-length",
+            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "te", "trailer", "transfer-encoding", "upgrade", "x-amz-content-sha256",
+            "x-mold-request-target",
+        ]
+        for (_, value) in headers.filter({ $0.key.lowercased() == "connection" }) {
+            excluded.formUnion(value.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces).lowercased()
+            })
+        }
+        return headers.filter { name, _ in
+            let name = name.lowercased()
+            return !excluded.contains(name) && !name.hasPrefix("x-mold-viewer-")
+                && !name.hasPrefix("x-mold-relay-")
+        }
+    }
+}
+
 actor RelayDiscovery {
     private var origins: [String: RelayTransport.Info] = [:]
     func info(origin: URL, session: URLSession) async throws -> RelayTransport.Info {
