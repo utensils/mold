@@ -52,7 +52,11 @@ export function normalizeEvent(event) {
     ).toString();
   const canonical = `${route}${query ? "?" + query : ""}`;
   const target = headers["x-mold-request-target"] ?? canonical;
-  if (!safeTarget(target) || !safeTarget(route))
+  if (
+    !safeTarget(target) ||
+    !safeTarget(route) ||
+    decodeURIComponent(target.split("?")[0]) !== decodeURIComponent(route)
+  )
     throw new Error("Invalid request target");
   const body = Buffer.from(
     event.body ?? "",
@@ -65,7 +69,7 @@ export function normalizeEvent(event) {
 const cors = {
   "access-control-allow-origin": "*",
   "access-control-expose-headers":
-    "x-mold-relay-object,x-mold-relay-protocol,content-range,content-length,x-mold-seed-used,x-mold-generation-time-ms,x-mold-gpu",
+    "x-mold-relay-request-state,etag,retry-after,x-mold-request-warning,x-mold-thumbnail-rendition,x-mold-relay-object,x-mold-relay-protocol,content-range,content-length,x-mold-seed-used,x-mold-generation-time-ms,x-mold-gpu",
   "x-mold-relay-protocol": "2",
   "cache-control": "no-store",
 };
@@ -99,9 +103,9 @@ export function createFrontend(dependencies = {}) {
       typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
         ? awslambda.HttpResponseStream.from(raw, {
             statusCode: status,
-            headers: { ...cors, ...headers },
+            headers: { ...headers, ...cors },
           })
-        : (raw.setMetadata?.(status, { ...cors, ...headers }), raw);
+        : (raw.setMetadata?.(status, { ...headers, ...cors }), raw);
     out.write("");
     return out;
   };
@@ -135,6 +139,7 @@ export function createFrontend(dependencies = {}) {
       expiresAt = Math.floor(Date.now() / 1000) + 900;
     await deps.store.put(`media#${id}`, {
       state: "pending",
+      createdAt: Math.floor(Date.now() / 1000),
       credential: credentialDigest(request.headers),
       sid,
       expiresAt,
@@ -166,7 +171,13 @@ export function createFrontend(dependencies = {}) {
     let result;
     try {
       result = await deps.request(event.request);
-      if (result.sid !== event.sid || result.response.statusCode !== 200)
+      if (
+        result.sid !== event.sid ||
+        result.response.statusCode !== 200 ||
+        String(result.response.headers["content-type"] ?? "")
+          .toLowerCase()
+          .startsWith("text/event-stream")
+      )
         throw new Error("Media refused");
       const object = await deps.stage(
         result.response,
@@ -233,6 +244,9 @@ export function createFrontend(dependencies = {}) {
         });
         return;
       }
+      const publicRead =
+        ["GET", "HEAD"].includes(request.method) &&
+        ["/health", "/api/docs", "/api/openapi.json"].includes(request.route);
       const readTicket =
         ["GET", "HEAD"].includes(request.method) &&
         /^\/api\/gallery\/(image|thumbnail|preview|assets|source-media)\//.test(
@@ -248,7 +262,8 @@ export function createFrontend(dependencies = {}) {
           request.route.startsWith("/_mold/relay/")) &&
         !request.headers["x-api-key"] &&
         !readTicket &&
-        !publicClaim
+        !publicClaim &&
+        !publicRead
       ) {
         json(raw, 401, { error: "missing X-Api-Key header" });
         return;
@@ -280,11 +295,13 @@ export function createFrontend(dependencies = {}) {
             sid,
           );
         cleanup = entry.cleanup;
-        mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
-          entry.method,
-        );
         result = await deps.request({
           method: entry.method,
+          onForwardAttempt: () => {
+            mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
+              entry.method,
+            );
+          },
           path: entry.path,
           headers: {
             ...entry.headers,
@@ -303,7 +320,11 @@ export function createFrontend(dependencies = {}) {
         request.method === "POST"
       ) {
         const { path } = JSON.parse(request.body.toString());
-        if (!safeTarget(path) || !path.startsWith("/api/"))
+        if (
+          !safeTarget(path) ||
+          !path.startsWith("/api/") ||
+          new URL(path, "https://mold.invalid").pathname === "/api/events"
+        )
           throw new Error("Invalid media path");
         json(raw, 202, await createMedia({ ...request, path }));
         return;
@@ -322,7 +343,15 @@ export function createFrontend(dependencies = {}) {
         )
           throw new Error("Media grant refused");
         json(raw, 200, {
-          state: job.state === "working" ? "pending" : job.state,
+          state:
+            job.state === "pending" &&
+            Math.floor(Date.now() / 1000) -
+              (job.createdAt ?? job.expiresAt - 900) >
+              90
+              ? "failed"
+              : job.state === "working"
+                ? "pending"
+                : job.state,
           ...(job.state === "ready"
             ? {
                 url: await deps.objectURL(
@@ -345,7 +374,8 @@ export function createFrontend(dependencies = {}) {
         return;
       } else if (
         ["GET", "HEAD"].includes(request.method) &&
-        !request.route.startsWith("/api/")
+        !request.route.startsWith("/api/") &&
+        request.route !== "/health"
       ) {
         const asset =
           /^\/(assets|fonts)\//.test(request.route) ||
@@ -359,17 +389,27 @@ export function createFrontend(dependencies = {}) {
             (asset ? "application/octet-stream" : "text/html"),
         });
         hasOutput = true;
-        if (request.method === "HEAD") out.end();
-        else await pipeline(shell.Body, out);
+        if (request.method === "HEAD") {
+          shell.Body.destroy();
+          out.end();
+        } else await pipeline(shell.Body, out);
         return;
       } else {
-        mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
-          request.method,
-        );
-        result = await deps.request(request);
+        result = await deps.request({
+          ...request,
+          onForwardAttempt: () => {
+            mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
+              request.method,
+            );
+          },
+        });
       }
       const response = result.response,
-        headers = cleanHeaders(response.headers, { response: true });
+        headers = Object.fromEntries(
+          Object.entries(
+            cleanHeaders(response.headers, { response: true }),
+          ).filter(([key]) => !key.toLowerCase().startsWith("access-control-")),
+        );
       if (
         request.route === "/api/gallery/media-token" &&
         request.method === "POST" &&

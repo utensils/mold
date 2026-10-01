@@ -67,7 +67,7 @@ test("offline browser shell and info load without host access; metrics aliases d
     event("/api/status", "GET", "", { "x-mold-request-target": "/metrics" }),
     out,
   );
-  assert.equal(out.status, 404);
+  assert.equal(out.status, 503); // Routed-path aliases are rejected before forwarding.
   assert.equal(calls, 0);
 });
 test("unknown finite response above 200MB stages once before viewer headers; mutation is not replayed", async () => {
@@ -297,4 +297,146 @@ test("relay media enrichment preserves the original host ticket expiry", async (
   const ticket = JSON.parse(out.value());
   assert.equal(ticket.expires_at, 1234);
   assert.equal(ticket.relay.state, "pending");
+});
+test("original request target cannot change routed path or bypass key admission", async () => {
+  let calls = 0;
+  const frontend = createFrontend({
+    request: async () => {
+      calls++;
+      throw Error("unexpected");
+    },
+  });
+  const out = writer();
+  await frontend(
+    event("/api/pairing/claim", "POST", "", {
+      "x-mold-request-target": "/api/queue",
+    }),
+    out,
+  );
+  assert.equal(calls, 0);
+  assert.notEqual(out.status, 200);
+});
+test("expired pending stage jobs fail promptly without another tunnel", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const { credentialDigest } = await import("../transfers.mjs");
+  const headers = { "x-api-key": "fixture" };
+  const frontend = createFrontend({
+    store: {
+      get: async () => ({
+        state: "pending",
+        createdAt: Math.floor(Date.now() / 1000) - 91,
+        expiresAt: Math.floor(Date.now() / 1000) + 800,
+        credential: credentialDigest(headers),
+      }),
+    },
+  });
+  const out = writer();
+  await frontend(event(`/_mold/relay/media/${id}`, "GET", "", headers), out);
+  assert.equal(JSON.parse(out.value()).state, "failed");
+});
+test("stager refuses SSE and closes its upstream", async () => {
+  let closed = false,
+    staged = false;
+  const frontend = createFrontend({
+    store: {
+      get: async () => ({
+        state: "pending",
+        sid: "s",
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+        revision: 1,
+      }),
+      cas: async () => true,
+      put: async (_id, value) => {
+        assert.equal(value.state, "failed");
+      },
+    },
+    request: async () => ({
+      sid: "s",
+      response: response("event", { "content-type": "text/event-stream" }),
+      close() {
+        closed = true;
+      },
+    }),
+    stage: async () => {
+      staged = true;
+    },
+  });
+  await frontend(
+    {
+      kind: "stage",
+      id: "fixture",
+      sid: "s",
+      request: { path: "/api/events" },
+    },
+    writer(),
+  );
+  assert.equal(staged, false);
+  assert.equal(closed, true);
+});
+test("shell HEAD destroys unused S3 response body", async () => {
+  const body = Readable.from(["shell"]);
+  const frontend = createFrontend({ shell: async () => ({ Body: body }) });
+  await frontend(event("/create", "HEAD"), writer());
+  assert.equal(body.destroyed, true);
+});
+test("host CORS cannot override relay wildcard; outcome header exposed", async () => {
+  const frontend = createFrontend({
+    request: async () => ({
+      sid: "s",
+      response: response("ok", {
+        "content-length": "2",
+        "access-control-allow-origin": "http://private",
+      }),
+      close() {},
+    }),
+  });
+  const out = writer();
+  await frontend(
+    event("/api/status", "GET", "", { "x-api-key": "fixture" }),
+    out,
+  );
+  assert.equal(out.headers["access-control-allow-origin"], "*");
+  assert.match(
+    out.headers["access-control-expose-headers"],
+    /x-mold-relay-request-state/,
+  );
+});
+test("mutation outcomes distinguish connect refusal from forwarding attempts", async () => {
+  for (const forwarded of [false, true]) {
+    const frontend = createFrontend({
+      request: async (req) => {
+        if (forwarded) req.onForwardAttempt();
+        throw Error("offline");
+      },
+    });
+    const out = writer();
+    await frontend(
+      event("/api/queue", "POST", "{}", { "x-api-key": "fixture" }),
+      out,
+    );
+    assert.equal(
+      out.headers["x-mold-relay-request-state"],
+      forwarded ? "outcome-unknown" : "not-forwarded",
+    );
+  }
+});
+test("health and public API documents forward instead of shell or admission401", async () => {
+  const paths = [];
+  const frontend = createFrontend({
+    request: async (req) => {
+      paths.push(req.path);
+      return {
+        sid: "s",
+        response: response("up", { "content-length": "2" }),
+        close() {},
+      };
+    },
+  });
+  for (const path of ["/health", "/api/docs", "/api/openapi.json"]) {
+    const out = writer();
+    await frontend(event(path), out);
+    assert.equal(out.status, 200);
+    assert.equal(out.value(), "up");
+  }
+  assert.deepEqual(paths, ["/health", "/api/docs", "/api/openapi.json"]);
 });

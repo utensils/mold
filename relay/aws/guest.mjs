@@ -146,6 +146,7 @@ export async function openRequest(
     headers = {},
     body = Buffer.alloc(0),
     size = body?.length ?? 0,
+    onForwardAttempt = () => {},
   },
   { guestFactory = createGuest } = {},
 ) {
@@ -176,6 +177,7 @@ export async function openRequest(
     request.on("finish", () => {
       if (!guest.socket.writableEnded) guest.socket.end();
     });
+    onForwardAttempt();
     if (Buffer.isBuffer(body)) {
       request.end(body);
     } else pipeline(body, request).catch(reject);
