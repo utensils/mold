@@ -164,3 +164,5 @@ Hosting requires an explicitly running authenticated `mold serve` and connector.
 Native macOS This Mac remains private; the GUI does not automatically open a
 tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
 are never replayed by the relay.
+
+Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.

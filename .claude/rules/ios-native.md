@@ -51,3 +51,5 @@ paths:
 **Live Activity layout.** Keep the Lock Screen card within 160 pt including padding; `ActivityCard` offers a compact fallback before clipping status or Stop. The step figure and machine name are separate labels (strip only the exact legacy machine suffix in `ActivityCardContent`, without changing the ActivityKit wire payload). Preserve the stale refresh message, terminal print deep link, and 44 pt Stop target. `--live-activity-fixture` is Debug-only UAT, never a render or a distribution feature.
 
 **UI test reports.** `make uitest` retries a failed test once in a fresh test process; a repeated failure must still fail the audit. Keep full logs and per-device/appearance result bundles in `build/UITestResults`, uploaded by CI even on failure. `scripts/tests/ios-uitest-runner.sh` verifies the retry bound and pipeline failure propagation with stubs.
+
+Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.

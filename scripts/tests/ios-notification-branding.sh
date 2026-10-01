@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+activity=apps/ios/Sources/Widgets/GenerationLiveActivity.swift
+! rg 'UIImage|checkmark|wand.and.sparkles|exclamationmark.triangle.fill' "$activity"
+python3 - <<'CHECK'
+from pathlib import Path
+source = Path("apps/ios/Sources/Widgets/GenerationLiveActivity.swift").read_text()
+leading = source.split("} compactLeading: {", 1)[1].split("} compactTrailing:", 1)[0]
+assert "ActivityBrandIcon()" in leading
+minimal = source.split("} minimal: {", 1)[1].split(".widgetURL", 1)[0]
+assert "ActivityRing(state: context.state)" in minimal
+preview = source.split("struct ActivityPreview:", 1)[1].split("private struct ActivityRing:", 1)[0]
+assert "ActivityBrandIcon()" in preview and "context.state.preview" not in preview
+ring = source.split("private struct ActivityRing:", 1)[1]
+for phase, end in [("running", "finished"), ("finished", "failed"), ("failed", None)]:
+    body = ring.split(f"case .{phase}:", 1)[1]
+    if end:
+        body = body.split(f"case .{end}:", 1)[0]
+    assert "ActivityBrandIcon()" in body, phase
+CHECK
+asset=apps/ios/Sources/Widgets/Resources/Assets.xcassets/MoldLogo.imageset/MoldLogo.png
+cmp "$asset" apps/ios/Sources/Companion/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+rg -q 'Image\("MoldLogo"\)' apps/ios/Sources/Widgets/ActivityBrandIcon.swift
+printf 'iOS notification branding ok\n'
