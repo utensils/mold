@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 activity=apps/ios/Sources/Widgets/GenerationLiveActivity.swift
-! grep -E 'UIImage|checkmark|wand.and.sparkles|exclamationmark.triangle.fill' "$activity"
+if grep -E 'UIImage|checkmark|wand.and.sparkles|exclamationmark.triangle.fill' "$activity"; then exit 1; fi
 python3 - <<'CHECK'
 from pathlib import Path
 source = Path("apps/ios/Sources/Widgets/GenerationLiveActivity.swift").read_text()
@@ -28,5 +28,5 @@ with open(sys.argv[1], "rb") as image:
 assert header[:8] == b"\x89PNG\r\n\x1a\n"
 assert struct.unpack(">II", header[16:24]) == (128, 128)
 PNG
-grep -q 'Image\("MoldLogo"\)' apps/ios/Sources/Widgets/ActivityBrandIcon.swift
+grep -Fq 'Image("MoldLogo")' apps/ios/Sources/Widgets/ActivityBrandIcon.swift
 printf 'iOS notification branding ok\n'
