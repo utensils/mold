@@ -29,6 +29,7 @@ COPY studio/package.json studio/package.json
 COPY ui/package.json ui/package.json
 COPY web/package.json web/package.json
 COPY desktop/package.json desktop/package.json
+COPY relay/aws/package.json relay/aws/package.json
 RUN bun install --frozen-lockfile
 COPY studio studio
 COPY ui ui
