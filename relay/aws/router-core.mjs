@@ -139,12 +139,15 @@ export function createRouter({
     }
   }
   async function message(id, body) {
-    if (typeof body !== "string" || Buffer.byteLength(body) > FRAME_LIMIT)
+    if (typeof body !== "string" || Buffer.byteLength(body) > FRAME_LIMIT) {
+      console.warn("Mold relay frame refusal", "body-format-or-size");
       return 400;
+    }
     let frame;
     try {
       frame = JSON.parse(body);
     } catch {
+      console.warn("Mold relay frame refusal", "json-format");
       return 400;
     }
     const connection = await store.get(`connection#${id}`);
@@ -184,10 +187,24 @@ export function createRouter({
           return { ...old, guests: { ...old.guests, [id]: now() + LIVE } };
         return null;
       });
-      if (!updated) return 403;
+      if (!updated) {
+        console.warn(
+          "Mold relay frame refusal",
+          "heartbeat-host-renewal",
+          connection.role,
+        );
+        return 403;
+      }
       for (let attempt = 0; attempt < 8; attempt++) {
         const current = await store.get(`connection#${id}`);
-        if (!current || current.sid !== connection.sid) return 403;
+        if (!current || current.sid !== connection.sid) {
+          console.warn(
+            "Mold relay frame refusal",
+            "heartbeat-connection-renewal",
+            connection.role,
+          );
+          return 403;
+        }
         if (
           await store.cas(`connection#${id}`, current.revision, {
             ...current,
@@ -251,8 +268,14 @@ export function createRouter({
         return 200;
       target = frame.rid;
     } else {
-      if (frame.rid !== id || (host.guests?.[id] ?? 0) <= now()) return 403;
-      if (frame.a === "accept") return 403;
+      if (frame.rid !== id || (host.guests?.[id] ?? 0) <= now()) {
+        console.warn("Mold relay frame refusal", "frontend-identity-or-lease");
+        return 403;
+      }
+      if (frame.a === "accept") {
+        console.warn("Mold relay frame refusal", "frontend-accept");
+        return 403;
+      }
       target = host.connectionId;
     }
     const { from: ignored, to: ignoredTo, ...safe } = frame;
