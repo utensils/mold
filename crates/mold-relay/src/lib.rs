@@ -533,7 +533,7 @@ where
                     else { activity.send_replace(tokio::time::Instant::now()); Wire::Bytes(buffer[..n].to_vec()) }
                 },
                 event = events_rx.recv() => match event {
-                    Some(Wire::Eof) => { peer_eof = true; if local_eof { cancel.cancel(); return Ok(()); } continue; },
+                    Some(Wire::Eof) => { peer_eof = true; if local_eof { close_bridge(&mut sink, &cancel).await; return Ok(()); } continue; },
                     Some(event) => event,
                     None => return Ok(()),
                 },
@@ -544,7 +544,7 @@ where
                 result = tokio::time::timeout(LIVENESS, sink.send(message)) => { result.context("relay write timed out")??; }
             }
             if local_eof && peer_eof {
-                cancel.cancel();
+                close_bridge(&mut sink, &cancel).await;
                 return Ok(());
             }
         }
@@ -591,6 +591,22 @@ where
     };
     tokio::try_join!(outgoing, incoming, idle)?;
     Ok(())
+}
+
+// Complete the WS handshake instead of dropping a socket with unread control
+// traffic: TCP may reset it and discard the final tunneled response frames.
+async fn close_bridge<S, E>(sink: &mut S, cancel: &CancellationToken)
+where
+    S: Sink<Wire, Error = E> + Unpin,
+{
+    if !send_bounded(sink, Wire::Close, cancel).await {
+        cancel.cancel();
+        return;
+    }
+    tokio::select! {
+        _ = cancel.cancelled() => {},
+        _ = tokio::time::sleep(LIVENESS) => cancel.cancel(),
+    }
 }
 
 fn ws_request(
@@ -1167,6 +1183,59 @@ mod regression_tests {
             .unwrap()
             .unwrap();
         heartbeat.abort();
+    }
+    #[tokio::test]
+    async fn both_tcp_eofs_complete_websocket_close_handshake() {
+        let (mut client, server, socket, input, mut output) = bridge_fixture().await;
+        let task = tokio::spawn(bridge(
+            server,
+            socket,
+            CancellationToken::new(),
+            Duration::from_secs(300),
+        ));
+        input.send(Wire::Ping(b"queued-control".to_vec())).unwrap();
+        input.send(Wire::Eof).unwrap();
+        client.write_all(b"final response").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut received = Vec::new();
+        let mut saw_eof = false;
+        loop {
+            let message = tokio::time::timeout(Duration::from_millis(200), output.recv())
+                .await
+                .expect("both EOFs did not start WS close handshake")
+                .expect("bridge dropped WS before close handshake");
+            match message {
+                Wire::Bytes(bytes) => received.extend(bytes),
+                Wire::Eof => saw_eof = true,
+                Wire::Close => {
+                    assert!(saw_eof);
+                    assert_eq!(received, b"final response");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(!task.is_finished(), "bridge must drain reciprocal WS Close");
+        input.send(Wire::Close).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn websocket_close_wait_remains_cancellable() {
+        let (_client, _server, mut socket, _input, mut output) = bridge_fixture().await;
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let task = tokio::spawn(async move { close_bridge(&mut socket, &stop).await });
+        assert!(matches!(output.recv().await, Some(Wire::Close)));
+        assert!(!task.is_finished());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
     #[tokio::test]
     async fn half_closed_stream_still_handles_ping_and_close() {

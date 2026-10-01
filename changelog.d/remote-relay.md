@@ -4,3 +4,5 @@
   and saved generation results recover through the durable queue.
 - Authenticated servers now allow the browser shell and its assets to load before
   API authentication; API and media permission checks remain enforced.
+- Direct relay streams now complete the WebSocket close handshake after both TCP
+  directions end, preserving final responses when heartbeat traffic is pending.
