@@ -468,3 +468,36 @@ test("encoded HEAD target preserves exact bytes on matching routed path", async 
   );
   assert.equal(forwarded.method, "HEAD");
 });
+test("encoded API route aliases still require credentials", async () => {
+  let calls = 0;
+  const f = createFrontend({
+    request: async () => {
+      calls++;
+      throw Error();
+    },
+  });
+  const out = writer();
+  await f(
+    event("/%61pi/status", "GET", "", {
+      "x-mold-request-target": "/api/status",
+    }),
+    out,
+  );
+  assert.equal(out.status, 401);
+  assert.equal(calls, 0);
+});
+test("host private cache policy survives relay CORS enforcement", async () => {
+  const f = createFrontend({
+    request: async () => ({
+      sid: "s",
+      response: response("ok", {
+        "content-length": "2",
+        "cache-control": "private,max-age=300",
+      }),
+      close() {},
+    }),
+  });
+  const out = writer();
+  await f(event("/api/status", "GET", "", { "x-api-key": "fixture" }), out);
+  assert.equal(out.headers["cache-control"], "private,max-age=300");
+});

@@ -103,9 +103,24 @@ export function createFrontend(dependencies = {}) {
       typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
         ? awslambda.HttpResponseStream.from(raw, {
             statusCode: status,
-            headers: { ...headers, ...cors },
+            headers: {
+              ...cors,
+              ...headers,
+              "access-control-allow-origin": "*",
+              "access-control-expose-headers":
+                cors["access-control-expose-headers"],
+              "x-mold-relay-protocol": "2",
+            },
           })
-        : (raw.setMetadata?.(status, { ...headers, ...cors }), raw);
+        : (raw.setMetadata?.(status, {
+            ...cors,
+            ...headers,
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers":
+              cors["access-control-expose-headers"],
+            "x-mold-relay-protocol": "2",
+          }),
+          raw);
     out.write("");
     return out;
   };
@@ -165,6 +180,7 @@ export function createFrontend(dependencies = {}) {
       !(await deps.store.cas(`media#${event.id}`, job.revision, {
         ...job,
         state: "working",
+        workingAt: Math.floor(Date.now() / 1000),
       }))
     )
       return;
@@ -266,7 +282,7 @@ export function createFrontend(dependencies = {}) {
       const publicClaim =
         request.route === "/api/pairing/claim" && request.method === "POST";
       if (
-        (request.route.startsWith("/api/") ||
+        (decodeURIComponent(request.route).startsWith("/api/") ||
           request.route.startsWith("/_mold/relay/")) &&
         !request.headers["x-api-key"] &&
         !readTicket &&
