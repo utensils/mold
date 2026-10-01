@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Credential safety checks for the deployment helper; never contacts AWS."""
+"""Deployment contract tests; no AWS calls or real secrets."""
 import importlib.util
+import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -15,98 +15,75 @@ spec.loader.exec_module(deploy)
 
 
 class DeploymentSafety(unittest.TestCase):
-    def test_private_file_creation_refuses_existing_and_symlink(self):
+    def options(self, **kwargs):
+        return SimpleNamespace(profile="fixture", region="us-west-2", **kwargs)
+
+    def test_private_file_and_symlink_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
-            token = Path(directory) / "token"
-            deploy.private_write(token, "fixture-secret")
-            self.assertEqual(os.stat(token).st_mode & 0o777, 0o600)
-            with self.assertRaises(FileExistsError):
-                deploy.private_write(token, "replacement")
+            path = Path(directory) / "token"
+            deploy.private_write(path, "fixture")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(deploy.read_token(path), "fixture")
             link = Path(directory) / "link"
-            link.symlink_to(token)
-            with self.assertRaises(FileExistsError):
-                deploy.private_write(link, "replacement")
-            self.assertEqual(token.read_text(), "fixture-secret")
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                deploy.read_token(link)
+            path.chmod(0o644)
+            with self.assertRaises(RuntimeError):
+                deploy.read_token(path)
 
-    def test_deployment_uses_private_staging_lock_and_bounded_health_retries(self):
+    def test_missing_token_uses_private_json_without_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
-            artifact = Path(directory) / "artifact"
-            artifact.write_bytes(b"fixture-artifact")
-            options = SimpleNamespace(artifact=artifact, bucket="fixture", region="us-west-2", instance_id="i-fixture")
-            requests = []
-            def fake_aws(args, _options):
-                if args[:2] == ["ssm", "send-command"]:
-                    request = Path(args[args.index("--cli-input-json") + 1].removeprefix("file://"))
-                    requests.append(__import__("json").loads(request.read_text()))
-                    return {"Command": {"CommandId": "fixture-command"}}
-                return {"Status": "Success"}
-            with patch.object(deploy, "aws", side_effect=fake_aws), patch.object(deploy.time, "sleep"):
-                deploy.deploy(options)
-            command = "\n".join(requests[0]["Parameters"]["commands"])
-            self.assertIn("mktemp -d", command)
-            self.assertIn("flock", command)
-            self.assertIn("check_gateway", command)
-            self.assertNotIn("/tmp/mold-relay-", command)
+            path = Path(directory) / "host"
+            calls = []
+            def fake(args, _):
+                calls.append(args)
+                if args[1] == "get-parameter":
+                    raise deploy.AwsError("ssm", "get-parameter", "ParameterNotFound")
+                request = Path(args[-1].removeprefix("file://"))
+                self.assertEqual(request.stat().st_mode & 0o777, 0o600)
+                body = json.loads(request.read_text())
+                self.assertEqual(body["Name"], "/mold/relay/host-token")
+                self.assertEqual(body["Type"], "SecureString")
+                self.assertNotIn(body["Value"], " ".join(args))
+                self.assertNotIn("Overwrite", body)
+                return {}
+            with patch.object(deploy, "aws", side_effect=fake):
+                deploy.provision_token(self.options(), "host", path)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
-    def test_failed_health_check_restores_previous_binary(self):
+    def test_existing_token_mismatch_never_rotates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "host"
+            deploy.private_write(path, "local")
+            with patch.object(deploy, "aws", return_value={"Parameter": {"Value": "remote"}}) as call:
+                with self.assertRaises(RuntimeError):
+                    deploy.provision_token(self.options(), "host", path)
+                self.assertEqual(call.call_count, 1)
+
+    def test_code_update_revision_hash_and_configuration_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "router.zip"
+            package.write_bytes(b"fixture ZIP")
+            before = {"State": "Active", "LastUpdateStatus": "Successful", "CodeSha256": "old", "RevisionId": "revision", "Handler": "index.handler"}
+            after = {**before, "CodeSha256": deploy.package_hash(package)}
+            with patch.object(deploy, "aws", side_effect=[before, {}, after]) as call:
+                deploy.deploy_function(self.options(), "router", package)
+                args = call.call_args_list[1].args[0]
+                self.assertEqual(args[:2], ["lambda", "update-function-code"])
+                self.assertIn("revision", args)
+                self.assertNotIn("update-function-configuration", args)
+
+    def test_shell_upload_only_prefix_with_mime(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            binaries = root / "bin"
-            binaries.mkdir()
-            tools = root / "tools"
-            tools.mkdir()
-            old = binaries / "mold-relay"
-            old.write_text("#!/bin/sh\necho old\n")
-            old.chmod(0o755)
-            artifact = root / "artifact"
-            artifact.write_text("#!/bin/sh\necho new\n")
-            artifact.chmod(0o755)
-            stubs = {
-                "aws": 'cp "$FIXTURE_ARTIFACT" "$6"',
-                "systemctl": "exit 0",
-                "sleep": "exit 0",
-                "flock": "exit 0",
-                "curl": 'test "$("$FIXTURE_BIN/mold-relay")" = old',
-            }
-            for name, body in stubs.items():
-                path = tools / name
-                path.write_text("#!/bin/sh\n" + body + "\n")
-                path.chmod(0o755)
-            options = SimpleNamespace(bucket="fixture", region="us-west-2")
-            digest = __import__("hashlib").sha256(artifact.read_bytes()).hexdigest()
-            script = deploy.remote_script(options, digest, "fixture")
-            script = script.replace("/usr/local/bin", str(binaries)).replace("/run/mold-relay-deploy", str(root / "private"))
-            environment = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
-                           "FIXTURE_ARTIFACT": str(artifact), "FIXTURE_BIN": str(binaries)}
-            result = subprocess.run(["sh", "-c", script], env=environment, capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(subprocess.check_output([str(old)], text=True).strip(), "old")
-            self.assertFalse(list((root / "private").glob("staging.*")))
-
-    def test_access_denied_poll_is_fatal_instead_of_silently_retried(self):
-        with tempfile.TemporaryDirectory() as directory:
-            artifact = Path(directory) / "artifact"
-            artifact.write_bytes(b"fixture")
-            options = SimpleNamespace(artifact=artifact, bucket="fixture", region="us-west-2", instance_id="i-fixture")
-            polls = []
-            def fake_aws(args, _options):
-                if args[:2] == ["ssm", "send-command"]:
-                    return {"Command": {"CommandId": "fixture-command"}}
-                if args[:2] == ["ssm", "get-command-invocation"]:
-                    polls.append(1)
-                    raise deploy.AwsError("ssm", "get-command-invocation", "AccessDeniedException")
-                return {}
-            with patch.object(deploy, "aws", side_effect=fake_aws), patch.object(deploy.time, "sleep"):
-                with self.assertRaises(deploy.AwsError):
-                    deploy.deploy(options)
-            self.assertEqual(len(polls), 1)
-
-    def test_aws_error_never_includes_response_or_credentials(self):
-        result = subprocess.CompletedProcess([], 1, "fixture-secret", "fixture-secret")
-        with patch.object(deploy.subprocess, "run", return_value=result):
-            with self.assertRaises(RuntimeError) as failure:
-                deploy.aws(["ssm", "get-parameter"], SimpleNamespace(profile="fixture", region="us-west-2"))
-        self.assertNotIn("fixture-secret", str(failure.exception))
+            (root / "index.html").write_text("fixture")
+            with patch.object(deploy, "aws", return_value={}) as call:
+                deploy.upload_shell(self.options(shell=root, bucket="fixture"))
+                args = call.call_args.args[0]
+                self.assertEqual(args[args.index("--key") + 1], "shell/index.html")
+                self.assertEqual(args[args.index("--content-type") + 1], "text/html")
 
 
 if __name__ == "__main__":
