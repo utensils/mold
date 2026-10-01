@@ -37,7 +37,7 @@ extension HTTPBackend {
                 url.path(percentEncoded: true) + (url.query(percentEncoded: true).map { "?" + $0 } ?? ""),
                 forHTTPHeaderField: "x-mold-request-target")
         }
-        guard ["POST", "PUT", "PATCH"].contains(original.httpMethod ?? "GET") else { return (prepared, file) }
+        guard ["POST", "PUT", "PATCH", "DELETE"].contains(original.httpMethod ?? "GET") else { return (prepared, file) }
         let size: Int
         let digest: String
         if let file {

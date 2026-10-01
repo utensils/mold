@@ -33,57 +33,60 @@ it("preserves encoded request targets and repeated query values", async () => {
     new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-mold-request-target"),
   ).toBe("/api/gallery/image/a%20b.png?media_token=x%2By&part=1&part=2");
 });
-it("stages arbitrary large bodies and never carries Mold credentials to S3", async () => {
-  const calls: { url: string; init?: RequestInit }[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url, init) => {
-      calls.push({ url: String(url), init });
-      if (String(url).endsWith("/info"))
-        return Response.json({
-          protocol: 2,
-          object_origin:
-            "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com",
-          upload_threshold: 2097152,
-          max_body_bytes: 67108864,
-        });
-      if (String(url).endsWith("/uploads"))
-        return Response.json({
-          id: "up1",
-          url: "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
-          headers: {},
-          expires_at: 9999999999,
-        });
-      return new Response("original");
-    }),
-  );
-  const body = new Uint8Array(2097153).fill(7);
-  const response = await relayFetch(
-    "https://machine.example/api/arbitrary?query=1",
-    {
-      method: "PATCH",
-      headers: {
-        "x-api-key": "secret",
-        "content-type": "application/octet-stream",
+it.each(["PATCH", "DELETE"])(
+  "stages large %s bodies without Mold credentials to S3",
+  async (method) => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        calls.push({ url: String(url), init });
+        if (String(url).endsWith("/info"))
+          return Response.json({
+            protocol: 2,
+            object_origin:
+              "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com",
+            upload_threshold: 2097152,
+            max_body_bytes: 67108864,
+          });
+        if (String(url).endsWith("/uploads"))
+          return Response.json({
+            id: "up1",
+            url: "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
+            headers: {},
+            expires_at: 9999999999,
+          });
+        return new Response("original");
+      }),
+    );
+    const body = new Uint8Array(2097153).fill(7);
+    const response = await relayFetch(
+      "https://machine.example/api/arbitrary?query=1",
+      {
+        method,
+        headers: {
+          "x-api-key": "secret",
+          "content-type": "application/octet-stream",
+        },
+        body,
       },
-      body,
-    },
-  );
-  expect(await response.text()).toBe("original");
-  expect(calls.map((c) => c.url)).toEqual([
-    "https://machine.example/_mold/relay/info",
-    "https://machine.example/_mold/relay/uploads",
-    "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
-    "https://machine.example/_mold/relay/request",
-  ]);
-  expect(new Headers(calls[2]?.init?.headers).has("x-api-key")).toBe(false);
-  expect(calls[2]?.init?.redirect).toBe("error");
-  const grant = JSON.parse(String(calls[1]?.init?.body));
-  expect(grant.path).toBe("/api/arbitrary?query=1");
-  expect(grant.method).toBe("PATCH");
-  expect(grant.size).toBe(body.length);
-  expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({ id: "up1" });
-});
+    );
+    expect(await response.text()).toBe("original");
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://machine.example/_mold/relay/info",
+      "https://machine.example/_mold/relay/uploads",
+      "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
+      "https://machine.example/_mold/relay/request",
+    ]);
+    expect(new Headers(calls[2]?.init?.headers).has("x-api-key")).toBe(false);
+    expect(calls[2]?.init?.redirect).toBe("error");
+    const grant = JSON.parse(String(calls[1]?.init?.body));
+    expect(grant.path).toBe("/api/arbitrary?query=1");
+    expect(grant.method).toBe(method);
+    expect(grant.size).toBe(body.length);
+    expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({ id: "up1" });
+  },
+);
 it("follows only explicit same-origin object envelopes without a key", async () => {
   const fetch = vi
     .fn()

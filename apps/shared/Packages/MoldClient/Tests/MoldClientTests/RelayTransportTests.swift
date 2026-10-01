@@ -8,10 +8,12 @@ private final class RelayTransportStub: StubTransport {
         "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com/_mold/objects/clip?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature="
         + String(repeating: "a", count: 64) + "&X-Amz-Expires=900"
     nonisolated(unsafe) static var requests: [URLRequest] = []
+    nonisolated(unsafe) static var infoStatus = 200
     override class func response(for path: String) -> (status: Int, body: Data)? {
         let json: String
         switch path {
         case "/_mold/relay/info":
+            if infoStatus != 200 { return (infoStatus, Data()) }
             json =
                 #"{"protocol":2,"upload_threshold":2097152,"max_body_bytes":67108864,"object_origin":"https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com"}"#
         case "/_mold/relay/uploads":
@@ -59,17 +61,17 @@ struct RelayTransportTests {
             host: MoldHost(name: "relay", baseURL: URL(string: "https://relay.example")!, apiKey: "secret"),
             session: URLSession(configuration: config))
     }
-    @Test func arbitraryLargeBodiesStageWithoutSendingTheMoldKeyToS3() async throws {
+    @Test(arguments: ["PATCH", "DELETE"]) func arbitraryLargeBodiesStageWithoutSendingTheMoldKeyToS3(method: String) async throws {
         RelayTransportStub.requests = []
         let backend = backend()
         var request = backend.request("/api/any-future-route?value=1")
-        request.httpMethod = "PATCH"
+        request.httpMethod = method
         request.httpBody = Data(repeating: 7, count: 2_097_153)
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         _ = try await backend.send(request)
         #expect(
-            RelayTransportStub.requests.map { $0.url!.path } == [
-                "/_mold/relay/info", "/_mold/relay/uploads", "/object", "/_mold/relay/request",
+            RelayTransportStub.requests.map { $0.url!.path }.filter { $0 != "/_mold/relay/info" } == [
+                "/_mold/relay/uploads", "/object", "/_mold/relay/request",
             ])
         let upload = try #require(
             RelayTransportStub.requests.first {
@@ -80,6 +82,20 @@ struct RelayTransportTests {
         let commit = try #require(RelayTransportStub.requests.last)
         #expect(commit.value(forHTTPHeaderField: "X-Api-Key") == "secret")
         #expect(commit.value(forHTTPHeaderField: "x-amz-content-sha256") != nil)
+    }
+    @Test func discoveryFallsBackOnlyOn404AndNeverOn503() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RelayTransportStub.self]
+        let session = URLSession(configuration: configuration)
+        let discovery = RelayDiscovery()
+        defer { RelayTransportStub.infoStatus = 200 }
+        RelayTransportStub.infoStatus = 404
+        let legacy = try await discovery.info(origin: URL(string: "https://legacy.example")!, session: session)
+        #expect(legacy.protocol != 2)
+        RelayTransportStub.infoStatus = 503
+        await #expect(throws: (any Error).self) {
+            try await discovery.info(origin: URL(string: "https://unavailable.example")!, session: session)
+        }
     }
     @Test func pendingMediaResolvesToTheSignedSameOriginURL() async throws {
         let url = try await backend().playableURL(for: "clip.mp4")

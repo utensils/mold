@@ -168,7 +168,7 @@ export async function relayFetch(
   const signal =
     init?.signal ?? (input instanceof Request ? input.signal : null);
   let response: Response;
-  const mutation = ["POST", "PUT", "PATCH"].includes(method);
+  const mutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
   const apiRequest =
     url.protocol === "https:" && url.pathname.startsWith("/api/");
   if (apiRequest)
