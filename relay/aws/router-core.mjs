@@ -106,8 +106,10 @@ export function createRouter({
     }
     return 200;
   }
-  async function leave(id) {
+  async function leave(id, cause = "disconnect") {
     const connection = await store.get(`connection#${id}`);
+    if (connection?.role === "host")
+      console.warn("Mold relay host membership removal", cause, id);
     await store.remove(`connection#${id}`);
     if (!connection) return;
     let affected;
@@ -295,7 +297,7 @@ export function createRouter({
       await post(target, { ...safe, from: id });
     } catch (error) {
       if (error?.$metadata?.httpStatusCode === 410) {
-        await leave(target);
+        await leave(target, "post-gone");
         return connection.role === "host" ? 200 : 503;
       }
       throw error;
