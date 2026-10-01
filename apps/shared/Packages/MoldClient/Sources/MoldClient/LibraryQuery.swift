@@ -88,8 +88,10 @@ public struct LibraryQuery: Hashable, Sendable {
     }
 
     private func isHidden(_ entry: LibraryEntry) -> Bool {
-        guard let hidden = hiddenCollectionIDs[entry.hostID], !hidden.isEmpty else { return false }
-        return entry.print.collectionList.contains(where: hidden.contains)
+        entry.everyCopy.contains { copy in
+            guard let hidden = hiddenCollectionIDs[copy.hostID], !hidden.isEmpty else { return false }
+            return copy.print.collectionList.contains(where: hidden.contains)
+        }
     }
 
     /// Ties are broken by filename, because a batch writes several prints in

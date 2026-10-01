@@ -65,7 +65,7 @@ struct PrintMenu: View {
 
     @ViewBuilder private var collectionMenu: some View {
         Menu {
-            ForEach(library.shelves.filter { !$0.hidden }) { shelf in
+            ForEach(library.shelves) { shelf in
                 let filed = entries.allSatisfy { shelf.count(in: [$0]) > 0 }
                 Button {
                     library.apply(.collection(name: shelf.name, slug: shelf.slug, filing: !filed), to: entries)

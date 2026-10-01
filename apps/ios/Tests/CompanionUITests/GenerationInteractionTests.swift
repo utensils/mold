@@ -141,7 +141,7 @@ final class GenerationInteractionTests: XCTestCase {
         // SwiftUI's accessibility value can lag synthesized keyboard input.
         // Wait for the same text contract, without typing a second time.
         let typed = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value CONTAINS %@", text), object: prompt
+            predicate: NSPredicate { _, _ in (prompt.value as? String)?.contains(text) == true }, object: prompt
         )
         XCTAssertEqual(XCTWaiter.wait(for: [typed], timeout: 5), .completed,
                        "Prompt must retain typed text; actual value: \(String(describing: prompt.value))")

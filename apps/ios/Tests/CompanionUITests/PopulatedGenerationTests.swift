@@ -12,8 +12,9 @@ final class PopulatedGenerationTests: XCTestCase {
         continueAfterFailure = false
         let machine = try FixtureMachine()
         let port = try await machine.start()
-        defer { machine.stop() }
         let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
@@ -66,17 +67,6 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertFalse(app.buttons["More Options"].exists, "The sheet must not offer an inert button to reopen itself")
         attach(app)
         app.buttons["Done"].firstMatch.tap()
-
-        // Remove only this test's local pairing; no remote mutation is possible.
-        app.terminate()
-        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
-        app.launch()
-        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
-        let card = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
-        reveal(card, in: app)
-        card.press(forDuration: 1)
-        app.buttons["Remove…"].firstMatch.tap()
-        app.buttons["Remove"].firstMatch.tap()
     }
 
     @MainActor private func checkLandscapeComposer(_ app: XCUIApplication) throws {
@@ -95,11 +85,13 @@ final class PopulatedGenerationTests: XCTestCase {
         prompt.typeText("Landscape lighthouse")
         XCTAssertTrue((prompt.value as? String)?.contains("Landscape lighthouse") == true)
         app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         let submit = app.buttons["submit-generation"]
         for _ in 0..<12 where !submit.isHittable { composer.swipeUp() }
         XCTAssertTrue(submit.isHittable, "Generate must be reachable in landscape; never tap it in UAT")
         let options = app.buttons.matching(NSPredicate(format: "label == 'Options' OR label == 'More Options'")).firstMatch
         reveal(options, in: app)
+        XCTAssertTrue(options.isHittable)
         options.tap()
         XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
         attach(app)

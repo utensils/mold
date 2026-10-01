@@ -2,14 +2,18 @@ import Foundation
 import Network
 
 /// A loopback-only machine for UI regression tests. It serves real generated
-/// profiles but cannot generate, download, or mutate anything.
+/// profiles and cannot generate or download. Optional collection mutations
+/// update only the fixture’s own in-memory state.
 final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
     private let gallery: Data
+    private let collectionFixture: Bool
+    private var collectionHidden = false
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false) throws {
+        self.collectionFixture = collectionFixture
         var root = URL(fileURLWithPath: #filePath)
         while root.pathComponents.count > 1,
               !FileManager.default.fileExists(atPath: root.appending(path: "docs/generated").path) {
@@ -27,6 +31,7 @@ final class FixtureMachine: @unchecked Sendable {
         gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
             ["filename": "fixture-\(index).png", "timestamp": 1_790_000_000 - index,
              "favorite": index < galleryFavorites,
+             "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
              "metadata": ["prompt": "Fixture \(index)"]] as [String: Any]
         })
         let parameters = NWParameters.tcp
@@ -68,10 +73,24 @@ final class FixtureMachine: @unchecked Sendable {
                 if done || error != nil { connection.cancel() } else { receive(connection, buffer: buffer) }
                 return
             }
-            let request = text.components(separatedBy: "\r\n")[0].split(separator: " ")
+            let parts = text.components(separatedBy: "\r\n\r\n")
+            let headers = parts[0].components(separatedBy: "\r\n")
+            let length = headers.first { $0.lowercased().hasPrefix("content-length:") }
+                .flatMap { Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+            let bodyText = parts.dropFirst().joined(separator: "\r\n\r\n")
+            guard bodyText.utf8.count >= length else {
+                if done || error != nil { connection.cancel() } else { receive(connection, buffer: buffer) }
+                return
+            }
+            let request = headers[0].split(separator: " ")
             let path = request.count > 1 ? String(request[1]).components(separatedBy: "?")[0] : ""
-            let allowed = request.first == "GET" || path == "/api/generate/placement-preview"
-            let body = allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let patchCollection = collectionFixture && request.first == "PATCH"
+                && path == "/api/gallery/collections/fixture-collection"
+            if patchCollection,
+               let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
+               let hidden = object["hidden"] as? Bool { collectionHidden = hidden }
+            let allowed = request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let body = patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
@@ -79,15 +98,26 @@ final class FixtureMachine: @unchecked Sendable {
         }
     }
 
+    private func collection() -> Data {
+        Data(#"{"id":"fixture-collection","name":"UAT Drafts","slug":"uat-drafts","count":1,"hidden":\#(collectionHidden)}"#.utf8)
+    }
+
     private func response(_ path: String) -> Data {
         let json: String
         switch path {
         case "/api/models": return models
         case "/api/status": json = #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
-        case "/api/capabilities": json = #"{"max_batch_outputs":4}"#
+        case "/api/capabilities": json = collectionFixture
+            ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#
+            : #"{"max_batch_outputs":4}"#
         case "/api/queue": json = #"{"entries":[]}"#
         case "/api/gallery": return gallery
-        case "/api/gallery/collections", "/api/gallery/tags": json = "[]"
+        case "/api/gallery/collections":
+            if collectionFixture {
+                var data = Data("[".utf8); data.append(collection()); data.append(Data("]".utf8)); return data
+            }
+            json = "[]"
+        case "/api/gallery/tags": json = "[]"
         case "/api/history": json = #"{"entries":[]}"#
         default: json = "{}"
         }

@@ -73,7 +73,7 @@ struct PromptPanel: View {
         .padding(16)
         .panel(.floating)
         .frame(maxWidth: Self.maxWidth)
-        .frame(maxHeight: maxHeight)
+        .frame(maxHeight: maxHeight, alignment: .bottom)
         // Published the same way the Library's title and tag fields already
         // do, so `ResultStrip`'s arrow-key shortcuts stand down for a caret
         // here exactly as they do for one there.

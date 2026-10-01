@@ -66,12 +66,8 @@ extension LibraryPane {
     /// The query the grid is actually drawing: what was typed, plus the
     /// narrowing the chosen shelf adds.
     var resolved: LibraryQuery {
-        var query = navigation.query
-        query.hiddenCollectionIDs = library.hiddenCollectionIDs
-        if let token = navigation.scope.token(in: library.shelves) {
-            query.tokens.append(token)
-        }
-        return query
+        navigation.scope.resolve(navigation.query, shelves: library.shelves,
+                                 hiddenCollectionIDs: library.hiddenCollectionIDs)
     }
 
     // MARK: - The viewer, the cursor, and what a print seeds

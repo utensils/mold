@@ -153,12 +153,12 @@ import Testing
         }
     }
 
-    /// Every submenu has something in it -- a "Move to Collection" with no
-    /// collections is a dead end.
+    /// New Collection keeps filing available even before the first shelf;
+    /// export menus still require at least one supported format.
     @Test func aSubmenuIsOnlyOfferedWhenItHasEntries() {
-        #expect(!titles(plan(shelves: [])).contains("Move to Collection"))
+        #expect(titles(plan(shelves: [])).contains("Move to Collection"))
         #expect(!titles(plan(formats: [])).contains("Export…"))
         #expect(plan(shelves: [shelf("Smurfs")]).items.first { $0.isSubmenu }?
-            .children.map(\.kind) == [.file(slug: "smurfs")])
+            .children.filter { !$0.isSeparator }.map(\.title) == ["Smurfs", "New Collection…"])
     }
 }

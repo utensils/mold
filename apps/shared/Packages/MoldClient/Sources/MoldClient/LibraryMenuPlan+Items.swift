@@ -53,7 +53,9 @@ public extension LibraryMenuPlan {
             Item(kind: .favorite(!allFavorite), title: favoriteTitle),
             Item(title: "Move to Collection", children: shelves.map {
                 Item(kind: .file(slug: $0.slug), title: $0.name)
-            }),
+            } + (shelves.isEmpty ? [] : [.separator]) + [
+                Item(kind: .newCollection, title: "New Collection…"),
+            ]),
         ]
         if let shelf = enclosingShelf {
             items.append(Item(kind: .unfile(slug: shelf.slug), title: "Remove from \(shelf.name)"))

@@ -53,6 +53,7 @@ struct LibraryPane: View {
     /// The shelf being renamed from the MENU BAR. The sidebar row has its own;
     /// both open the same sheet.
     @State var renamingShelf: CollectionShelf?
+    @State private var newCollectionTargets: [LibraryEntry]?
     /// The mesh export waiting on its controls. Both doors -- the tile's menu
     /// and the viewer's -- open this one sheet.
     @State private var meshExport: MeshExportPrompt?
@@ -66,6 +67,7 @@ struct LibraryPane: View {
                        confirmDestruction: { pendingDestruction = $0 },
                        materializer: materializer, upscales: upscales,
                        collectionAction: { performCollection($0) },
+                       newCollection: { newCollectionTargets = $0 },
                        meshExport: { meshExport = $0 })
     }
 
@@ -78,36 +80,7 @@ struct LibraryPane: View {
         let showing = index.showing(pool: pool, revision: library.rows.value,
                                     query: resolved, selection: selection.items)
         return watched(showing)
-            .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 0) {
-                    if let progress = library.localSaveProgress {
-                        bulkStatusRow(progress) {
-                            Button("Stop After Current Transfers") { library.localSaveStopRequested = true }
-                                .disabled(library.localSaveStopRequested)
-                        }
-                    }
-                    if let progress = library.bulkProgress {
-                        bulkStatusRow(progress) {
-                            Button(library.bulkEmptying ? "Stop After Current Machine" : "Stop After Current Batch") { library.bulkStopRequested = true }
-                                .disabled(library.bulkStopRequested)
-                        }
-                    }
-                    if let progress = library.mutations.progress {
-                        bulkStatusRow(progress) { EmptyView() }
-                    }
-                    ForEach(library.bulkActivities.keys.sorted(by: { $0.uuidString < $1.uuidString }), id: \.self) { id in
-                        bulkStatusRow(library.bulkActivities[id] ?? "Working…") { EmptyView() }
-                    }
-                    if let result = library.bulkResult, !library.bulkRunning {
-                        HStack {
-                            Text(result)
-                            Spacer()
-                            Button("Dismiss") { library.bulkResult = nil }
-                        }.padding(12).background(.bar)
-                    }
-                }
-
-            }
+            .safeAreaInset(edge: .bottom) { LibraryActivityStatus() }
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
                 showsInspector.toggle()
@@ -121,7 +94,7 @@ struct LibraryPane: View {
                 navigation.rememberEdge()
             })
             .destructionDialog($pendingDestruction)
-            .sheet(isPresented: $library.localSaveAlertPresented) {
+            .deferredMenuSheet(isPresented: $library.localSaveAlertPresented) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Sync to This Mac").font(.title2.bold())
                     Text(library.localSaveReport)
@@ -152,6 +125,12 @@ struct LibraryPane: View {
                 }
                 .padding(24)
                 .frame(width: 600, height: library.localSaveFailures.isEmpty ? 180 : 480)
+            }
+            .sheet(isPresented: Binding(
+                get: { newCollectionTargets != nil },
+                set: { if !$0 { newCollectionTargets = nil } }
+            )) {
+                ShelfNameSheet(shelf: nil, entries: newCollectionTargets ?? [])
             }
             .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
             .sheet(item: $meshExport) { prompt in

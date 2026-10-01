@@ -62,13 +62,9 @@ extension View {
         perform: @escaping (Kind) -> Void,
         @ViewBuilder extra: @escaping () -> Extra = { EmptyView() }
     ) -> some View {
-        contextMenu {
-            let offered = actions()
-            if RowAction.offersMenu(offered) {
-                RowActionMenu(actions: offered, perform: perform,
-                              extra: { AnyView(extra()) })
-            }
-        }
+        ContextualRowActionOwner(content: self, actions: actions, perform: perform,
+                                 extra: { AnyView(extra()) })
+            .equatable()
     }
 
     /// A row's contextual menu, or none. THE door: no caller attaches
@@ -87,9 +83,9 @@ extension View {
         @ViewBuilder extra: @escaping () -> Extra = { EmptyView() }
     ) -> some View {
         if RowAction.offersMenu(actions) {
-            contextMenu {
-                RowActionMenu(actions: actions, perform: perform, extra: { AnyView(extra()) })
-            }
+            ContextualRowActionOwner(content: self, actions: { actions }, perform: perform,
+                                     extra: { AnyView(extra()) })
+                .equatable()
         } else {
             self
         }
@@ -105,9 +101,58 @@ extension TableRowContent {
         _ actions: [RowAction<Kind>], perform: @escaping (Kind) -> Void
     ) -> some TableRowContent<TableRowValue> {
         if RowAction.offersMenu(actions) {
-            contextMenu { RowActionMenu(actions: actions, perform: perform) }
+            contextMenu { ContextualRowActionMenu(actions: actions, perform: perform).equatable() }
         } else {
             self
         }
+    }
+}
+
+/// Freeze the owner together with its context-menu attachment. Freezing only
+/// the menu's rows still lets a source redraw replace SwiftUI's AppKit bridge
+/// and dismiss an otherwise unchanged native menu.
+struct ContextualRowActionOwner<Content: View, Kind: Hashable>: View, Equatable {
+    let content: Content
+    let actions: () -> [RowAction<Kind>]
+    let perform: (Kind) -> Void
+    let tracking: ContextMenuTracking
+    let extra: () -> AnyView
+    /// Fresh per value; persistent @State storage here retains stale row inputs.
+    let latest: ContextMenuOwnerInputs<Content, Kind>
+    @State private var completionRevision = 0
+
+    init(content: Content, actions: @escaping () -> [RowAction<Kind>],
+         perform: @escaping (Kind) -> Void, tracking: ContextMenuTracking = .shared,
+         extra: @escaping () -> AnyView = { AnyView(EmptyView()) }) {
+        self.content = content
+        self.actions = actions
+        self.perform = perform
+        self.tracking = tracking
+        self.extra = extra
+        latest = ContextMenuOwnerInputs(
+            content: content, actions: actions, perform: perform, extra: extra)
+    }
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.latest.update(content: rhs.content, actions: rhs.actions,
+                              perform: rhs.perform, extra: rhs.extra)
+            return lhs.tracking === rhs.tracking && lhs.tracking.isTracking
+        }
+    }
+
+    var body: some View {
+        // Capture the pending inputs as values so an equal comparison cannot
+        // change the closures belonging to the menu that is already open.
+        let content = latest.content
+        let actions = latest.actions
+        let perform = latest.perform
+        let extra = latest.extra
+        let _ = completionRevision
+        return content.contextMenu {
+            ContextualRowActionMenuProvider(actions: actions, perform: perform,
+                                           tracking: tracking, extra: extra)
+        }
+        .onReceive(tracking.didFinishTracking) { completionRevision = $0 }
     }
 }

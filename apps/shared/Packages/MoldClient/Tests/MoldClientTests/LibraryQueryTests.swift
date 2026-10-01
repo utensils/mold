@@ -131,3 +131,22 @@ func searchIsForgivingAboutHowItIsTyped(typed: String) {
     query.text = typed
     #expect(query.apply(to: mine).count == 1)
 }
+
+@Test func aHiddenRemoteCopyHidesTheMergedLocalTile() {
+    var local = entry("saved.png")
+    local.copies = [entry("source.png", host: hal, collections: ["secret"])]
+    var query = LibraryQuery()
+    query.hiddenCollectionIDs = [hal: ["secret"]]
+    #expect(query.apply(to: [local]).isEmpty)
+    query.tokens = [.collection(slug: "secret", name: "Secret", ids: [hal: "secret"])]
+    #expect(query.apply(to: [local]).count == 1)
+}
+
+@Test func recentlyDeletedKeepsHiddenCollectionMembersRecoverable() {
+    let prints = [entry("hidden.png", collections: ["secret"])]
+    let hidden: [UUID: Set<String>] = [workstation: ["secret"]]
+    let general = LibraryScope.all.resolve(LibraryQuery(), shelves: [], hiddenCollectionIDs: hidden)
+    #expect(general.apply(to: prints).isEmpty)
+    let trash = LibraryScope.trash.resolve(LibraryQuery(), shelves: [], hiddenCollectionIDs: hidden)
+    #expect(trash.apply(to: prints).map(\.print.filename) == ["hidden.png"])
+}

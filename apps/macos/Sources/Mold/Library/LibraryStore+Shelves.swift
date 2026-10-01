@@ -8,15 +8,19 @@ import MoldClient
 extension LibraryStore {
     /// A shelf is made on the machine you are looking at; the others get their
     /// copy the first time something is filed into it there.
-    func createShelf(named name: String, on hostID: MoldHost.ID) async {
-        guard let client = hosts.backend(for: hostID) else { return }
+    @discardableResult
+    func createShelf(named name: String, on hostID: MoldHost.ID) async -> CollectionShelf? {
+        guard let client = hosts.backend(for: hostID) else { return nil }
+        var created: Collection?
         do {
-            _ = try await client.createCollection(name: name, description: nil)
+            created = try await client.createCollection(name: name, description: nil)
             hosts.succeeded(on: hostID)
         } catch {
             hosts.report(error, on: hostID, doing: "create the collection “\(name)”")
         }
         await reloadCollections()
+        guard let created else { return nil }
+        return CollectionShelf.merge([hostID: [created]]).first
     }
 
     /// Renames every machine's copy, so the shelf does not split in two.

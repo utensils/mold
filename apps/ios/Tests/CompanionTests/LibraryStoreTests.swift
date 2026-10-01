@@ -136,6 +136,29 @@ struct LibraryStoreTests {
         #expect(hosts.failures.first?.text.contains("disk unavailable") == true)
     }
 
+    @Test func hidingACollectionUpdatesEveryMachineCopy() async throws {
+        let (library, hosts, one, two) = try await fleet(first: [try print("a.png")], second: [])
+        let first = Collection(id: "alpha-shelf", name: "Drafts", slug: "drafts", hidden: false)
+        let second = Collection(id: "beta-shelf", name: "Drafts", slug: "drafts", hidden: false)
+        one.stub("collections()", returning: [first])
+        two.stub("collections()", returning: [second])
+        await library.reload()
+        let shelf = try #require(library.shelves.first)
+        one.stub("updateCollection(id:change:)", returning: first)
+        two.stub("updateCollection(id:change:)", returning: second)
+        one.stub("collections()", returning: [Collection(id: first.id, name: first.name, slug: first.slug, hidden: true)])
+        two.stub("collections()", returning: [Collection(id: second.id, name: second.name, slug: second.slug, hidden: true)])
+        await library.setShelfHidden(shelf, hidden: true)
+        for (fake, id) in [(one, first.id), (two, second.id)] {
+            let sent = try #require(fake.calls.last { $0.route == "updateCollection(id:change:)" })
+            #expect(sent.arguments.first as? String == id)
+            #expect((sent.arguments.last as? CollectionChange)?.hidden == true)
+        }
+        #expect(library.hiddenCollectionIDs[hosts.hosts[0].id] == [first.id])
+        #expect(library.hiddenCollectionIDs[hosts.hosts[1].id] == [second.id])
+        #expect(library.shelves.first?.hidden == true)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())

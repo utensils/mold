@@ -26,6 +26,8 @@ extension LibraryActions {
             quickLook(targets)
         case let .favorite(on):
             library.setFavorite(on, on: targets)
+        case .newCollection:
+            newCollection?(targets)
         case let .file(slug):
             if let shelf = library.shelf(slug: slug) { library.file(targets, into: shelf) }
         case let .unfile(slug):

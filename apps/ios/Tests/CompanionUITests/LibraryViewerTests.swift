@@ -10,9 +10,9 @@ final class LibraryViewerTests: XCTestCase {
         continueAfterFailure = false
         let machine = try FixtureMachine(galleryPrints: 60, galleryFavorites: 30)
         let port = try await machine.start()
-        defer { machine.stop() }
 
         let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
@@ -37,19 +37,10 @@ final class LibraryViewerTests: XCTestCase {
 
         // A different nonempty shelf starts at its first tile, not at the
         // deep offset inherited from All Prints.
-        app.buttons["library-collections"].tap()
-        app.buttons["Favourites"].tap()
+        app.chooseLibraryShelf("Favourites")
         let firstFavorite = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
         XCTAssertTrue(firstFavorite.waitForExistence(timeout: 5))
         XCTAssertTrue(firstFavorite.isHittable)
 
-        // Leave the simulator's paired-machine list as this test found it.
-        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
-        let card = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
-        for _ in 0..<8 where !card.isHittable { app.swipeUp() }
-        card.press(forDuration: 1)
-        app.buttons["Remove…"].firstMatch.tap()
-        app.buttons["Remove"].firstMatch.tap()
     }
 }

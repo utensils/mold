@@ -82,6 +82,7 @@ struct CollectionRow: View {
 /// Naming a collection, new or existing.
 struct ShelfNameSheet: View {
     let shelf: CollectionShelf?
+    var entries: [LibraryEntry] = []
 
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
@@ -121,7 +122,9 @@ struct ShelfNameSheet: View {
                 // be one that is ANSWERING: the first in the list being down
                 // used to fail the whole thing and report, when any other
                 // machine would have done just as well.
-                await library.createShelf(named: named, on: machine.id)
+                if let created = await library.createShelf(named: named, on: machine.id), !entries.isEmpty {
+                    library.file(entries, into: created)
+                }
             }
         }
         dismiss()

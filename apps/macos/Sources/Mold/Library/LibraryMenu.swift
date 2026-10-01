@@ -34,7 +34,7 @@ struct LibraryMenu {
         return targets.map(actions.draggable)
     }
 
-    private var plan: LibraryMenuPlan {
+    var plan: LibraryMenuPlan {
         LibraryMenuPlan(
             scope: scope.menuKind,
             count: targets.count,
@@ -65,8 +65,11 @@ struct LibraryMenu {
 
 extension View {
     /// One print's menu, from the one list.
-    func libraryMenu(_ menu: LibraryMenu) -> some View {
-        rowActionMenu(lazy: { menu.items }, perform: menu.perform) {
+    func libraryMenu(_ menu: LibraryMenu, snapshot: LibraryMenuPlan? = nil) -> some View {
+        // Resolve observable host/operation flags here. The native builder
+        // later renders only this pure plan, without subscribing to stores.
+        let plan = snapshot ?? menu.plan
+        return rowActionMenu(lazy: { plan.items }, perform: menu.perform) {
             let shares = menu.share
             if !shares.isEmpty {
                 ShareLink(items: shares) { print in SharePreview(print.filename) }

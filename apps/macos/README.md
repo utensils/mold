@@ -600,3 +600,14 @@ and shows in one place -- a dismissable line above the pane, never a modal --
 so one machine failing says nothing about the machines that worked.
 
 Source-image fitting pixels, mask composition and supported modes live in the shared MoldClient package, also used by the native iOS companion. The Mac keeps painting masks in fitted canvas coordinates.
+
+A collection’s sidebar context menu offers **Hide from All Prints** and
+**Show in All Prints**. Hidden collection members stay out of the general grid
+even when a saved local copy leads their merged tile; opening that collection
+still shows its prints.
+
+The Generate capsule stays anchored 20 points above the bottom of the canvas,
+including when its controls scroll in a short window. In the Library, select
+several prints and choose **Move to Collection → New Collection…** to name a
+collection and file the selection into it. Open context menus keep their rows
+and submenus stable while background transfer status changes.
