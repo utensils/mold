@@ -121,6 +121,7 @@ lint: lint-script lint-layers lint-color lint-type lint-widgets lint-a11y lint-s
 lint-script: ## The shared lint script still catches what it exists to catch
 	@../shared/scripts/tests/swift-lint.sh
 	@../../scripts/tests/companion-helper.sh
+	@../../scripts/tests/ios-notification-branding.sh
 
 lint-layers: ## MoldClient stays UI-free; one composition root; keys only in the Keychain
 	@! grep -rlnE '^import (SwiftUI|AppKit|UIKit)' $(PACKAGES)/MoldClient/Sources \
