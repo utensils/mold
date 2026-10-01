@@ -611,3 +611,18 @@ including when its controls scroll in a short window. In the Library, select
 several prints and choose **Move to Collection → New Collection…** to name a
 collection and file the selection into it. Open context menus keep their rows
 and submenus stable while background transfer status changes.
+
+## Optional remote HTTPS access
+
+An authenticated machine can run `mold relay connect` to expose its normal API
+through a trusted HTTPS gateway. Add that HTTPS address through the existing
+Machines flow or pair using a QR whose reachable URL is the public address.
+Normal API-key storage, instance identity, device revocation and signed gallery
+media tickets still apply; the relay enrollment token is only for the host.
+The gateway can see credentials and media and publishes one machine per process.
+See [the relay guide](https://utensils.io/mold/deployment/relay).
+
+Hosting requires an explicitly running authenticated `mold serve` and connector.
+Native macOS This Mac remains private; the GUI does not automatically open a
+tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
+are never replayed by the relay.

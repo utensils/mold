@@ -854,6 +854,21 @@ still lands in `--output-dir` on this machine, which is the point of the
 command.
 See [mold runpod CLI](/deployment/runpod-cli).
 
+## `mold relay`
+
+Optional outbound HTTPS access to an existing authenticated machine:
+
+```bash
+MOLD_RELAY_TOKEN_FILE=/absolute/path/relay-token mold relay connect \
+  --relay-url wss://gateway.example --target 127.0.0.1:7680
+mold relay serve --control-bind 127.0.0.1:7681 --data-bind 127.0.0.1:7682
+```
+
+The gateway runs behind a trusted TLS proxy and publishes one machine.
+Clients use its HTTPS URL and normal Mold credentials. See
+[remote HTTPS relay](/deployment/relay) for authentication, streaming and
+service setup.
+
 ## `mold lambda`
 
 Deploy and manage private mold servers on Lambda Cloud.
@@ -940,7 +955,7 @@ only when doing so preserves the target the user asked about.
 | Server-first with local execution  | `run`, `pull`, `upscale`                                                      | Uses the server when reachable, otherwise executes or downloads locally                                                               |
 | Standalone prompt tooling          | `expand`, `remix`                                                             | Uses the configured local expansion model or external API backend                                                                     |
 | Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`    | Starts or inspects processes, or browses mDNS directly; `server status` reports on `--host`/`MOLD_HOST` when one names another server |
-| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`               | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                                            |
+| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`, `relay`      | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                                            |
 | Requires a live Mold server        | `jobs`, `queue`, `library`, `trash`, `mcp`, `discord`                         | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority                     |
 
 An unreachable non-loopback `MOLD_HOST` remains an error for host-administration

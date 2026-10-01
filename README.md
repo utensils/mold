@@ -216,6 +216,12 @@ mold serve                                      # GPU machine
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
+For access outside your network without opening the GPU host's inbound ports,
+use the optional [HTTPS reverse relay](https://utensils.io/mold/deployment/relay).
+Run `mold relay connect` beside an authenticated server; every client uses the
+resulting HTTPS machine address with its existing API key or pairing flow.
+The trusted gateway can see traffic and publishes one machine per process.
+
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
 Add `--no-save` to keep one render out of a server's Library; the host still
 publishes the print and moves it straight to trash, so `mold trash restore`

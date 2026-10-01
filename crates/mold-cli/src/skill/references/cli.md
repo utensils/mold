@@ -705,3 +705,14 @@ reload the VAE on CPU if GPU recovery is exhausted. A repeated cleanup OOM
 does not prevent that retry; unrelated errors propagate. `MOLD_VAE_TILED`
 controls this Metal recovery path. Bounded Candle convolution workspaces replace
 the old proactive span cap. CPU/CUDA Z-Image decode policy is unchanged.
+
+## Optional remote HTTPS relay
+
+`mold relay connect --relay-url wss://gateway.example --target 127.0.0.1:7680`
+opens an outbound tunnel for an authenticated server. The enrollment token is
+read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
+`MOLD_HOST` and their Mold API key/pairing credential, never that token.
+`mold relay serve` runs a loopback gateway behind a trusted TLS proxy. One
+gateway publishes one machine. The proxy can see credentials/media; do not
+claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
+See the deployment guide for safe TLS, streaming and metrics routing.

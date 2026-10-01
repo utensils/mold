@@ -969,3 +969,18 @@ collection names across the loaded library, including prints beyond the visible
 thumbnail window. Native and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
 intentionally absent.
+
+## Optional remote HTTPS access
+
+An authenticated machine can run `mold relay connect` to expose its normal API
+through a trusted HTTPS gateway. Add that HTTPS address through the existing
+Machines flow or pair using a QR whose reachable URL is the public address.
+Normal API-key storage, instance identity, device revocation and signed gallery
+media tickets still apply; the relay enrollment token is only for the host.
+The gateway can see credentials and media and publishes one machine per process.
+See [the relay guide](https://utensils.io/mold/deployment/relay).
+
+Hosting requires an explicitly running authenticated `mold serve` and connector.
+Native macOS This Mac remains private; the GUI does not automatically open a
+tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
+are never replayed by the relay.

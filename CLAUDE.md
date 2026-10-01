@@ -66,6 +66,7 @@ crates/
 ├── mold-db/          SQLite (rusqlite, bundled, WAL) — gallery, settings, model_prefs, prompt_history
 ├── mold-inference/   Candle engines per family
 ├── mold-candle/      Application-owned candle models + public-API extensions (backend changes go in the utensils/candle fork)
+├── mold-relay/       GPU-independent outbound HTTP tunnel + standalone cloud gateway
 ├── mold-scheduler/   Placement / admission planner
 ├── mold-server/      Axum HTTP server (consumed as lib by mold-cli)
 ├── mold-cli/         The `mold` binary (clap)
@@ -92,6 +93,7 @@ apps/shared/  MoldClient + MoldStyle Swift packages both native apps build on
 | `mold-scheduler/` | `mold-ai-scheduler`        |
 | `mold-server/`    | `mold-ai-server`           |
 | `mold-discord/`   | `mold-ai-discord`          |
+| `mold-relay/`     | `mold-ai-relay` (binary: `mold-relay`) |
 
 ## Workflow
 
