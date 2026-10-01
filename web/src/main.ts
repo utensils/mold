@@ -1,6 +1,6 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import App from "./App.vue";
+import OriginAccess from "./OriginAccess.vue";
 import { router } from "./router";
 import { installTheme } from "./lib/theme";
 import { retireSequenceStorage } from "@studio/lib/retireSequenceStorage";
@@ -11,7 +11,7 @@ installTheme();
 // until something frees them. Fire and forget — nothing on screen waits on it.
 void retireSequenceStorage();
 
-const app = createApp(App);
+const app = createApp(OriginAccess);
 app.use(createPinia());
 app.use(router);
 app.mount("#app");

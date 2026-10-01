@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch as fetch } from "./originAuth";
 /*
  * Multi-host gallery media (Task #22). `<img>`/`<video>` elements cannot send
  * an `x-api-key` header and a durable key must never enter a URL, so remote
@@ -13,8 +14,8 @@
  *     without buffering it and without the durable key in the URL. Hosts that
  *     lack the current endpoint are rejected with an upgrade message.
  *
- * The serving origin ("this server") is same-origin and keyless in the web
- * registry, so it always uses plain relative URLs — exactly today's behaviour.
+ * The serving origin ("this server") carries its session key in the registry
+ * and uses the same authenticated media paths as other keyed machines.
  * Mirrors the desktop app's desktop/src/lib/gallery/media.ts contract.
  */
 import {

@@ -138,6 +138,7 @@ describe("queue api", () => {
       "https://render.example/api/queue?limit=11&cursor=opaque%2F%2B+token%3D",
       {
         headers: { "x-api-key": "secret" },
+        redirect: "error",
         signal: controller.signal,
       },
     );

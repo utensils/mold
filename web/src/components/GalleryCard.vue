@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { imageUrl, thumbnailUrl } from "../api";
-import { getHost } from "../lib/hostRegistry";
+import { getHost, originHost } from "../lib/hostRegistry";
 import {
   directMediaUrl,
   directThumbnailUrl,
@@ -163,7 +163,8 @@ const aspectStyle = computed(() => {
  */
 const hostEntry = computed(() => {
   const id = (props.item as { hostId?: string }).hostId;
-  return id ? getHost(id) : null;
+  const origin = originHost();
+  return id ? getHost(id) : origin.apiKey ? origin : null;
 });
 
 const thumbSrc = ref("");

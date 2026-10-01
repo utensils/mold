@@ -53,9 +53,11 @@ export async function apiFetchTo(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
+  const headers = apiHeaders(target, init.headers);
   const response = await fetch(`${target.baseUrl}${path}`, {
     ...init,
-    headers: apiHeaders(target, init.headers),
+    ...(headers.has("x-api-key") ? { redirect: "error" as const } : {}),
+    headers,
   });
   if (!response.ok) await throwApiError(response);
   return response;
@@ -90,6 +92,7 @@ export async function conditionalApiJsonTo<T>(
   if (cached) headers.set("If-None-Match", cached.etag);
   const response = await fetch(`${target.baseUrl}${path}`, {
     ...init,
+    ...(headers.has("x-api-key") ? { redirect: "error" as const } : {}),
     headers,
   });
   if (response.status === 304 && cached) return cached.value as T;

@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch } from "../lib/originAuth";
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
@@ -1889,6 +1890,7 @@ function ensureDurableEventSession(route: HostRoute): void {
   const controller = new AbortController();
   durableEventSessions.set(route.hostId, { signature, controller });
   void fetchEventSource(`${route.target.baseUrl}/api/events`, {
+    fetch: originAuthenticatedFetch,
     method: "GET",
     headers: Object.fromEntries(apiHeaders(routeApiTarget(route)).entries()),
     signal: controller.signal,
@@ -2122,6 +2124,7 @@ async function attachAutoChainJob(
     controller.abort();
   };
   await fetchEventSource(chainJobEventsUrl(jobId, route?.target), {
+    fetch: originAuthenticatedFetch,
     signal: controller.signal,
     openWhenHidden: true,
     headers: route?.target?.apiKey ? { "x-api-key": route.target.apiKey } : {},

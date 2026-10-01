@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
 /*
  * Per-host fetch client for the Machines workspace. Dependency-free plain
  * fetch against an arbitrary mold server's origin URL, so the same code path

@@ -1,3 +1,4 @@
+import { originApiKey } from "./originAuth";
 /*
  * Machines host registry (spec §08 G1) — the browser's list of mold servers
  * it can reach. The primary host is ALWAYS the serving origin
@@ -42,7 +43,13 @@ export function originUrl(): string {
 }
 
 export function originHost(): HostEntry {
-  return { id: ORIGIN_HOST_ID, name: "this server", url: originUrl() };
+  const apiKey = originApiKey();
+  return {
+    id: ORIGIN_HOST_ID,
+    name: "this server",
+    url: originUrl(),
+    ...(apiKey ? { apiKey } : {}),
+  };
 }
 
 /**

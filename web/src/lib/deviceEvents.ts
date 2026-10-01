@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch } from "./originAuth";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { apiHeaders, apiJsonTo, type ApiTarget } from "@studio/api/client";
 
@@ -22,6 +23,7 @@ export function subscribeToDeviceSnapshots(
       if (signal.aborted || capabilities.events?.available !== true) return;
 
       await fetchEventSource(`${target.baseUrl}/api/events`, {
+        fetch: originAuthenticatedFetch,
         method: "GET",
         headers: Object.fromEntries(apiHeaders(target).entries()),
         signal,

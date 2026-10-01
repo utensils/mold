@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
+
 import {
   computed,
   nextTick,

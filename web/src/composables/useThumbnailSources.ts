@@ -13,7 +13,7 @@ import {
   type ThumbnailPriority,
 } from "@studio/lib/thumbnailScheduler";
 import { thumbnailUrl } from "../api";
-import { getHost } from "../lib/hostRegistry";
+import { getHost, originHost } from "../lib/hostRegistry";
 import { resolveThumbnailSrc } from "../lib/galleryMedia";
 import { printKey } from "../lib/multiHostGallery";
 import type { GalleryImage } from "../types";
@@ -36,8 +36,8 @@ export function useThumbnailSources(maxResolvedSources = 320) {
     priority: ThumbnailPriority = "visible",
   ): string {
     const id = (entry as { hostId?: string }).hostId;
-    const host = id ? getHost(id) : null;
-    if (!host) return thumbnailUrl(entry.filename);
+    const host = id ? getHost(id) : originHost();
+    if (!host || (!id && !host.apiKey)) return thumbnailUrl(entry.filename);
     const print = printKey(entry as { hostId?: string; filename: string });
     const mediaVersion =
       entry.media_version ??

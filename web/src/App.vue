@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originApiTarget } from "./lib/originAuth";
+
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
@@ -180,7 +182,7 @@ async function handleRetry(model: string) {
   await downloadAction(() =>
     runWithLicenseConsent({
       hostLabel: "This machine",
-      target: { baseUrl: "", apiKey: null },
+      target: originApiTarget(),
       installModel: model,
       start: () => downloads.enqueue(model),
     }),
