@@ -153,8 +153,19 @@ export function createRouter({
       console.warn("Mold relay frame refusal", "json-format");
       return 400;
     }
-    const connection = await store.get(`connection#${id}`);
+    let connection = await store.get(`connection#${id}`);
     let host = await store.get("host");
+    const invalidMembership = () =>
+      !connection ||
+      !host ||
+      host.expiresAt <= now() ||
+      connection.expiresAt <= now() ||
+      host.sid !== connection.sid;
+    if (invalidMembership()) {
+      // Sequential reads can straddle a concurrent renewal; confirm before closing.
+      connection = await store.get(`connection#${id}`);
+      host = await store.get("host");
+    }
     if (
       !connection ||
       !host ||

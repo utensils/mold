@@ -8,7 +8,9 @@ function fixture(options = {}) {
   let now = 100;
   const store = {
     async get(id) {
-      return structuredClone(rows.get(id));
+      const snapshot = structuredClone(rows.get(id));
+      await options.afterRead?.(id);
+      return snapshot;
     },
     async cas(id, revision, value) {
       if ((rows.get(id)?.revision ?? 0) !== revision) return false;
@@ -289,4 +291,32 @@ test("frontend admission waits for authenticated host hello readiness", async ()
     (await connect(f.router, "g", "frontend", "frontend-test")).statusCode,
     200,
   );
+});
+
+test("lease renewed after initial read does not falsely close host", async () => {
+  let delay = false;
+  let f;
+  f = fixture({
+    afterRead: async (id) => {
+      if (delay && id === "host") {
+        delay = false;
+        f.advance(6);
+        f.rows.get("connection#h").expiresAt = 196;
+      }
+    },
+  });
+  await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.rows.get("connection#h").expiresAt = 105;
+  delay = true;
+  const sid = f.rows.get("host").sid;
+  const reply = await send(f.router, "h", {
+    a: "eof",
+    v: 2,
+    sid,
+    rid: "completed",
+    seq: 0,
+  });
+  assert.equal(reply.statusCode, 200);
+  assert.deepEqual(f.closed, []);
 });
