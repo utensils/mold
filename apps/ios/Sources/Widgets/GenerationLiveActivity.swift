@@ -8,8 +8,8 @@ struct GenerationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: GenerationActivityAttributes.self) { context in
             LockScreenActivity(context: context)
-                .padding(16)
-                .activityBackgroundTint(nil)
+                .padding(ActivityCardLayout.inset)
+                .activityBackgroundTint(Color(uiColor: .systemBackground).opacity(0.88))
                 .widgetURL(link(context))
         } dynamicIsland: { context in
             DynamicIsland {
@@ -18,10 +18,7 @@ struct GenerationLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     if context.state.phase == .running {
-                        Button(intent: StopRenderIntent(clientBatchId: context.attributes.clientBatchId)) {
-                            Label("Stop", systemImage: "stop.fill").labelStyle(.iconOnly)
-                        }
-                        .tint(.red)
+                        ActivityStop(clientBatchId: context.attributes.clientBatchId)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
@@ -44,59 +41,16 @@ struct GenerationLiveActivity: Widget {
     }
 }
 
-private struct LockScreenActivity: View {
+struct ActivityPreview: View {
     let context: ActivityViewContext<GenerationActivityAttributes>
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ActivityPreview(context: context).frame(width: 64, height: 64)
-            VStack(alignment: .leading, spacing: 4) {
-                ActivityDetail(context: context)
-            }
-            if context.state.phase == .running {
-                Button(intent: StopRenderIntent(clientBatchId: context.attributes.clientBatchId)) {
-                    Label("Stop", systemImage: "stop.fill").labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-            }
+    private var symbol: String {
+        switch context.state.phase {
+        case .running: "wand.and.sparkles"
+        case .finished: "checkmark"
+        case .failed: "exclamationmark"
         }
     }
-}
-
-private struct ActivityDetail: View {
-    let context: ActivityViewContext<GenerationActivityAttributes>
-
-    var body: some View {
-        let state = context.state
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(context.isStale ? String(localized: "Open Mold Studio to refresh") : state.sentence)
-                    .font(.headline)
-                Spacer(minLength: 4)
-                if state.phase == .running, let end = state.endsAt, end > .now, !context.isStale {
-                    Text(timerInterval: Date.now...end, countsDown: true)
-                        .font(.caption.monospacedDigit())
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 64)
-                }
-            }
-            Text(context.attributes.prompt).font(.callout).lineLimit(2)
-            if state.phase == .running {
-                if let fraction = state.fraction { ProgressView(value: fraction) } else { ProgressView(value: 0) }
-            }
-            if let figure = state.figure {
-                Text(verbatim: figure).font(.caption.monospaced())
-            }
-            if state.waiting > 0 {
-                Text("+\(state.waiting) waiting").font(.caption)
-            }
-        }
-    }
-}
-
-private struct ActivityPreview: View {
-    let context: ActivityViewContext<GenerationActivityAttributes>
 
     var body: some View {
         Group {
@@ -104,8 +58,10 @@ private struct ActivityPreview: View {
                let image = UIImage(contentsOfFile: AppGroup.activityPreviews.appending(path: name).path) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else {
-                Image(systemName: "wand.and.sparkles").font(.title2).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.quaternary)
+                Image(systemName: symbol).font(.title3.weight(.medium))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(LinearGradient(colors: [.cyan, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
             }
         }
         .clipShape(.rect(cornerRadius: 8))

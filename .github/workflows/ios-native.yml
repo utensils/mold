@@ -64,7 +64,9 @@ jobs:
         run: brew install xcodegen
 
       - name: Architecture lints
-        run: make lint
+        run: |
+          make lint
+          bash ../../scripts/tests/ios-uitest-runner.sh
 
       # The shared packages on the phone's platform: MoldClient's suite on an
       # iOS simulator, so a macOS-only API cannot land in them unnoticed.
@@ -79,3 +81,12 @@ jobs:
       # sweep is the local `make uitest`'s -- run it before merging iPad work.
       - name: Accessibility audit
         run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"
+
+      - name: Upload UI test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-test-reports-${{ github.run_attempt }}
+          path: apps/ios/build/UITestResults/
+          if-no-files-found: ignore
+          retention-days: 7

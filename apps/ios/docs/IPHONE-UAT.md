@@ -120,3 +120,12 @@ open and scrolls the opened tile back into view on return.
 - Notification Center's grouped rows exposed unreliable XCTest row-tap/swipe behavior; the automated regression uses the real system banner, and manual UAT uses an ungrouped Lock Screen notification.
 - Architecture lint and Release Simulator build pass. The Debug-only notification fixture is absent from the Release binary. The native macOS notification delegate already explicitly routes and completes on MainActor and was not changed. Physical-device confirmation remains unverified: the paired iPhone was locked when diagnostics were requested.
 - Follow-up: both notification UI tests also pass with an empty saved-machine list. Dismissing the viewer verifies the Generate destination instead of assuming a populated model chooser.
+
+## Live Activity card — 2026-09-30
+
+- iPhone 17 Pro Simulator, iOS 26.5: visually checked the real ActivityKit Lock Screen card in light/dark appearances. The prompt is subordinate to the status, progress spans the card, and machine/queue labels share one footer instead of a large monospaced stack. The fallback preview uses a blue gradient tile.
+- At accessibility-extra-extra-extra-large, the compact variant retains the status, progress and 44 pt Stop target without clipping. The finished variant uses a checkmark when no preview exists and removes the repeated machine footer. Tapping the finished activity opens the missing-print viewer and keeps the app alive.
+- Presentation contracts cover legacy step/machine separation, unknown progress, stale messaging and terminal controls. The ActivityKit payload and deep-link contract are unchanged.
+- UAT uses the Debug-only `--live-activity-fixture` launch argument; no render was submitted. Physical-device presentation remains to be confirmed in TestFlight.
+- All 129 iOS unit tests and architecture lints pass. The Release Simulator build passes, with both Debug UAT fixture types absent from the binary. Also visually checked a real preview image and the no-step "Working on it" state; the latter shows no fabricated progress bar.
+- The final suite has 130 passing tests, including a height invariant that measures all three normal rows with UIKit text metrics and accounts for the card padding. The final Release build also passes.

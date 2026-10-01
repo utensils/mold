@@ -31,6 +31,9 @@ final class ActivityCoordinator {
         StopRenderIntent.handler = { [weak self] id in await self?.stop(clientBatchId: id) }
         generate.settled = { [weak self] batch, run in self?.terminal(batch, run) }
         observe()
+        #if DEBUG
+        LiveActivityFixture.startIfRequested()
+        #endif
     }
 
     private func observe() {

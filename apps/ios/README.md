@@ -77,6 +77,13 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
 | `make lint` | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`) |
 
+UI tests retry a failed test once in a fresh test process to tolerate hosted
+Simulator timing failures. A repeated failure still fails the audit. Full logs
+and result bundles are kept under `build/UITestResults/` for each device and
+appearance; CI uploads them even when the audit fails. Run
+`bash scripts/tests/ios-uitest-runner.sh` from the repository root to verify the
+runner's retry limit, reports, and failure propagation without Xcode.
+
 On iPad, the audit checks the Settings form through its sidebar page, while
 interaction tests cover the sheet’s Done and Add a Machine actions. This avoids
 a UIKit floating-tab loop triggered by the auditor’s private text-size cycling
@@ -93,6 +100,13 @@ For notification UAT, Debug builds accept
 schedule one real system notification after twenty seconds without rendering.
 `NotificationTapTests` exercises background and cold-launch taps. Release and
 TestFlight builds exclude the fixture.
+
+The Live Activity uses a translucent card with a 48 pt preview, a compact status
+and prompt, a full-width progress row, and a machine/queue footer. At large text
+sizes it drops secondary content before clipping the status or Stop control.
+Debug builds accept `--live-activity-fixture running` (also `waiting`, `finished`,
+`failed`, `stale`, or `clear`) for Lock Screen UAT without submitting a render.
+The fixture is excluded from Release/TestFlight builds.
 
 ## Layout
 
