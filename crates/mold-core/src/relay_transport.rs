@@ -30,15 +30,33 @@ mod tests {
                 .unwrap(),
             &b"okay"[..]
         );
-        Mock::given(method("POST")).and(path("/_mold/relay/uploads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a","url":"https://evil.example/file","headers":{},"expires_at":9999999999u64}))).expect(1).mount(&server).await;
-        assert!(client
-            .put(format!("{}/api/upload", server.uri()))
-            .body(vec![0; STAGE_THRESHOLD])
-            .send()
+        Mock::given(method("POST")).and(path("/_mold/relay/uploads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a","url":"https://evil.example/file","headers":{},"expires_at":9999999999u64}))).expect(2).mount(&server).await;
+        for request in [
+            client.put(format!("{}/api/upload", server.uri())),
+            client.delete(format!("{}/api/upload", server.uri())),
+        ] {
+            assert!(request
+                .body(vec![0; STAGE_THRESHOLD])
+                .send()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("untrusted relay upload URL"));
+        }
+        let methods: Vec<String> = server
+            .received_requests()
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("untrusted relay upload URL"));
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/_mold/relay/uploads")
+            .map(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["method"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(methods, ["PUT", "DELETE"]);
     }
     #[tokio::test]
     async fn object_download_omits_api_key_and_reconstructs_streamed_response() {
