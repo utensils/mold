@@ -1,4 +1,5 @@
 //! Optional, bounded TCP-over-WebSocket relay. No inference dependencies.
+pub mod aws;
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{
@@ -81,8 +82,15 @@ pub struct ConnectArgs {
     /// Close streams without application bytes for this long (heartbeats excluded).
     #[arg(long, default_value_t = DEFAULT_IDLE_TIMEOUT.as_secs(), value_parser = clap::value_parser!(u64).range(1..=86400))]
     pub idle_timeout_secs: u64,
+    #[arg(long, value_enum, default_value_t = RelayTransport::Direct)]
+    pub transport: RelayTransport,
     #[arg(long)]
     pub allow_insecure_loopback: bool,
+}
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RelayTransport {
+    Direct,
+    Aws,
 }
 impl RelayAction {
     pub async fn run(self) -> Result<()> {
@@ -109,17 +117,34 @@ impl RelayAction {
                 .await
             }
             Self::Connect(args) => {
-                connect_with_options(
-                    &args.relay_url,
-                    args.target,
-                    load_token(args.token_file.as_deref())?,
-                    args.allow_insecure_loopback,
-                    shutdown,
-                    RelayOptions {
-                        idle_timeout: Duration::from_secs(args.idle_timeout_secs),
-                    },
-                )
-                .await
+                let token = load_token(args.token_file.as_deref())?;
+                let options = RelayOptions {
+                    idle_timeout: Duration::from_secs(args.idle_timeout_secs),
+                };
+                match args.transport {
+                    RelayTransport::Direct => {
+                        connect_with_options(
+                            &args.relay_url,
+                            args.target,
+                            token,
+                            args.allow_insecure_loopback,
+                            shutdown,
+                            options,
+                        )
+                        .await
+                    }
+                    RelayTransport::Aws => {
+                        aws::connect(
+                            &args.relay_url,
+                            args.target,
+                            token,
+                            args.allow_insecure_loopback,
+                            shutdown,
+                            options,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
