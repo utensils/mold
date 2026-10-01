@@ -13,6 +13,7 @@
  */
 import {
   computed,
+  inject,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -49,6 +50,7 @@ import {
 } from "@studio/api/config";
 import { styleDisplayName, styleLabel } from "@studio/lib/styleLabel";
 import type { DeviceInfo } from "@studio/api/devices";
+import { ORIGIN_ACCESS_CHANGE_KEY } from "../lib/originAuth";
 import { matchSystem, theme } from "../lib/theme";
 import type { ThemeId } from "@ui/theme";
 import { toast } from "../lib/toasts";
@@ -75,6 +77,7 @@ import {
   type CatalogCredentialStatus,
 } from "../api";
 
+const changeOriginKey = inject(ORIGIN_ACCESS_CHANGE_KEY, null);
 const WEB_SECTIONS = sectionsForSurface("web");
 
 const pairingHost = computed(() => originHost());
@@ -581,6 +584,20 @@ onBeforeUnmount(() => {
         <template v-else-if="section.id === 'hosts'">
           <SettingRow label="This server" :help="pairingHost.url">
             <span class="settings-value">{{ serverSummary }}</span>
+          </SettingRow>
+          <SettingRow
+            v-if="changeOriginKey && pairingHost.apiKey"
+            label="Browser API key"
+            help="Clear this tab's saved key and connect with another API key."
+          >
+            <button
+              type="button"
+              class="settings-link"
+              data-test="change-origin-api-key"
+              @click="changeOriginKey"
+            >
+              Change API key
+            </button>
           </SettingRow>
           <div class="settings-panel-row">
             <DevicePanel

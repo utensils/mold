@@ -2,9 +2,17 @@ import { mount, flushPromises } from "@vue/test-utils";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import OriginAccess from "./OriginAccess.vue";
 import { originApiKey } from "./lib/originAuth";
-vi.mock("./App.vue", () => ({
-  default: { template: '<div data-test="studio">Studio</div>' },
-}));
+vi.mock("./App.vue", async () => {
+  const { inject } = await import("vue");
+  const { ORIGIN_ACCESS_CHANGE_KEY } = await import("./lib/originAuth");
+  return {
+    default: {
+      setup: () => ({ changeKey: inject(ORIGIN_ACCESS_CHANGE_KEY) }),
+      template:
+        '<div data-test="studio">Studio<button data-test="settings-change-key" @click="changeKey">Change API key</button></div>',
+    },
+  };
+});
 beforeEach(() => sessionStorage.clear());
 afterEach(() => vi.unstubAllGlobals());
 it("mounts Studio only after a validated key and never saves a refused key", async () => {
@@ -29,7 +37,8 @@ it("mounts Studio only after a validated key and never saves a refused key", asy
   expect(new Headers(fetchMock.mock.calls[2][1].headers).get("x-api-key")).toBe(
     "right",
   );
-  await wrapper.get("button").trigger("click");
+  expect(wrapper.find(".origin-access-change").exists()).toBe(false);
+  await wrapper.get('[data-test="settings-change-key"]').trigger("click");
   expect(originApiKey()).toBeNull();
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(false);
   wrapper.unmount();

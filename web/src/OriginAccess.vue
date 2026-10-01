@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, provide, ref } from "vue";
 import App from "./App.vue";
 import {
+  ORIGIN_ACCESS_CHANGE_KEY,
   originAuthenticatedFetch,
   originApiKey,
   setOriginApiKey,
@@ -42,18 +43,12 @@ function changeKey() {
   setOriginApiKey("");
   error.value = "Enter this machine's API key to connect.";
 }
+provide(ORIGIN_ACCESS_CHANGE_KEY, changeKey);
 onMounted(connect);
 </script>
 <template>
   <template v-if="ready">
     <App />
-    <button
-      v-if="originApiKey()"
-      class="origin-access-change"
-      @click="changeKey"
-    >
-      Change API key
-    </button>
   </template>
   <main v-else class="origin-access">
     <form @submit.prevent="connect">
@@ -103,12 +98,5 @@ onMounted(connect);
 }
 .origin-access button {
   padding: 12px;
-}
-.origin-access-change {
-  position: fixed;
-  bottom: 8px;
-  right: 8px;
-  font-size: var(--mold-fs-sm);
-  z-index: 10;
 }
 </style>

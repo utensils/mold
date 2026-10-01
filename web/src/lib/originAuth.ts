@@ -1,3 +1,7 @@
+import type { InjectionKey } from "vue";
+export const ORIGIN_ACCESS_CHANGE_KEY: InjectionKey<() => void> = Symbol(
+  "mold.origin.change-key",
+);
 /** Browser credentials belong to this exact serving origin and this tab's session. */
 const BrowserURL = URL;
 const storageKey = () => `mold.web.origin-key.v1:${window.location.origin}`;
