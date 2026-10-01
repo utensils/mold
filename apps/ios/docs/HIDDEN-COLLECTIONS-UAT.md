@@ -70,3 +70,5 @@ the clean repeat passed in
 `/tmp/mold-hidden-collection-test/DerivedData/Logs/Test/Test-MoldCompanion-2026.09.30_09-53-18--0700.xcresult`.
 The focused harness allows one retry for the same auditor timeout domains the
 existing shell audits handle; it never ignores accessibility findings.
+
+The full hosted suite also exposed two generation interaction harness failures: a formatted accessibility-value predicate timed out despite the correct prompt value, and centered landscape scrolling was intercepted by picture wells. Direct value polling and the existing clear-edge reveal helper retain the original assertions. Focused AX5 prompt and populated landscape/model-search tests passed in light and dark on a disposable iPhone Simulator; fixture cleanup now runs on failure too.
