@@ -95,6 +95,7 @@ COPY crates/mold-candle/src/qk_norm_rope/qk_norm_rope.cu crates/mold-candle/src/
 COPY crates/mold-candle/src/stable_diffusion/vae/group_norm.cu crates/mold-candle/src/stable_diffusion/vae/group_norm.cu
 COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
 COPY crates/mold-scheduler/Cargo.toml crates/mold-scheduler/Cargo.toml
+COPY crates/mold-relay/Cargo.toml crates/mold-relay/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
 COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
@@ -113,6 +114,7 @@ RUN mkdir -p crates/mold-core/src \
              crates/mold-candle/src \
              crates/mold-inference/src \
              crates/mold-scheduler/src \
+             crates/mold-relay/src \
              crates/mold-server/src \
              crates/mold-cli/src \
              crates/mold-discord/src \
@@ -122,6 +124,8 @@ RUN mkdir -p crates/mold-core/src \
     && echo "// stub" > crates/mold-candle/src/lib.rs \
     && echo "// stub" > crates/mold-inference/src/lib.rs \
     && echo "// stub" > crates/mold-scheduler/src/lib.rs \
+    && echo "// stub" > crates/mold-relay/src/lib.rs \
+    && echo 'fn main() {}' > crates/mold-relay/src/main.rs \
     && echo "// stub" > crates/mold-server/src/lib.rs \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
     && echo "// stub" > crates/mold-discord/src/lib.rs
