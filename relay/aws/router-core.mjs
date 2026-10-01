@@ -158,8 +158,16 @@ export function createRouter({
     ) {
       console.warn(
         "Mold relay frame refusal",
-        "membership-expired-or-epoch",
-        connection?.role === "host" ? "host" : "frontend",
+        !connection
+          ? "missing-connection"
+          : !host
+            ? "missing-host"
+            : host.expiresAt <= now()
+              ? "host-expired"
+              : connection.expiresAt <= now()
+                ? "connection-expired"
+                : "epoch-mismatch",
+        connection?.role ?? "unknown",
       );
       return 403;
     }
