@@ -90,6 +90,15 @@ it.each(["PATCH", "DELETE"])(
       "https://machine.example/_mold/relay/request",
     ]);
     expect(new Headers(calls[2]?.init?.headers).has("x-api-key")).toBe(false);
+    expect(new Headers(calls[2]?.init?.headers).has("authorization")).toBe(
+      false,
+    );
+    expect(new Headers(calls[2]?.init?.headers).has("cookie")).toBe(false);
+    expect(Object.fromEntries(new Headers(calls[0]?.init?.headers))).toEqual({
+      authorization: "Bearer credential",
+      "x-api-key": "secret",
+    });
+    expect(calls[0]?.init?.redirect).toBe("error");
     expect(calls[2]?.init?.redirect).toBe("error");
     const grant = JSON.parse(String(calls[1]?.init?.body));
     expect(grant.path).toBe("/api/arbitrary?query=1");
@@ -282,6 +291,11 @@ it("recognizes only the bounded legacy Mold SPA as direct discovery", async () =
   const calls: string[] = [];
   const fetch = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => {
     calls.push(String(url));
+    if (
+      String(url).endsWith("/info") &&
+      !new Headers(_init?.headers).has("x-api-key")
+    )
+      return new Response(null, { status: 401 });
     return String(url).endsWith("/info")
       ? new Response(shell, {
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -304,8 +318,8 @@ it("recognizes only the bounded legacy Mold SPA as direct discovery", async () =
     "https://legacy.example/api/upload",
     "https://legacy.example/api/upload",
   ]);
-  expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("x-api-key")).toBe(
-    false,
+  expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-api-key")).toBe(
+    "secret",
   );
   expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("x-api-key")).toBe(
     "secret",

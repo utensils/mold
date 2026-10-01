@@ -50,7 +50,8 @@ extension HTTPBackend {
         }
         prepared.setValue(digest, forHTTPHeaderField: "x-amz-content-sha256")
         guard size > 2_097_152 else { return (prepared, file) }
-        let info = try await RelayTransport.cache.info(origin: host.baseURL, session: session)
+        let info = try await RelayTransport.cache.info(origin: host.baseURL, session: session,
+            originalHeaders: prepared.allHTTPHeaderFields ?? [:])
         guard info.protocol == 2 else { return (prepared, file) }
         guard size <= info.maxBodyBytes else {
             throw ResponseCeiling.Exceeded(

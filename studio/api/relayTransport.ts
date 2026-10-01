@@ -146,11 +146,18 @@ async function boundedDiscoveryText(response: Response): Promise<string> {
 async function relayInfo(
   origin: string,
   signal: AbortSignal | null = null,
+  originalHeaders?: Headers,
 ): Promise<RelayInfo | null> {
   let pending = infoCache.get(origin);
   if (!pending) {
+    const credentials = new Headers();
+    for (const name of ["x-api-key", "authorization"]) {
+      const value = originalHeaders?.get(name);
+      if (value) credentials.set(name, value);
+    }
     pending = globalThis
       .fetch(`${origin}/_mold/relay/info`, {
+        headers: credentials,
         redirect: "error",
         credentials: "omit",
         signal,
@@ -264,7 +271,9 @@ export async function relayFetch(
     if (!headers.has("content-type") && request.headers.has("content-type"))
       headers.set("content-type", request.headers.get("content-type")!);
     const info =
-      bytes.byteLength > threshold ? await relayInfo(url.origin, signal) : null;
+      bytes.byteLength > threshold
+        ? await relayInfo(url.origin, signal, headers)
+        : null;
     if (info && bytes.byteLength > info.upload_threshold) {
       if (bytes.byteLength > info.max_body_bytes)
         throw new Error("This relay accepts request bodies up to 64 MiB.");

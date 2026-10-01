@@ -12,6 +12,7 @@ private final class RelayTransportStub: StubTransport {
     nonisolated(unsafe) static var grantBody: Data?
     nonisolated(unsafe) static var infoHTML: String?
     nonisolated(unsafe) static var infoProtocol: String?
+    nonisolated(unsafe) static var infoRequiresAuth = false
     override class func response(for path: String) -> (status: Int, body: Data)? {
         let json: String
         switch path {
@@ -48,6 +49,12 @@ private final class RelayTransportStub: StubTransport {
             }
         }
         if request.url?.path == "/_mold/relay/info", let html = Self.infoHTML {
+            if Self.infoRequiresAuth && request.value(forHTTPHeaderField: "X-Api-Key") == nil {
+                let refusal = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: [:])!
+                client?.urlProtocol(self, didReceive: refusal, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
             var headers = ["Content-Type": "text/html; charset=utf-8"]
             if let marker = Self.infoProtocol { headers["x-mold-relay-protocol"] = marker }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!
@@ -165,6 +172,26 @@ struct RelayTransportTests {
         await #expect(throws: (any Error).self) {
             try await discovery.info(origin: URL(string: "https://oversized-shell.example")!, session: session)
         }
+    }
+    @Test func keyedLegacyUploadsAuthenticateDiscoveryOnTheirOwnOrigin() async throws {
+        RelayTransportStub.requests = []
+        RelayTransportStub.infoHTML = "<title>mold — studio</title><div id=\"app\"></div>"
+        RelayTransportStub.infoRequiresAuth = true
+        defer { RelayTransportStub.infoHTML = nil; RelayTransportStub.infoRequiresAuth = false }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RelayTransportStub.self]
+        let backend = HTTPBackend(host: MoldHost(name: "legacy", baseURL: URL(string: "https://keyed-legacy.example")!, apiKey: "secret"), session: URLSession(configuration: configuration))
+        var request = backend.request("/api/upload")
+        request.httpMethod = "POST"
+        request.httpBody = Data(repeating: 7, count: 2_097_153)
+        request.setValue("credential=secret", forHTTPHeaderField: "Cookie")
+        request.setValue("Bearer credential", forHTTPHeaderField: "Authorization")
+        _ = try await backend.send(request)
+        #expect(RelayTransportStub.requests.map { $0.url!.path } == ["/_mold/relay/info", "/api/upload"])
+        #expect(RelayTransportStub.requests.first?.value(forHTTPHeaderField: "X-Api-Key") == "secret")
+        #expect(RelayTransportStub.requests.first?.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(RelayTransportStub.requests.first?.httpShouldHandleCookies == false)
+        #expect(RelayTransportStub.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer credential")
     }
     @Test func pendingMediaResolvesToTheSignedSameOriginURL() async throws {
         let url = try await backend().playableURL(for: "clip.mp4")

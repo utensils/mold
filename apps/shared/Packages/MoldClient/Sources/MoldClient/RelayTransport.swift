@@ -114,12 +114,16 @@ extension RelayTransport {
 
 actor RelayDiscovery {
     private var origins: [String: RelayTransport.Info] = [:]
-    func info(origin: URL, session: URLSession) async throws -> RelayTransport.Info {
+    func info(origin: URL, session: URLSession, originalHeaders: [String: String] = [:]) async throws -> RelayTransport.Info {
         let key = origin.scheme! + "://" + origin.host! + ":" + String(origin.port ?? 443)
         if let cached = origins[key] { return cached }
         let url = URL(string: "/_mold/relay/info", relativeTo: origin)!.absoluteURL
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
+        request.httpShouldHandleCookies = false
+        for (name, value) in originalHeaders where ["x-api-key", "authorization"].contains(name.lowercased()) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         let (stream, response) = try await session.bytes(for: request, delegate: RelayNoRedirect())
         defer { stream.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw MoldClientError.malformedResponse }
