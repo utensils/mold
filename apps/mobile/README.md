@@ -972,7 +972,7 @@ intentionally absent.
 
 ## Optional remote HTTPS access
 
-An authenticated machine can run `mold relay connect` to expose its normal API
+An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
 through a trusted HTTPS gateway. Add that HTTPS address through the existing
 Machines flow or pair using a QR whose reachable URL is the public address.
 Normal API-key storage, instance identity, device revocation and signed gallery

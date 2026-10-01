@@ -26,7 +26,9 @@ an owner-only file, then run the connector alongside the server:
 ```bash
 chmod 600 /absolute/path/relay-token
 MOLD_RELAY_TOKEN_FILE=/absolute/path/relay-token mold relay connect \
-  --relay-url wss://mold-link.urandom.io --target 127.0.0.1:7680
+  --transport aws \
+  --relay-url wss://uwijdhg05d.execute-api.us-west-2.amazonaws.com/production \
+  --target 127.0.0.1:7680
 ```
 
 On Windows, where this connector cannot verify file ACLs, supply the token in
@@ -67,33 +69,48 @@ This option does not automatically expose the app's private engine. CLI-only
 headless hosts can use the GPU-free standalone `mold-relay` connector binary
 with the same `connect` arguments.
 
-## Host a gateway
+## Lambda gateway
 
-For local development, `mold relay serve` has loopback-only control and data
-listeners (ports 7681 and 7682). Put a trusted HTTPS reverse proxy in front:
-`/_mold/relay/*` goes to the control listener; normal requests go to the data
-listener. Use plaintext HTTP/1.1 upstreams, disable response buffering, remove
-untrusted forwarding headers and block public `/metrics`. The standalone
-`mold-relay serve` command avoids GPU dependencies on the cloud instance.
+Production uses a Regional API Gateway HTTPS endpoint and two Node.js 22 Lambda
+functions. A separate API Gateway WebSocket endpoint connects the machine to
+per-request frontend sessions; DynamoDB stores admission and connection leases.
+The host connector runs on your machine, outside Lambda. URandom Terraform owns
+these resources and DNS; Mold owns the runtime code and browser shell. Zephra
+and existing GPU services remain independent.
 
-Production hosts require WSS. Plain WS is permitted only with the explicit
-`--allow-insecure-loopback` development flag and a loopback relay address.
-The gateway has bounded connection admission and attachment deadlines. Streams
-close after 3,600 seconds without application bytes in either direction;
-WebSocket heartbeats do not extend this deadline. Set `--idle-timeout-secs`
-(1–86,400) on both gateway and connector to change it. Synchronous generation
-requests send no response bytes while queued or rendering; if those requests
-can take longer than an hour, raise the timeout on both endpoints. Streaming
-queue events keep their connection active. A
-second connector is rejected while the first owns the machine address. Token
-rotation requires restarting the gateway and connector, ending old sessions.
-Mold sees loopback proxy peers, so enabled per-IP rate limits aggregate remote
-clients and connector authentication probes; do not trust forwarded headers to
-circumvent these limits.
+API credentials still reach and are checked by the host. Anonymous host access
+must return 401 before a connector forwards requests. API Gateway and Lambda
+terminate TLS and can see credentials and media. Enrollment and internal bridge
+tokens live in SSM SecureString, outside Terraform state. Public metrics are
+blocked. One enrolled host owns an address; another requires its own deployment.
 
-The URandom Terraform `modules/mold-relay` example owns a separate AWS instance,
-DNS and restricted SSM management role. Tokens are provisioned outside Terraform
-state. See its README for resource costs and deployment procedure. Build the
-small static Linux artifact with `scripts/relay/build-linux.sh`; only reviewed
-artifacts should be installed. Inspect the complete Terraform plan before an
-apply. Existing Zephra and GPU services are independent of this gateway.
+The shared clients stage requests larger than 2 MiB through private S3, preserving
+the existing 64 MiB request limit. Grants bind the original method, URL, headers,
+body checksum, host session and credential, and can be consumed once. Finite
+responses larger than 16 MiB, or with an unknown length, use private S3 objects;
+clients restore their original status and headers. Media players resolve short
+lived signed object URLs without sending Mold keys to S3. These URLs expire
+within 15 minutes; resolve media again to renew access. Staged objects are capped
+at 8 GiB. Static browser assets are served by the frontend from the private bucket.
+
+A Lambda request is bounded by the platform's 15 minute limit. SSE connections
+close before that limit and clients reopen their read stream and reconcile state.
+Generation clients submit once to the durable queue, then read progress and saved
+results. Relay generation therefore requires gallery retention: `--no-save` and
+gallery-disabled generation are refused before submission. Disconnects never
+cause automatic mutation replay or a local generation fallback after an uncertain
+admission. Native This Mac remains private unless you explicitly start an
+authenticated server and connector.
+
+Build and deploy reviewed runtime packages with the tooling under `scripts/relay/`.
+Inspect the complete scoped Terraform plan before applying infrastructure changes.
+Lambda usage includes the lifetime of streaming requests; this is optional remote
+access, not a free cloud GPU service.
+
+For local development only, `mold relay serve` provides the original direct
+transport with loopback control/data listeners on ports 7681/7682. A trusted TLS
+reverse proxy must route `/_mold/relay/*` to control, normal requests to data,
+remove spoofed forwarding headers, block metrics, and stream HTTP/1.1 responses.
+Use `--transport direct` on its connector. Plain WS requires the explicit
+`--allow-insecure-loopback` flag. Direct streams default to a 3,600 second
+application-byte inactivity limit, configurable with `--idle-timeout-secs`.

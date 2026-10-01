@@ -136,13 +136,13 @@ current platform support.
 
 ## Mold Studio
 
-| Platform | Download |
-| --- | --- |
+| Platform                | Download                                                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **macOS (recommended)** | **[Mold Studio for Mac](https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg)** — native, Apple Silicon, macOS 26+ |
-| macOS (legacy) | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg) — for Macs that cannot run macOS 26 |
-| Windows | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe) — see below |
-| Linux | Mold Desktop (Tauri) — source/CI builds, see below |
-| Android | [Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk) — see below |
+| macOS (legacy)          | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg) — for Macs that cannot run macOS 26          |
+| Windows                 | [Mold Desktop (Tauri)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe) — see below                      |
+| Linux                   | Mold Desktop (Tauri) — source/CI builds, see below                                                                                                  |
+| Android                 | [Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk) — see below                                               |
 
 **On a Mac, use Mold Studio.** It is the native macOS app: signed,
 notarized, self-updating through Sparkle, with mold's own Metal engine built
@@ -218,7 +218,7 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 
 For access outside your network without opening the GPU host's inbound ports,
 use the optional [HTTPS reverse relay](https://utensils.io/mold/deployment/relay).
-Run `mold relay connect` beside an authenticated server; every client uses the
+Run `mold relay connect --transport aws` beside an authenticated server; every client uses the
 resulting HTTPS machine address with its existing API key or pairing flow.
 The trusted gateway can see traffic and publishes one machine per process.
 
