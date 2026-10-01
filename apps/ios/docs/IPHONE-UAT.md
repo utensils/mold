@@ -169,3 +169,6 @@ open and scrolls the opened tile back into view on return.
   date heading and first row. The focused date-heading contrast regression
   failed at all three sizes before replacing the overlay with a top safe-area
   inset; notices now reserve their own space above the grid.
+- The saved-gallery notice itself failed small/normal-text contrast on its
+  translucent material. Primary text on an opaque semantic background passes
+  focused XS/Large/AX5 contrast, with the fixture deliberately taken offline.

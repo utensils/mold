@@ -48,7 +48,7 @@ paths:
 
 **Hidden collections.** Library queries include host-local hidden membership ids and check every merged copy, so a local lead cannot expose a hidden remote member. Hidden shelves remain directly browsable. Library View Options offers Manage Collections on phone and iPad; its Hide from All Prints toggle updates every machine holding that shelf and surfaces failures through HostStore.
 
-**Library status notices.** Failure/offline notices use a top safe-area inset, never an overlay over date headings and prints. Contrast coverage includes the populated date heading at every audited text size; Library and Search share this layout.
+**Library status notices.** Failure/offline notices use a top safe-area inset, never an overlay over date headings and prints. The saved-gallery notice uses primary text on an opaque semantic surface: material failed small-text contrast even with explicit primary text. Contrast coverage includes the populated date heading and offline notice at every audited text size; Library and Search share this layout.
 
 **Live Activity layout.** Keep the Lock Screen card within 160 pt including padding; `ActivityCard` offers a compact fallback before clipping status or Stop. The step figure and machine name are separate labels (strip only the exact legacy machine suffix in `ActivityCardContent`, without changing the ActivityKit wire payload). Preserve the stale refresh message, terminal print deep link, and 44 pt Stop target. `--live-activity-fixture` is Debug-only UAT, never a render or a distribution feature.
 
