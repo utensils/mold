@@ -99,7 +99,10 @@ Gallery imports above the relay request cap require a direct connection. Signed 
 A Lambda request is bounded by the platform's 15 minute limit. SSE connections
 close before that limit and clients reopen their read stream and reconcile state.
 Generation clients submit once to the durable queue, then read progress and saved
-results. Relay generation therefore requires gallery retention: `--no-save` and
+results. CLI model pulls submit once to the durable download API and read the
+retained job until completion; a stream closing does not report success. Chain
+read streams reconcile their manifest and reconnect after EOF.
+Relay generation therefore requires gallery retention: `--no-save` and
 gallery-disabled generation are refused before submission. Disconnects never
 cause automatic mutation replay or a local generation fallback after an uncertain
 admission. Native This Mac remains private unless you explicitly start an
