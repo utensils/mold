@@ -42,3 +42,22 @@ Shell upload writes only `shell/` with MIME types and AES256 encryption. It neve
 sync-deletes assets or modifies uploads/media prefixes. Retaining old hashed
 assets allows cached browser shells to continue loading after deployment.
 No infrastructure or real-machine registration is performed by this helper.
+
+Before mutating AWS, deployment resolves both local/remote token values and
+rejects identical host/bridge credentials or mismatches. It also downloads both
+current Lambda ZIPs into mode 600 `before-*.zip` files and verifies their AWS code
+hashes. Presigned download URLs are never logged or saved. `rollback.json`
+records only deployment identity and code hashes. Failure to retain either
+package prevents deployment. Keep the artifact directory private.
+
+To restore the retained predeployment code after a failed or unhealthy release:
+
+```sh
+python3 scripts/relay/deploy.py --rollback /private/operator/path/relay-release
+```
+
+Rollback preflights both functions and refuses unrelated concurrent code changes;
+it uses the same RevisionId, update-status and hash checks. It changes code only,
+leaves configuration/secrets and shell assets intact, and is safe to repeat after
+one function has already been restored. Rollback is explicit because an
+unconfirmed AWS update must be inspected before another mutation.

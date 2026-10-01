@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -52,30 +53,90 @@ def read_token(path):
     return token
 
 
-def provision_token(options, role, path):
-    parameter = f"/mold/relay/{role}-token"
-    local = read_token(path) if path.exists() or path.is_symlink() else None
-    try:
-        remote = aws(["ssm", "get-parameter", "--name", parameter, "--with-decryption"], options)["Parameter"]["Value"]
-    except AwsError as error:
-        if error.code != "ParameterNotFound":
-            raise
-        remote = None
-    if remote is not None:
-        if local is not None and local != remote:
+def token_preflight(options):
+    result = {}
+    for role in ("host", "bridge"):
+        path = getattr(options, f"{role}_token_file")
+        local = read_token(path) if path.exists() or path.is_symlink() else None
+        try:
+            remote = aws(["ssm", "get-parameter", "--name", f"/mold/relay/{role}-token",
+                          "--with-decryption"], options)["Parameter"]["Value"]
+        except AwsError as error:
+            if error.code != "ParameterNotFound":
+                raise
+            remote = None
+        if local is not None and remote is not None and local != remote:
             raise RuntimeError(f"Existing {role} token differs; refusing rotation")
-        if local is None:
-            private_write(path, remote + "\n")
-        return
-    token = local or secrets.token_hex(32)
-    # Value exists only in a mode600 file, never argv, shell interpolation or logs.
-    with tempfile.TemporaryDirectory(prefix="mold-relay-secret-") as directory:
-        request = Path(directory) / "request.json"
-        private_write(request, json.dumps({"Name": parameter, "Type": "SecureString", "Value": token,
-                                          "Description": f"Mold relay {role} authentication"}))
-        aws(["ssm", "put-parameter", "--cli-input-json", f"file://{request}"], options)
-    if local is None:
-        private_write(path, token + "\n")
+        result[role] = {"token": remote or local or secrets.token_hex(32),
+                        "remote": remote is not None, "local": local is not None}
+    if secrets.compare_digest(result["host"]["token"], result["bridge"]["token"]):
+        raise RuntimeError("Host and bridge tokens must have different values")
+    return result
+
+
+def provision_token(options, role, path, prepared=None):
+    if prepared is None:
+        # Standalone compatibility; deployment always preflights both roles together.
+        local = read_token(path) if path.exists() or path.is_symlink() else None
+        try:
+            remote = aws(["ssm", "get-parameter", "--name", f"/mold/relay/{role}-token", "--with-decryption"], options)["Parameter"]["Value"]
+        except AwsError as error:
+            if error.code != "ParameterNotFound":
+                raise
+            remote = None
+        if local is not None and remote is not None and local != remote:
+            raise RuntimeError(f"Existing {role} token differs; refusing rotation")
+        prepared = {"token": remote or local or secrets.token_hex(32), "remote": remote is not None, "local": local is not None}
+    if not prepared["remote"]:
+        with tempfile.TemporaryDirectory(prefix="mold-relay-secret-") as directory:
+            request = Path(directory) / "request.json"
+            private_write(request, json.dumps({"Name": f"/mold/relay/{role}-token", "Type": "SecureString",
+                                              "Value": prepared["token"], "Description": f"Mold relay {role} authentication"}))
+            aws(["ssm", "put-parameter", "--cli-input-json", f"file://{request}"], options)
+    if not prepared["local"]:
+        private_write(path, prepared["token"] + "\n")
+
+
+def retain_rollback(options, packages):
+    manifest = {"profile": options.profile, "region": options.region, "functions": {}}
+    for role, package in packages.items():
+        response = aws(["lambda", "get-function", "--function-name", f"mold-relay-{role}"], options)
+        config = response["Configuration"]
+        destination = options.output / f"before-{role}.zip"
+        try:
+            # Presigned AWS URL stays in memory; exceptions must never expose it.
+            with urllib.request.urlopen(response["Code"]["Location"], timeout=30) as source:
+                data = source.read(64 * 1024 * 1024 + 1)
+            if len(data) > 64 * 1024 * 1024:
+                raise RuntimeError("Rollback artifact exceeds download bound")
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(data)
+        except Exception:
+            raise RuntimeError(f"Could not retain {role} rollback code; URL and response omitted") from None
+        if package_hash(destination) != config["CodeSha256"]:
+            raise RuntimeError(f"{role} rollback artifact hash mismatch")
+        manifest["functions"][role] = {"before": config["CodeSha256"], "deployed": package_hash(package)}
+    private_write(options.output / "rollback.json", json.dumps(manifest))
+    return manifest
+
+
+def rollback(options, directory):
+    manifest = json.loads((directory / "rollback.json").read_text())
+    if manifest["profile"] != options.profile or manifest["region"] != options.region:
+        raise RuntimeError("Rollback profile/region differs from retained deployment")
+    # Preflight every function before changing either; never overwrite unrelated code.
+    for role, entry in manifest["functions"].items():
+        if role not in ("router", "frontend"):
+            raise RuntimeError("Invalid rollback role")
+        package = directory / f"before-{role}.zip"
+        if package_hash(package) != entry["before"]:
+            raise RuntimeError("Rollback ZIP hash mismatch")
+        current = aws(["lambda", "get-function-configuration", "--function-name", f"mold-relay-{role}"], options)
+        if current["CodeSha256"] not in (entry["before"], entry["deployed"]):
+            raise RuntimeError("Concurrent code change detected; refusing rollback")
+    for role, entry in manifest["functions"].items():
+        deploy_function(options, role, directory / f"before-{role}.zip", allowed_hashes=(entry["before"], entry["deployed"]))
 
 
 def build_packages(directory):
@@ -102,11 +163,13 @@ def package_hash(package):
     return base64.b64encode(hashlib.sha256(package.read_bytes()).digest()).decode()
 
 
-def deploy_function(options, role, package):
+def deploy_function(options, role, package, allowed_hashes=None):
     name = f"mold-relay-{role}"
     before = aws(["lambda", "get-function-configuration", "--function-name", name], options)
     if before.get("LastUpdateStatus") != "Successful" or before.get("State") != "Active":
         raise RuntimeError(f"{name} is not ready for a code update")
+    if allowed_hashes is not None and before["CodeSha256"] not in allowed_hashes:
+        raise RuntimeError("Concurrent code change detected; refusing rollback")
     expected = package_hash(package)
     if before["CodeSha256"] == expected:
         return
@@ -158,8 +221,14 @@ def main():
     parser.add_argument("--host-token-file", type=Path)
     parser.add_argument("--bridge-token-file", type=Path)
     parser.add_argument("--build-only", action="store_true")
-    parser.add_argument("--output", type=Path, required=True, help="Fresh retained artifact directory")
+    parser.add_argument("--rollback", type=Path, help="Restore retained predeployment ZIPs with concurrent-code guards")
+    parser.add_argument("--output", type=Path, help="Fresh retained artifact directory")
     options = parser.parse_args()
+    if options.rollback:
+        rollback(options, options.rollback)
+        return
+    if options.output is None:
+        parser.error("--output is required for build/deploy")
     if not options.build_only and (options.host_token_file is None or options.bridge_token_file is None):
         parser.error("Deployment requires separate owner-only host and bridge token files")
     if not options.build_only and options.host_token_file.resolve() == options.bridge_token_file.resolve():
@@ -172,10 +241,12 @@ def main():
         return
     # Validate shell before any cloud mutation.
     list(shell_files(options))
+    tokens = token_preflight(options)
+    manifest = retain_rollback(options, packages)
     for role in ("host", "bridge"):
-        provision_token(options, role, getattr(options, f"{role}_token_file"))
+        provision_token(options, role, getattr(options, f"{role}_token_file"), tokens[role])
     for role, package in packages.items():
-        deploy_function(options, role, package)
+        deploy_function(options, role, package, allowed_hashes=(manifest["functions"][role]["before"],))
     upload_shell(options)
 
 
