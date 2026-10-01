@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 /*
  * Shared 3-D print viewer — the lightbox's answer to a `.glb` the way `<video>`
  * is its answer to an `.mp4`. Mounted by web, desktop and the iPhone gallery.

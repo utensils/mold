@@ -1,3 +1,4 @@
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { apiFetch } from "./api/client";
 import { inTauri, ipc } from "./ipc";
 

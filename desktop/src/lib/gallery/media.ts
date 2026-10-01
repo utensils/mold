@@ -1,3 +1,4 @@
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { ApiError, apiFetch, apiFetchTo, currentTarget, type ApiTarget } from "../api/client";
 import type { GalleryImage } from "../api/types";
 import { inTauri, ipc } from "../ipc";

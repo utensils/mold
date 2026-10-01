@@ -1,4 +1,4 @@
-import { relayFetch, validateRelayObjectUrl } from "./relayTransport";
+import { relayFetch, resolveRelayObjectUrl } from "./relayTransport";
 const MediaURL = URL;
 export interface RelayMediaTicket {
   url?: string;
@@ -13,7 +13,7 @@ export async function resolveRelayMedia(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const origin = new MediaURL(baseUrl || window.location.origin).origin;
-  if (ticket.url) return validateRelayObjectUrl(ticket.url, origin);
+  if (ticket.url) return resolveRelayObjectUrl(ticket.url, origin, signal);
   if (!ticket.relay) return null;
   if (!ticket.relay.id || ticket.relay.state !== "pending")
     throw new Error("The relay returned an invalid media transfer.");
@@ -32,7 +32,7 @@ export async function resolveRelayMedia(
       expires_at?: number;
     };
     if (status.state === "ready" && status.url)
-      return validateRelayObjectUrl(status.url, origin);
+      return resolveRelayObjectUrl(status.url, origin, signal);
     if (status.state !== "pending")
       throw new Error("The relay could not stage this media file.");
     await new Promise<void>((resolve, reject) => {

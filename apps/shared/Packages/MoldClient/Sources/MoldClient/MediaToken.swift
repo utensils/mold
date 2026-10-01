@@ -13,6 +13,19 @@ public struct MediaToken: Codable, Hashable, Sendable {
     public let expiresAt: UInt64?
     /// False on a keyless host, where the plain URL already works.
     public let authRequired: Bool
+    public let url: String?
+    public let relay: RelayMediaTransfer?
+}
+
+public struct RelayMediaTransfer: Codable, Hashable, Sendable {
+    public let id: String
+    public let state: String
+}
+
+private struct RelayMediaStatus: Decodable {
+    let state: String
+    let url: String?
+    let expiresAt: UInt64?
 }
 
 public extension HTTPBackend {
@@ -40,6 +53,7 @@ public extension HTTPBackend {
         // the server compares against the request's (encoded) path, so the
         // ticket never matched.
         let ticket = try await mediaToken(forPath: urls.mediaPath(filename))
+        if let resolved = try await relayMediaURL(ticket) { return resolved }
         // A host that answers `auth_required: false` is keyless and the
         // direct URL IS the right request there. That is the case this Mac
         // lands in holding a key the host no longer wants, and the server
@@ -63,5 +77,23 @@ public extension HTTPBackend {
         components.queryItems = query
         guard let url = components.url else { throw MoldClientError.unauthorized }
         return url
+    }
+
+    internal func relayMediaURL(_ ticket: MediaToken) async throws -> URL? {
+        if let url = ticket.url { return try await relayObjectURL(url) }
+        guard let transfer = ticket.relay else { return nil }
+        guard !transfer.id.isEmpty, transfer.state == "pending" else { throw MoldClientError.malformedResponse }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(840))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            let state: RelayMediaStatus = try await get("/_mold/relay/media/\(escaped(transfer.id))")
+            if state.state == "ready", let url = state.url {
+                if let expires = state.expiresAt, expires <= UInt64(Date().timeIntervalSince1970) { throw MoldClientError.unauthorized }
+                return try await relayObjectURL(url)
+            }
+            guard state.state == "pending" else { throw MoldClientError.malformedResponse }
+            try await Task.sleep(for: .seconds(1))
+        }
+        throw MoldClientError.unreachable("Media staging timed out. Try again.")
     }
 }

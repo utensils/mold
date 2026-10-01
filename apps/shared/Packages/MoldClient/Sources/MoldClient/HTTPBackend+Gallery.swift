@@ -91,7 +91,7 @@ public extension HTTPBackend {
         let temporary: URL
         let response: URLResponse
         do {
-            (temporary, response) = try await session.download(for: request, delegate: redirectGuard)
+            (temporary, response) = try await relayDownload(request)
         } catch let error as URLError {
             throw TransportFailure.from(error)
         }

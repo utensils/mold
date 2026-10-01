@@ -22,6 +22,17 @@ it("hashes empty mutation bodies without probing ordinary requests", async () =>
     new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-amz-content-sha256"),
   ).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 });
+it("preserves encoded request targets and repeated query values", async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response("{}"));
+  vi.stubGlobal("fetch", fetch);
+  await relayFetch(
+    "https://machine.example/api/gallery/image/a%20b.png?media_token=x%2By&part=1&part=2",
+    { headers: { "x-api-key": "secret" } },
+  );
+  expect(
+    new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-mold-request-target"),
+  ).toBe("/api/gallery/image/a%20b.png?media_token=x%2By&part=1&part=2");
+});
 it("stages arbitrary large bodies and never carries Mold credentials to S3", async () => {
   const calls: { url: string; init?: RequestInit }[] = [];
   vi.stubGlobal(
@@ -31,13 +42,15 @@ it("stages arbitrary large bodies and never carries Mold credentials to S3", asy
       if (String(url).endsWith("/info"))
         return Response.json({
           protocol: 2,
+          object_origin:
+            "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com",
           upload_threshold: 2097152,
           max_body_bytes: 67108864,
         });
       if (String(url).endsWith("/uploads"))
         return Response.json({
           id: "up1",
-          url: "https://bucket.s3.amazonaws.com/object?signature=short",
+          url: "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
           headers: {},
           expires_at: 9999999999,
         });
@@ -60,7 +73,7 @@ it("stages arbitrary large bodies and never carries Mold credentials to S3", asy
   expect(calls.map((c) => c.url)).toEqual([
     "https://machine.example/_mold/relay/info",
     "https://machine.example/_mold/relay/uploads",
-    "https://bucket.s3.amazonaws.com/object?signature=short",
+    "https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short",
     "https://machine.example/_mold/relay/request",
   ]);
   expect(new Headers(calls[2]?.init?.headers).has("x-api-key")).toBe(false);
@@ -106,6 +119,59 @@ it("refuses foreign and nonreserved object locations", () => {
       validateRelayObjectUrl(url, "https://machine.example"),
     ).toThrow();
 });
+it("accepts only signed objects from the pinned relay S3 bucket", () => {
+  const objectOrigin =
+    "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";
+  const signed = `${objectOrigin}/_mold/objects/a?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=${"a".repeat(64)}&X-Amz-Expires=900`;
+  expect(
+    validateRelayObjectUrl(signed, "https://machine.example", objectOrigin),
+  ).toBe(signed);
+  for (const url of [
+    signed.replace("123456789012", "999999999999"),
+    signed.replace("X-Amz-Signature=", "unsigned="),
+    signed.replace("Expires=900", "Expires=901"),
+    signed + "#fragment",
+    signed.replace("dualstack.us-east-1", "dualstack.us-west-2"),
+  ])
+    expect(() =>
+      validateRelayObjectUrl(url, "https://machine.example", objectOrigin),
+    ).toThrow();
+});
+it("resolves a cross-origin signed object explicitly without any API headers", async () => {
+  const object_origin =
+    "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";
+  const url = `${object_origin}/_mold/objects/a?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=${"a".repeat(64)}&X-Amz-Expires=900`;
+  const fetch = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    if (String(input).endsWith("/info"))
+      return Response.json({
+        protocol: 2,
+        upload_threshold: 2097152,
+        max_body_bytes: 67108864,
+        object_origin,
+      });
+    if (String(input) === url) return new Response("media");
+    return new Response(
+      JSON.stringify({
+        url,
+        status: 200,
+        headers: { "content-type": "video/mp4" },
+      }),
+      { headers: { "x-mold-relay-object": "1" } },
+    );
+  });
+  vi.stubGlobal("fetch", fetch);
+  const response = await relayFetch(
+    "https://machine.example/api/gallery/image/a.mp4",
+    { headers: { "x-api-key": "secret" } },
+  );
+  expect(await response.text()).toBe("media");
+  const download = fetch.mock.calls.find((call) => call[0] === url);
+  expect(download).toBeDefined();
+  expect(new Headers(download?.[1]?.headers).has("x-api-key")).toBe(false);
+  expect(new Headers(download?.[1]?.headers).has("x-mold-request-target")).toBe(
+    false,
+  );
+});
 it("caches only exact-origin discovery and falls back only on 404", async () => {
   const calls: string[] = [];
   vi.stubGlobal(
@@ -135,15 +201,15 @@ it("caches only exact-origin discovery and falls back only on 404", async () => 
   ).rejects.toThrow("discovery failed");
 });
 it("refuses bodies above relay limits before issuing an upload grant", async () => {
-  const fetch = vi
-    .fn()
-    .mockResolvedValue(
-      Response.json({
-        protocol: 2,
-        upload_threshold: 2097152,
-        max_body_bytes: 2097152,
-      }),
-    );
+  const fetch = vi.fn().mockResolvedValue(
+    Response.json({
+      protocol: 2,
+      object_origin:
+        "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com",
+      upload_threshold: 2097152,
+      max_body_bytes: 2097152,
+    }),
+  );
   vi.stubGlobal("fetch", fetch);
   await expect(
     relayFetch("https://one.example/api/x", {

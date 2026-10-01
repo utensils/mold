@@ -52,12 +52,13 @@ extension HTTPBackend {
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
+            let (prepared, _) = try await relayPrepared(request)
             let (data, response) = try await session.data(
-                for: request, delegate: redirectGuard)
+                for: prepared, delegate: relayDelegate(prepared))
             guard let http = response as? HTTPURLResponse else {
                 throw MoldClientError.malformedResponse
             }
-            return (data, http)
+            return try await relayObject(data, response: http, original: request)
         } catch let error as URLError {
             throw TransportFailure.from(error)
         }
@@ -67,20 +68,26 @@ extension HTTPBackend {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.upload(
-                for: request, fromFile: file, delegate: redirectGuard)
+            let (prepared, source) = try await relayPrepared(request, file: file)
+            if let source {
+                (data, response) = try await session.upload(
+                    for: prepared, fromFile: source, delegate: relayDelegate(prepared))
+            } else {
+                (data, response) = try await session.data(for: prepared, delegate: relayDelegate(prepared))
+            }
         } catch let error as URLError {
             throw TransportFailure.from(error)
         }
         guard let http = response as? HTTPURLResponse else {
             throw MoldClientError.malformedResponse
         }
+        let (resolvedData, resolvedHTTP) = try await relayObject(data, response: http, original: request)
         do {
-            try HTTPRefusal.check(http, data)
+            try HTTPRefusal.check(resolvedHTTP, resolvedData)
         } catch {
             TransportLog.refusal(error, for: request)
             throw error
         }
-        return data
+        return resolvedData
     }
 }

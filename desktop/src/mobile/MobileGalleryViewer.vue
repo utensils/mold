@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { showsAlphaBed } from "@studio/lib/alphaMedia";
 import { useMobileBack } from "./useMobileBack";
 import MeshViewer from "@studio/components/MeshViewer.vue";
