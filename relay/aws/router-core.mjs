@@ -340,8 +340,10 @@ export function createRouter({
       target = host.connectionId;
     }
     const { from: ignored, to: ignoredTo, ...safe } = frame;
+    const forwarded = { ...safe, from: id };
+    const postStarted = Date.now();
     try {
-      await post(target, { ...safe, from: id });
+      await post(target, forwarded);
     } catch (error) {
       if (error?.$metadata?.httpStatusCode === 410) {
         console.warn(
@@ -350,6 +352,11 @@ export function createRouter({
           frame.a,
           target,
           error.$metadata?.httpStatusCode,
+          Buffer.byteLength(JSON.stringify(forwarded)),
+          Date.now() - postStarted,
+          Number.isSafeInteger(error.$metadata?.attempts)
+            ? error.$metadata.attempts
+            : 0,
           /^[A-Za-z0-9-]{1,128}$/.test(error.$metadata?.requestId ?? "")
             ? error.$metadata.requestId
             : "unknown",
@@ -358,6 +365,8 @@ export function createRouter({
           const started = Date.now();
           let confirmedGone = false;
           let category = "unavailable";
+          let status = 0;
+          let failure = "None";
           try {
             if (checkConnection) {
               await checkConnection(target);
@@ -366,12 +375,18 @@ export function createRouter({
           } catch (checkError) {
             confirmedGone = checkError?.$metadata?.httpStatusCode === 410;
             category = confirmedGone ? "gone" : "transient";
+            status = Number.isSafeInteger(checkError?.$metadata?.httpStatusCode)
+              ? checkError.$metadata.httpStatusCode
+              : 0;
+            failure = failureCategory(checkError);
           }
           console.warn(
             "Mold relay connection verification",
             category,
             target,
             Date.now() - started,
+            status,
+            failure,
           );
           if (confirmedGone)
             await leave(target, "post-gone-confirmed", host.sid);

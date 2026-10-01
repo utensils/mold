@@ -24,7 +24,9 @@ export const handler = createRouter({
     );
   },
   checkConnection: async (id) => {
-    await api.send(new GetConnectionCommand({ ConnectionId: id }));
+    await api.send(new GetConnectionCommand({ ConnectionId: id }), {
+      abortSignal: AbortSignal.timeout(2000),
+    });
   },
   close: async (id) => {
     try {

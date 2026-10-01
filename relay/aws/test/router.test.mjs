@@ -386,19 +386,38 @@ test("replacement host resets readiness and stale hello cannot publish it", asyn
   assert.equal(f.rows.get("host").ready, false);
 });
 
-for (const outcome of ["alive", "gone", "transient"]) {
+for (const outcome of [
+  "alive",
+  "gone",
+  "transient",
+  "forbidden",
+  "throttled",
+  "unavailable",
+]) {
   test(`host Post410 confirms ${outcome} before eviction`, async () => {
     let fail = false;
     const f = fixture({
       post: async (id) => {
         if (fail && id === "h") throw { $metadata: { httpStatusCode: 410 } };
       },
-      checkConnection: async () => {
-        if (outcome !== "alive")
-          throw {
-            $metadata: { httpStatusCode: outcome === "gone" ? 410 : 503 },
-          };
-      },
+      checkConnection:
+        outcome === "unavailable"
+          ? undefined
+          : async () => {
+              if (outcome !== "alive")
+                throw {
+                  $metadata: {
+                    httpStatusCode:
+                      outcome === "gone"
+                        ? 410
+                        : outcome === "forbidden"
+                          ? 403
+                          : outcome === "throttled"
+                            ? 429
+                            : 503,
+                  },
+                };
+            },
     });
     await connect(f.router, "h", "host", "host-test");
     await send(f.router, "h", { a: "hello", v: 2 });
