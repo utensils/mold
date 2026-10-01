@@ -2677,6 +2677,11 @@ function resultHostId(): string {
  */
 const hostedResultSrc = ref("");
 let hostedResultToken = 0;
+let hostedResultResolution: AbortController | null = null;
+onBeforeUnmount(() => {
+  hostedResultToken += 1;
+  hostedResultResolution?.abort();
+});
 watch(
   () => {
     const r = latestDone.value?.result;
@@ -2687,6 +2692,8 @@ watch(
     return filename ? `${resultHostId()}\u0000${filename}` : "";
   },
   async (key) => {
+    hostedResultResolution?.abort();
+    hostedResultResolution = null;
     hostedResultToken += 1;
     const token = hostedResultToken;
     hostedResultSrc.value = "";
@@ -2695,7 +2702,12 @@ watch(
     const host = listHosts().find((h) => h.id === hostId);
     if (!host) return;
     try {
-      const src = await resolveStreamableSrc(host, filename);
+      hostedResultResolution = new AbortController();
+      const src = await resolveStreamableSrc(
+        host,
+        filename,
+        hostedResultResolution.signal,
+      );
       if (token !== hostedResultToken) return;
       hostedResultSrc.value = src;
     } catch (err) {

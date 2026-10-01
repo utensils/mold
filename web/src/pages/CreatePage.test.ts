@@ -1672,6 +1672,59 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  it("cancels hosted result resolution when superseded and when the canvas unmounts", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "fixture-key",
+    });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [
+      { ...finishedCanvasJob({ image: undefined }), hostId: studio.id },
+    ];
+    const originalFetch = globalThis.fetch;
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) => {
+        signals.push(init?.signal as AbortSignal);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    try {
+      await flushPromises();
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      const previous = signals[0]!;
+      streamJobsRef.value = [
+        {
+          ...finishedCanvasJob({
+            image: undefined,
+            filename: "replacement.png",
+          }),
+          hostId: studio.id,
+        },
+      ];
+      await flushPromises();
+      expect(previous.aborted).toBe(true);
+      expect(signals).toHaveLength(2);
+      expect(signals[1]!.aborted).toBe(false);
+      wrapper.unmount();
+      expect(signals[1]!.aborted).toBe(true);
+    } finally {
+      wrapper.unmount();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("streams a settled print from a keyed machine through the media ticket", async () => {
     // The same door the Lightbox uses: an <img>/<video> cannot send the key,
     // so a keyed machine issues a short-lived ticket and the clip can
