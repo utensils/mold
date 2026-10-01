@@ -257,15 +257,27 @@ export function createRouter({
         return 403;
       }
       // A completed frontend can disconnect while its final ACK/EOF is in flight.
-      // Drop that stale request frame without evicting the shared host session.
-      if ((host.guests?.[frame.rid] ?? 0) <= now()) return 200;
+      // Cancel only that request; never acknowledge/forward stale bytes or evict host.
+      const cancelStale = async () => {
+        try {
+          await post(id, { a: "cancel", v: 2, sid: host.sid, rid: frame.rid });
+        } catch (error) {
+          // One bounded management request; stale transport failures cannot evict host.
+          console.warn(
+            "Mold relay stale cancellation failure",
+            failureCategory(error),
+          );
+        }
+        return 200;
+      };
+      if ((host.guests?.[frame.rid] ?? 0) <= now()) return await cancelStale();
       const guest = await store.get(`connection#${frame.rid}`);
       if (
         guest?.role !== "frontend" ||
         guest.sid !== host.sid ||
         guest.expiresAt <= now()
       )
-        return 200;
+        return await cancelStale();
       target = frame.rid;
     } else {
       if (frame.rid !== id || (host.guests?.[id] ?? 0) <= now()) {

@@ -128,7 +128,9 @@ test("host cannot address a foreign guest, oversized and malformed frames are re
     seq: 0,
     d: "YQ==",
   });
-  assert.equal(f.delivered.length, 0);
+  assert.deepEqual(f.delivered, [
+    { id: "h", a: "cancel", v: 2, sid, rid: "foreign" },
+  ]);
   await connect(f.router, "g", "frontend", "frontend-test");
   assert.equal(
     (
@@ -227,4 +229,37 @@ test("vanished guest during delivery drops harmlessly without host error packet"
   assert.equal(f.rows.get("host").connectionId, "h");
   assert.equal(f.rows.has("connection#g"), false);
   assert.equal(f.closed.includes("h"), false);
+});
+test("stale host requests receive cancellation without forwarding or host eviction", async () => {
+  for (const stale of [
+    "missing-row",
+    "expired-row",
+    "expired-lease",
+    "missing-lease",
+  ]) {
+    const f = fixture();
+    await connect(f.router, "h", "host", "host-test");
+    await connect(f.router, "g", "frontend", "frontend-test");
+    await send(f.router, "g", { a: "hello", v: 2 });
+    const host = f.rows.get("host"),
+      sid = host.sid;
+    if (stale === "missing-row") f.rows.delete("connection#g");
+    if (stale === "expired-row") f.rows.get("connection#g").expiresAt = 99;
+    if (stale === "expired-lease") host.guests.g = 99;
+    if (stale === "missing-lease") delete host.guests.g;
+    f.delivered.length = 0;
+    const reply = await send(f.router, "h", {
+      a: "eof",
+      v: 2,
+      sid,
+      rid: "g",
+      seq: 1,
+    });
+    assert.equal(reply.statusCode, 200);
+    assert.deepEqual(f.delivered, [
+      { id: "h", a: "cancel", v: 2, sid, rid: "g" },
+    ]);
+    assert.deepEqual(f.closed, []);
+    assert.equal(f.rows.get("host").connectionId, "h");
+  }
 });
