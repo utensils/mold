@@ -137,6 +137,20 @@ mod tests {
         ));
     }
     #[test]
+    fn mold_without_bundled_ui_is_positive_direct_discovery_evidence() {
+        let html="<title>mold</title><h1>mold is running</h1><p>This binary was built without the web gallery UI bundled.</p>";
+        assert!(!classify_discovery_body("text/html", false, html.as_bytes()).unwrap());
+        assert!(classify_discovery_body("text/html", true, html.as_bytes()).is_err());
+        assert!(classify_discovery_body("application/json", false, html.as_bytes()).is_err());
+        for incomplete in [
+            "<title>mold</title>",
+            "<title>mold</title><h1>mold is running</h1>",
+            "<h1>mold is running</h1>This binary was built without the web gallery UI bundled.",
+        ] {
+            assert!(classify_discovery_body("text/html", false, incomplete.as_bytes()).is_err());
+        }
+    }
+    #[test]
     fn legacy_mold_spa_is_positive_direct_discovery_evidence() {
         let html = "<!doctype html><meta name=\"description\" content=\"mold — local AI image and video studio.\"><title>mold — studio</title>";
         assert!(!classify_discovery_body("text/html", false, html.as_bytes()).unwrap());
@@ -373,8 +387,11 @@ fn classify_discovery_body(content_type: &str, marked: bool, body: &[u8]) -> Res
     {
         let html = std::str::from_utf8(body).context("invalid direct server metadata")?;
         ensure!(
-            html.contains("<title>mold — studio</title>")
-                && html.contains("mold — local AI image and video studio."),
+            (html.contains("<title>mold — studio</title>")
+                && html.contains("mold — local AI image and video studio."))
+                || (html.contains("<title>mold</title>")
+                    && html.contains("<h1>mold is running</h1>")
+                    && html.contains("This binary was built without the web gallery UI bundled.")),
             "unrecognized relay discovery HTML"
         );
         return Ok(false);
