@@ -1142,19 +1142,26 @@ impl MoldClient {
                 tokio::time::Instant::now() < deadline,
                 "chain stream still pending after 24 hours; inspect durable job"
             );
-            let mut resp = self
-                .client
-                .get(format!(
-                    "{}/api/chain-jobs/{}/events",
-                    self.base_url, job_id
-                ))
-                .send()
-                .await?;
-            if resp.status().is_client_error() || resp.status().is_server_error() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("server error {status}: {body}");
+            let response = async {
+                let response = self
+                    .client
+                    .get(format!(
+                        "{}/api/chain-jobs/{}/events",
+                        self.base_url, job_id
+                    ))
+                    .send()
+                    .await?;
+                error_for_status_with_body(response).await
             }
+            .await;
+            let mut resp = match response {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
 
             let mut outcome = ChainJobOutcome {
                 state: ChainJobState::Running,
@@ -1162,7 +1169,18 @@ impl MoldClient {
                 output: None,
             };
             let mut buffer = SseFrameParser::new();
-            while let Some(chunk) = resp.chunk().await? {
+            loop {
+                let chunk = match resp.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let error = anyhow::Error::from(error);
+                        if is_transient_request_error(&error) {
+                            break;
+                        }
+                        return Err(error);
+                    }
+                };
                 buffer.push(&chunk);
                 while let Some(event_text) = buffer.next_frame() {
                     let (_, data) = parse_sse_event(&event_text);
@@ -1181,7 +1199,7 @@ impl MoldClient {
                                     .filter_map(|stage| stage.frames_emitted)
                                     .sum(),
                             });
-                            if crate::chain_job::settled(job.summary.state) {
+                            if chain_follow_stopped(job.summary.state) {
                                 // A job that settled before we subscribed carries
                                 // its print in the manifest, not in a frame.
                                 outcome.output = job
@@ -1227,7 +1245,7 @@ impl MoldClient {
                             if error.is_some() {
                                 outcome.error = error;
                             }
-                            if crate::chain_job::settled(state) {
+                            if chain_follow_stopped(state) {
                                 return Ok(outcome);
                             }
                         }
@@ -1236,8 +1254,15 @@ impl MoldClient {
                 }
             }
             // Read-only reconciliation never resubmits the admitted chain.
-            let detail = self.get_chain_job(job_id).await?;
-            if crate::chain_job::settled(detail.summary.state) {
+            let detail = match self.get_chain_job(job_id).await {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if chain_follow_stopped(detail.summary.state) {
                 outcome.state = detail.summary.state;
                 outcome.error = detail.summary.error;
                 outcome.output = detail
@@ -3844,6 +3869,13 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
 }
 
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
+fn chain_follow_stopped(state: crate::chain_job::ChainJobState) -> bool {
+    crate::chain_job::settled(state)
+        || matches!(
+            state,
+            crate::chain_job::ChainJobState::Paused | crate::chain_job::ChainJobState::Interrupted
+        )
+}
 fn build_client(api_key: Option<&str>) -> (Client, bool) {
     let mut builder = Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
@@ -4145,6 +4177,14 @@ mod tests {
         unsafe { std::env::remove_var("MOLD_HOST") };
     }
 
+    #[test]
+    fn chain_follow_returns_parked_states() {
+        use crate::chain_job::ChainJobState;
+        assert!(chain_follow_stopped(ChainJobState::Paused));
+        assert!(chain_follow_stopped(ChainJobState::Interrupted));
+        assert!(chain_follow_stopped(ChainJobState::Completed));
+        assert!(!chain_follow_stopped(ChainJobState::Running));
+    }
     #[tokio::test]
     async fn chain_sse_reconnects_after_nonterminal_eof() {
         use wiremock::matchers::{method, path};
@@ -4153,7 +4193,9 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = calls.clone();
         Mock::given(method("GET")).and(path("/api/chain-jobs/fixture/events")).respond_with(move |_:&wiremock::Request|{
-            let state=if count.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {"running"}else{"completed"};
+            let call=count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            if call==0{return ResponseTemplate::new(503);}
+            let state=if call==1 {"running"}else{"completed"};
             ResponseTemplate::new(200).set_body_string(format!("data: {{\"type\":\"state_changed\",\"state\":\"{state}\",\"error\":null}}\n\n")).insert_header("content-type","text/event-stream")
         }).mount(&server).await;
         let detail = crate::chain_job::ChainJobDetail {
@@ -4185,7 +4227,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result = client.stream_chain_job_events("fixture", tx).await.unwrap();
         assert_eq!(result.state, crate::chain_job::ChainJobState::Completed);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
     #[tokio::test]
     async fn relay_pull_admits_once_and_uses_retained_terminal_state() {

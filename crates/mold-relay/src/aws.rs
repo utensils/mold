@@ -214,7 +214,7 @@ impl RequestBoundary {
                 bail!("AWS relay data exceeds request body");
             }
             *remaining -= bytes.len();
-            return Ok(Some(bytes));
+            return Ok((!bytes.is_empty()).then_some(bytes));
         }
         self.header.extend_from_slice(&bytes);
         let Some(end) = self.header.windows(4).position(|p| p == b"\r\n\r\n") else {
@@ -336,6 +336,14 @@ pub async fn connect(
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
+async fn next_outgoing(
+    cancel: &CancellationToken,
+    heartbeat: &mut mpsc::Receiver<Frame>,
+    controls: &mut mpsc::Receiver<Frame>,
+    data: &mut mpsc::Receiver<Frame>,
+) -> Option<Frame> {
+    tokio::select! {biased;_ = cancel.cancelled()=>None,frame=heartbeat.recv()=>frame,frame=controls.recv()=>frame,frame=data.recv()=>frame}
+}
 fn writer_cadence() -> tokio::time::Interval {
     let mut cadence = tokio::time::interval(Duration::from_millis(5));
     cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -363,9 +371,20 @@ fn stream_diagnostic(error: &anyhow::Error) {
     };
     diagnostic(category);
 }
+fn close_metadata(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> (Option<u16>, usize) {
+    frame
+        .map(|frame| (Some(frame.code.into()), frame.reason.len()))
+        .unwrap_or((None, 0))
+}
 fn diagnostic(reason: &'static str) {
     if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some() {
-        eprintln!("mold-relay: {reason}");
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        eprintln!("mold-relay: unix_s={time} {reason}");
     }
 }
 
@@ -380,8 +399,19 @@ where
             Some(Ok(Message::Text(text))) => return Ok(Some(text.to_string())),
             Some(Ok(Message::Ping(_))) => diagnostic("websocket_ping"),
             Some(Ok(Message::Pong(_))) => diagnostic("websocket_pong"),
-            Some(Ok(Message::Close(_))) | None => {
+            Some(Ok(Message::Close(frame))) => {
+                if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some() {
+                    let (code, length) = close_metadata(frame.as_ref());
+                    eprintln!(
+                        "mold-relay: websocket_close_code={} reason_bytes={length}",
+                        code.unwrap_or(1005)
+                    );
+                }
                 diagnostic("websocket_closed");
+                return Ok(None);
+            }
+            None => {
+                diagnostic("websocket_eof");
                 return Ok(None);
             }
             Some(Ok(_)) => {
@@ -431,6 +461,7 @@ async fn session(
     let sid = ready.sid.context("missing AWS relay epoch")?;
     diagnostic("host_ready");
     let cancel = shutdown.child_token();
+    let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<Frame>(1);
     let (control_tx, mut control_rx) = mpsc::channel::<Frame>(128);
     let (data_tx, mut data_rx) = mpsc::channel::<Frame>(128);
     let writer_cancel = cancel.clone();
@@ -438,7 +469,13 @@ async fn session(
         // Priority controls, and a shared rate below API Gateway's route throttle.
         let mut cadence = writer_cadence();
         loop {
-            let frame = tokio::select! {biased;_ = writer_cancel.cancelled()=>break,frame=control_rx.recv()=>frame,frame=data_rx.recv()=>frame};
+            let frame = next_outgoing(
+                &writer_cancel,
+                &mut heartbeat_rx,
+                &mut control_rx,
+                &mut data_rx,
+            )
+            .await;
             let Some(frame) = frame else {
                 break;
             };
@@ -461,8 +498,13 @@ async fn session(
     tokio::pin!(expiry);
     let mut last = tokio::time::Instant::now();
     loop {
-        tokio::select! {
+        tokio::select! {biased;
             _ = cancel.cancelled()=>{diagnostic("session_cancelled");break;},
+            _ = heartbeat.tick()=>{
+                if last.elapsed()>Duration::from_secs(90){diagnostic("heartbeat_timeout");break;}
+                let mut ping=Frame::new("heartbeat","","");ping.sid=None;ping.rid=None;
+                if heartbeat_tx.try_send(ping).is_err(){diagnostic("heartbeat_queue_full");break;}
+            }
             _ = &mut expiry=>{diagnostic("session_rotation");break;},
             result=tasks.join_next(),if !tasks.is_empty()=>{if let Some(Ok(rid))=result{requests.remove(&rid);}},
             message=next_text(&mut source)=>{
@@ -484,11 +526,7 @@ async fn session(
                     if tx.try_send(frame).is_err(){requests.remove(&rid);let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));}
                 }
             },
-            _ = heartbeat.tick()=>{
-                if last.elapsed()>Duration::from_secs(90){diagnostic("heartbeat_timeout");break;}
-                let mut ping=Frame::new("heartbeat","","");ping.sid=None;ping.rid=None;
-                if control_tx.try_send(ping).is_err(){diagnostic("control_queue_full");break;}
-            }
+
         }
     }
     cancel.cancel();
@@ -793,6 +831,66 @@ mod tests {
             .unwrap();
         cancel.cancel();
         connector.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn busy_control_queue_cannot_starve_heartbeat() {
+        let cancel = CancellationToken::new();
+        let (ht, mut hr) = mpsc::channel(1);
+        let (ct, mut cr) = mpsc::channel(8);
+        let (dt, mut dr) = mpsc::channel(8);
+        dt.send(Frame::new("data", "epoch", "guest")).await.unwrap();
+        let producer = tokio::spawn(async move {
+            loop {
+                if ct.send(Frame::new("ack", "epoch", "guest")).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let send = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            ht.send(Frame::new("heartbeat", "", "")).await.unwrap();
+        });
+        let mut cadence = writer_cadence();
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let frame = next_outgoing(&cancel, &mut hr, &mut cr, &mut dr)
+                    .await
+                    .unwrap();
+                cadence.tick().await;
+                if frame.a == "heartbeat" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        producer.abort();
+        send.await.unwrap();
+    }
+    #[test]
+    fn websocket_close_diagnostics_expose_only_code_and_reason_length() {
+        let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "secret must not appear".into(),
+        };
+        assert_eq!(close_metadata(Some(&frame)), (Some(1008), 22));
+        assert_eq!(close_metadata(None), (None, 0));
+    }
+    #[test]
+    fn empty_validated_body_chunk_is_a_noop() {
+        let mut request = RequestBoundary::new();
+        assert!(request
+            .push(
+                b"PUT /api/upload HTTP/1.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            )
+            .unwrap()
+            .is_some());
+        assert!(request.push(Vec::new()).unwrap().is_none());
+        assert!(request.finish().is_err());
+        assert_eq!(request.push(b"body".to_vec()).unwrap().unwrap(), b"body");
+        request.finish().unwrap();
     }
     #[test]
     fn early_final_http_response_stops_request_body_forwarding() {

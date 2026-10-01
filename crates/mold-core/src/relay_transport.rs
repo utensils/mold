@@ -3,6 +3,119 @@
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn staged_upload_success_uses_signed_tls_put_then_authenticated_dispatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let cert = rustls::pki_types::CertificateDer::from(
+            include_bytes!("../tests/fixtures/relay-tls/cert.der").to_vec(),
+        );
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                include_bytes!("../tests/fixtures/relay-tls/key.der").to_vec(),
+            ));
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = vec![42u8; STAGE_THRESHOLD];
+        let expected_body = expected.clone();
+        let tls = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
+                .accept(socket)
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("PUT /uploads/fixture?"));
+            assert!(!head.to_lowercase().contains("x-api-key"));
+            assert!(!head.to_lowercase().contains("authorization:"));
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            assert_eq!(length, expected_body.len());
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(body, expected_body);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        const HOST: &str = "mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let tls_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let unsigned = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(HOST, address)
+            .use_preconfigured_tls(tls_config)
+            .build()
+            .unwrap();
+        let server = MockServer::start().await;
+        let mut keys = reqwest::header::HeaderMap::new();
+        keys.insert("x-api-key", "private".parse().unwrap());
+        let mut client = RelayClient::new(Client::builder().default_headers(keys).build().unwrap());
+        client.unsigned = unsigned;
+        client.mark_relay(&server.uri());
+        client
+            .object_origins
+            .lock()
+            .unwrap()
+            .insert(server.uri(), format!("https://{HOST}"));
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 300;
+        let grant = serde_json::json!({"id":"fixture-grant","url":format!("https://{HOST}/uploads/fixture?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-Signature={}","a".repeat(64)),"headers":{"content-type":"application/octet-stream"},"expires_at":expires});
+        Mock::given(method("POST"))
+            .and(path("/_mold/relay/uploads"))
+            .and(header("x-api-key", "private"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(grant))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_mold/relay/request"))
+            .and(header("x-api-key", "private"))
+            .and(body_json(serde_json::json!({"id":"fixture-grant"})))
+            .respond_with(ResponseTemplate::new(201).set_body_string("stored"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let response = client
+            .put(format!("{}/api/import", server.uri()))
+            .body(expected)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        assert_eq!(response.text().await.unwrap(), "stored");
+        tls.await.unwrap();
+    }
+    #[tokio::test]
     async fn relay_hashes_small_bodies_and_rejects_unsafe_upload_grants() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -30,7 +143,7 @@ mod tests {
                 .unwrap(),
             &b"okay"[..]
         );
-        Mock::given(method("POST")).and(path("/_mold/relay/uploads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a","url":"https://evil.example/file","headers":{},"expires_at":9999999999u64}))).expect(2).mount(&server).await;
+        Mock::given(method("POST")).and(path("/_mold/relay/uploads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a","url":"https://evil.example/file","headers":{},"expires_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()+300}))).expect(2).mount(&server).await;
         for request in [
             client.put(format!("{}/api/upload", server.uri())),
             client.delete(format!("{}/api/upload", server.uri())),
@@ -106,6 +219,13 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key(&url.origin().ascii_serialization()));
+    }
+    #[test]
+    fn upload_grant_expiry_is_bounded_by_fifteen_minutes() {
+        assert!(valid_grant_expiry(1001, 1000));
+        assert!(valid_grant_expiry(1900, 1000));
+        assert!(!valid_grant_expiry(1901, 1000));
+        assert!(!valid_grant_expiry(1000, 1000));
     }
     #[test]
     fn staged_metadata_omits_credentials_and_transport_headers() {
@@ -241,6 +361,9 @@ fn signed_mold_s3(url: &Url) -> bool {
             .is_some_and(|v| v.len() == 64 && v.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn valid_grant_expiry(expiry: u64, now: u64) -> bool {
+    expiry > now && expiry - now <= 900
+}
 fn stage_header_allowed(name: &str) -> bool {
     !name.starts_with("x-mold-viewer-")
         && !matches!(
@@ -501,11 +624,15 @@ impl RelayRequest {
                 .json()
                 .await?;
             ensure!(
-                grant["expires_at"].as_u64().is_some_and(|expiry| expiry
-                    > std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()),
+                grant["expires_at"]
+                    .as_u64()
+                    .is_some_and(|expiry| valid_grant_expiry(
+                        expiry,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    )),
                 "expired relay upload grant"
             );
             let put_url = Url::parse(grant["url"].as_str().context("missing relay upload URL")?)?;
