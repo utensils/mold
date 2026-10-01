@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch as fetch } from "./originAuth";
 /**
  * POST-capable Server-Sent Events client.
  *

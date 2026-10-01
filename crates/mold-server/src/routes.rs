@@ -3737,6 +3737,20 @@ pub(crate) fn apply_media_headers(
     img: mold_core::ImageData,
     headers: &mut HeaderMap,
 ) -> Vec<u8> {
+    let bytes = media_response_headers(response, &img, headers);
+    if response.mesh.is_none() && response.audio.is_none() && response.video.is_none() {
+        img.data
+    } else {
+        bytes.to_vec()
+    }
+}
+
+/// Project media facts without copying the potentially large payload.
+pub(crate) fn media_response_headers<'a>(
+    response: &'a mold_core::GenerateResponse,
+    img: &'a mold_core::ImageData,
+    headers: &mut HeaderMap,
+) -> &'a [u8] {
     // Narrowest probe first: mesh, then audio, then video. Each is missing
     // whatever the next probe keys on — a mesh has no sample rate and no
     // frames, an audio print has no frames — so a wider probe running first
@@ -3767,7 +3781,7 @@ pub(crate) fn apply_media_headers(
         set("x-mold-mesh-bounds-max", fmt_bounds(mesh.bounds_max));
         set("x-mold-mesh-poster-width", mesh.poster_width.to_string());
         set("x-mold-mesh-poster-height", mesh.poster_height.to_string());
-        return mesh.data.clone();
+        return &mesh.data;
     }
 
     if let Some(audio) = response.audio.as_ref() {
@@ -3798,7 +3812,7 @@ pub(crate) fn apply_media_headers(
             "x-mold-audio-thumbnail-height",
             audio.thumbnail_height.to_string(),
         );
-        return audio.data.clone();
+        return &audio.data;
     }
 
     // For video responses, return the actual video data (not the thumbnail)
@@ -3871,10 +3885,10 @@ pub(crate) fn apply_media_headers(
                 headers.insert("x-mold-video-audio-channels", v);
             }
         }
-        return video.data.clone();
+        return &video.data;
     }
 
-    img.data
+    &img.data
 }
 
 pub(crate) fn validate_generate_request(

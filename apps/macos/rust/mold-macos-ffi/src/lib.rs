@@ -49,7 +49,8 @@ const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// their handler; it only stops the page reading the reply. The API key is the
 /// protection, and every state-changing route is behind it: `EXEMPT_PATHS`
 /// (`crates/mold-server/src/auth.rs`) is `/health`, `/api/docs`,
-/// `/api/openapi.json` and `/api/pairing/claim` alone.
+/// `/api/openapi.json` and `/api/pairing/claim`. The read-only browser shell
+/// and static assets are also public to display the API-key entry screen.
 const EMBEDDED_CORS_ORIGIN: &str = "mold-embedded-engine no browser origin";
 
 static ENGINE: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();

@@ -1,3 +1,4 @@
+import { originApiTarget } from "../lib/originAuth";
 /*
  * Which machine a model gets installed on (spec §08 multi-host, shared rule in
  * `@studio/lib/modelInstallTargets`).
@@ -168,7 +169,7 @@ export function useModelInstallTargets(): ModelInstallTargets {
       const outcome = await runWithLicenseConsent({
         hostLabel: target?.host.label ?? "This machine",
         // The SPA is served by the host it talks to, so the origin is "".
-        target: { baseUrl: "", apiKey: null },
+        target: originApiTarget(),
         installModel: modelId,
         start: () => cat.startDownload(modelId),
       });

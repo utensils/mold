@@ -1,0 +1,759 @@
+//! Authenticated HTTP facade for the optional AWS relay.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn staged_upload_success_uses_signed_tls_put_then_authenticated_dispatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let cert = rustls::pki_types::CertificateDer::from(
+            include_bytes!("../tests/fixtures/relay-tls/cert.der").to_vec(),
+        );
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                include_bytes!("../tests/fixtures/relay-tls/key.der").to_vec(),
+            ));
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = vec![42u8; STAGE_THRESHOLD];
+        let expected_body = expected.clone();
+        let tls = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
+                .accept(socket)
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("PUT /uploads/fixture?"));
+            assert!(!head.to_lowercase().contains("x-api-key"));
+            assert!(!head.to_lowercase().contains("authorization:"));
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            assert_eq!(length, expected_body.len());
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(body, expected_body);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        const HOST: &str = "mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let tls_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let unsigned = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(HOST, address)
+            .use_preconfigured_tls(tls_config)
+            .build()
+            .unwrap();
+        let server = MockServer::start().await;
+        let mut keys = reqwest::header::HeaderMap::new();
+        keys.insert("x-api-key", "private".parse().unwrap());
+        let mut client = RelayClient::new(Client::builder().default_headers(keys).build().unwrap());
+        client.unsigned = unsigned;
+        client.mark_relay(&server.uri());
+        client
+            .object_origins
+            .lock()
+            .unwrap()
+            .insert(server.uri(), format!("https://{HOST}"));
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 300;
+        let grant = serde_json::json!({"id":"fixture-grant","url":format!("https://{HOST}/uploads/fixture?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-Signature={}","a".repeat(64)),"headers":{"content-type":"application/octet-stream"},"expires_at":expires});
+        Mock::given(method("POST"))
+            .and(path("/_mold/relay/uploads"))
+            .and(header("x-api-key", "private"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(grant))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_mold/relay/request"))
+            .and(header("x-api-key", "private"))
+            .and(body_json(serde_json::json!({"id":"fixture-grant"})))
+            .respond_with(ResponseTemplate::new(201).set_body_string("stored"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let response = client
+            .put(format!("{}/api/import", server.uri()))
+            .body(expected)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        assert_eq!(response.text().await.unwrap(), "stored");
+        tls.await.unwrap();
+    }
+    #[tokio::test]
+    async fn relay_hashes_small_bodies_and_rejects_unsafe_upload_grants() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/_mold/relay/info")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"protocol":2,"upload_threshold":2097152,"max_body_bytes":67108864}))).mount(&server).await;
+        let hash = format!("{:x}", Sha256::digest(b"body"));
+        Mock::given(method("POST"))
+            .and(path("/api/test"))
+            .and(header("x-amz-content-sha256", hash.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"okay"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = RelayClient::new(Client::new());
+        client.known.lock().unwrap().insert(server.uri(), true);
+        assert_eq!(
+            client
+                .post(format!("{}/api/test", server.uri()))
+                .body("body")
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            &b"okay"[..]
+        );
+        Mock::given(method("POST")).and(path("/_mold/relay/uploads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a","url":"https://evil.example/file","headers":{},"expires_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()+300}))).expect(2).mount(&server).await;
+        for request in [
+            client.put(format!("{}/api/upload", server.uri())),
+            client.delete(format!("{}/api/upload", server.uri())),
+        ] {
+            assert!(request
+                .body(vec![0; STAGE_THRESHOLD])
+                .send()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("untrusted relay upload URL"));
+        }
+        let methods: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/_mold/relay/uploads")
+            .map(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["method"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(methods, ["PUT", "DELETE"]);
+    }
+    #[tokio::test]
+    async fn object_download_omits_api_key_and_reconstructs_streamed_response() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/media")).and(header("x-api-key","private"))
+            .respond_with(ResponseTemplate::new(200).insert_header("x-mold-relay-object","1").set_body_json(serde_json::json!({"url":format!("{}/_mold/objects/a?signature=x",server.uri()),"status":206,"headers":{"content-type":"video/mp4","x-mold-video-frames":"25"}}))).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/_mold/objects/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"media"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-api-key", "private".parse().unwrap());
+        let client = RelayClient::new(Client::builder().default_headers(headers).build().unwrap());
+        client.mark_relay(&server.uri());
+        let response = client
+            .get(format!("{}/api/media", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.headers()["x-mold-video-frames"], "25");
+        assert_eq!(response.bytes().await.unwrap(), &b"media"[..]);
+        let requests = server.received_requests().await.unwrap();
+        let fetched = requests
+            .iter()
+            .find(|r| r.url.path() == "/_mold/objects/a")
+            .unwrap();
+        assert!(!fetched.headers.contains_key("x-api-key"));
+        assert!(!fetched.headers.contains_key("x-amz-content-sha256"));
+    }
+    #[tokio::test]
+    async fn discovery_connection_failure_is_not_cached_as_direct_mode() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = RelayClient::new(Client::new());
+        let url = Url::parse(&format!("https://{address}/api/status")).unwrap();
+        let error = client.is_relay(&url).await.unwrap_err();
+        assert!(crate::client::MoldClient::is_connection_error(&error));
+        assert!(crate::client::is_transient_request_error(&error));
+        assert!(!client
+            .known
+            .lock()
+            .unwrap()
+            .contains_key(&url.origin().ascii_serialization()));
+    }
+    #[test]
+    fn upload_grant_expiry_is_bounded_by_fifteen_minutes() {
+        assert!(valid_grant_expiry(1001, 1000));
+        assert!(valid_grant_expiry(1900, 1000));
+        assert!(!valid_grant_expiry(1901, 1000));
+        assert!(!valid_grant_expiry(1000, 1000));
+    }
+    #[test]
+    fn staged_metadata_omits_credentials_and_transport_headers() {
+        for name in [
+            "cookie",
+            "authorization",
+            "x-api-key",
+            "transfer-encoding",
+            "x-mold-viewer-id",
+            "x-mold-request-target",
+            "connection",
+        ] {
+            assert!(!stage_header_allowed(name), "{name}");
+        }
+        assert!(stage_header_allowed("content-type"));
+        assert!(stage_header_allowed("range"));
+    }
+    #[test]
+    fn signed_objects_require_the_discovered_bucket_identity() {
+        let url=Url::parse("https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com/_mold/objects/a?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        assert!(!trusted_signed_object(&url, None));
+        assert!(trusted_signed_object(
+            &url,
+            Some(&url.origin().ascii_serialization())
+        ));
+        assert!(!trusted_signed_object(
+            &url,
+            Some("https://mold-relay-999999999999-us-east-1.s3.dualstack.us-east-1.amazonaws.com")
+        ));
+    }
+    #[test]
+    fn mold_without_bundled_ui_is_positive_direct_discovery_evidence() {
+        let html="<title>mold</title><h1>mold is running</h1><p>This binary was built without the web gallery UI bundled.</p>";
+        assert!(!classify_discovery_body("text/html", false, html.as_bytes()).unwrap());
+        assert!(classify_discovery_body("text/html", true, html.as_bytes()).is_err());
+        assert!(classify_discovery_body("application/json", false, html.as_bytes()).is_err());
+        for incomplete in [
+            "<title>mold</title>",
+            "<title>mold</title><h1>mold is running</h1>",
+            "<h1>mold is running</h1>This binary was built without the web gallery UI bundled.",
+        ] {
+            assert!(classify_discovery_body("text/html", false, incomplete.as_bytes()).is_err());
+        }
+    }
+    #[test]
+    fn legacy_mold_spa_is_positive_direct_discovery_evidence() {
+        let html = "<!doctype html><meta name=\"description\" content=\"mold — local AI image and video studio.\"><title>mold — studio</title>";
+        assert!(!classify_discovery_body("text/html", false, html.as_bytes()).unwrap());
+        assert!(classify_discovery_body("text/html", true, html.as_bytes()).is_err());
+        assert!(classify_discovery_body("application/json", false, b"{}").is_err());
+        assert!(classify_discovery_body("text/html", false, b"<title>other</title>").is_err());
+    }
+    #[test]
+    fn signed_object_handoff_stays_on_the_trusted_origin_and_prefix() {
+        let origin = reqwest::Url::parse("https://mold-link.urandom.io/api/status").unwrap();
+        assert!(validate_object_url(
+            &origin,
+            "https://mold-link.urandom.io/_mold/objects/a?sig=x"
+        )
+        .is_ok());
+        assert!(validate_object_url(&origin, "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com/_mold/objects/a?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_ok());
+        assert!(validate_object_url(&origin, "https://evil.example/_mold/objects/a").is_err());
+        assert!(validate_object_url(&origin, "https://mold-link.urandom.io/api/status").is_err());
+    }
+}
+use anyhow::{ensure, Context, Result};
+use futures_util::TryStreamExt;
+use http_body_util::BodyExt;
+use reqwest::{Client, RequestBuilder, Response, Url};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+const MAX_BODY: usize = 64 * 1024 * 1024;
+const STAGE_THRESHOLD: usize = 2 * 1024 * 1024;
+
+fn validate_object_url(origin: &Url, value: &str) -> Result<Url> {
+    let url = Url::parse(value).context("invalid relay object URL")?;
+    ensure!(
+        (url.origin() == origin.origin() || signed_mold_s3(&url))
+            && url.path().starts_with("/_mold/objects/")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none(),
+        "untrusted relay object URL"
+    );
+    Ok(url)
+}
+
+fn signed_mold_s3(url: &Url) -> bool {
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
+        return false;
+    }
+    let Some((bucket, service)) = url.host_str().and_then(|host| host.split_once(".s3.")) else {
+        return false;
+    };
+    let service = service.strip_prefix("dualstack.").unwrap_or(service);
+    let Some(region) = service.strip_suffix(".amazonaws.com") else {
+        return false;
+    };
+    let Some(identity) = bucket.strip_prefix("mold-relay-") else {
+        return false;
+    };
+    let Some((account, bucket_region)) = identity.split_once('-') else {
+        return false;
+    };
+    if account.len() != 12
+        || !account.bytes().all(|byte| byte.is_ascii_digit())
+        || bucket_region != region
+        || region.is_empty()
+        || !region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return false;
+    }
+    let mut params = HashMap::new();
+    for (key, value) in url.query_pairs() {
+        if params.insert(key, value).is_some() {
+            return false;
+        }
+    }
+    params
+        .get("X-Amz-Algorithm")
+        .is_some_and(|v| v == "AWS4-HMAC-SHA256")
+        && params
+            .get("X-Amz-Expires")
+            .and_then(|v| v.parse::<u16>().ok())
+            .is_some_and(|v| (1..=900).contains(&v))
+        && params
+            .get("X-Amz-Signature")
+            .is_some_and(|v| v.len() == 64 && v.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn valid_grant_expiry(expiry: u64, now: u64) -> bool {
+    expiry > now && expiry - now <= 900
+}
+fn stage_header_allowed(name: &str) -> bool {
+    !name.starts_with("x-mold-viewer-")
+        && !matches!(
+            name,
+            "authorization"
+                | "cookie"
+                | "transfer-encoding"
+                | "connection"
+                | "x-mold-request-target"
+                | "x-api-key"
+                | "host"
+                | "content-length"
+                | "x-amz-content-sha256"
+        )
+}
+fn trusted_signed_object(url: &Url, expected: Option<&str>) -> bool {
+    signed_mold_s3(url)
+        && expected.is_some_and(|origin| url.origin().ascii_serialization() == origin)
+}
+
+#[derive(Clone)]
+pub(crate) struct RelayClient {
+    client: Client,
+    unsigned: Client,
+    known: Arc<Mutex<HashMap<String, bool>>>,
+    object_origins: Arc<Mutex<HashMap<String, String>>>,
+}
+impl RelayClient {
+    pub(crate) fn new(client: Client) -> Self {
+        Self {
+            client,
+            unsigned: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("TLS client"),
+            known: Default::default(),
+            object_origins: Default::default(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn mark_relay(&self, url: &str) {
+        self.known.lock().unwrap().insert(url.to_string(), true);
+    }
+    pub(crate) fn get(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
+        self.wrap(self.client.get(url))
+    }
+    pub(crate) fn post(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
+        self.wrap(self.client.post(url))
+    }
+    pub(crate) fn put(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
+        self.wrap(self.client.put(url))
+    }
+    pub(crate) fn patch(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
+        self.wrap(self.client.patch(url))
+    }
+    pub(crate) fn delete(&self, url: impl reqwest::IntoUrl) -> RelayRequest {
+        self.wrap(self.client.delete(url))
+    }
+    fn wrap(&self, request: RequestBuilder) -> RelayRequest {
+        RelayRequest {
+            request,
+            client: self.clone(),
+        }
+    }
+    pub(crate) async fn is_relay(&self, url: &Url) -> Result<bool> {
+        let key = url.origin().ascii_serialization();
+        if let Some(value) = self.known.lock().unwrap().get(&key).copied() {
+            return Ok(value);
+        }
+        if url.scheme() != "https" {
+            return Ok(false);
+        }
+        let mut info_url = url.clone();
+        info_url.set_path("/_mold/relay/info");
+        info_url.set_query(None);
+        let value = match self
+            .client
+            .get(info_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let marked = response.headers().contains_key("x-mold-relay-protocol");
+                let mut response = response;
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await.context("invalid relay metadata")? {
+                    ensure!(
+                        body.len() + chunk.len() <= 64 * 1024,
+                        "relay metadata exceeds limit"
+                    );
+                    body.extend_from_slice(&chunk);
+                }
+                let detected = classify_discovery_body(&content_type, marked, &body)?;
+                if detected {
+                    let info: serde_json::Value = serde_json::from_slice(&body)?;
+                    if let Some(value) = info["object_origin"].as_str() {
+                        let object = Url::parse(value).context("invalid relay object origin")?;
+                        ensure!(
+                            object.scheme() == "https"
+                                && object.username().is_empty()
+                                && object.password().is_none()
+                                && object.query().is_none()
+                                && object.fragment().is_none()
+                                && object.path() == "/",
+                            "invalid relay object origin"
+                        );
+                        self.object_origins
+                            .lock()
+                            .unwrap()
+                            .insert(key.clone(), object.origin().ascii_serialization());
+                    }
+                }
+                detected
+            }
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => false,
+            Ok(response) => anyhow::bail!(
+                "relay discovery failed (HTTP {})",
+                response.status().as_u16()
+            ),
+            Err(error) => {
+                return Err(error.without_url()).context(
+                    "relay discovery temporarily unavailable; retry before sending the request",
+                )
+            }
+        };
+        self.known.lock().unwrap().insert(key, value);
+        Ok(value)
+    }
+}
+
+fn classify_discovery_body(content_type: &str, marked: bool, body: &[u8]) -> Result<bool> {
+    if content_type
+        .split(';')
+        .next()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/html"))
+        && !marked
+    {
+        let html = std::str::from_utf8(body).context("invalid direct server metadata")?;
+        ensure!(
+            (html.contains("<title>mold — studio</title>")
+                && html.contains("mold — local AI image and video studio."))
+                || (html.contains("<title>mold</title>")
+                    && html.contains("<h1>mold is running</h1>")
+                    && html.contains("This binary was built without the web gallery UI bundled.")),
+            "unrecognized relay discovery HTML"
+        );
+        return Ok(false);
+    }
+    let info: serde_json::Value = serde_json::from_slice(body).context("invalid relay metadata")?;
+    ensure!(
+        info["protocol"] == 2
+            && info["upload_threshold"] == STAGE_THRESHOLD
+            && info["max_body_bytes"] == MAX_BODY,
+        "unsupported relay metadata"
+    );
+    Ok(true)
+}
+
+pub(crate) struct RelayRequest {
+    request: RequestBuilder,
+    client: RelayClient,
+}
+impl RelayRequest {
+    pub(crate) fn json<T: Serialize + ?Sized>(mut self, value: &T) -> Self {
+        self.request = self.request.json(value);
+        self
+    }
+    pub(crate) fn query<T: Serialize + ?Sized>(mut self, value: &T) -> Self {
+        self.request = self.request.query(value);
+        self
+    }
+    pub(crate) fn body(mut self, value: impl Into<reqwest::Body>) -> Self {
+        self.request = self.request.body(value);
+        self
+    }
+    pub(crate) fn header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        reqwest::header::HeaderName: TryFrom<K>,
+        <reqwest::header::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        reqwest::header::HeaderValue: TryFrom<V>,
+        <reqwest::header::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.request = self.request.header(key, value);
+        self
+    }
+    pub(crate) async fn send(self) -> Result<Response> {
+        let mut request = self.request.build()?;
+        let origin = request.url().clone();
+        if origin.scheme() == "https" {
+            let target = format!(
+                "{}{}",
+                origin.path(),
+                origin
+                    .query()
+                    .map(|query| format!("?{query}"))
+                    .unwrap_or_default()
+            );
+            request
+                .headers_mut()
+                .insert("x-mold-request-target", target.parse()?);
+        }
+        if !self.client.is_relay(&origin).await? {
+            return Ok(self.client.client.execute(request).await?);
+        }
+        if request.timeout().is_none() {
+            *request.timeout_mut() = Some(std::time::Duration::from_secs(850));
+        }
+        let mut bytes = Vec::new();
+        if let Some(mut body) = request.body_mut().take() {
+            while let Some(frame) = body.frame().await {
+                let frame = frame?;
+                if let Ok(data) = frame.into_data() {
+                    ensure!(
+                        bytes.len() + data.len() <= MAX_BODY,
+                        "relay request exceeds 64 MiB"
+                    );
+                    bytes.extend_from_slice(&data);
+                }
+            }
+        }
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        request
+            .headers_mut()
+            .insert("x-amz-content-sha256", hash.parse()?);
+        let response = if bytes.len() >= STAGE_THRESHOLD {
+            let mut upload_url = origin.clone();
+            upload_url.set_path("/_mold/relay/uploads");
+            upload_url.set_query(None);
+            let headers: HashMap<String, String> = request
+                .headers()
+                .iter()
+                .filter(|(key, _)| stage_header_allowed(key.as_str()))
+                .filter_map(|(key, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (key.to_string(), value.to_string()))
+                })
+                .collect();
+            let path = format!(
+                "{}{}",
+                origin.path(),
+                origin.query().map(|q| format!("?{q}")).unwrap_or_default()
+            );
+            let envelope = serde_json::to_vec(
+                &serde_json::json!({"method":request.method().as_str(),"path":path,"headers":headers,"size":bytes.len(),"sha256":hash}),
+            )?;
+            let grant: serde_json::Value = signed_json(&self.client.client, upload_url, envelope)
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            ensure!(
+                grant["expires_at"]
+                    .as_u64()
+                    .is_some_and(|expiry| valid_grant_expiry(
+                        expiry,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    )),
+                "expired relay upload grant"
+            );
+            let put_url = Url::parse(grant["url"].as_str().context("missing relay upload URL")?)?;
+            ensure!(
+                trusted_signed_object(
+                    &put_url,
+                    self.client
+                        .object_origins
+                        .lock()
+                        .unwrap()
+                        .get(&origin.origin().ascii_serialization())
+                        .map(String::as_str)
+                ) && put_url.username().is_empty()
+                    && put_url.password().is_none(),
+                "untrusted relay upload URL"
+            );
+            let mut upload = self.client.unsigned.put(put_url).body(bytes);
+            if let Some(headers) = grant["headers"].as_object() {
+                for (key, value) in headers {
+                    ensure!(
+                        !matches!(
+                            key.to_ascii_lowercase().as_str(),
+                            "authorization" | "x-api-key"
+                        ),
+                        "invalid relay upload headers"
+                    );
+                    upload =
+                        upload.header(key, value.as_str().context("invalid relay upload header")?);
+                }
+            }
+            upload
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("relay upload failed"))?
+                .error_for_status()
+                .map_err(|_| anyhow::anyhow!("relay upload refused"))?;
+            let id = grant["id"].as_str().context("missing relay upload ID")?;
+            let mut dispatch_url = origin.clone();
+            dispatch_url.set_path("/_mold/relay/request");
+            dispatch_url.set_query(None);
+            signed_json(
+                &self.client.client,
+                dispatch_url,
+                serde_json::to_vec(&serde_json::json!({"id":id}))?,
+            )
+            .await?
+        } else {
+            *request.body_mut() = Some(bytes.into());
+            self.client.client.execute(request).await?
+        };
+        if response
+            .headers()
+            .get("x-mold-relay-object")
+            .is_none_or(|value| value != "1")
+        {
+            return Ok(response);
+        }
+        let object: serde_json::Value = response.json().await?;
+        let url = validate_object_url(
+            &origin,
+            object["url"].as_str().context("missing relay object URL")?,
+        )?;
+        ensure!(
+            url.origin() == origin.origin()
+                || trusted_signed_object(
+                    &url,
+                    self.client
+                        .object_origins
+                        .lock()
+                        .unwrap()
+                        .get(&origin.origin().ascii_serialization())
+                        .map(String::as_str)
+                ),
+            "untrusted relay object bucket"
+        );
+        let fetched = self
+            .client
+            .unsigned
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("relay object download failed"))?
+            .error_for_status()
+            .map_err(|_| anyhow::anyhow!("relay object download refused"))?;
+        let status = object["status"]
+            .as_u64()
+            .context("invalid relay object status")?;
+        let mut reconstructed = http::Response::builder().status(u16::try_from(status)?);
+        if let Some(headers) = object["headers"].as_object() {
+            for (key, value) in headers {
+                if !matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "transfer-encoding" | "connection" | "content-length"
+                ) {
+                    reconstructed = reconstructed
+                        .header(key, value.as_str().context("invalid relay object header")?);
+                }
+            }
+        }
+        Ok(reconstructed
+            .body(reqwest::Body::wrap_stream(
+                fetched.bytes_stream().map_err(reqwest::Error::without_url),
+            ))?
+            .into())
+    }
+}
+async fn signed_json(client: &Client, url: Url, body: Vec<u8>) -> Result<Response> {
+    let hash = format!("{:x}", Sha256::digest(&body));
+    let target = format!(
+        "{}{}",
+        url.path(),
+        url.query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    Ok(client
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-amz-content-sha256", hash)
+        .header("x-mold-request-target", target)
+        .body(body)
+        .send()
+        .await?)
+}

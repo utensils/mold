@@ -275,7 +275,7 @@ The **non-streaming `/api/generate`** returns raw bytes with headers, not SSE. C
 
 ### Auth (MOLD_API_KEY)
 
-`auth.rs`: `load_api_keys()` reads `MOLD_API_KEY` — single value, comma-separated list, or `@/path/to/file` (one key/line, `#` comments). Unset/empty ⇒ auth disabled. Enforced by `require_api_key` middleware checking the **`X-Api-Key`** header with constant-time compare (`subtle`). Exempt paths (`auth.rs::EXEMPT_PATHS`): `/health`, `/api/docs`, `/api/openapi.json`, and `/api/pairing/claim` — the last because the one-use pairing ticket _is_ the credential being redeemed, so it is deliberately the only unauthenticated credential handoff (`/metrics` is mounted outside the auth layer entirely). When auth is **disabled**, `POST /api/shutdown` is restricted to loopback IPs. Rate limiting (`rate_limit.rs`) is opt-in via `MOLD_RATE_LIMIT=N/period` (sec|min|hour) + `MOLD_RATE_LIMIT_BURST`, and `classify_route` sorts every path into two tiers: **read** is every `GET`, `POST /api/generation-batches/status`, and anything unclassified, at ten times the configured rate capped at 1000/period; **generation** is `POST` to `/api/generate`, `/api/generate/stream`, `/api/generate/placement-preview`, `/api/generation-batches`, `/api/chain-jobs/placement-preview`, `/api/expand`, `/api/upscale[/stream]`, `/api/models/load`, `/api/models/pull`, `/api/queue/:id/retry` and `/api/queue/held/sweep`, plus `PATCH /api/devices/*`, `DELETE /api/models/unload`, and every `DELETE` under `/api/gallery/`. `/health`, `/api/docs`, and `/api/openapi.json` are not rate limited at all.
+`auth.rs`: `load_api_keys()` reads `MOLD_API_KEY` — single value, comma-separated list, or `@/path/to/file` (one key/line, `#` comments). Unset/empty ⇒ auth disabled. Enforced by `require_api_key` middleware checking the **`X-Api-Key`** header with constant-time compare (`subtle`). Exempt paths (`auth.rs::EXEMPT_PATHS`): `/health`, `/api/docs`, `/api/openapi.json`, and `/api/pairing/claim` — the last because the one-use pairing ticket _is_ the credential being redeemed, so it is deliberately the only unauthenticated credential handoff (`/metrics` is mounted outside the auth layer entirely). The browser shell and static assets are public so the API-key entry screen can load; API data still requires authentication. When auth is **disabled**, `POST /api/shutdown` is restricted to loopback IPs. Rate limiting (`rate_limit.rs`) is opt-in via `MOLD_RATE_LIMIT=N/period` (sec|min|hour) + `MOLD_RATE_LIMIT_BURST`, and `classify_route` sorts every path into two tiers: **read** is every `GET`, `POST /api/generation-batches/status`, and anything unclassified, at ten times the configured rate capped at 1000/period; **generation** is `POST` to `/api/generate`, `/api/generate/stream`, `/api/generate/placement-preview`, `/api/generation-batches`, `/api/chain-jobs/placement-preview`, `/api/expand`, `/api/upscale[/stream]`, `/api/models/load`, `/api/models/pull`, `/api/queue/:id/retry` and `/api/queue/held/sweep`, plus `PATCH /api/devices/*`, `DELETE /api/models/unload`, and every `DELETE` under `/api/gallery/`. `/health`, `/api/docs`, and `/api/openapi.json` are not rate limited at all.
 
 Pairing never copies an operator key. `POST /api/pairing/sessions` creates a
 two-minute, one-use handoff; `POST /api/pairing/claim` exchanges it for a
@@ -333,3 +333,18 @@ Older hosts omit this section. Shared RAM remains separate from the Metal
 budget. Kernel changes are local-only `mold system metal-memory` commands on
 that Mac; the app has no remote privileged control. See the
 [Metal memory guide](../../website/guide/metal-memory.md).
+
+## Optional remote HTTPS access
+
+An authenticated machine can run `mold relay connect` to expose its normal API
+through a trusted HTTPS gateway. Add that HTTPS address through the existing
+Machines flow or pair using a QR whose reachable URL is the public address.
+Normal API-key storage, instance identity, device revocation and signed gallery
+media tickets still apply; the relay enrollment token is only for the host.
+The gateway can see credentials and media and publishes one machine per process.
+See [the relay guide](https://utensils.io/mold/deployment/relay).
+
+Hosting requires an explicitly running authenticated `mold serve` and connector.
+Native macOS This Mac remains private; the GUI does not automatically open a
+tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
+are never replayed by the relay.

@@ -671,3 +671,15 @@ describe("authedMediaUrl host-keyed cache", () => {
     expect(apiFetchTo).toHaveBeenCalledTimes(3);
   });
 });
+
+it("cancels media resolution before issuing a ticket request", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    streamableMediaUrl("/api/gallery/image/clip.mp4", {
+      target: { baseUrl: "https://studio.example", apiKey: "secret" },
+      signal: controller.signal,
+    }),
+  ).rejects.toMatchObject({ name: "AbortError" });
+  expect(apiFetchTo).not.toHaveBeenCalled();
+});

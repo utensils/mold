@@ -1,0 +1,42 @@
+name: Lambda relay
+on:
+  pull_request:
+    paths:
+      - 'relay/aws/**'
+      - 'scripts/relay/**'
+      - 'scripts/tests/relay-deploy-test.py'
+      - 'package.json'
+      - 'bun.lock'
+      - '.github/workflows/relay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'relay/aws/**'
+      - 'scripts/relay/**'
+      - 'scripts/tests/relay-deploy-test.py'
+      - 'package.json'
+      - 'bun.lock'
+      - '.github/workflows/relay.yml'
+permissions:
+  contents: read
+concurrency:
+  group: lambda-relay-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lambda-relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: bun install --frozen-lockfile
+      - run: node --test relay/aws/test/*.test.mjs
+      - run: python3 scripts/tests/relay-deploy-test.py
+      - run: python3 scripts/relay/deploy.py --build-only --output "$RUNNER_TEMP/relay-packages"
+      - run: |
+          node -e 'import(process.env.RUNNER_TEMP + "/relay-packages/router/index.mjs")'
+          node -e 'import(process.env.RUNNER_TEMP + "/relay-packages/frontend/index.mjs")'

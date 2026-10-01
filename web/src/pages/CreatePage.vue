@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
+
 import {
   computed,
   nextTick,
@@ -2447,18 +2449,24 @@ const resultVideoSrc = computed(() => {
 /** The playable artifact for an audio-only print; empty for every other kind. */
 const resultAudioSrc = computed(() => {
   const r = latestDone.value?.result;
-  if (!r || !isAudioCompletion(r) || !r.image) return "";
+  if (!r || !isAudioCompletion(r)) return "";
+  if (!r.image) return hostedResultSrc.value;
   return `data:audio/wav;base64,${r.image}`;
 });
 /**
- * The GLB the viewer loads, as an object URL.
+ * Inline GLB bytes become an object URL; restored files use the host media ticket.
  *
  * A `data:model/gltf-binary` URL would re-encode tens of megabytes of
  * geometry into the DOM on every render; a Blob keeps the bytes out of the
  * document and is revoked the moment the canvas moves on, so a session of
  * meshes cannot leak them.
  */
-const resultMeshSrc = ref("");
+const inlineResultMeshSrc = ref("");
+const resultMeshSrc = computed(() => {
+  const result = latestDone.value?.result;
+  if (!result || !isMeshCompletion(result)) return "";
+  return result.image ? inlineResultMeshSrc.value : hostedResultSrc.value;
+});
 let revokeResultMesh: (() => void) | null = null;
 watch(
   () => {
@@ -2469,14 +2477,14 @@ watch(
     revokeResultMesh?.();
     revokeResultMesh = null;
     if (!base64) {
-      resultMeshSrc.value = "";
+      inlineResultMeshSrc.value = "";
       return;
     }
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([bytes], { type: GLB_MIME_TYPE }));
-    resultMeshSrc.value = url;
+    inlineResultMeshSrc.value = url;
     revokeResultMesh = () => URL.revokeObjectURL(url);
   },
   { immediate: true },
@@ -2661,7 +2669,7 @@ function resultHostId(): string {
   );
 }
 /**
- * A settled still or clip with no inline bytes is drawn from its host through
+ * A settled print with no inline bytes is drawn from its host through
  * the same door the Lightbox uses: a direct URL on a keyless machine, the
  * short-lived `media_token` ticket on a keyed one, so a clip Range-streams
  * instead of buffering whole into memory. A ticket URL is a plain string,
@@ -2669,16 +2677,23 @@ function resultHostId(): string {
  */
 const hostedResultSrc = ref("");
 let hostedResultToken = 0;
+let hostedResultResolution: AbortController | null = null;
+onBeforeUnmount(() => {
+  hostedResultToken += 1;
+  hostedResultResolution?.abort();
+});
 watch(
   () => {
     const r = latestDone.value?.result;
-    if (!r || r.image || isMeshCompletion(r) || isAudioCompletion(r)) {
+    if (!r || r.image) {
       return "";
     }
     const filename = resultFilename.value;
     return filename ? `${resultHostId()}\u0000${filename}` : "";
   },
   async (key) => {
+    hostedResultResolution?.abort();
+    hostedResultResolution = null;
     hostedResultToken += 1;
     const token = hostedResultToken;
     hostedResultSrc.value = "";
@@ -2687,7 +2702,12 @@ watch(
     const host = listHosts().find((h) => h.id === hostId);
     if (!host) return;
     try {
-      const src = await resolveStreamableSrc(host, filename);
+      hostedResultResolution = new AbortController();
+      const src = await resolveStreamableSrc(
+        host,
+        filename,
+        hostedResultResolution.signal,
+      );
       if (token !== hostedResultToken) return;
       hostedResultSrc.value = src;
     } catch (err) {

@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch, originApiTarget } from "../lib/originAuth";
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
@@ -963,6 +964,7 @@ function streamTargetKey(route: HostRoute | null): string {
 }
 
 export const __testing__ = {
+  routeForDetachedJob,
   AUTO_REMOVE_DONE_MS,
   STALE_THRESHOLD_MS,
   loadPersistedJobs,
@@ -1889,6 +1891,7 @@ function ensureDurableEventSession(route: HostRoute): void {
   const controller = new AbortController();
   durableEventSessions.set(route.hostId, { signature, controller });
   void fetchEventSource(`${route.target.baseUrl}/api/events`, {
+    fetch: originAuthenticatedFetch,
     method: "GET",
     headers: Object.fromEntries(apiHeaders(routeApiTarget(route)).entries()),
     signal: controller.signal,
@@ -2122,6 +2125,7 @@ async function attachAutoChainJob(
     controller.abort();
   };
   await fetchEventSource(chainJobEventsUrl(jobId, route?.target), {
+    fetch: originAuthenticatedFetch,
     signal: controller.signal,
     openWhenHidden: true,
     headers: route?.target?.apiKey ? { "x-api-key": route.target.apiKey } : {},
@@ -2265,8 +2269,23 @@ function submitJob(
  * keys never persist): resolve the host back through the registry so cancel
  * reaches the machine that actually holds the job, not the origin. */
 function routeForDetachedJob(job: Job): StreamTarget | undefined {
-  if (job.target) return job.target;
-  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) return undefined;
+  if (job.target) {
+    if (
+      !job.target.apiKey &&
+      (!job.target.baseUrl || job.target.baseUrl === window.location.origin)
+    ) {
+      const key = originApiTarget().apiKey;
+      return { ...job.target, ...(key ? { apiKey: key } : {}) };
+    }
+    return job.target;
+  }
+  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) {
+    const origin = originApiTarget();
+    return {
+      baseUrl: origin.baseUrl,
+      ...(origin.apiKey ? { apiKey: origin.apiKey } : {}),
+    };
+  }
   const host = getHost(job.hostId);
   if (!host) return undefined;
   const target: StreamTarget = { baseUrl: host.url };

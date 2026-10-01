@@ -1,3 +1,4 @@
+import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
 import { computed, inject, ref } from "vue";
 import type { AdvancedPlacement, DevicePlacement, DeviceRef } from "../types";
 import { RESOURCES_INJECTION_KEY, type UseResources } from "./useResources";

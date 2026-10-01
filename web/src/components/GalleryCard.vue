@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { imageUrl, thumbnailUrl } from "../api";
-import { getHost } from "../lib/hostRegistry";
+import { getHost, originHost } from "../lib/hostRegistry";
 import {
   directMediaUrl,
   directThumbnailUrl,
   needsAuthedMedia,
-  resolveStreamableSrc,
   resolveThumbnailSrc,
 } from "../lib/galleryMedia";
 import type { GalleryImage, ModelInfoExtended } from "../types";
@@ -163,7 +162,8 @@ const aspectStyle = computed(() => {
  */
 const hostEntry = computed(() => {
   const id = (props.item as { hostId?: string }).hostId;
-  return id ? getHost(id) : null;
+  const origin = originHost();
+  return id ? getHost(id) : origin.apiKey ? origin : null;
 });
 
 const thumbSrc = ref("");
@@ -193,13 +193,8 @@ function resolveSources() {
     .catch(() => {
       /* the fallback chain lands on the "can't render" tile */
     });
-  void resolveStreamableSrc(host, name)
-    .then((url) => {
-      if (generation === resolveGeneration) fullSrc.value = url;
-    })
-    .catch(() => {
-      if (generation === resolveGeneration) stage.value = "broken";
-    });
+  // Full media is resolved by the viewer on open, never by a library tile.
+  stage.value = "thumb";
 }
 
 // Multi-source form on purpose: a getter returning a fresh `[...]` re-fires on
@@ -230,7 +225,11 @@ const modelLabel = computed(() =>
 const resolution = computed(() => formatResolution(props.item.metadata));
 
 function onImgError() {
-  if (stage.value === "thumb") stage.value = "full";
+  if (
+    stage.value === "thumb" &&
+    !needsAuthedMedia(hostEntry.value ?? originHost())
+  )
+    stage.value = "full";
   else stage.value = "broken";
 }
 
@@ -331,7 +330,10 @@ function onRecreate(evt: Event) {
            `object-cover` in grid so tiles pack tightly. -->
       <img
         v-if="
-          visible && stage !== 'broken' && kind !== 'video' && imageCurrentSrc
+          visible &&
+          stage !== 'broken' &&
+          (kind !== 'video' || !videoSrc) &&
+          imageCurrentSrc
         "
         :src="imageCurrentSrc"
         :alt="item.metadata.prompt || item.filename"

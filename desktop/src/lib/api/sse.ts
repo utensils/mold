@@ -1,4 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { relayFetch } from "@studio/api/relayTransport";
 import { apiHeaders, currentTarget, type ApiTarget } from "./client";
 
 /**
@@ -66,6 +67,7 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
 
   try {
     await fetchEventSource(`${target.baseUrl}${path}`, {
+      fetch: relayFetch,
       method,
       headers: Object.fromEntries(headers.entries()),
       ...(body !== undefined ? { body } : {}),
@@ -83,6 +85,10 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
       },
       onmessage(msg) {
         options.onEvent(msg.event || "message", msg.data);
+      },
+      onclose() {
+        if (retriable && !options.signal.aborted)
+          throw new Error("Event stream closed; reconnecting.");
       },
       onerror(err) {
         const error = err instanceof Error ? err : new Error(String(err));

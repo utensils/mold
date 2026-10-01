@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import VideoSoundToggle from "../components/gallery/VideoSoundToggle.vue";
 import { useVideoPlaybackStore } from "../stores/videoPlayback";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";

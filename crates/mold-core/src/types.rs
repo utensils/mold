@@ -10320,6 +10320,7 @@ mod tests {
                 completed_at_ms: Some(20),
                 terminal_error: None,
                 result: Some(super::GenerationBatchResult {
+                    response_headers: Default::default(),
                     filename: Some("finished.png".into()),
                     original_filename: Some("original.png".into()),
                     seed: Some(4242),
@@ -11259,6 +11260,10 @@ pub struct GenerationBatchChild {
 /// absent rather than reporting a fabricated zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, Default)]
 pub struct GenerationBatchResult {
+    /// Original media response facts, retained without payload bytes so relay
+    /// polling can reconstruct typed output after an invocation ends.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub response_headers: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -11,6 +11,26 @@ beforeEach(() => {
 });
 
 describe("sseStream", () => {
+  it("reconnects GET snapshots after graceful relay EOF without replaying POST", async () => {
+    const outcomes: boolean[] = [];
+    fetchEventSource.mockImplementation(async (_url: string, options: { onclose: () => void }) => {
+      try {
+        options.onclose();
+        outcomes.push(false);
+      } catch {
+        outcomes.push(true);
+      }
+    });
+    for (const method of ["GET", "POST"] as const) {
+      await sseStream("/api/events", {
+        method,
+        signal: new AbortController().signal,
+        onEvent: vi.fn(),
+        target: { baseUrl: "http://studio:7680", apiKey: null },
+      });
+    }
+    expect(outcomes).toEqual([true, false]);
+  });
   it("merges caller headers with SSE defaults and host authentication", async () => {
     fetchEventSource.mockResolvedValue(undefined);
 

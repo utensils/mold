@@ -365,3 +365,15 @@ describe("evictHostMedia", () => {
     expect(revoked).toContain(src);
   });
 });
+
+it("cancels media resolution before issuing a ticket request", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  mockFetch(() => {
+    throw new Error("must not issue canceled request");
+  });
+  await expect(
+    resolveStreamableSrc(authedRemote, "clip.mp4", controller.signal),
+  ).rejects.toMatchObject({ name: "AbortError" });
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});

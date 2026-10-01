@@ -1,0 +1,109 @@
+<script setup lang="ts">
+import { onMounted, provide, ref } from "vue";
+import App from "./App.vue";
+import {
+  ORIGIN_ACCESS_CHANGE_KEY,
+  originAuthenticatedFetch,
+  originApiKey,
+  setOriginApiKey,
+} from "./lib/originAuth";
+const ready = ref(false);
+const requiresKey = ref(false);
+const busy = ref(false);
+const key = ref("");
+const error = ref("");
+async function connect() {
+  busy.value = true;
+  error.value = "";
+  const candidate = key.value.trim() || originApiKey();
+  try {
+    const response = await originAuthenticatedFetch("/api/status", {
+      headers: candidate ? { "x-api-key": candidate } : {},
+      redirect: "error",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) {
+      requiresKey.value = response.status === 401;
+      error.value =
+        response.status === 401
+          ? "Enter this machine's API key to connect."
+          : `This machine returned ${response.status}. Try again.`;
+      return;
+    }
+    if (candidate) setOriginApiKey(candidate);
+    key.value = "";
+    ready.value = true;
+  } catch {
+    error.value =
+      "This machine is unavailable. Check the connection and try again." +
+      (candidate
+        ? " For remote access, open the HTTPS address directly; API-key requests cannot follow redirects."
+        : "");
+  } finally {
+    busy.value = false;
+  }
+}
+function changeKey() {
+  ready.value = false;
+  requiresKey.value = true;
+  setOriginApiKey("");
+  error.value = "Enter this machine's API key to connect.";
+}
+provide(ORIGIN_ACCESS_CHANGE_KEY, changeKey);
+onMounted(connect);
+</script>
+<template>
+  <template v-if="ready">
+    <App />
+  </template>
+  <main v-else class="origin-access">
+    <form @submit.prevent="connect">
+      <h1>Connect to this machine</h1>
+      <p v-if="requiresKey">
+        {{
+          originApiKey()
+            ? "Reconnect using your saved API key, or enter another key."
+            : "Enter the API key configured on this machine."
+        }}
+      </p>
+      <label v-if="requiresKey" for="origin-key">API key</label>
+      <input
+        v-if="requiresKey"
+        id="origin-key"
+        v-model="key"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        :disabled="busy"
+      />
+      <p v-if="error" role="alert">{{ error }}</p>
+      <p v-if="requiresKey">Your key stays in this tab's browser session.</p>
+      <button type="submit" :disabled="busy">
+        {{ busy ? "Connecting…" : requiresKey ? "Connect" : "Try again" }}
+      </button>
+    </form>
+  </main>
+</template>
+<style scoped>
+.origin-access {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.origin-access form {
+  width: min(100%, 420px);
+  display: grid;
+  gap: 12px;
+}
+.origin-access input {
+  padding: 12px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+  color: inherit;
+}
+.origin-access button {
+  padding: 12px;
+}
+</style>

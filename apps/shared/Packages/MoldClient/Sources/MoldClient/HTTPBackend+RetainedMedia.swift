@@ -36,11 +36,7 @@ public extension HTTPBackend {
         for filename: String, member memberId: String
     ) async throws -> Data {
         let route = retainedSourceMediaPath(filename) + "/\(escaped(memberId))"
-        let (stream, response) = try await session.bytes(
-            for: request(route), delegate: redirectGuard)
-        guard let http = response as? HTTPURLResponse else {
-            throw MoldClientError.malformedResponse
-        }
+        let (stream, http) = try await relayBytes(request(route))
         guard (200 ..< 300).contains(http.statusCode) else {
             if http.statusCode == 401 { throw MoldClientError.unauthorized }
             throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)

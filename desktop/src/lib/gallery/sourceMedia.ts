@@ -1,3 +1,4 @@
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { blobToBase64 } from "@studio/lib/base64";
 import { apiFetch, apiFetchTo } from "../api/client";
 import { inTauri, ipc } from "../ipc";

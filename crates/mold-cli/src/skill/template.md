@@ -31,7 +31,7 @@ rebuilds/relaunches in Simulator; `companion-run` launches once. Helpers accept
   selected H3, Wan, or LTX-2 task requires it.
 - For a 3-D mesh (`hunyuan3d`), the input is one image or an advertised set of
   named front/left/back/right views and the output is a GLB. Use `--matting
-  auto` to preserve useful alpha and remove opaque backgrounds, `on` to
+auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   recompute every supplied cutout, or `off` to keep the pixels unchanged. Add
   `--delight` when the profile advertises Hunyuan3D lighting and highlight
   removal; it runs after matting and before shape or paint.
@@ -84,3 +84,26 @@ rebuilds/relaunches in Simulator; `companion-run` launches once. Helpers accept
 ## Direct prompting routes
 
 {{prompt_routes}}
+
+## Optional remote HTTPS relay
+
+```bash
+mold relay connect --transport aws --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+```
+
+This opens an outbound tunnel for an authenticated server. The enrollment token is
+read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
+`MOLD_HOST` and their Mold API key/pairing credential, never that token.
+The production gateway uses API Gateway, Lambda, DynamoDB and private S3.
+Large bodies/media use single-use staged transfers. Generation uses durable queue
+recovery and requires saved output; `--no-save` is refused before admission.
+For a direct local-development gateway:
+
+```bash
+mold relay serve
+```
+
+One gateway publishes one machine. The proxy can see credentials/media; do not
+claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
+Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
+See the deployment guide for safe TLS, streaming and metrics routing.

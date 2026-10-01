@@ -381,6 +381,7 @@ try {
     console.error("Could not capture Android failure evidence:", captureError);
   }
   for (const [name, args] of [
+    ["overlay-back.txt", ["logcat", "-d", "-s", "MoldOverlayBack:D", "*:S"]],
     ["last-anr.txt", ["dumpsys", "activity", "lastanr"]],
     [
       "system-crash.txt",

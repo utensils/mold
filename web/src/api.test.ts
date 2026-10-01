@@ -136,10 +136,15 @@ describe("queue api", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://render.example/api/queue?limit=11&cursor=opaque%2F%2B+token%3D",
-      {
-        headers: { "x-api-key": "secret" },
+      expect.objectContaining({
+        redirect: "error",
         signal: controller.signal,
-      },
+      }),
+    );
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("x-api-key")).toBe("secret");
+    expect(headers.get("x-mold-request-target")).toBe(
+      "/api/queue?limit=11&cursor=opaque%2F%2B+token%3D",
     );
     expect(listing.page?.next_cursor).toBe("next-page");
   });

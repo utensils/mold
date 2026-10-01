@@ -502,7 +502,7 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
 
     // Exempt certain paths (health checks, docs).
     let path = request.uri().path();
-    if EXEMPT_PATHS.contains(&path) {
+    if EXEMPT_PATHS.contains(&path) || is_browser_bootstrap_read(request.method(), path) {
         return next.run(request).await;
     }
 
@@ -548,6 +548,67 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
             unauthorized("missing X-Api-Key header")
         }
     }
+}
+
+/// Only the public browser shell and its bundle may load before API authentication.
+/// Do not exempt an arbitrary non-API prefix: unmatched routes remain protected.
+fn is_browser_bootstrap_read(method: &Method, path: &str) -> bool {
+    if method != Method::GET && method != Method::HEAD {
+        return false;
+    }
+    let path = if path == "/" {
+        path
+    } else {
+        path.strip_suffix('/').unwrap_or(path)
+    };
+    if matches!(
+        path,
+        "/" | "/index.html"
+            | "/create"
+            | "/queue"
+            | "/library"
+            | "/models"
+            | "/machines"
+            | "/settings"
+            | "/logo.png"
+            | "/favicon.ico"
+            | "/favicon.png"
+            | "/favicon.svg"
+            | "/apple-touch-icon.png"
+    ) {
+        return true;
+    }
+    let safe_segment = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if let Some(asset) = path.strip_prefix("/assets/") {
+        let public_extension = asset.rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension,
+                "js" | "css"
+                    | "ttf"
+                    | "otf"
+                    | "woff"
+                    | "woff2"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "svg"
+                    | "webp"
+                    | "gif"
+                    | "ico"
+                    | "avif"
+                    | "wasm"
+            )
+        });
+        return public_extension && asset.split('/').all(safe_segment);
+    }
+    path.strip_prefix("/machines/").is_some_and(safe_segment)
 }
 
 fn is_ticketed_media_read(request: &Request) -> bool {
@@ -956,6 +1017,107 @@ mod tests {
             .contains_key(&token_hash));
     }
 
+    #[tokio::test]
+    async fn authenticated_server_allows_only_browser_bootstrap_reads() {
+        use axum::{
+            body::Body,
+            http::{Method, Request, StatusCode},
+        };
+        let auth = Some(Arc::new(ApiKeySet::new(HashSet::from([
+            "secret".to_string()
+        ]))));
+        let app = axum::Router::new()
+            .fallback(|| async { StatusCode::OK })
+            .layer(axum::middleware::from_fn(require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                inject_auth_state,
+            ));
+        for path in [
+            "/",
+            "/index.html",
+            "/favicon.ico",
+            "/favicon.svg",
+            "/apple-touch-icon.png",
+            "/create/",
+            "/machines/origin/",
+            "/create",
+            "/library",
+            "/machines/origin",
+            "/assets/index-a.js",
+            "/logo.png",
+        ] {
+            for method in [Method::GET, Method::HEAD] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
+            }
+        }
+        for path in [
+            "/api/status",
+            "/api/status/",
+            "/api/shutdown",
+            "/secrets.json",
+            "/.env",
+            "/api/unknown",
+            "/unknown",
+            "/assets/../api/status",
+            "/assets//secret",
+            "/assets/%2e%2e/api/status",
+            "/assets/.env",
+            "/assets/private.json",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        for path in ["/", "/create", "/assets/index-a.js"] {
+            let response = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[test]
+    fn browser_bootstrap_matches_concrete_web_router_paths() {
+        let router = include_str!("../../../web/src/router.ts");
+        let mut checked = 0;
+        for line in router.lines() {
+            let Some((_, path)) = line.split_once("path: ") else {
+                continue;
+            };
+            let path = path.trim_start_matches('"');
+            let path = path.split('"').next().unwrap();
+            if path.contains("pathMatch") {
+                continue;
+            }
+            let path = path.replace(":id", "render-machine");
+            assert!(is_browser_bootstrap_read(&Method::GET, &path), "{path}");
+            assert!(is_browser_bootstrap_read(&Method::HEAD, &path), "{path}");
+            assert!(!is_browser_bootstrap_read(&Method::POST, &path), "{path}");
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "the router source must still contain concrete paths"
+        );
+    }
+
     fn protected_test_app(auth_state: AuthState) -> axum::Router {
         axum::Router::new()
             .route(
@@ -1045,16 +1207,20 @@ mod tests {
             .unwrap();
         let auth = Some(key_set);
 
-        let denied = pairing_test_app(auth)
-            .oneshot(
-                Request::post("/api/pairing/sessions")
-                    .header("x-api-key", paired)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        for peer in ["192.0.2.1:12345", "127.0.0.1:12345", "[::1]:12345"] {
+            let mut request = Request::post("/api/pairing/sessions")
+                .header("x-api-key", &paired)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let denied = pairing_test_app(auth.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{peer}");
+        }
     }
 
     #[tokio::test]

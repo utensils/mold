@@ -1,3 +1,8 @@
+import { originAuthenticatedFetch as fetch } from "./originAuth";
+import {
+  resolveRelayMedia,
+  type RelayMediaTicket,
+} from "@studio/api/relayMedia";
 /*
  * Multi-host gallery media (Task #22). `<img>`/`<video>` elements cannot send
  * an `x-api-key` header and a durable key must never enter a URL, so remote
@@ -13,8 +18,8 @@
  *     without buffering it and without the durable key in the URL. Hosts that
  *     lack the current endpoint are rejected with an upgrade message.
  *
- * The serving origin ("this server") is same-origin and keyless in the web
- * registry, so it always uses plain relative URLs — exactly today's behaviour.
+ * The serving origin ("this server") carries its session key in the registry
+ * and uses the same authenticated media paths as other keyed machines.
  * Mirrors the desktop app's desktop/src/lib/gallery/media.ts contract.
  */
 import {
@@ -265,7 +270,7 @@ function trimThumbnailCache(): void {
   }
 }
 
-interface GalleryMediaTicket {
+interface GalleryMediaTicket extends RelayMediaTicket {
   token: string | null;
   expires_at: number | null;
   auth_required?: boolean;
@@ -289,7 +294,9 @@ export class MediaUpgradeRequiredError extends Error {
 export async function resolveStreamableSrc(
   host: HostEntry,
   filename: string,
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const path = mediaPath(filename);
   const directUrl = directMediaUrl(host, filename);
   if (!needsAuthedMedia(host)) return directUrl;
@@ -298,12 +305,20 @@ export async function resolveStreamableSrc(
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders(host) },
     body: JSON.stringify({ path }),
+    signal: signal ?? null,
   });
   if (res.status === 404 || res.status === 405) {
     throw new MediaUpgradeRequiredError();
   }
   if (!res.ok) throw new Error(`media-token failed: ${res.status}`);
   const ticket = (await res.json()) as GalleryMediaTicket;
+  const relayUrl = await resolveRelayMedia(
+    ticket,
+    hostMediaBase(host),
+    authHeaders(host),
+    signal,
+  );
+  if (relayUrl) return relayUrl;
   if (ticket.auth_required === false) return directUrl;
   if (!ticket.token || !Number.isSafeInteger(ticket.expires_at)) {
     throw new Error("host returned an invalid gallery media ticket");

@@ -61,7 +61,7 @@ const GALLERY_PERSISTS_OUTPUTS_MAX_AGE: std::time::Duration = std::time::Duratio
 #[derive(Clone)]
 pub struct MoldClient {
     base_url: String,
-    client: Client,
+    client: crate::relay_transport::RelayClient,
     api_key_configured: bool,
     /// Memoized `gallery.persists_outputs` and when it was learned. The outer
     /// `Option` is "not asked yet"; the inner one is the server's own answer,
@@ -138,7 +138,7 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(None);
         Self {
             base_url: normalize_host(base_url),
-            client,
+            client: crate::relay_transport::RelayClient::new(client),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -149,7 +149,7 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(Some(&api_key));
         Self {
             base_url: normalize_host(base_url),
-            client,
+            client: crate::relay_transport::RelayClient::new(client),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -162,7 +162,7 @@ impl MoldClient {
         let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
-            client,
+            client: crate::relay_transport::RelayClient::new(client),
             api_key_configured,
             gallery_persists_outputs: Default::default(),
         }
@@ -317,11 +317,176 @@ impl MoldClient {
         Ok(())
     }
 
+    async fn relay_generation_response(
+        &self,
+        req: &GenerateRequest,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<SseProgressEvent>>,
+    ) -> Result<reqwest::Response> {
+        self.relay_generation_response_inner(req, progress)
+            .await
+            .map_err(|error| {
+                if Self::is_model_not_found(&error) {
+                    error
+                } else {
+                    // A relay mutation may have committed even when its response
+                    // was lost. A transport source would authorize local fallback.
+                    anyhow::anyhow!("{error:#}")
+                }
+            })
+    }
+
+    async fn relay_generation_response_inner(
+        &self,
+        req: &GenerateRequest,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<SseProgressEvent>>,
+    ) -> Result<reqwest::Response> {
+        anyhow::ensure!(req.save_to_gallery != Some(false), "long relay generation requires saved output; no-save jobs cannot be recovered after the Lambda deadline");
+        anyhow::ensure!(
+            self.gallery_persists_outputs().await != Some(false),
+            "relay generation requires a host that retains saved output"
+        );
+        let admission = GenerationBatchAdmissionRequest {
+            client_batch_id: format!("relay-{}", uuid::Uuid::new_v4()),
+            requests: vec![crate::prompt_text::protect_generate_request_for_wire(req)],
+        };
+        let mut status = self
+            .admit_generation_batch(&admission)
+            .await
+            .with_context(|| {
+                format!(
+                    "relay admission uncertain; reconcile client batch {} before retrying",
+                    admission.client_batch_id
+                )
+            })?;
+        let id = status.id.clone();
+        let instance = status.instance_id.clone();
+        let mut previous_progress: Option<QueueJobProgress> = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(86400);
+        loop {
+            anyhow::ensure!(
+                status.instance_id == instance && status.id == id,
+                "relay serving instance changed; retained batch {id} must be reconciled"
+            );
+            let child = status
+                .children
+                .first()
+                .context("relay batch has no child")?;
+            match child.state {
+                crate::types::GenerationBatchChildState::Complete => {
+                    let result = child
+                        .result
+                        .as_ref()
+                        .context("completed relay job has no result")?;
+                    let filename = result.filename.as_deref().with_context(|| {
+                        format!(
+                            "relay job {} completed without retained media",
+                            child.job_id
+                        )
+                    })?;
+                    if [
+                        ".mp4", ".webm", ".gif", ".wav", ".mp3", ".flac", ".glb", ".obj",
+                    ]
+                    .iter()
+                    .any(|extension| filename.ends_with(extension))
+                    {
+                        anyhow::ensure!(!result.response_headers.is_empty(), "older host omitted durable media facts; update Mold on the relay host to recover {}", child.job_id);
+                    }
+                    let mut response = error_for_status_with_body(
+                        self.client
+                            .get(format!(
+                                "{}/api/gallery/image/{}",
+                                self.base_url,
+                                encode_path_segment(filename)
+                            ))
+                            .send()
+                            .await?,
+                    )
+                    .await?;
+                    for (key, value) in &result.response_headers {
+                        if key == "content-type" || key.starts_with("x-mold-") {
+                            response.headers_mut().insert(
+                                reqwest::header::HeaderName::from_bytes(key.as_bytes())?,
+                                value.parse()?,
+                            );
+                        }
+                    }
+                    if let Some(seed) = result.seed {
+                        response
+                            .headers_mut()
+                            .insert("x-mold-seed-used", seed.to_string().parse()?);
+                    }
+                    if let Some(gpu) = result.gpu {
+                        response
+                            .headers_mut()
+                            .insert("x-mold-gpu", gpu.to_string().parse()?);
+                    }
+                    return Ok(response);
+                }
+                crate::types::GenerationBatchChildState::Failed
+                | crate::types::GenerationBatchChildState::Cancelled
+                | crate::types::GenerationBatchChildState::Held => {
+                    if child.error_code.as_deref().is_some_and(|code| {
+                        code == crate::types::SSE_ERROR_CODE_MODEL_NOT_FOUND
+                            || code == crate::types::SSE_ERROR_CODE_UNKNOWN_MODEL
+                    }) {
+                        return Err(MoldError::ModelNotFound(
+                            child
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "model not found".into()),
+                        )
+                        .into());
+                    }
+                    anyhow::bail!(
+                        "relay job {}: {}",
+                        child.job_id,
+                        child.error.as_deref().unwrap_or("generation stopped")
+                    );
+                }
+                _ => {}
+            }
+            if let Some(tx) = progress {
+                if let Ok(Some(snapshot)) = self.queue_job_progress(&child.job_id).await {
+                    for event in snapshot.events_since(previous_progress.as_ref()) {
+                        let _ = tx.send(event);
+                    }
+                    previous_progress = Some(snapshot);
+                }
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "relay polling deadline reached; batch {id} is retained"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match self.generation_batch(&id).await {
+                Ok(Some(next)) => status = next,
+                Ok(None) => anyhow::bail!("relay batch {id} no longer exists"),
+                Err(error) if is_transient_request_error(&error) => continue, // Only reads retry; admission never does.
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("relay batch {id} is retained; polling failed"))
+                }
+            }
+        }
+    }
+
     /// Generate an image. Returns raw image bytes (PNG or JPEG).
     /// The server returns raw bytes, not JSON — callers are responsible for
     /// writing the bytes to disk or further processing.
     pub async fn generate_raw(&self, req: &GenerateRequest) -> Result<Vec<u8>> {
         require_direct_singleton(req)?;
+        if self
+            .client
+            .is_relay(&reqwest::Url::parse(&self.base_url)?)
+            .await?
+        {
+            return Ok(self
+                .relay_generation_response(req, None)
+                .await?
+                .bytes()
+                .await?
+                .to_vec());
+        }
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         let response = self
             .client
@@ -342,6 +507,14 @@ impl MoldClient {
     /// For video responses the server sends `x-mold-video-*` metadata headers
     /// alongside the raw video bytes so we can reconstruct [`VideoData`].
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
+        self.generate_inner(req, None).await
+    }
+
+    async fn generate_inner(
+        &self,
+        req: GenerateRequest,
+        relay_progress: Option<tokio::sync::mpsc::UnboundedSender<SseProgressEvent>>,
+    ) -> Result<GenerateResponse> {
         require_direct_singleton(&req)?;
         let fallback_seed = req.seed.unwrap_or(0);
         let width = req.width;
@@ -351,12 +524,20 @@ impl MoldClient {
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(&req);
 
         let start = std::time::Instant::now();
-        let resp = self
+        let resp = if self
             .client
-            .post(format!("{}/api/generate", self.base_url))
-            .json(&wire_req)
-            .send()
-            .await?;
+            .is_relay(&reqwest::Url::parse(&self.base_url)?)
+            .await?
+        {
+            self.relay_generation_response(&req, relay_progress.as_ref())
+                .await?
+        } else {
+            self.client
+                .post(format!("{}/api/generate", self.base_url))
+                .json(&wire_req)
+                .send()
+                .await?
+        };
         let resp = require_direct_media_response(resp).await?;
 
         // Read the seed the server actually used from the response header.
@@ -385,8 +566,19 @@ impl MoldClient {
         // could not apply). Read here so every branch below carries them.
         let request_warnings = parse_request_warnings(resp.headers());
 
+        let generation_time_ms = resp
+            .headers()
+            .get("x-mold-generation-time-ms")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| start.elapsed().as_millis() as u64);
+        let model = resp
+            .headers()
+            .get("x-mold-model")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .unwrap_or(model);
         let data = resp.bytes().await?.to_vec();
-        let generation_time_ms = start.elapsed().as_millis() as u64;
 
         if let Some(meta) = mesh_meta {
             return Ok(GenerateResponse {
@@ -628,6 +820,13 @@ impl MoldClient {
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<GenerateResponse> {
         require_direct_singleton(req)?;
+        if self
+            .client
+            .is_relay(&reqwest::Url::parse(&self.base_url)?)
+            .await?
+        {
+            return self.generate_inner(req.clone(), Some(progress_tx)).await;
+        }
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         // A completion carries the whole render base64-encoded inside one SSE
         // frame — the server encodes it, the client decodes it, and the same
@@ -937,107 +1136,146 @@ impl MoldClient {
     ) -> Result<ChainJobOutcome> {
         use crate::chain_job::{ChainJobEvent, ChainJobState};
 
-        let mut resp = self
-            .client
-            .get(format!(
-                "{}/api/chain-jobs/{}/events",
-                self.base_url, job_id
-            ))
-            .send()
-            .await?;
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("server error {status}: {body}");
-        }
-
-        let mut outcome = ChainJobOutcome {
-            state: ChainJobState::Running,
-            error: None,
-            output: None,
-        };
-        let mut buffer = SseFrameParser::new();
-        while let Some(chunk) = resp.chunk().await? {
-            buffer.push(&chunk);
-            while let Some(event_text) = buffer.next_frame() {
-                let (_, data) = parse_sse_event(&event_text);
-                let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(24 * 3600);
+        loop {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "chain stream still pending after 24 hours; inspect durable job"
+            );
+            let response = async {
+                let response = self
+                    .client
+                    .get(format!(
+                        "{}/api/chain-jobs/{}/events",
+                        self.base_url, job_id
+                    ))
+                    .send()
+                    .await?;
+                error_for_status_with_body(response).await
+            }
+            .await;
+            let mut resp = match response {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     continue;
-                };
-                match event {
-                    ChainJobEvent::Snapshot { job } => {
-                        outcome.state = job.summary.state;
-                        outcome.error = job.summary.error.clone();
-                        let _ = progress_tx.send(ChainProgressEvent::ChainStart {
-                            stage_count: job.summary.stage_count,
-                            estimated_total_frames: job
-                                .stages
-                                .iter()
-                                .filter_map(|stage| stage.frames_emitted)
-                                .sum(),
-                        });
-                        if crate::chain_job::settled(job.summary.state) {
-                            // A job that settled before we subscribed carries
-                            // its print in the manifest, not in a frame.
-                            outcome.output = job
-                                .finalizes
-                                .last()
-                                .and_then(|record| record.gallery_filename.clone());
-                            return Ok(outcome);
+                }
+                Err(error) => return Err(error),
+            };
+
+            let mut outcome = ChainJobOutcome {
+                state: ChainJobState::Running,
+                error: None,
+                output: None,
+            };
+            let mut buffer = SseFrameParser::new();
+            loop {
+                let chunk = match resp.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let error = anyhow::Error::from(error);
+                        if is_transient_request_error(&error) {
+                            break;
                         }
+                        return Err(error);
                     }
-                    ChainJobEvent::StageStart { stage_idx } => {
-                        let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
-                    }
-                    ChainJobEvent::DenoiseStep {
-                        stage_idx,
-                        step,
-                        total,
-                    } => {
-                        let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                };
+                buffer.push(&chunk);
+                while let Some(event_text) = buffer.next_frame() {
+                    let (_, data) = parse_sse_event(&event_text);
+                    let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
+                        continue;
+                    };
+                    match event {
+                        ChainJobEvent::Snapshot { job } => {
+                            outcome.state = job.summary.state;
+                            outcome.error = job.summary.error.clone();
+                            let _ = progress_tx.send(ChainProgressEvent::ChainStart {
+                                stage_count: job.summary.stage_count,
+                                estimated_total_frames: job
+                                    .stages
+                                    .iter()
+                                    .filter_map(|stage| stage.frames_emitted)
+                                    .sum(),
+                            });
+                            if chain_follow_stopped(job.summary.state) {
+                                // A job that settled before we subscribed carries
+                                // its print in the manifest, not in a frame.
+                                outcome.output = job
+                                    .finalizes
+                                    .last()
+                                    .and_then(|record| record.gallery_filename.clone());
+                                return Ok(outcome);
+                            }
+                        }
+                        ChainJobEvent::StageStart { stage_idx } => {
+                            let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
+                        }
+                        ChainJobEvent::DenoiseStep {
                             stage_idx,
                             step,
                             total,
-                        });
-                    }
-                    ChainJobEvent::StageDone {
-                        stage_idx,
-                        frames_emitted,
-                        ..
-                    } => {
-                        let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                        } => {
+                            let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                                stage_idx,
+                                step,
+                                total,
+                            });
+                        }
+                        ChainJobEvent::StageDone {
                             stage_idx,
                             frames_emitted,
-                        });
-                    }
-                    ChainJobEvent::Finalizing { total_frames } => {
-                        let _ = progress_tx.send(ChainProgressEvent::Stitching { total_frames });
-                    }
-                    ChainJobEvent::Finalized {
-                        gallery_filename, ..
-                    } => outcome.output = gallery_filename,
-                    ChainJobEvent::StateChanged { state, error } => {
-                        outcome.state = state;
-                        if error.is_some() {
-                            outcome.error = error;
+                            ..
+                        } => {
+                            let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                                stage_idx,
+                                frames_emitted,
+                            });
                         }
-                        if crate::chain_job::settled(state) {
-                            return Ok(outcome);
+                        ChainJobEvent::Finalizing { total_frames } => {
+                            let _ =
+                                progress_tx.send(ChainProgressEvent::Stitching { total_frames });
                         }
+                        ChainJobEvent::Finalized {
+                            gallery_filename, ..
+                        } => outcome.output = gallery_filename,
+                        ChainJobEvent::StateChanged { state, error } => {
+                            outcome.state = state;
+                            if error.is_some() {
+                                outcome.error = error;
+                            }
+                            if chain_follow_stopped(state) {
+                                return Ok(outcome);
+                            }
+                        }
+                        ChainJobEvent::Yielded { .. } => {}
                     }
-                    ChainJobEvent::Yielded { .. } => {}
                 }
             }
+            // Read-only reconciliation never resubmits the admitted chain.
+            let detail = match self.get_chain_job(job_id).await {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if chain_follow_stopped(detail.summary.state) {
+                outcome.state = detail.summary.state;
+                outcome.error = detail.summary.error;
+                outcome.output = detail
+                    .finalizes
+                    .last()
+                    .and_then(|record| record.gallery_filename.clone());
+                return Ok(outcome);
+            }
+            if progress_tx.is_closed() {
+                anyhow::bail!("chain progress consumer closed before completion");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        // The runner closes the broadcast when the job settles, so a stream
-        // that ends without a terminal frame means the state changed while
-        // nobody was subscribed. Ask.
-        outcome.state = self
-            .get_chain_job(job_id)
-            .await
-            .map(|detail| detail.summary.state)
-            .unwrap_or(outcome.state);
-        Ok(outcome)
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
@@ -1597,6 +1835,16 @@ impl MoldClient {
         accept_licenses: &[crate::types::LicenseAcceptance],
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<()> {
+        if self
+            .client
+            .is_relay(&reqwest::Url::parse(&self.base_url)?)
+            .await?
+        {
+            return self
+                .pull_model_durable(model, accept_licenses, progress_tx)
+                .await
+                .map_err(|error| anyhow::anyhow!("relay pull could not be reconciled: {error}"));
+        }
         let mut resp = self
             .client
             .post(format!("{}/api/models/pull", self.base_url))
@@ -1653,7 +1901,66 @@ impl MoldClient {
             }
         }
 
-        Ok(())
+        anyhow::bail!("pull stream ended before completion; inspect the host download queue")
+    }
+
+    async fn pull_model_durable(
+        &self,
+        model: &str,
+        accept_licenses: &[crate::types::LicenseAcceptance],
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<()> {
+        let admitted = self.create_download(model, accept_licenses).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(24 * 3600);
+        loop {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "download still pending after 24 hours; inspect host download queue"
+            );
+            let listing = match self.list_downloads().await {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let job = listing
+                .active_jobs
+                .iter()
+                .chain(listing.active.iter())
+                .chain(listing.queued.iter())
+                .chain(listing.history.iter())
+                .find(|job| job.id == admitted.response.id)
+                .context("admitted download missing from host queue; outcome unknown")?;
+            match job.status {
+                crate::types::JobStatus::Completed => {
+                    let _ = progress_tx.send(SseProgressEvent::PullComplete {
+                        model: model.to_owned(),
+                    });
+                    return Ok(());
+                }
+                crate::types::JobStatus::Failed | crate::types::JobStatus::Cancelled => {
+                    anyhow::bail!(
+                        "host download failed: {}",
+                        job.error.as_deref().unwrap_or("cancelled")
+                    )
+                }
+                _ => {
+                    let _ = progress_tx.send(SseProgressEvent::DownloadProgress {
+                        filename: job.current_file.clone().unwrap_or_default(),
+                        file_index: job.files_done,
+                        total_files: job.files_total,
+                        bytes_downloaded: job.bytes_done,
+                        bytes_total: job.bytes_total,
+                        batch_bytes_downloaded: job.bytes_done,
+                        batch_bytes_total: job.bytes_total,
+                        batch_elapsed_ms: 0,
+                    });
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     }
 
     pub fn host(&self) -> &str {
@@ -3561,9 +3868,29 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
     (event_type, data_lines.join("\n"))
 }
 
+fn chain_follow_stopped(state: crate::chain_job::ChainJobState) -> bool {
+    crate::chain_job::settled(state)
+        || matches!(
+            state,
+            crate::chain_job::ChainJobState::Paused | crate::chain_job::ChainJobState::Interrupted
+        )
+}
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
 fn build_client(api_key: Option<&str>) -> (Client, bool) {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        if attempt
+            .previous()
+            .last()
+            .is_some_and(|previous| previous.origin() != attempt.url().origin())
+        {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    }));
     let mut api_key_configured = false;
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -3850,6 +4177,142 @@ mod tests {
         unsafe { std::env::remove_var("MOLD_HOST") };
     }
 
+    #[test]
+    fn chain_follow_returns_parked_states() {
+        use crate::chain_job::ChainJobState;
+        assert!(chain_follow_stopped(ChainJobState::Paused));
+        assert!(chain_follow_stopped(ChainJobState::Interrupted));
+        assert!(chain_follow_stopped(ChainJobState::Completed));
+        assert!(!chain_follow_stopped(ChainJobState::Running));
+    }
+    #[tokio::test]
+    async fn chain_sse_reconnects_after_nonterminal_eof() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        Mock::given(method("GET")).and(path("/api/chain-jobs/fixture/events")).respond_with(move |_:&wiremock::Request|{
+            let call=count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            if call==0{return ResponseTemplate::new(503);}
+            let state=if call==1 {"running"}else{"completed"};
+            ResponseTemplate::new(200).set_body_string(format!("data: {{\"type\":\"state_changed\",\"state\":\"{state}\",\"error\":null}}\n\n")).insert_header("content-type","text/event-stream")
+        }).mount(&server).await;
+        let detail = crate::chain_job::ChainJobDetail {
+            summary: crate::chain_job::ChainJobSummary {
+                id: "fixture".into(),
+                state: crate::chain_job::ChainJobState::Running,
+                model: "fixture".into(),
+                stage_count: 1,
+                current_stage: 0,
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+                error: None,
+                ephemeral: false,
+                execution_phase: None,
+                cancelling: false,
+            },
+            stages: vec![],
+            finalizes: vec![],
+            retakes: vec![],
+            amends: vec![],
+            script: Default::default(),
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/chain-jobs/fixture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&detail))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = client.stream_chain_job_events("fixture", tx).await.unwrap();
+        assert_eq!(result.state, crate::chain_job::ChainJobState::Completed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+    #[tokio::test]
+    async fn relay_pull_admits_once_and_uses_retained_terminal_state() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/pull"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"fixture-id","position":0})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/downloads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"active_jobs":[],"queued":[],"history":[{"id":"fixture-id","model":"fixture","status":"completed","files_done":1,"files_total":1,"bytes_done":7,"bytes_total":7}]}))).expect(1).mount(&server).await;
+        let client = MoldClient::new(&server.uri());
+        client.client.mark_relay(&server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client
+            .pull_model_stream_accepting("fixture", &[], tx)
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await,Some(SseProgressEvent::PullComplete{model}) if model=="fixture")
+        );
+    }
+    #[tokio::test]
+    async fn pull_sse_eof_without_terminal_event_is_not_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/pull"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(": relay reconnect\n\n", "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        assert!(client
+            .pull_model_stream_accepting("fixture", &[], tx)
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn keyed_client_never_follows_cross_origin_redirects() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let source = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/target"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&other)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/target", other.uri())),
+            )
+            .mount(&source)
+            .await;
+        let (client, _) = build_client(Some("fixture-secret"));
+        assert_eq!(
+            client
+                .get(format!("{}/start", source.uri()))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            302
+        );
+    }
     #[test]
     fn test_is_connection_error_non_connect() {
         // A generic anyhow error is not a connection error
@@ -5457,6 +5920,131 @@ mod tests {
             .unwrap_err();
         assert!(MoldClient::is_model_not_found(&error), "{error}");
         assert!(error.to_string().contains("flux-schnell:q8"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn relay_generation_admits_once_and_polls_saved_output() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let status = serde_json::json!({"id":"batch1","client_batch_id":"test","instance_id":"epoch","durable":true,"children":[{"index":0,"job_id":"job1","state":"complete","result":{"filename":"saved.png","seed":42}}]});
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/saved.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"png"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let response = client
+            .relay_generation_response(&stream_request(), None)
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["x-mold-seed-used"], "42");
+        assert_eq!(response.bytes().await.unwrap(), &b"png"[..]);
+    }
+
+    #[tokio::test]
+    async fn uncertain_relay_admission_never_authorizes_local_replay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = MoldClient::new(&format!("http://{address}"));
+        let error = client
+            .relay_generation_response(&stream_request(), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("reconcile client batch"));
+        assert_eq!(
+            crate::control::classify_generate_error(&error),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_no_save_refuses_before_admission() {
+        let server = wiremock::MockServer::start().await;
+        let client = MoldClient::new(&server.uri());
+        client.client.mark_relay(&server.uri());
+        let mut request = stream_request();
+        request.save_to_gallery = Some(false);
+        assert!(client
+            .generate(request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("requires saved output"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_relay_reconstructs_authoritative_video_audio_and_mesh_facts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (kind, filename, headers) in [
+            (
+                "video",
+                "saved.mp4",
+                serde_json::json!({"content-type":"video/mp4","x-mold-video-frames":"25","x-mold-video-fps":"24","x-mold-video-width":"768","x-mold-video-height":"512"}),
+            ),
+            (
+                "audio",
+                "saved.wav",
+                serde_json::json!({"content-type":"audio/wav","x-mold-audio-format":"wav","x-mold-audio-sample-rate":"48000","x-mold-audio-channels":"2","x-mold-audio-duration-ms":"5040"}),
+            ),
+            (
+                "mesh",
+                "saved.glb",
+                serde_json::json!({"content-type":"model/gltf-binary","x-mold-mesh-format":"glb","x-mold-mesh-vertices":"123","x-mold-mesh-faces":"321","x-mold-mesh-bounds-min":"-1,-2,-3","x-mold-mesh-bounds-max":"1,2,3"}),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let status = serde_json::json!({"id":"batch1","client_batch_id":"test","instance_id":"epoch","durable":true,"children":[{"index":0,"job_id":"job1","state":"complete","result":{"filename":filename,"seed":42,"response_headers":headers}}]});
+            Mock::given(method("POST"))
+                .and(path("/api/generation-batches"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/gallery/image/{filename}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes([1, 2, 3]))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = MoldClient::new(&server.uri());
+            client.client.mark_relay(&server.uri());
+            let result = client.generate(stream_request()).await.unwrap();
+            assert_eq!(result.seed_used, 42);
+            match kind {
+                "video" => {
+                    let video = result.video.unwrap();
+                    assert_eq!(
+                        (video.frames, video.fps, video.width, video.height),
+                        (25, 24, 768, 512)
+                    );
+                    assert_eq!(video.data, [1, 2, 3]);
+                }
+                "audio" => {
+                    let audio = result.audio.unwrap();
+                    assert_eq!(
+                        (audio.sample_rate, audio.channels, audio.duration_ms),
+                        (48000, 2, 5040)
+                    );
+                }
+                "mesh" => {
+                    let mesh = result.mesh.unwrap();
+                    assert_eq!((mesh.vertex_count, mesh.face_count), (123, 321));
+                    assert_eq!(mesh.bounds_min, [-1., -2., -3.]);
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     fn stream_request() -> GenerateRequest {

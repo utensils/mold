@@ -34,6 +34,10 @@
         "vite.mobile.config.ts"
       ],
       "project": ["src/**/*.{ts,vue}"]
+    },
+    "relay/aws": {
+      "entry": ["router.mjs", "frontend.mjs", "test/**/*.test.mjs"],
+      "project": ["**/*.mjs"]
     }
   }
 }

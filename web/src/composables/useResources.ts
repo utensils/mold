@@ -1,3 +1,4 @@
+import { createOriginEventSource } from "../lib/originEventSource";
 import {
   computed,
   onBeforeUnmount,
@@ -38,7 +39,7 @@ export function useResources(): UseResources {
   function connect() {
     if (stopped) return;
     try {
-      es = new EventSource("/api/resources/stream");
+      es = createOriginEventSource("/api/resources/stream");
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
       scheduleRetry();

@@ -25,6 +25,7 @@ pub mod install_error;
 pub mod lambda;
 pub mod license_acceptance;
 pub mod ltx2_camera;
+mod relay_transport;
 pub use ltx2_camera::{Ltx2CameraControlAvailability, Ltx2CameraControlInfo};
 pub mod ltx2_control;
 pub mod ltx2_duration;

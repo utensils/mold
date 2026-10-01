@@ -1,3 +1,4 @@
+import { setOriginApiKey } from "../lib/originAuth";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
@@ -1669,6 +1670,61 @@ describe("CreatePage layout and behavior", () => {
     expect(String(canvas.props("resultVideoSrc") ?? "")).not.toContain(
       "undefined",
     );
+  });
+
+  it("cancels hosted result resolution when superseded and when the canvas unmounts", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "fixture-key",
+    });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [
+      { ...finishedCanvasJob({ image: undefined }), hostId: studio.id },
+    ];
+    const originalFetch = globalThis.fetch;
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) => {
+        signals.push(init?.signal as AbortSignal);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    try {
+      await flushPromises();
+      expect(signals.length).toBeGreaterThan(0);
+      const previous = signals.at(-1)!;
+      expect(previous).toBeInstanceOf(AbortSignal);
+      const initialRequests = signals.length;
+      streamJobsRef.value = [
+        {
+          ...finishedCanvasJob({
+            image: undefined,
+            filename: "replacement.png",
+          }),
+          hostId: studio.id,
+        },
+      ];
+      await flushPromises();
+      expect(previous.aborted).toBe(true);
+      expect(signals.length).toBeGreaterThan(initialRequests);
+      const current = signals.at(-1)!;
+      expect(current.aborted).toBe(false);
+      wrapper.unmount();
+      expect(current.aborted).toBe(true);
+    } finally {
+      wrapper.unmount();
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("streams a settled print from a keyed machine through the media ticket", async () => {
@@ -5662,6 +5718,58 @@ describe("CreatePage 3-D mesh prints", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["mesh", "audio"])(
+    "restores %s from the authenticated serving origin through a media ticket",
+    async (kind) => {
+      const job = meshJob();
+      job.result!.image = "";
+      job.result!.filename = kind === "mesh" ? "chair.glb" : "sound.wav";
+      if (kind === "audio") {
+        delete job.result!.mesh_vertices;
+        job.result!.format = "wav";
+        job.result!.audio_sample_rate = 48000;
+      }
+      streamJobsRef.value = [job];
+      setOriginApiKey("origin-mesh-secret");
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({
+              token: "mesh-ticket",
+              expires_at: 1700000000,
+              auth_required: true,
+            }),
+          ),
+      );
+      globalThis.fetch = fetchMock;
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      try {
+        await flushPromises();
+        const src = String(
+          wrapper
+            .getComponent({ name: "ResultCanvas" })
+            .props(kind === "mesh" ? "resultMeshSrc" : "resultAudioSrc"),
+        );
+        expect(src).toContain(`/api/gallery/image/${job.result!.filename}`);
+        expect(src).toContain("media_token=mesh-ticket");
+        expect(src).not.toContain("origin-mesh-secret");
+        const request = fetchMock.mock.calls.find(([url]) =>
+          String(url).endsWith("/api/gallery/media-token"),
+        );
+        expect(request).toBeDefined();
+        expect(new Headers(request?.[1]?.headers).get("x-api-key")).toBe(
+          "origin-mesh-secret",
+        );
+        expect(request?.[1]?.redirect).toBe("error");
+      } finally {
+        wrapper.unmount();
+        globalThis.fetch = originalFetch;
+        setOriginApiKey("");
+      }
+    },
+  );
+
   it("writes the shared mesh caption under the print", async () => {
     vi.stubGlobal("URL", {
       ...URL,
@@ -5821,6 +5929,7 @@ function pageStubs() {
         "stage",
         "resultSrc",
         "resultMeshSrc",
+        "resultAudioSrc",
         "emptyGuidance",
       ],
       template:

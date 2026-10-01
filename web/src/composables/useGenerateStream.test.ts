@@ -1820,3 +1820,25 @@ describe("server chain-job lifecycle hints", () => {
     expect(reconcileGenerationBatches.mock.calls.length).toBe(before);
   });
 });
+
+it("restores serving-origin credentials for detached durable REST actions", () => {
+  sessionStorage.setItem(
+    `mold.web.origin-key.v1:${window.location.origin}`,
+    "origin-fixture",
+  );
+  const detached = { hostId: "origin" } as Job;
+  expect(__testing__.routeForDetachedJob(detached)?.apiKey).toBe(
+    "origin-fixture",
+  );
+  expect(
+    __testing__.routeForDetachedJob({
+      target: { baseUrl: window.location.origin },
+    } as Job)?.apiKey,
+  ).toBe("origin-fixture");
+  expect(
+    __testing__.routeForDetachedJob({
+      target: { baseUrl: "https://foreign.example" },
+    } as Job)?.apiKey,
+  ).toBeUndefined();
+  sessionStorage.clear();
+});

@@ -12,14 +12,14 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 
 ## What it does
 
-| Area | What |
-| --- | --- |
-| Machines | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain |
-| Generate | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share |
-| Library | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
-| Queue | Every machine's work; held jobs in words with Pull and Retry, Retry and Move to…; reorder, pause, empty |
-| Models | Installed per machine, Discover, downloads, licences |
-| Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension |
+| Area              | What                                                                                                                                                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                                          |
+| Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                                |
+| Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
+| Queue             | Every machine's work; held jobs in words with Pull and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                                 |
+| Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
+| Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension                                                                                                                                              |
 
 A render notification opens its finished print when the app is in the background
 or closed. Notification activation and its system completion callback run on the
@@ -68,14 +68,14 @@ Every helper accepts Make overrides, for example
 `companion-dev SIM=<UDID> BUILD=/Volumes/ExternalStorage/mold-ios-build`.
 Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 
-| Target | What |
-| --- | --- |
-| `make gen` | Regenerate `MoldCompanion.xcodeproj` from `project.yml` (the project is generated and gitignored) |
-| `make build` / `make run` | Build for the simulator, and install and launch it |
-| `make test` | Unit tests (Swift Testing) on the simulator |
-| `make packages-test` | MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator |
-| `make uitest` | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
-| `make lint` | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`) |
+| Target                    | What                                                                                                                                                                                                                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `make gen`                | Regenerate `MoldCompanion.xcodeproj` from `project.yml` (the project is generated and gitignored)                                                                                                                                                                        |
+| `make build` / `make run` | Build for the simulator, and install and launch it                                                                                                                                                                                                                       |
+| `make test`               | Unit tests (Swift Testing) on the simulator                                                                                                                                                                                                                              |
+| `make packages-test`      | MoldClient, MoldStyle and MoldMesh's own suites on the iOS simulator                                                                                                                                                                                                     |
+| `make uitest`             | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
+| `make lint`               | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`)                                                                                                                                                                                                   |
 
 UI tests retry a failed test once in a fresh test process to tolerate hosted
 Simulator timing failures. A repeated failure still fails the audit. Full logs
@@ -110,15 +110,15 @@ The fixture is excluded from Release/TestFlight builds.
 
 ## Layout
 
-| Path | What |
-| --- | --- |
-| `Sources/Companion/` | The app |
-| `Sources/Shared/` | Compiled into the app and both extensions (App Group paths, snapshot types) |
-| `Sources/Widgets/` | WidgetKit + Live Activity extension. Reads the App Group only |
-| `Sources/Share/` | Share extension. Stages a photo in the App Group and never networks |
-| `Tests/CompanionTests/` | Unit tests |
-| `Tests/CompanionUITests/` | The accessibility audit |
-| `../shared/Packages/` | `MoldClient` (wire + transport, with `MoldClientTesting`), `MoldStyle` (tokens) and `MoldMesh` (Metal mesh renderer), shared with the Mac app |
+| Path                      | What                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Sources/Companion/`      | The app                                                                                                                                       |
+| `Sources/Shared/`         | Compiled into the app and both extensions (App Group paths, snapshot types)                                                                   |
+| `Sources/Widgets/`        | WidgetKit + Live Activity extension. Reads the App Group only                                                                                 |
+| `Sources/Share/`          | Share extension. Stages a photo in the App Group and never networks                                                                           |
+| `Tests/CompanionTests/`   | Unit tests                                                                                                                                    |
+| `Tests/CompanionUITests/` | The accessibility audit                                                                                                                       |
+| `../shared/Packages/`     | `MoldClient` (wire + transport, with `MoldClientTesting`), `MoldStyle` (tokens) and `MoldMesh` (Metal mesh renderer), shared with the Mac app |
 
 ## Background behaviour
 
@@ -149,3 +149,18 @@ including hidden ones, and offers **Hide from All Prints**. Hiding or showing a
 collection updates every machine holding it. Hidden collections remain directly
 accessible from the shelf picker and sidebar, while their prints stay out of
 the general grid, including when another machine holds the tile’s leading copy.
+
+## Optional remote HTTPS access
+
+An authenticated machine can run `mold relay connect --transport aws` to expose its normal API
+through a trusted HTTPS gateway. Add that HTTPS address through the existing
+Machines flow or pair using a QR whose reachable URL is the public address.
+Normal API-key storage, instance identity, device revocation and signed gallery
+media tickets still apply; the relay enrollment token is only for the host.
+The gateway can see credentials and media and publishes one machine per process.
+See [the relay guide](https://utensils.io/mold/deployment/relay).
+
+Hosting requires an explicitly running authenticated `mold serve` and connector.
+Native macOS This Mac remains private; the GUI does not automatically open a
+tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
+are never replayed by the relay.

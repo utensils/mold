@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
+
 /*
  * Lightbox — the canonical print viewer (spec §03
  * Tile/lightbox rules, prototype desktop LIGHTBOX + mobile-web GALLERY VIEWER).
@@ -35,7 +37,7 @@ import {
 } from "@studio/lib/identityConditioning";
 import { downloadFilename } from "../../lib/libraryOrganization";
 import { imageUrl, thumbnailUrl } from "../../api";
-import { ORIGIN_HOST_ID, getHost } from "../../lib/hostRegistry";
+import { ORIGIN_HOST_ID, getHost, originHost } from "../../lib/hostRegistry";
 import { peekHostCapabilities } from "../../composables/useHostRouting";
 import {
   meshExportFilename,
@@ -348,7 +350,8 @@ function openMeshAnimationExport() {
  */
 const hostEntry = computed(() => {
   const id = (props.item as { hostId?: string } | null)?.hostId;
-  return id ? getHost(id) : null;
+  const origin = originHost();
+  return id ? getHost(id) : origin.apiKey ? origin : null;
 });
 const hostLabel = computed(() => {
   const item = props.item as { hostLabel?: string } | null;
@@ -361,8 +364,11 @@ const posterSrc = ref("");
 const streamBlocked = ref(false);
 const streamMessage = ref("");
 let resolveGeneration = 0;
+let mediaResolution: AbortController | null = null;
 
 function resolveMedia() {
+  mediaResolution?.abort();
+  mediaResolution = new AbortController();
   const item = props.item;
   const generation = ++resolveGeneration;
   streamBlocked.value = false;
@@ -399,7 +405,7 @@ function resolveMedia() {
     .catch(() => {
       /* no poster is fine — the media itself still loads */
     });
-  void resolveStreamableSrc(host, item.filename)
+  void resolveStreamableSrc(host, item.filename, mediaResolution.signal)
     .then((url) => {
       if (generation === resolveGeneration) mediaSrc.value = url;
     })
@@ -581,6 +587,7 @@ onMounted(() => {
   window.addEventListener("keydown", onKey);
 });
 onBeforeUnmount(() => {
+  mediaResolution?.abort();
   window.removeEventListener("resize", updateWide);
   window.removeEventListener("keydown", onKey);
   releaseViewer();

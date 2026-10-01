@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { originAuthenticatedFetch as fetch } from "../../../lib/originAuth";
+
 /*
  * LTX-2 advanced video suite — the family-specific controls the Advanced
  * drawer nests inside its "Video" section for LTX-2 / LTX-2.3 (the audio

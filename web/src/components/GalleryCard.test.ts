@@ -1,6 +1,8 @@
 import { mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import GalleryCard from "./GalleryCard.vue";
+import * as galleryMedia from "../lib/galleryMedia";
+import { setOriginApiKey } from "../lib/originAuth";
 import type { GalleryImage } from "../types";
 
 class FakeIntersectionObserver {
@@ -96,4 +98,24 @@ describe("GalleryCard", () => {
     );
     cutout.unmount();
   });
+});
+
+it("does not stage full keyed media when library tiles mount", () => {
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+  setOriginApiKey("fixture-key");
+  const full = vi
+    .spyOn(galleryMedia, "resolveStreamableSrc")
+    .mockResolvedValue("https://host/media");
+  const thumbnail = vi
+    .spyOn(galleryMedia, "resolveThumbnailSrc")
+    .mockResolvedValue("blob:thumbnail");
+  const wrappers = Array.from({ length: 20 }, () =>
+    mount(GalleryCard, { props: { item } }),
+  );
+  expect(full).not.toHaveBeenCalled();
+  expect(thumbnail).toHaveBeenCalledTimes(20);
+  wrappers.forEach((wrapper) => wrapper.unmount());
+  setOriginApiKey("");
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });

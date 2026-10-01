@@ -4,6 +4,31 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 dockerfile="$repo_root/Dockerfile"
 
+# Bun resolves every root workspace even when only the web app is built.
+python3 - "$repo_root" <<'PYTHON'
+import json
+import pathlib
+import re
+import sys
+root = pathlib.Path(sys.argv[1])
+docker = (root / "Dockerfile").read_text().splitlines()
+install = next(i for i, line in enumerate(docker) if line == "RUN bun install --frozen-lockfile")
+for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
+    manifest = f"{workspace}/package.json"
+    required = f"COPY {manifest} {manifest}"
+    if required not in docker[:install]:
+        sys.exit(f"FAIL: Docker web-builder must copy {manifest} before bun install")
+# Both Nix frontend derivations run the same root frozen workspace install.
+flake = (root / "flake.nix").read_text()
+for package in ("mold-web", "mold-desktop-web"):
+    definition = flake.split(f"{package} = pkgs.stdenv.mkDerivation {{", 1)[1]
+    fileset = definition.split("fileset = lib.fileset.unions [", 1)[1].split("];", 1)[0]
+    paths = set(re.findall(r"\./([^\s]+)", fileset))
+    for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
+        if workspace not in paths and f"{workspace}/package.json" not in paths:
+            sys.exit(f"FAIL: Nix {package} must include {workspace}/package.json before bun install")
+PYTHON
+
 studio_copy_line="$(grep -n -m1 '^COPY studio studio$' "$dockerfile" | cut -d: -f1 || true)"
 ui_copy_line="$(grep -n -m1 '^COPY ui ui$' "$dockerfile" | cut -d: -f1 || true)"
 web_build_line="$(grep -n -m1 '^RUN bun run build:web$' "$dockerfile" | cut -d: -f1 || true)"

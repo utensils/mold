@@ -1,3 +1,4 @@
+import { ORIGIN_ACCESS_CHANGE_KEY, setOriginApiKey } from "../lib/originAuth";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
@@ -201,6 +202,28 @@ describe("SettingsPage", () => {
     theme.value = "safelight-dark";
     matchSystem.value = false;
     vi.restoreAllMocks();
+  });
+
+  it("offers the serving-origin key action inside Machines settings", async () => {
+    const changeKey = vi.fn();
+    setOriginApiKey("settings-key");
+    const wrapper = mount(SettingsPage, {
+      global: { provide: { [ORIGIN_ACCESS_CHANGE_KEY as symbol]: changeKey } },
+    });
+    try {
+      await flushPromises();
+      await openSection(wrapper, "hosts");
+      const button = wrapper.get('[data-test="change-origin-api-key"]');
+      expect(button.text()).toBe("Change API key");
+      await button.trigger("click");
+      expect(changeKey).toHaveBeenCalledOnce();
+      expect(wrapper.get('[data-test="section-hosts"]').text()).toContain(
+        "Browser API key",
+      );
+    } finally {
+      wrapper.unmount();
+      setOriginApiKey("");
+    }
   });
 
   it("keeps its padded content inside narrow web viewports", () => {

@@ -1,3 +1,5 @@
+import { originApiTarget } from "./lib/originAuth";
+import { originAuthenticatedFetch as fetch } from "./lib/originAuth";
 import type {
   ChainJobSummary,
   ChainRequestWire,
@@ -35,7 +37,7 @@ export async function listGallery(
   signal?: AbortSignal,
 ): Promise<GalleryImage[]> {
   return conditionalApiJsonTo<GalleryImage[]>(
-    { baseUrl: base, apiKey: null },
+    originApiTarget(),
     "/api/gallery",
     { signal },
   );
@@ -132,7 +134,11 @@ export async function listGalleryFrom(
   signal?: AbortSignal,
 ): Promise<GalleryImage[]> {
   return conditionalApiJsonTo<GalleryImage[]>(
-    { baseUrl: targetBase(target), apiKey: target?.apiKey ?? null },
+    {
+      baseUrl: targetBase(target),
+      apiKey:
+        target?.apiKey ?? (!target?.baseUrl ? originApiTarget().apiKey : null),
+    },
     "/api/gallery",
     { signal },
   );

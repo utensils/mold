@@ -13,6 +13,12 @@ import Testing
 /// all.
 @MainActor
 struct ThumbnailCacheTests {
+    @Test func HTTPSRelayThumbnailsKeepTheirEncodedRequestTarget() async {
+        StubProtocol.reset()
+        let machine = MoldHost(id: UUID(), name: "relay", baseURL: URL(string: "https://relay.example")!, apiKey: "secret")
+        _ = await cache().image(for: entry("a b.png", on: machine), host: machine, size: 256)
+        #expect(StubProtocol.seen.first?.value(forHTTPHeaderField: "x-mold-request-target") == "/api/gallery/thumbnail/a%20b.png?size=256")
+    }
     private func host(_ name: String, key: String?) -> MoldHost {
         MoldHost(id: UUID(), name: name, baseURL: URL(string: "http://\(name):7680")!,
                  apiKey: key)

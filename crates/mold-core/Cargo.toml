@@ -35,6 +35,9 @@ mesh-delight = ["mesh-matting"]
 
 [dependencies]
 anyhow = "1"
+http = "1"
+http-body-util = "0.1"
+futures-util = "0.3"
 console = "0.15"
 dirs = "6"
 fs2 = "0.4"
@@ -60,6 +63,8 @@ ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"

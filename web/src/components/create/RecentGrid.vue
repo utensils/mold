@@ -13,7 +13,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
-import { thumbnailUrl } from "../../api";
+import { useThumbnailSources } from "../../composables/useThumbnailSources";
 import { mediaKind, type GalleryImage } from "../../types";
 import { showsAlphaBed } from "@studio/lib/alphaMedia";
 
@@ -81,6 +81,7 @@ const cap = computed(() => {
   }
   return props.limit;
 });
+const { srcFor } = useThumbnailSources();
 const shown = computed(() => props.entries.slice(0, cap.value));
 const overflow = computed(() =>
   Math.max(0, props.entries.length - shown.value.length),
@@ -124,7 +125,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
       <MediaTile
         v-for="item in shown"
         :key="item.filename"
-        :src="thumbnailUrl(item.filename)"
+        :src="srcFor(item)"
         :alt="tileAlt(item)"
         :alpha="
           mediaKind(item.format, item.filename, item.metadata) === 'image' &&

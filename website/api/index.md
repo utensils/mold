@@ -315,7 +315,9 @@ When `MOLD_API_KEY` is set, all API requests must include an `X-Api-Key`
 header. The exemptions are `/health`, `/api/docs`, `/api/openapi.json`, and
 `/api/pairing/claim` — a phone redeems a pairing ticket before it holds a key,
 so that route authenticates on the one-use ticket instead — plus `/metrics`,
-which is mounted outside the auth layer. `GET` and `HEAD` reads of
+which is mounted outside the auth layer. The browser shell and static assets
+are public so the browser can display its API-key entry screen; API data remains
+authenticated. `GET` and `HEAD` reads of
 `/api/gallery/image/:name` and `/api/chain-jobs/:id/stages/:idx/media` also
 accept a short-lived signed media ticket in place of the header (see below).
 

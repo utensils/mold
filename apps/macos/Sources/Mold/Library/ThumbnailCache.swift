@@ -85,9 +85,8 @@ final class ThumbnailCache {
             // before a byte is read, and the count is kept as it arrives
             // because a host that lies about the length is exactly the one
             // this guards against.
-            guard let (stream, response) = try? await session.bytes(
-                for: request, delegate: RedirectGuard(origin: host.baseURL)),
-                  let http = response as? HTTPURLResponse,
+            guard let (stream, http) = try? await HTTPBackend.responseBytes(
+                for: request, host: host, session: session),
                   (200..<300).contains(http.statusCode),
                   http.expectedContentLength <= Int64(ResponseCeiling.thumbnail),
                   let data = try? await stream.collected(upTo: ResponseCeiling.thumbnail)

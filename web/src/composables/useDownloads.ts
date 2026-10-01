@@ -1,3 +1,4 @@
+import { createOriginEventSource } from "../lib/originEventSource";
 import { ref, type Ref } from "vue";
 import {
   cancelDownload,
@@ -392,7 +393,7 @@ function buildSingleton(): UseDownloads {
   function connect() {
     if (closed || es) return;
     try {
-      es = new EventSource(downloadsStreamUrl());
+      es = createOriginEventSource(downloadsStreamUrl());
     } catch {
       scheduleReconnect();
       return;

@@ -705,3 +705,26 @@ reload the VAE on CPU if GPU recovery is exhausted. A repeated cleanup OOM
 does not prevent that retry; unrelated errors propagate. `MOLD_VAE_TILED`
 controls this Metal recovery path. Bounded Candle convolution workspaces replace
 the old proactive span cap. CPU/CUDA Z-Image decode policy is unchanged.
+
+## Optional remote HTTPS relay
+
+```bash
+mold relay connect --transport aws --relay-url wss://API.execute-api.REGION.amazonaws.com/production --target 127.0.0.1:7680
+```
+
+This opens an outbound tunnel for an authenticated server. The enrollment token is
+read from an owner-only `MOLD_RELAY_TOKEN_FILE`; clients use the normal HTTPS
+`MOLD_HOST` and their Mold API key/pairing credential, never that token.
+The production gateway uses API Gateway, Lambda, DynamoDB and private S3.
+Large bodies/media use single-use staged transfers. Generation uses durable queue
+recovery and requires saved output; `--no-save` is refused before admission.
+For a direct local-development gateway:
+
+```bash
+mold relay serve
+```
+
+One gateway publishes one machine. The proxy can see credentials/media; do not
+claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
+Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
+See the deployment guide for safe TLS, streaming and metrics routing.

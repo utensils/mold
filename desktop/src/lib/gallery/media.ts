@@ -1,8 +1,11 @@
+import { relayFetch as fetch } from "@studio/api/relayTransport";
 import { ApiError, apiFetch, apiFetchTo, currentTarget, type ApiTarget } from "../api/client";
 import type { GalleryImage } from "../api/types";
 import { inTauri, ipc } from "../ipc";
 import { GLB_MIME_TYPE } from "@studio/lib/meshExport";
 import { thumbnailRenditionQuery } from "@studio/lib/thumbnailPersistentCache";
+import { resolveRelayMedia, type RelayMediaTicket } from "@studio/api/relayMedia";
+import { apiHeaders } from "../api/client";
 
 /**
  * Gallery media sits behind X-Api-Key auth, and <img>/<video> cannot send
@@ -83,7 +86,7 @@ export interface AuthedMediaOptions {
   signal?: AbortSignal;
 }
 
-interface GalleryMediaTicket {
+interface GalleryMediaTicket extends RelayMediaTicket {
   token: string | null;
   expires_at: number | null;
   auth_required?: boolean;
@@ -203,6 +206,7 @@ export async function streamableMediaUrl(
   path: string,
   opts: StreamableMediaOptions = {},
 ): Promise<string> {
+  opts.signal?.throwIfAborted();
   if (path.startsWith("mold-local:")) return path;
   const target = opts.target ?? currentTarget();
   const directUrl = `${target.baseUrl.replace(/\/$/, "")}${path}`;
@@ -213,8 +217,16 @@ export async function streamableMediaUrl(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     const ticket = (await response.json()) as GalleryMediaTicket;
+    const relayUrl = await resolveRelayMedia(
+      ticket,
+      target.baseUrl,
+      apiHeaders(target),
+      opts.signal,
+    );
+    if (relayUrl) return relayUrl;
     // A key can remain in Keychain after a host disables authentication. New
     // hosts make that state explicit so the media element can use its normal
     // direct URL instead of treating the harmless stale key as a failure.

@@ -1,5 +1,7 @@
 package com.utensils.mold.mobile_native
 
+import android.content.pm.ApplicationInfo
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
@@ -18,8 +20,14 @@ class AndroidOverlayBack(
     private val handler = Handler(Looper.getMainLooper())
     private var pending: Runnable? = null
     private var destroyed = false
+    private fun trace(event: String) {
+        if (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            Log.d("MoldOverlayBack", event)
+        }
+    }
     private val callback = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
+            trace("pressed pending=${pending != null} destroyed=$destroyed")
             if (pending != null || destroyed) return
             val view = this@AndroidOverlayBack.webView.get()
             if (view == null) {
@@ -31,20 +39,24 @@ class AndroidOverlayBack(
             // just before its response was delayed on the way to the UI thread.
             val deadline = System.currentTimeMillis() + 1000
             val timeout = Runnable {
+                trace("renderer timeout")
                 pending = null
             }
             pending = timeout
             handler.postDelayed(timeout, 1000)
+            trace("renderer scheduled")
             try {
                 view.evaluateJavascript(
                     "Date.now() < $deadline && !window.dispatchEvent(new Event('mold:native-back', {cancelable:true}))",
                 ) { consumed ->
+                    trace("renderer callback result=$consumed active=${pending === timeout} expired=${System.currentTimeMillis() >= deadline}")
                     if (pending !== timeout || destroyed) return@evaluateJavascript
                     handler.removeCallbacks(timeout)
                     pending = null
                     if (consumed != "true") delegate()
                 }
-            } catch (_: RuntimeException) {
+            } catch (error: RuntimeException) {
+                trace("renderer exception=${error.javaClass.simpleName}")
                 handler.removeCallbacks(timeout)
                 pending = null
                 delegate()
@@ -55,9 +67,19 @@ class AndroidOverlayBack(
     init {
         activity.lifecycle.addObserver(this)
         activity.onBackPressedDispatcher.addCallback(activity, callback)
+        trace("registered enabled=${callback.isEnabled}")
+    }
+
+    override fun onStart(owner: LifecycleOwner) {
+        trace("started enabled=${callback.isEnabled} viewAlive=${webView.get() != null} pending=${pending != null}")
+    }
+
+    override fun onResume(owner: LifecycleOwner) {
+        trace("resumed enabled=${callback.isEnabled} viewAlive=${webView.get() != null} pending=${pending != null}")
     }
 
     private fun delegate() {
+        trace("delegate")
         callback.isEnabled = false
         try {
             activity.onBackPressedDispatcher.onBackPressed()
