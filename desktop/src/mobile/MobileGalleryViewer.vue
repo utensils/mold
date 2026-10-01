@@ -803,7 +803,10 @@ function evictLoad(load: MediaLoad | null): void {
   if (load) evictMedia(load.path, load.cacheKey);
 }
 
+let mediaResolution: AbortController | null = null;
 async function loadMedia(load = currentMediaLoad()): Promise<void> {
+  mediaResolution?.abort();
+  mediaResolution = new AbortController();
   const epoch = ++loadEpoch;
   activeMedia = load;
   loading.value = true;
@@ -818,6 +821,7 @@ async function loadMedia(load = currentMediaLoad()): Promise<void> {
   try {
     const url = await streamableMediaUrl(load.path, {
       target: load.target,
+      signal: mediaResolution.signal,
       cacheKey: load.cacheKey,
       allowLegacyBlob: load.allowLegacyBlob,
     });
@@ -1330,6 +1334,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  mediaResolution?.abort();
   mounted = false;
   window.removeEventListener("pointermove", trackViewerGesture, true);
   window.removeEventListener("pointerup", finishViewerGesture, true);

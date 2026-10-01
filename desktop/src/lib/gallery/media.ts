@@ -206,6 +206,7 @@ export async function streamableMediaUrl(
   path: string,
   opts: StreamableMediaOptions = {},
 ): Promise<string> {
+  opts.signal?.throwIfAborted();
   if (path.startsWith("mold-local:")) return path;
   const target = opts.target ?? currentTarget();
   const directUrl = `${target.baseUrl.replace(/\/$/, "")}${path}`;
@@ -216,9 +217,15 @@ export async function streamableMediaUrl(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     const ticket = (await response.json()) as GalleryMediaTicket;
-    const relayUrl = await resolveRelayMedia(ticket, target.baseUrl, apiHeaders(target));
+    const relayUrl = await resolveRelayMedia(
+      ticket,
+      target.baseUrl,
+      apiHeaders(target),
+      opts.signal,
+    );
     if (relayUrl) return relayUrl;
     // A key can remain in Keychain after a host disables authentication. New
     // hosts make that state explicit so the media element can use its normal

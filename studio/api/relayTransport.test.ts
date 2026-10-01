@@ -329,6 +329,10 @@ it("recognizes only the bounded legacy Mold SPA as direct discovery", async () =
 it.each([
   ["<html>gateway login</html>", { "content-type": "text/html" }],
   [
+    "<title>mold</title><h1>mold is running</h1>This binary was built without the web gallery UI bundled.",
+    { "content-type": "text/html", "x-mold-relay-protocol": "2" },
+  ],
+  [
     '<title>mold — studio</title><div id="app"></div>',
     { "content-type": "text/html", "x-mold-relay-protocol": "2" },
   ],
@@ -354,3 +358,82 @@ it.each([
     expect(fetch).toHaveBeenCalledOnce();
   },
 );
+
+it("keeps HTTPS mutations usable from an insecure LAN page without WebCrypto", async () => {
+  vi.stubGlobal("crypto", {});
+  const fetch = vi.fn().mockResolvedValue(new Response("{}"));
+  vi.stubGlobal("fetch", fetch);
+  await relayFetch("https://machine.example/api/status", {
+    method: "POST",
+    body: "abc",
+  });
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(
+    new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-amz-content-sha256"),
+  ).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+});
+
+it("isolates a shared discovery from the first upload cancellation", async () => {
+  let release!: (response: Response) => void;
+  const discovery = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  const fetch = vi.fn((url: RequestInfo | URL, _init?: RequestInit) =>
+    String(url).endsWith("/info")
+      ? discovery
+      : Promise.resolve(new Response("direct")),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const controller = new AbortController();
+  const body = new Uint8Array(2097153);
+  const first = relayFetch("https://shared.example/api/x", {
+    method: "POST",
+    body,
+    signal: controller.signal,
+  }).then(
+    () => "success",
+    (error: Error) => error.name,
+  );
+  const second = relayFetch("https://shared.example/api/y", {
+    method: "POST",
+    body,
+  });
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect(fetch.mock.calls[0]?.[1]?.signal).not.toBe(controller.signal);
+  controller.abort();
+  release(new Response(null, { status: 404 }));
+  expect(await first).toBe("AbortError");
+  expect(await (await second).text()).toBe("direct");
+});
+
+it("recognizes the known unbundled Mold stub and refuses a title-only page", async () => {
+  const stub =
+    "<title>mold</title><h1>mold is running</h1>This binary was built without the web gallery UI bundled.";
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    String(url).endsWith("/info")
+      ? new Response(stub, { headers: { "content-type": "text/html" } })
+      : new Response("direct"),
+  );
+  vi.stubGlobal("fetch", fetch);
+  expect(
+    await (
+      await relayFetch("https://stub.example/api/upload", {
+        method: "POST",
+        body: new Uint8Array(2097153),
+      })
+    ).text(),
+  ).toBe("direct");
+  clearRelayInfoCache();
+  fetch.mockImplementation(
+    async () =>
+      new Response("<title>mold</title>", {
+        headers: { "content-type": "text/html" },
+      }),
+  );
+  await expect(
+    relayFetch("https://stub.example/api/upload", {
+      method: "POST",
+      body: new Uint8Array(2097153),
+    }),
+  ).rejects.toThrow();
+});

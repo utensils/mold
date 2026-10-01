@@ -1,3 +1,4 @@
+import { sha256 } from "@noble/hashes/sha2.js";
 /** The Lambda facade preserves HTTP; only bulk bodies and object responses need adaptation. */
 const TransportURL = URL;
 const threshold = 2 * 1024 * 1024;
@@ -83,7 +84,9 @@ export async function resolveRelayObjectUrl(
 }
 async function digest(bytes: ArrayBuffer): Promise<string> {
   return Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+    globalThis.crypto?.subtle
+      ? new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
+      : sha256(new Uint8Array(bytes)),
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 }
@@ -160,7 +163,7 @@ async function relayInfo(
         headers: credentials,
         redirect: "error",
         credentials: "omit",
-        signal,
+        signal: AbortSignal.timeout(10_000),
       })
       .then(async (response) => {
         if (response.status === 404) {
@@ -180,8 +183,13 @@ async function relayInfo(
             ?.trim()
             .toLowerCase() === "text/html" &&
           !response.headers.has("x-mold-relay-protocol") &&
-          text.includes("<title>mold — studio</title>") &&
-          text.includes('<div id="app"></div>')
+          ((text.includes("<title>mold — studio</title>") &&
+            text.includes('<div id="app"></div>')) ||
+            (text.includes("<title>mold</title>") &&
+              text.includes("<h1>mold is running</h1>") &&
+              text.includes(
+                "This binary was built without the web gallery UI bundled.",
+              )))
         )
           return null;
         const info = JSON.parse(text) as RelayInfo;
@@ -203,7 +211,15 @@ async function relayInfo(
       if (infoCache.get(origin) === pending) infoCache.delete(origin);
     });
   }
-  return pending;
+  if (!signal) return pending;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    pending!
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 async function control(
   origin: string,

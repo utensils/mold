@@ -81,11 +81,16 @@ enum RelayTransport {
         return url
     }
     static func uploadURL(_ value: String) throws -> URL {
-        guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil,
-            let host = url.host, host.hasSuffix(".amazonaws.com"),
-            host.range(
-                of: #"^[a-z0-9.-]+\.s3([.-][a-z0-9-]+)?\.amazonaws\.com$"#, options: .regularExpression)
-                != nil
+        guard let url = URL(string: value), s3Identity(url) != nil else { throw MoldClientError.malformedResponse }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func one(_ name: String) -> String? {
+            let values = items.filter { $0.name == name }
+            return values.count == 1 ? values.first?.value : nil
+        }
+        guard one("X-Amz-Algorithm") == "AWS4-HMAC-SHA256", let signature = one("X-Amz-Signature"),
+            signature.range(of: #"^[a-fA-F0-9]{64}$"#, options: .regularExpression) != nil,
+            let expiry = one("X-Amz-Expires"), expiry.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
+            let seconds = Int(expiry), (1...900).contains(seconds)
         else { throw MoldClientError.malformedResponse }
         return url
     }
@@ -142,7 +147,9 @@ actor RelayDiscovery {
         if http.statusCode == 200, contentType == "text/html",
             http.value(forHTTPHeaderField: "x-mold-relay-protocol") == nil,
             let shell = String(data: data, encoding: .utf8),
-            shell.contains("<title>mold — studio</title>"), shell.contains("<div id=\"app\"></div>")
+            ((shell.contains("<title>mold — studio</title>") && shell.contains("<div id=\"app\"></div>")) ||
+                (shell.contains("<title>mold</title>") && shell.contains("<h1>mold is running</h1>")
+                    && shell.contains("This binary was built without the web gallery UI bundled.")))
         {
             origins[key] = .direct
             return .direct
@@ -164,3 +171,19 @@ final class RelayNoRedirect: NSObject, URLSessionTaskDelegate, Sendable {
     ) async -> URLRequest? { nil }
 }
 
+
+final class RelaySameOriginRedirect: NSObject, URLSessionTaskDelegate, Sendable {
+    let origin: URL
+    init(origin: URL) { self.origin = origin }
+    func redirected(_ request: URLRequest) -> URLRequest? {
+        guard let url = request.url, HostAddress.sameOrigin(origin, url) else { return nil }
+        var request = request
+        if request.value(forHTTPHeaderField: "x-mold-request-target") != nil {
+            request.setValue(url.path(percentEncoded: true) + (url.query(percentEncoded: true).map { "?" + $0 } ?? ""), forHTTPHeaderField: "x-mold-request-target")
+        }
+        return request
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        redirected(request)
+    }
+}

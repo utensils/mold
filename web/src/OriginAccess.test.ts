@@ -71,3 +71,16 @@ it("suggests the direct HTTPS address for a refused keyed connection without dia
   expect(originApiKey()).toBeNull();
   wrapper.unmount();
 });
+
+it("shows retry instead of an API-key demand after transient origin failures", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("", { status: 503 })),
+  );
+  const wrapper = mount(OriginAccess);
+  await flushPromises();
+  expect(wrapper.find("input").exists()).toBe(false);
+  expect(wrapper.text()).toContain("Try again");
+  expect(wrapper.text()).not.toContain("Enter the API key");
+  wrapper.unmount();
+});

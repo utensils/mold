@@ -22,7 +22,7 @@ private final class RelayTransportStub: StubTransport {
                 #"{"protocol":2,"upload_threshold":2097152,"max_body_bytes":67108864,"object_origin":"https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com"}"#
         case "/_mold/relay/uploads":
             json =
-                #"{"id":"up1","url":"https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?signature=short","headers":{},"expires_at":9999999999}"#
+                #"{"id":"up1","url":"https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/object?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=\#(String(repeating: "a", count: 64))&X-Amz-Expires=900","headers":{},"expires_at":\#(UInt64(Date().timeIntervalSince1970) + 900)}"#
         case "/api/gallery/media-token":
             json = #"{"auth_required":true,"relay":{"id":"media1","state":"pending"}}"#
         case "/_mold/relay/media/media1":
@@ -158,6 +158,13 @@ struct RelayTransportTests {
         #expect(RelayTransportStub.requests.first?.value(forHTTPHeaderField: "X-Api-Key") == nil)
         _ = try await discovery.info(origin: URL(string: "https://legacy-shell.example")!, session: session)
         #expect(RelayTransportStub.requests.count == 1)
+        RelayTransportStub.infoHTML = "<title>mold</title><h1>mold is running</h1>This binary was built without the web gallery UI bundled."
+        let stub = try await discovery.info(origin: URL(string: "https://stub-shell.example")!, session: session)
+        #expect(stub.protocol != 2)
+        RelayTransportStub.infoHTML = "<title>mold</title>"
+        await #expect(throws: (any Error).self) {
+            try await discovery.info(origin: URL(string: "https://title-only-shell.example")!, session: session)
+        }
         RelayTransportStub.infoHTML = "<html>gateway login</html>"
         await #expect(throws: (any Error).self) {
             try await discovery.info(origin: URL(string: "https://unknown-shell.example")!, session: session)
@@ -294,5 +301,22 @@ struct RelayTransportTests {
         #expect(upload.value(forHTTPHeaderField: "X-Api-Key") == nil)
         #expect(upload.value(forHTTPHeaderField: "x-mold-request-target") == nil)
         #expect(RelayTransportStub.requests.last?.url?.path == "/_mold/relay/request")
+    }
+}
+
+@Test func relayCredentialRedirectsKeepOnlyTheExactOrigin() throws {
+    let guardrail = RelaySameOriginRedirect(origin: URL(string: "https://relay.example")!)
+    var request = URLRequest(url: URL(string: "https://relay.example/api/status/")!)
+    request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
+    request.setValue("/api/status", forHTTPHeaderField: "x-mold-request-target")
+    let same = try #require(guardrail.redirected(request))
+    #expect(same.value(forHTTPHeaderField: "X-Api-Key") == "secret")
+    #expect(same.value(forHTTPHeaderField: "x-mold-request-target") == "/api/status/")
+    request.url = URL(string: "https://foreign.example/api/status")!
+    #expect(guardrail.redirected(request) == nil)
+}
+@Test func unsignedUploadGrantsAreRejected() {
+    #expect(throws: (any Error).self) {
+        try RelayTransport.uploadURL("https://mold-relay-123456789012-us-east-1.s3.us-east-1.amazonaws.com/upload")
     }
 }

@@ -8,6 +8,7 @@ import {
   setOriginApiKey,
 } from "./lib/originAuth";
 const ready = ref(false);
+const requiresKey = ref(false);
 const busy = ref(false);
 const key = ref("");
 const error = ref("");
@@ -22,6 +23,7 @@ async function connect() {
       signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) {
+      requiresKey.value = response.status === 401;
       error.value =
         response.status === 401
           ? "Enter this machine's API key to connect."
@@ -43,6 +45,7 @@ async function connect() {
 }
 function changeKey() {
   ready.value = false;
+  requiresKey.value = true;
   setOriginApiKey("");
   error.value = "Enter this machine's API key to connect.";
 }
@@ -56,15 +59,16 @@ onMounted(connect);
   <main v-else class="origin-access">
     <form @submit.prevent="connect">
       <h1>Connect to this machine</h1>
-      <p>
+      <p v-if="requiresKey">
         {{
           originApiKey()
             ? "Reconnect using your saved API key, or enter another key."
             : "Enter the API key configured on this machine."
         }}
       </p>
-      <label for="origin-key">API key</label>
+      <label v-if="requiresKey" for="origin-key">API key</label>
       <input
+        v-if="requiresKey"
         id="origin-key"
         v-model="key"
         type="password"
@@ -73,9 +77,9 @@ onMounted(connect);
         :disabled="busy"
       />
       <p v-if="error" role="alert">{{ error }}</p>
-      <p>Your key stays in this tab's browser session.</p>
+      <p v-if="requiresKey">Your key stays in this tab's browser session.</p>
       <button type="submit" :disabled="busy">
-        {{ busy ? "Connecting…" : "Connect" }}
+        {{ busy ? "Connecting…" : requiresKey ? "Connect" : "Try again" }}
       </button>
     </form>
   </main>

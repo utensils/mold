@@ -9,8 +9,8 @@ extension HTTPBackend {
     }
 
     func relayDelegate(_ request: URLRequest) -> any URLSessionTaskDelegate {
-        if request.url?.scheme == "https", request.value(forHTTPHeaderField: "X-Api-Key") != nil {
-            return RelayNoRedirect()
+        if request.url?.scheme == "https", request.value(forHTTPHeaderField: "X-Api-Key") != nil || request.value(forHTTPHeaderField: "Authorization") != nil {
+            return RelaySameOriginRedirect(origin: host.baseURL)
         }
         return redirectGuard
     }
@@ -73,6 +73,7 @@ extension HTTPBackend {
         try HTTPRefusal.check(grantHTTP, grantData)
         let grant = try MoldJSON.decoder.decode(RelayTransport.Grant.self, from: grantData)
         guard !grant.id.isEmpty, grant.expiresAt > UInt64(Date().timeIntervalSince1970),
+            grant.expiresAt <= UInt64(Date().timeIntervalSince1970) + 900,
             !grant.headers.keys.contains(where: {
                 ["x-api-key", "authorization"].contains($0.lowercased())
                     || $0.lowercased().hasPrefix("x-mold-")
@@ -123,6 +124,8 @@ extension HTTPBackend {
     func relayDownload(_ original: URLRequest) async throws -> (URL, HTTPURLResponse) {
         let (prepared, _) = try await relayPrepared(original)
         var (file, answer) = try await session.download(for: prepared, delegate: relayDelegate(prepared))
+        var succeeded = false
+        defer { if !succeeded { try? FileManager.default.removeItem(at: file) } }
         guard var http = answer as? HTTPURLResponse else { throw MoldClientError.malformedResponse }
         if http.value(forHTTPHeaderField: "x-mold-relay-object") == "1" {
             let envelopeFile = file
@@ -144,6 +147,7 @@ extension HTTPBackend {
             else { throw MoldClientError.malformedResponse }
             http = restored
         }
+        succeeded = true
         return (file, http)
     }
 

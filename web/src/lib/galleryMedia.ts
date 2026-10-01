@@ -294,7 +294,9 @@ export class MediaUpgradeRequiredError extends Error {
 export async function resolveStreamableSrc(
   host: HostEntry,
   filename: string,
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const path = mediaPath(filename);
   const directUrl = directMediaUrl(host, filename);
   if (!needsAuthedMedia(host)) return directUrl;
@@ -303,6 +305,7 @@ export async function resolveStreamableSrc(
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders(host) },
     body: JSON.stringify({ path }),
+    signal: signal ?? null,
   });
   if (res.status === 404 || res.status === 405) {
     throw new MediaUpgradeRequiredError();
@@ -313,6 +316,7 @@ export async function resolveStreamableSrc(
     ticket,
     hostMediaBase(host),
     authHeaders(host),
+    signal,
   );
   if (relayUrl) return relayUrl;
   if (ticket.auth_required === false) return directUrl;
