@@ -153,6 +153,7 @@ describe("MobileGalleryViewer", () => {
       target,
       cacheKey: "studio",
       allowLegacyBlob: true,
+      signal: expect.any(AbortSignal),
     });
 
     await view.get("[data-test='gallery-viewer-reuse']").trigger("click");
@@ -288,6 +289,7 @@ describe("MobileGalleryViewer", () => {
       target,
       cacheKey: "studio",
       allowLegacyBlob: false,
+      signal: expect.any(AbortSignal),
     });
     expect(view.find("[role='status']").exists()).toBe(true);
     await video.trigger("loadedmetadata");
@@ -693,14 +695,18 @@ describe("MobileGalleryViewer", () => {
       target,
       cacheKey: "studio",
       allowLegacyBlob: true,
+      signal: expect.any(AbortSignal),
     });
     expect(view.get("[data-test='gallery-viewer-image']").attributes("src")).toBe(
       "https://studio/media/two",
     );
     expect(evictMedia).toHaveBeenCalledWith("/api/gallery/image/print%20one.png", "studio");
 
+    const latestSignal = streamableMediaUrl.mock.calls.at(-1)?.[1].signal as AbortSignal;
+    expect(latestSignal.aborted).toBe(false);
     view.unmount();
     wrapper = null;
+    expect(latestSignal.aborted).toBe(true);
     expect(evictMedia).toHaveBeenLastCalledWith("/api/gallery/image/print%20two.png", "studio");
   });
 
@@ -728,6 +734,7 @@ describe("MobileGalleryViewer", () => {
       target: remoteTarget,
       cacheKey: "remote",
       allowLegacyBlob: true,
+      signal: expect.any(AbortSignal),
     });
     expect(view.get("[data-test='gallery-viewer-image']").attributes("src")).toBe(
       "https://remote/media/full",

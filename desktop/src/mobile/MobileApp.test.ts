@@ -9952,6 +9952,7 @@ describe("MobileApp gallery", () => {
       target,
       cacheKey: "studio-id",
       allowLegacyBlob: false,
+      signal: expect.any(AbortSignal),
     });
 
     await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
