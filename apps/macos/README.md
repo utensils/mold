@@ -630,5 +630,5 @@ are never replayed by the relay.
 
 Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
 within the current shelf, preserving search and machine filters. Clicking or
-Command/Shift-clicking a fully visible tile keeps the viewport in place;
+Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.

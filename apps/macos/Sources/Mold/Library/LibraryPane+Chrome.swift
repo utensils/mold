@@ -21,7 +21,7 @@ extension LibraryPane {
             .onAppear { revealIfNeeded() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
-            .onChange(of: navigation.query.tokens) { _, _ in clearSelection() }
+            .onChange(of: navigation.query) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
             .onChange(of: library.rows.value) { _, _ in followMergedTiles() }
             // A click on an already-open Library: `.onAppear` above only
@@ -71,8 +71,18 @@ extension LibraryPane {
                 scope: navigation.scope, actions: actions, entries: showing.visible,
                 shelves: library.shelves, enclosingShelf: enclosingShelf,
                 trashCount: library.trashed.count,
-                selection: $selection, onOpen: { viewing = $0 }
+                selection: $selection,
+                returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
+                    ? gridReturn?.id : nil,
+                onReturnRestored: { gridReturn = nil },
+                onOpen: { gridReturn = nil; viewing = $0 }
             )
+            .id(LibraryGridContext(scope: navigation.scope, query: navigation.query))
         }
     }
+}
+
+private struct LibraryGridContext: Hashable {
+    let scope: LibraryScope
+    let query: LibraryQuery
 }

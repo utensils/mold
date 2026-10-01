@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Exercise a saved-machine screen, not just first-run empty states.
 final class GenerationInteractionTests: XCTestCase {
@@ -36,6 +37,8 @@ final class GenerationInteractionTests: XCTestCase {
     }
 
     @MainActor func testAccessibilityComposerAndMachineCardsFitTheScreen() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad,
+                      "Phone composer width contract; iPad composition is covered by the shell audit")
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
         let form = app.scrollViews["phone-generate-form"]
         XCTAssertTrue(form.waitForExistence(timeout: 5))
@@ -163,6 +166,8 @@ final class GenerationInteractionTests: XCTestCase {
     }
 
     @MainActor func testLibraryShelvesAndSettingsAreReachableOnPhone() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad,
+                      "Phone Settings toolbar route; iPad sidebar Settings is covered by the shell audit")
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         let shelves = app.navigationBars.buttons["All Prints"].firstMatch

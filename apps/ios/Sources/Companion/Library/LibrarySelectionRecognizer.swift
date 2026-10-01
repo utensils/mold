@@ -89,7 +89,13 @@ struct LibrarySelectionRecognizer: UIGestureRecognizerRepresentable {
 
         func emit() {
             guard let start else { return }
-            owner.changed(converter.location(in: .global), start)
+            var point = converter.location(in: .global)
+            if let scroll {
+                let frame = scroll.convert(scroll.bounds, to: nil)
+                point.y = min(frame.maxY - scroll.adjustedContentInset.bottom - 1,
+                              max(frame.minY + scroll.adjustedContentInset.top + 1, point.y))
+            }
+            owner.changed(point, start)
         }
 
         private func tick() {

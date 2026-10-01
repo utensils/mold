@@ -129,3 +129,23 @@ open and scrolls the opened tile back into view on return.
 - UAT uses the Debug-only `--live-activity-fixture` launch argument; no render was submitted. Physical-device presentation remains to be confirmed in TestFlight.
 - All 129 iOS unit tests and architecture lints pass. The Release Simulator build passes, with both Debug UAT fixture types absent from the binary. Also visually checked a real preview image and the no-step "Working on it" state; the latter shows no fabricated progress bar.
 - The final suite has 130 passing tests, including a height invariant that measures all three normal rows with UIKit text metrics and accounts for the card padding. The final Release build also passes.
+
+## Library selection, title and media filters — 2026-10-01
+
+- Reproduced selection moving a scrolled tile upward by 39 points with a
+  failing iPhone Simulator regression. The fixed grid observes visibility
+  separately from explicit viewer-return and pinch scroll requests.
+- iPhone 17 Pro Simulator, iOS 26.5: tapping multiple prints retains tile
+  position within two points. Horizontal finger sweeps select and deselect a
+  range; holding near the bottom edge scrolls the grid upward to expose later
+  rows. A subsequent vertical swipe still scrolls normally in Select mode.
+- Videos filters pictures out, remains active when switching to Favourites,
+  and All Media restores the unfiltered shelf. The loopback fixture supplies
+  picture, clip and mesh rows; no generation or remote mutation occurs.
+- The retained-position screenshot shows one inline All Prints title/menu
+  above the grid, with no duplicate blue shelf link. Focused title contrast
+  checks pass at extra-small, normal and AX5 text. Viewer-return UI coverage
+  and all 134 native unit tests pass.
+- Independent review approved the selection lifecycle and shared filter
+  contract. Physical-device gesture behavior remains unverified; the evidence
+  above is Simulator UAT.

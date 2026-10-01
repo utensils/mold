@@ -1,7 +1,2 @@
-### Fixed
-- Native iOS Library selections no longer pull the viewport upward; its shelf menu stays in one readable navigation title instead of overlapping scrolling prints.
-- Native macOS Library clicks no longer recenter fully visible selected tiles; keyboard navigation still reveals offscreen tiles.
-
-### Added
-- Native iOS Library finger-drag range selection and deselection, reversal and edge scrolling, while vertical swipes retain normal scrolling.
-- All Media, Photos, Videos and 3D Library filters on native iOS and macOS, preserving the current shelf, search and machine filters.
+- **Stable native Library selection.** iOS tile selections keep the viewport in place, with finger-sweep range selection/deselection, reversal and edge scrolling while vertical swipes keep native scrolling. A single navigation title menu replaces overlapping shelf labels.
+- **Native Library media filters.** iOS and macOS offer All Media, Photos, Videos and 3D within the current shelf, preserving search and machine filters. Mac pointer selections keep their position while keyboard navigation still reveals offscreen tiles.

@@ -24,3 +24,21 @@ pending owner inputs, footer removal, and deferred local-save reports. Shared
 query tests cover merged remote/local hidden membership and Recently Deleted.
 The UI stress test uses copy progress; local-save completion report deferral is
 covered by the native contract tests rather than a running local engine.
+
+## Library scrolling and media filters — 2026-10-01
+
+Native Debug build with ad-hoc signing, disposable preferences/home, and a
+read-only loopback fixture containing 120 mixed prints (45 favourites).
+
+- All Media shows 120 prints. Videos and 3D each show 40; Videos within
+  Favourites shows 15. Photos shows 40. Changing media type after scrolling
+  deeply resets the new result list to the top, retaining the shelf.
+- Pointer selections, including a partly clipped row, leave the viewport in
+  place. Arrow navigation reveals later rows when the keyboard cursor moves
+  outside the visible area.
+- Opened Fixture 42 in the still viewer and returned with Library; its selected
+  tile was revealed. Scrolled away, visited Queue, and reopened Library: the
+  old viewer anchor was not replayed.
+- Native build and architecture lint pass. The independent reviewer approved
+  the final one-shot viewer restore and scope/query reset. Shared MoldClient
+  tests pass (1,095 tests). No generation or production data mutation occurred.

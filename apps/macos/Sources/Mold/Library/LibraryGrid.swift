@@ -17,6 +17,8 @@ struct LibraryGrid: View {
     let enclosingShelf: CollectionShelf?
     let trashCount: Int
     @Binding var selection: LibraryCursor.Selection
+    let returnToPrint: PrintID?
+    let onReturnRestored: () -> Void
     let onOpen: (PrintID) -> Void
 
     /// Not `private`: the cursor the keyboard drives is built in
@@ -57,7 +59,10 @@ struct LibraryGrid: View {
             .onAppear {
                 // A newly created grid after closing the viewer should reveal
                 // its returned cursor once; pointer selections never request a scroll.
-                if let lead = selection.lead { scroller.scrollTo(lead, anchor: .center) }
+                if let returnToPrint {
+                    scroller.scrollTo(returnToPrint, anchor: .center)
+                    onReturnRestored()
+                }
             }
             .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.95) { ids in
                 visibleIDs = Set(ids)

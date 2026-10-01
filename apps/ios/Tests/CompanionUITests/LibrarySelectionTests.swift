@@ -5,7 +5,7 @@ final class LibrarySelectionTests: XCTestCase {
 
     @MainActor func testSelectionKeepsViewportAndDragSelectsRange() async throws {
         continueAfterFailure = false
-        let machine = try FixtureMachine(galleryPrints: 90, mixedMedia: true)
+        let machine = try FixtureMachine(galleryPrints: 300, galleryFavorites: 45, mixedMedia: true)
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)
@@ -23,7 +23,8 @@ final class LibrarySelectionTests: XCTestCase {
         grid.swipeUp(velocity: .slow)
         app.buttons["Select"].tap()
         let tiles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture '"))
-        let visible = tiles.allElementsBoundByIndex.filter { $0.isHittable && $0.frame.minY > 180 && $0.frame.maxY < 650 }
+        let visibleElements = tiles.allElementsBoundByIndex.filter { $0.isHittable && $0.frame.minY > 180 && $0.frame.maxY < 650 }
+        let visible = visibleElements.map { app.buttons[$0.label].firstMatch }
         XCTAssertGreaterThanOrEqual(visible.count, 3)
         let first = visible[0]
         let before = first.frame
@@ -50,17 +51,22 @@ final class LibrarySelectionTests: XCTestCase {
         }
         let bottomY = try XCTUnwrap(sweptTiles.map(\.frame.minY).max())
         let edgeStart = try XCTUnwrap(sweptTiles.first { abs($0.frame.minY - bottomY) < 2 })
-        let edgeBefore = edgeStart.frame.minY
+        let stableEdge = app.buttons[edgeStart.label].firstMatch
+        let edgeBefore = stableEdge.frame.minY
         let endY = app.buttons["Delete"].firstMatch.frame.minY - 10
-        let startPoint = edgeStart.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+        let startPoint = stableEdge.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
         let endPoint = app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: app.frame.maxX - 12, dy: endY))
         startPoint.press(forDuration: 0.05, thenDragTo: endPoint,
                          withVelocity: .slow, thenHoldForDuration: 1.2)
-        XCTAssertLessThan(edgeStart.frame.minY, edgeBefore - 10, "holding a sweep at the edge should scroll")
-        let oldY = first.frame.minY
+        XCTAssertTrue(!stableEdge.isHittable || stableEdge.frame.minY < edgeBefore - 10,
+                      "holding a sweep at the edge should move the starting print upward")
+        let scrollingTile = try XCTUnwrap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture '")).allElementsBoundByIndex
+            .first { $0.isHittable && $0.frame.minY > 180 && $0.frame.maxY < 650 })
+        let scrollingPrint = app.buttons[scrollingTile.label].firstMatch
+        let oldY = scrollingPrint.frame.minY
         grid.swipeUp(velocity: .slow)
-        XCTAssertTrue(!first.isHittable || first.frame.minY < oldY - 20,
+        XCTAssertTrue(!scrollingPrint.isHittable || scrollingPrint.frame.minY < oldY - 20,
                       "vertical scrolling remains available in Select mode")
         app.buttons["Done"].tap()
         app.buttons["View Options"].tap()
@@ -71,10 +77,12 @@ final class LibrarySelectionTests: XCTestCase {
         let video = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'clip'"))
         XCTAssertTrue(video.firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'picture'")).firstMatch.exists)
+        app.chooseLibraryShelf("Favourites")
+        XCTAssertTrue(app.navigationBars["Favourites · Videos"].waitForExistence(timeout: 5))
         app.buttons["View Options"].tap()
         let mediaAgain = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Media Type'")).firstMatch
         if mediaAgain.waitForExistence(timeout: 2) { mediaAgain.tap() }
         app.buttons["All Media"].firstMatch.tap()
-        XCTAssertTrue(app.navigationBars["All Prints"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Favourites"].waitForExistence(timeout: 5))
     }
 }
