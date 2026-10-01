@@ -214,14 +214,14 @@ export function createRouter({
       if (host.connectionId !== id) return 403;
       // A completed frontend can disconnect while its final ACK/EOF is in flight.
       // Drop that stale request frame without evicting the shared host session.
-      if ((host.guests?.[frame.rid] ?? 0) <= now()) return 410;
+      if ((host.guests?.[frame.rid] ?? 0) <= now()) return 200;
       const guest = await store.get(`connection#${frame.rid}`);
       if (
         guest?.role !== "frontend" ||
         guest.sid !== host.sid ||
         guest.expiresAt <= now()
       )
-        return 410;
+        return 200;
       target = frame.rid;
     } else {
       if (frame.rid !== id || (host.guests?.[id] ?? 0) <= now()) return 403;
@@ -234,7 +234,7 @@ export function createRouter({
     } catch (error) {
       if (error?.$metadata?.httpStatusCode === 410) {
         await leave(target);
-        return 503;
+        return connection.role === "host" ? 200 : 503;
       }
       throw error;
     }

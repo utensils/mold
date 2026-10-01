@@ -168,9 +168,11 @@ export function createFrontend(dependencies = {}) {
       }))
     )
       return;
-    let result;
+    let result,
+      phase = "connect";
     try {
       result = await deps.request(event.request);
+      phase = "validate-response";
       if (
         result.sid !== event.sid ||
         result.response.statusCode !== 200 ||
@@ -179,6 +181,7 @@ export function createFrontend(dependencies = {}) {
           .startsWith("text/event-stream")
       )
         throw new Error("Media refused");
+      phase = "stage-object";
       const object = await deps.stage(
         result.response,
         cleanHeaders(result.response.headers, { response: true }),
@@ -190,7 +193,12 @@ export function createFrontend(dependencies = {}) {
         ...facts,
         expiresAt: object.expires_at,
       });
-    } catch {
+    } catch (error) {
+      console.error(
+        "Mold relay media staging failure",
+        phase,
+        failureCategory(error),
+      );
       await deps.store.put(`media#${event.id}`, { ...job, state: "failed" });
     } finally {
       result?.close();

@@ -198,7 +198,7 @@ test("late host frames after guest disconnect do not evict the enrolled host", a
     credit: 4,
     ack_seq: 1,
   });
-  assert.equal(reply.statusCode, 410);
+  assert.equal(reply.statusCode, 200);
   assert.deepEqual(f.closed, []);
   assert.equal(f.rows.get("host").connectionId, "h");
 });
