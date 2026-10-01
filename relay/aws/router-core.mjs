@@ -78,6 +78,26 @@ export function createRouter({
       });
       return 200;
     }
+    // Only legacy records lacking the field may migrate from a proven hello.
+    const legacy = await store.get("host");
+    if (legacy && legacy.ready === undefined && legacy.expiresAt > now()) {
+      const owner = await store.get(`connection#${legacy.connectionId}`);
+      if (
+        owner?.role === "host" &&
+        owner.hello === true &&
+        owner.sid === legacy.sid &&
+        owner.expiresAt > now()
+      ) {
+        await updateHost((old) =>
+          old?.sid === legacy.sid &&
+          old.connectionId === legacy.connectionId &&
+          old.ready === undefined &&
+          old.expiresAt > now()
+            ? { ...old, ready: true }
+            : null,
+        );
+      }
+    }
     const host = await updateHost((old) => {
       if (!old || old.expiresAt <= now() || old.ready !== true) return null;
       const guests = Object.fromEntries(
@@ -109,12 +129,10 @@ export function createRouter({
   }
   async function leave(id, cause = "disconnect") {
     const connection = await store.get(`connection#${id}`);
-    if (connection?.role === "host")
-      console.warn("Mold relay host membership removal", cause, id);
     await store.remove(`connection#${id}`);
     if (!connection) return;
     let affected;
-    await updateHost((old) => {
+    const removed = await updateHost((old) => {
       if (old?.sid !== connection.sid) return null;
       if (connection.role === "host" && old.connectionId === id) {
         affected = Object.keys(old.guests ?? {});
@@ -128,6 +146,8 @@ export function createRouter({
       }
       return null;
     });
+    if (removed && connection.role === "host")
+      console.warn("Mold relay host membership removal", cause, id);
     for (const peer of affected ?? []) {
       try {
         await post(peer, {
@@ -232,21 +252,17 @@ export function createRouter({
       return 200;
     }
     if (frame.a === "hello") {
-      if (connection.hello) return 409;
+      if (connection.hello && connection.role !== "host") return 409;
       if (
+        !connection.hello &&
         !(await store.cas(`connection#${id}`, connection.revision, {
           ...connection,
           hello: true,
         }))
       )
         return 409;
-      await post(id, {
-        a: "ready",
-        v: 2,
-        sid: host.sid,
-        rid: id,
-        role: connection.role,
-      });
+      // Receipt of hello proves the upgrade completed. Publish before ready,
+      // and allow a host to retry if its ready delivery or store update failed.
       if (connection.role === "host") {
         const ready = await updateHost((old) =>
           old?.sid === connection.sid &&
@@ -257,6 +273,13 @@ export function createRouter({
         );
         if (!ready) return 503;
       }
+      await post(id, {
+        a: "ready",
+        v: 2,
+        sid: host.sid,
+        rid: id,
+        role: connection.role,
+      });
       if (connection.role === "frontend")
         await post(host.connectionId, {
           a: "open",

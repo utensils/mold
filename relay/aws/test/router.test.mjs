@@ -320,3 +320,51 @@ test("lease renewed after initial read does not falsely close host", async () =>
   assert.equal(reply.statusCode, 200);
   assert.deepEqual(f.closed, []);
 });
+test("host hello records readiness before delivery and retries failed delivery", async () => {
+  let reject = true;
+  let f;
+  f = fixture({
+    post: async (_id, frame) => {
+      if (frame.a === "ready") {
+        assert.equal(f.rows.get("host").ready, true);
+        if (reject) {
+          reject = false;
+          throw new Error("delivery failed");
+        }
+      }
+    },
+  });
+  await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  assert.equal(
+    (await send(f.router, "h", { a: "hello", v: 2 })).statusCode,
+    200,
+  );
+});
+test("legacy proven hello migrates but explicit unready host does not", async () => {
+  const f = fixture();
+  await connect(f.router, "h", "host", "host-test");
+  f.rows.get("connection#h").hello = true;
+  assert.equal(
+    (await connect(f.router, "g", "frontend", "frontend-test")).statusCode,
+    503,
+  );
+  delete f.rows.get("host").ready;
+  assert.equal(
+    (await connect(f.router, "g", "frontend", "frontend-test")).statusCode,
+    200,
+  );
+});
+test("replacement host resets readiness and stale hello cannot publish it", async () => {
+  const f = fixture();
+  await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.advance(91);
+  await connect(f.router, "new", "host", "host-test");
+  assert.equal(f.rows.get("host").ready, false);
+  assert.equal(
+    (await send(f.router, "h", { a: "hello", v: 2 })).statusCode,
+    403,
+  );
+  assert.equal(f.rows.get("host").ready, false);
+});
