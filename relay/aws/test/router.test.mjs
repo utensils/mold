@@ -340,6 +340,22 @@ test("host hello records readiness before delivery and retries failed delivery",
     (await send(f.router, "h", { a: "hello", v: 2 })).statusCode,
     200,
   );
+  assert.equal(
+    (await connect(f.router, "g", "frontend", "frontend-test")).statusCode,
+    200,
+  );
+  assert.equal(
+    (await send(f.router, "g", { a: "hello", v: 2 })).statusCode,
+    200,
+  );
+  assert.deepEqual(
+    f.delivered.map(({ id, a }) => ({ id, a })),
+    [
+      { id: "h", a: "ready" },
+      { id: "g", a: "ready" },
+      { id: "h", a: "open" },
+    ],
+  );
 });
 test("legacy proven hello migrates but explicit unready host does not", async () => {
   const f = fixture();
