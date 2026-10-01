@@ -860,11 +860,13 @@ Optional outbound HTTPS access to an existing authenticated machine:
 
 ```bash
 MOLD_RELAY_TOKEN_FILE=/absolute/path/relay-token mold relay connect \
-  --relay-url wss://gateway.example --target 127.0.0.1:7680
+  --transport aws --relay-url wss://gateway.example --target 127.0.0.1:7680
 mold relay serve --control-bind 127.0.0.1:7681 --data-bind 127.0.0.1:7682
 ```
 
-The gateway runs behind a trusted TLS proxy and publishes one machine.
+`--transport aws` selects the production Lambda/WebSocket protocol. The default
+`direct` transport is for the self-hosted development gateway started by
+`mold relay serve`. The gateway publishes one machine.
 Clients use its HTTPS URL and normal Mold credentials. See
 [remote HTTPS relay](/deployment/relay) for authentication, streaming and
 service setup.
