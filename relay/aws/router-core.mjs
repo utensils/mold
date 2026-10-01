@@ -155,9 +155,18 @@ export function createRouter({
       host.expiresAt <= now() ||
       connection.expiresAt <= now() ||
       host.sid !== connection.sid
-    )
+    ) {
+      console.warn(
+        "Mold relay frame refusal",
+        "membership-expired-or-epoch",
+        connection?.role === "host" ? "host" : "frontend",
+      );
       return 403;
-    if (frame.v !== 2) return 400;
+    }
+    if (frame.v !== 2) {
+      console.warn("Mold relay frame refusal", "version");
+      return 400;
+    }
     if (frame.a === "heartbeat") {
       const updated = await updateHost((old) => {
         if (old?.sid !== connection.sid || old.expiresAt <= now()) return null;
@@ -208,10 +217,20 @@ export function createRouter({
         });
       return 200;
     }
-    if (!validFrame(frame) || frame.sid !== connection.sid) return 400;
+    if (!validFrame(frame) || frame.sid !== connection.sid) {
+      console.warn(
+        "Mold relay frame refusal",
+        "schema-or-epoch",
+        connection.role,
+      );
+      return 400;
+    }
     let target;
     if (connection.role === "host") {
-      if (host.connectionId !== id) return 403;
+      if (host.connectionId !== id) {
+        console.warn("Mold relay frame refusal", "host-owner");
+        return 403;
+      }
       // A completed frontend can disconnect while its final ACK/EOF is in flight.
       // Drop that stale request frame without evicting the shared host session.
       if ((host.guests?.[frame.rid] ?? 0) <= now()) return 200;

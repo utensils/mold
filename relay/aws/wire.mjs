@@ -1,6 +1,20 @@
 import { Duplex } from "node:stream";
 import { createHash } from "node:crypto";
 import { validFrame, FRAME_LIMIT } from "./router-core.mjs";
+const wireError = (message) =>
+  Object.assign(new Error(message), {
+    name:
+      {
+        "Invalid relay frame": "RelayInvalidFrame",
+        "Relay peer disconnected": "RelayPeerDisconnected",
+        "Invalid relay acknowledgement": "RelayInvalidAcknowledgement",
+        "Conflicting relay duplicate": "RelayConflictingDuplicate",
+        "Relay reorder bound exceeded": "RelayReorderBound",
+        "Relay bytes after EOF": "RelayBytesAfterEOF",
+        "Relay sequence gap": "RelaySequenceGap",
+        "Relay acknowledgement timed out": "RelayAcknowledgementTimeout",
+      }[message] ?? "RelayConnectionClosed",
+  });
 const digest = (frame) =>
   createHash("sha256")
     .update(frame.a === "eof" ? "eof" : frame.d)
@@ -99,11 +113,11 @@ export class RelayDuplex extends Duplex {
       frame.sid !== this.sid ||
       frame.rid !== this.rid
     ) {
-      this.destroy(new Error("Invalid relay frame"));
+      this.destroy(wireError("Invalid relay frame"));
       return;
     }
     if (frame.a === "cancel") {
-      this.destroy(new Error("Relay peer disconnected"));
+      this.destroy(wireError("Relay peer disconnected"));
       return;
     }
     if (frame.a === "accept") return;
@@ -111,7 +125,7 @@ export class RelayDuplex extends Duplex {
       if (frame.ack_seq <= this.lastAckSeq) return;
       this.lastAckSeq = frame.ack_seq;
       if (frame.next > this.out) {
-        this.destroy(new Error("Invalid relay acknowledgement"));
+        this.destroy(wireError("Invalid relay acknowledgement"));
         return;
       }
       for (const seq of this.pending.keys())
@@ -122,19 +136,19 @@ export class RelayDuplex extends Duplex {
     }
     if (frame.seq < this.next) {
       if (this.seen.get(frame.seq) !== digest(frame)) {
-        this.destroy(new Error("Conflicting relay duplicate"));
+        this.destroy(wireError("Conflicting relay duplicate"));
         return;
       }
       this.ack();
       return;
     }
     if (this.remoteEnded || frame.seq >= this.next + 4) {
-      this.destroy(new Error("Relay reorder bound exceeded"));
+      this.destroy(wireError("Relay reorder bound exceeded"));
       return;
     }
     const old = this.incoming.get(frame.seq);
     if (old && digest(old) !== digest(frame)) {
-      this.destroy(new Error("Conflicting relay duplicate"));
+      this.destroy(wireError("Conflicting relay duplicate"));
       return;
     }
     this.incoming.set(frame.seq, frame);
@@ -152,7 +166,7 @@ export class RelayDuplex extends Duplex {
         this.remoteEnded = true;
         this.push(null);
         if (this.incoming.size)
-          this.destroy(new Error("Relay bytes after EOF"));
+          this.destroy(wireError("Relay bytes after EOF"));
         break;
       }
       this.blocked = !this.push(Buffer.from(frame.d, "base64"));
@@ -165,7 +179,7 @@ export class RelayDuplex extends Duplex {
     if (hasGap && !this.gapTimer) {
       this.gapSequence = this.next;
       this.gapTimer = setTimeout(
-        () => this.destroy(new Error("Relay sequence gap")),
+        () => this.destroy(wireError("Relay sequence gap")),
         this.gapMs,
       );
     }
@@ -175,7 +189,7 @@ export class RelayDuplex extends Duplex {
     for (const value of this.pending.values())
       if (Date.now() - value.time >= this.retryMs) {
         if (value.tries++ >= 3) {
-          this.destroy(new Error("Relay acknowledgement timed out"));
+          this.destroy(wireError("Relay acknowledgement timed out"));
           return;
         }
         value.time = Date.now();
