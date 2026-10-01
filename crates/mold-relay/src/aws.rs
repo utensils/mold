@@ -191,6 +191,7 @@ pub async fn connect(
     shutdown: CancellationToken,
     options: RelayOptions,
 ) -> Result<()> {
+    ensure_tls_provider();
     let endpoint = validate_aws_endpoint(endpoint, allow_loopback_ws)?;
     let token = validate_token(&token)?;
     validate_target(target)?;

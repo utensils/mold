@@ -1,5 +1,14 @@
 //! Optional, bounded TCP-over-WebSocket relay. No inference dependencies.
 pub mod aws;
+
+fn ensure_tls_provider() {
+    // Workspace feature unification may enable both Rustls providers. Keep an
+    // existing process choice; otherwise select the portable Ring backend.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{
@@ -665,6 +674,7 @@ pub async fn connect_with_options(
     shutdown: CancellationToken,
     options: RelayOptions,
 ) -> Result<()> {
+    ensure_tls_provider();
     let options = options.validate()?;
     let token = validate_token(&token)?;
     let origin = validate_endpoint(endpoint, allow_loopback_ws)?;
@@ -895,6 +905,13 @@ mod regression_tests {
             output_rx,
         )
     }
+    #[test]
+    fn tls_provider_is_initialized_before_websocket_tls() {
+        ensure_tls_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = rustls::ClientConfig::builder();
+    }
+
     #[test]
     fn default_idle_budget_allows_one_hour_synchronous_work() {
         assert_eq!(
