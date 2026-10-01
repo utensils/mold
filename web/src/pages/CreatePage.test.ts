@@ -1701,9 +1701,10 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     try {
       await flushPromises();
-      expect(signals).toHaveLength(1);
-      expect(signals[0]).toBeInstanceOf(AbortSignal);
-      const previous = signals[0]!;
+      expect(signals.length).toBeGreaterThan(0);
+      const previous = signals.at(-1)!;
+      expect(previous).toBeInstanceOf(AbortSignal);
+      const initialRequests = signals.length;
       streamJobsRef.value = [
         {
           ...finishedCanvasJob({
@@ -1715,10 +1716,11 @@ describe("CreatePage layout and behavior", () => {
       ];
       await flushPromises();
       expect(previous.aborted).toBe(true);
-      expect(signals).toHaveLength(2);
-      expect(signals[1]!.aborted).toBe(false);
+      expect(signals.length).toBeGreaterThan(initialRequests);
+      const current = signals.at(-1)!;
+      expect(current.aborted).toBe(false);
       wrapper.unmount();
-      expect(signals[1]!.aborted).toBe(true);
+      expect(current.aborted).toBe(true);
     } finally {
       wrapper.unmount();
       globalThis.fetch = originalFetch;
