@@ -243,6 +243,54 @@ impl RequestBoundary {
     }
 }
 
+struct ResponseAdmission {
+    head: Vec<u8>,
+    final_response: bool,
+}
+impl ResponseAdmission {
+    fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            final_response: false,
+        }
+    }
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        if self.final_response {
+            return true;
+        }
+        if self.head.len() + bytes.len() > 64 * 1024 {
+            self.final_response = true;
+            return true;
+        }
+        self.head.extend_from_slice(bytes);
+        loop {
+            let Some(line_end) = self.head.windows(2).position(|p| p == b"\r\n") else {
+                return false;
+            };
+            let status = std::str::from_utf8(&self.head[..line_end])
+                .ok()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<u16>().ok());
+            if status.is_some_and(|n| (200..=599).contains(&n)) {
+                self.final_response = true;
+                return true;
+            }
+            let Some(end) = self.head.windows(4).position(|p| p == b"\r\n\r\n") else {
+                return false;
+            };
+            self.head.drain(..end + 4);
+        }
+    }
+}
+fn request_ack(sid: &str, rid: &str, inbox: &Inbox, queued: usize, serial: &mut u64) -> Frame {
+    let mut ack = Frame::new("ack", sid, rid);
+    ack.next = Some(inbox.next);
+    ack.credit = Some(WINDOW.saturating_sub(inbox.held.len() + queued));
+    ack.ack_seq = Some(*serial);
+    *serial += 1;
+    ack
+}
+
 /// AWS endpoints may include the API Gateway deployment stage path.
 pub fn validate_aws_endpoint(endpoint: &str, allow_loopback_ws: bool) -> Result<url::Url> {
     let url =
@@ -299,6 +347,21 @@ fn reconnect_delay(previous: Duration, session_age: Duration) -> Duration {
     } else {
         previous
     }
+}
+fn stream_diagnostic(error: &anyhow::Error) {
+    let message = error.to_string();
+    let category = match message.as_str() {
+        "AWS relay acknowledgement timed out" => "stream_ack_timeout",
+        "AWS relay stream stalled" => "stream_idle_or_gap_timeout",
+        "AWS relay data exceeds request body" => "stream_body_length_exceeded",
+        "incomplete AWS relay HTTP request" => "stream_body_incomplete",
+        "AWS relay receive window exceeded" => "stream_receive_window_exceeded",
+        "AWS relay requires explicit body length" => "stream_length_missing",
+        "AWS relay requires connection close" => "stream_connection_not_close",
+        "AWS relay body exceeds limit" => "stream_body_limit",
+        _ => "stream_other_failure",
+    };
+    diagnostic(category);
 }
 fn diagnostic(reason: &'static str) {
     if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some() {
@@ -416,7 +479,7 @@ async fn session(
                     let Ok(permit)=capacity.clone().try_acquire_owned() else {let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));continue;};
                     let (tx,rx)=mpsc::channel(16);requests.insert(rid.clone(),tx);
                     let sid=sid.clone();let controls=control_tx.clone();let data=data_tx.clone();let stop=cancel.child_token();
-                    tasks.spawn(async move {let _permit=permit;if request_stream(target,(&sid,&rid),rx,controls.clone(),data,stop,options).await.is_err() { let _=controls.try_send(Frame::new("cancel",&sid,&rid)); } rid});
+                    tasks.spawn(async move {let _permit=permit;if let Err(error)=request_stream(target,(&sid,&rid),rx,controls.clone(),data,stop,options).await { stream_diagnostic(&error); let _=controls.try_send(Frame::new("cancel",&sid,&rid)); } rid});
                 } else if let Some(tx)=requests.get(&rid) {
                     if tx.try_send(frame).is_err(){requests.remove(&rid);let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));}
                 }
@@ -479,7 +542,8 @@ async fn request_stream(
     options: RelayOptions,
 ) -> Result<()> {
     let (sid, rid) = identity;
-    let mut tcp = tokio::select! {_ = cancel.cancelled()=>return Ok(()),result=authenticated_target(target)=>result?};
+    let tcp = tokio::select! {_ = cancel.cancelled()=>return Ok(()),result=authenticated_target(target)=>result?};
+    let (mut tcp_read, tcp_write) = tcp.into_split();
     controls
         .send(Frame::new("accept", sid, rid))
         .await
@@ -495,9 +559,21 @@ async fn request_stream(
     let mut activity = tokio::time::Instant::now();
     let mut gap_since = None;
     let mut request = RequestBoundary::new();
+    let mut response = ResponseAdmission::new();
+    let mut writes: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut write_offset = 0;
+    let mut write_failed = false;
     loop {
-        tokio::select! {
+        tokio::select! {biased;
             _ = cancel.cancelled()=>return Ok(()),
+            result=tcp_read.read(&mut buffer),if !read_eof && pending.len()<WINDOW && acknowledgement.credit>0=>{
+                let n=match result {Ok(n)=>n,Err(_) if response.final_response=>0,Err(error)=>return Err(error.into())};
+                if n>0 && response.push(&buffer[..n]) {writes.clear();write_offset=0;write_failed=true;}
+                let mut frame=Frame::new(if n==0{"eof"}else{"data"},sid,rid);frame.seq=Some(seq);
+                if n==0{read_eof=true;}else{frame.d=Some(STANDARD.encode(&buffer[..n]));activity=tokio::time::Instant::now();}
+                output.send(frame.clone()).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;
+                pending.insert(seq,Pending{frame,sent:tokio::time::Instant::now(),retries:0});seq+=1;acknowledgement.credit-=1;
+            },
             frame=input.recv()=>{
                 let Some(frame)=frame else{return Ok(());};
                 match frame.a.as_str() {
@@ -516,23 +592,27 @@ async fn request_stream(
                             if payload.eof { request.finish()?; }
                             if !payload.eof {
                                 let Some(bytes) = request.push(payload.bytes)? else { continue; };
-                                tokio::select!{_ = cancel.cancelled()=>return Ok(()),result=tokio::time::timeout(GAP,tcp.write_all(&bytes))=>{result.context("AWS relay target stalled")??;}}
-                                if !bytes.is_empty(){activity=tokio::time::Instant::now();}
+                                if !write_failed {anyhow::ensure!(writes.len()<WINDOW*2,"AWS relay target write queue exceeded");writes.push_back(bytes);}
+                                activity=tokio::time::Instant::now();
                             }
                             // Request EOF is logical completion, never TCP FIN.
                         }
                         if inbox.held.is_empty(){gap_since=None;}else if gap_since.is_none(){gap_since=Some(tokio::time::Instant::now());}
-                        let mut ack=Frame::new("ack",sid,rid);ack.next=Some(inbox.next);ack.credit=Some(WINDOW-inbox.held.len());ack.ack_seq=Some(ack_out);ack_out+=1;
+                        let ack=request_ack(sid,rid,&inbox,writes.len(),&mut ack_out);
                         controls.send(ack).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;
                     },
                     _=>bail!("invalid AWS relay request action"),
                 }
             },
-            result=tcp.read(&mut buffer),if !read_eof && pending.len()<WINDOW && acknowledgement.credit>0=>{
-                let n=result?;let mut frame=Frame::new(if n==0{"eof"}else{"data"},sid,rid);frame.seq=Some(seq);
-                if n==0{read_eof=true;}else{frame.d=Some(STANDARD.encode(&buffer[..n]));activity=tokio::time::Instant::now();}
-                output.send(frame.clone()).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;
-                pending.insert(seq,Pending{frame,sent:tokio::time::Instant::now(),retries:0});seq+=1;acknowledgement.credit-=1;
+            readiness=tcp_write.writable(),if !write_failed && !writes.is_empty()=>{
+                readiness?;
+                let bytes=writes.front().unwrap();
+                match tcp_write.try_write(&bytes[write_offset..]) {
+                    Ok(0)=>{write_failed=true;writes.clear();write_offset=0;diagnostic("target_write_closed");},
+                    Ok(n)=>{write_offset+=n;activity=tokio::time::Instant::now();if write_offset==bytes.len(){writes.pop_front();write_offset=0;let ack=request_ack(sid,rid,&inbox,writes.len(),&mut ack_out);controls.send(ack).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;}},
+                    Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{},
+                    Err(_)=>{write_failed=true;writes.clear();write_offset=0;diagnostic("target_write_failed");},
+                }
             },
             _ = tick.tick()=>{
                 if activity.elapsed()>options.idle_timeout || gap_since.is_some_and(|t:tokio::time::Instant|t.elapsed()>GAP){bail!("AWS relay stream stalled");}
@@ -564,6 +644,71 @@ mod tests {
             bytes.push(byte[0]);
         }
         bytes
+    }
+    #[tokio::test]
+    async fn aws_early_response_survives_an_inflight_request_body() {
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = target.local_addr().unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut tcp, _) = target.accept().await.unwrap();
+            assert!(read_headers(&mut tcp).await.starts_with(b"GET /api/status"));
+            tcp.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            assert!(read_headers(&mut tcp).await.starts_with(b"PUT /api/upload"));
+            tcp.write_all(b"HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 6\r\nConnection: close\r\n\r\nrefuse").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+        let (tx, rx) = mpsc::channel(32);
+        let (controls, mut control_rx) = mpsc::channel(32);
+        let (output, mut output_rx) = mpsc::channel(32);
+        let task = tokio::spawn(request_stream(
+            address,
+            ("epoch", "guest"),
+            rx,
+            controls,
+            output,
+            CancellationToken::new(),
+            RelayOptions::default(),
+        ));
+        assert_eq!(control_rx.recv().await.unwrap().a, "accept");
+        for seq in 0..4 {
+            let mut frame = Frame::new("data", "epoch", "guest");
+            frame.seq = Some(seq);
+            let bytes = if seq == 0 {
+                b"PUT /api/upload HTTP/1.1\r\nContent-Length: 65536\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            } else {
+                vec![42; PAYLOAD]
+            };
+            frame.d = Some(STANDARD.encode(bytes));
+            tx.send(frame).await.unwrap();
+        }
+        let mut bytes = Vec::new();
+        let mut serial = 0;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let frame = output_rx.recv().await.unwrap();
+                if let Some(data) = frame.d {
+                    bytes.extend(STANDARD.decode(data).unwrap());
+                }
+                let mut ack = Frame::new("ack", "epoch", "guest");
+                ack.next = Some(frame.seq.unwrap() + 1);
+                ack.credit = Some(WINDOW);
+                ack.ack_seq = Some(serial);
+                serial += 1;
+                tx.send(ack).await.unwrap();
+                if frame.a == "eof" {
+                    break;
+                }
+            }
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(bytes.starts_with(b"HTTP/1.1 415"));
+        assert!(bytes.ends_with(b"refuse"));
+        fixture.await.unwrap();
     }
     #[tokio::test]
     async fn aws_request_reorders_without_replay_and_logical_eof_retains_http_response() {
@@ -648,6 +793,14 @@ mod tests {
             .unwrap();
         cancel.cancel();
         connector.await.unwrap().unwrap();
+    }
+    #[test]
+    fn early_final_http_response_stops_request_body_forwarding() {
+        let mut response = ResponseAdmission::new();
+        assert!(!response.push(b"HTTP/1.1 100 Continue\r\n\r\n"));
+        assert!(!response.push(b"HTTP/1.1 4"));
+        assert!(response.push(b"15 Unsupported Media Type\r\nContent-Length: 0\r\n\r\n"));
+        assert!(response.push(b""));
     }
     #[tokio::test]
     async fn writer_cadence_delays_and_healthy_sessions_reset_backoff() {
