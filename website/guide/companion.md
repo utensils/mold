@@ -75,6 +75,7 @@ keeps its original filename and file type.
   machines once. Favourites, tags, collections and Recently Deleted work the
   way they do on the Mac, across every machine that holds a copy. On iPhone,
   tap the navigation title to change shelves; it stays readable as you scroll.
+  Status notices reserve space above the grid so dates and prints stay visible.
   **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
   Tap **Select**, then tap tiles or sweep sideways across them. Starting on
   a selected tile deselects the range; reverse to shorten it, or hold near

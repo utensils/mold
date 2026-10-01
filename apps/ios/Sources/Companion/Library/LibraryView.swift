@@ -97,7 +97,7 @@ struct LibraryView: View {
             }
             return true
         }
-        .overlay(alignment: .top) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 4) {
                 FailureBanner()
                 OfflineNote()

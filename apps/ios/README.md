@@ -48,7 +48,9 @@ collections and Recently Deleted. Media Type filters All Media, Photos, Videos
 and 3D within the current shelf. In Select mode, tap tiles or start a sideways
 finger sweep to select a range; start on a selected tile to deselect a range.
 Reverse the sweep to shorten it, or hold near a grid edge to scroll further.
-Vertical swipes still scroll, and tapping selections keeps the viewport put. Its cached listing and images load before
+Vertical swipes still scroll, and tapping selections keeps the viewport put.
+Status notices sit above the grid without covering date headings or prints.
+Its cached listing and images load before
 the machines respond. Opening a print keeps the grid's scroll position when
 you return; clips play automatically only while their page is selected in the
 viewer. Settings is available from Generate, Library and Machines;

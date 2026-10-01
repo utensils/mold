@@ -165,3 +165,7 @@ open and scrolls the opened tile back into view on return.
   dismissal drag: the Library tab becomes hittable again and the same print's
   vertical position is restored within two points. Viewer-return also passes,
   explicitly checking that the main Library tab stays hidden in the viewer.
+- Populated Library/Search AX5 audits exposed status notices covering the
+  date heading and first row. The focused date-heading contrast regression
+  failed at all three sizes before replacing the overlay with a top safe-area
+  inset; notices now reserve their own space above the grid.
