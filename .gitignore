@@ -137,3 +137,6 @@ apps/ios/Version.yml
 apps/shared/**/.build/
 apps/shared/**/.swiftpm/
 apps/shared/**/build/
+
+# Native widget notification branding asset
+!apps/ios/Sources/Widgets/Resources/Assets.xcassets/MoldLogo.imageset/MoldLogo.png
