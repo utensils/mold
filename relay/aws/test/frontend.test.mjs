@@ -263,3 +263,38 @@ test("media jobs persist object identity instead of signed credential URLs", asy
   await frontend(event("/_mold/relay/media/" + id, "GET", "", headers), out);
   assert.equal(JSON.parse(out.value()).url, "https://fresh.invalid/signed");
 });
+
+test("relay media enrichment preserves the original host ticket expiry", async () => {
+  const frontend = createFrontend({
+    request: async (req) => ({
+      response:
+        req.path === "/api/gallery/media-token"
+          ? response(
+              JSON.stringify({
+                auth_required: true,
+                token: "host-ticket",
+                expires_at: 1234,
+              }),
+              { "content-length": "73" },
+            )
+          : response("{}", { "content-length": "2" }),
+      sid: "epoch",
+      close() {},
+    }),
+    store: { put: async () => {} },
+    invoke: async () => {},
+  });
+  const out = writer();
+  await frontend(
+    event(
+      "/api/gallery/media-token",
+      "POST",
+      JSON.stringify({ path: "/api/gallery/image/a.png" }),
+      { "x-api-key": "fixture" },
+    ),
+    out,
+  );
+  const ticket = JSON.parse(out.value());
+  assert.equal(ticket.expires_at, 1234);
+  assert.equal(ticket.relay.state, "pending");
+});

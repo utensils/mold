@@ -396,7 +396,7 @@ export function createFrontend(dependencies = {}) {
             ...request,
             path: path.pathname + path.search,
           });
-          json(raw, 200, { ...ticket, ...pending });
+          json(raw, 200, { ...ticket, relay: pending.relay });
           return;
         }
         json(raw, 200, ticket);

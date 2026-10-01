@@ -6,7 +6,7 @@ const digest = (frame) =>
     .update(frame.a === "eof" ? "eof" : frame.d)
     .digest("hex");
 export class RelayDuplex extends Duplex {
-  constructor({ sid, rid, send, gapMs = 10000, retryMs = 3000 }) {
+  constructor({ sid, rid, send, gapMs = 30000, retryMs = 10000 }) {
     super({
       readableHighWaterMark: 65536,
       writableHighWaterMark: 16384,
