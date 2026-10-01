@@ -51,22 +51,23 @@ describe("target-explicit Studio API", () => {
   it.each([apiFetchTo, conditionalApiJsonTo])(
     "fences redirects whenever a request carries an API credential",
     async (read) => {
-      const fetchMock = vi
-        .fn()
-        .mockImplementation(async () => new Response("{}"));
+      const fetchMock = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response("{}"),
+      );
       vi.stubGlobal("fetch", fetchMock);
       await read(
         { baseUrl: "https://relay.example", apiKey: "secret" },
         "/api/status",
         { redirect: "follow" },
       );
-      expect(fetchMock.mock.calls[0][1].redirect).toBe("error");
+      expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe("error");
       await read(
         { baseUrl: "https://relay.example", apiKey: null },
         "/api/status",
         { headers: { "X-Api-Key": "explicit" } },
       );
-      expect(fetchMock.mock.calls[1][1].redirect).toBe("error");
+      expect(fetchMock.mock.calls[1]?.[1]?.redirect).toBe("error");
     },
   );
 
