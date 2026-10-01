@@ -30,6 +30,26 @@ const LIMIT: usize = 64;
 const ATTACH: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const LIVENESS: Duration = Duration::from_secs(45);
+/// Application-byte inactivity limit; heartbeat traffic does not extend it.
+#[derive(Clone, Copy)]
+pub struct RelayOptions {
+    pub idle_timeout: Duration,
+}
+impl Default for RelayOptions {
+    fn default() -> Self {
+        Self {
+            idle_timeout: Duration::from_secs(300),
+        }
+    }
+}
+impl RelayOptions {
+    fn validate(self) -> Result<Self> {
+        if self.idle_timeout.is_zero() || self.idle_timeout > Duration::from_secs(86400) {
+            bail!("relay idle timeout must be positive and at most 24 hours");
+        }
+        Ok(self)
+    }
+}
 
 #[derive(Subcommand)]
 pub enum RelayAction {
@@ -44,6 +64,9 @@ pub struct ServeArgs {
     pub control_bind: SocketAddr,
     #[arg(long, env = "MOLD_RELAY_TOKEN_FILE", value_hint = clap::ValueHint::FilePath)]
     pub token_file: Option<PathBuf>,
+    /// Close streams without application bytes for this long (heartbeats excluded).
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    pub idle_timeout_secs: u64,
 }
 #[derive(Args)]
 pub struct ConnectArgs {
@@ -54,6 +77,9 @@ pub struct ConnectArgs {
     pub target: SocketAddr,
     #[arg(long, env = "MOLD_RELAY_TOKEN_FILE", value_hint = clap::ValueHint::FilePath)]
     pub token_file: Option<PathBuf>,
+    /// Close streams without application bytes for this long (heartbeats excluded).
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    pub idle_timeout_secs: u64,
     #[arg(long)]
     pub allow_insecure_loopback: bool,
 }
@@ -70,21 +96,27 @@ impl RelayAction {
                 validate_target(args.data_bind)?;
                 validate_target(args.control_bind)?;
                 let token = load_token(args.token_file.as_deref())?;
-                serve(
+                serve_with_options(
                     TcpListener::bind(args.data_bind).await?,
                     TcpListener::bind(args.control_bind).await?,
                     token,
                     shutdown,
+                    RelayOptions {
+                        idle_timeout: Duration::from_secs(args.idle_timeout_secs),
+                    },
                 )
                 .await
             }
             Self::Connect(args) => {
-                connect(
+                connect_with_options(
                     &args.relay_url,
                     args.target,
                     load_token(args.token_file.as_deref())?,
                     args.allow_insecure_loopback,
                     shutdown,
+                    RelayOptions {
+                        idle_timeout: Duration::from_secs(args.idle_timeout_secs),
+                    },
                 )
                 .await
             }
@@ -221,6 +253,11 @@ async fn control(
                 },
                 message = socket.recv() => match message {
                     Some(Ok(AxMessage::Pong(_))) | Some(Ok(AxMessage::Ping(_))) => last = tokio::time::Instant::now(),
+                    Some(Ok(AxMessage::Text(text))) => {
+                        let Some(stream) = text.strip_prefix("reject ").and_then(|text| Uuid::parse_str(text).ok()) else { break; };
+                        let mut slot = state.session.lock().await;
+                        if let Some(session) = slot.as_mut().filter(|s| s.id == id) { session.pending.remove(&stream); }
+                    },
                     _ => break,
                 },
                 _ = heartbeat.tick() => {
@@ -277,6 +314,24 @@ pub async fn serve(
     token: String,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    serve_with_options(
+        data_listener,
+        control_listener,
+        token,
+        shutdown,
+        RelayOptions::default(),
+    )
+    .await
+}
+/// Run with an explicit inactivity policy (also used by integration fixtures).
+pub async fn serve_with_options(
+    data_listener: TcpListener,
+    control_listener: TcpListener,
+    token: String,
+    shutdown: CancellationToken,
+    options: RelayOptions,
+) -> Result<()> {
+    let options = options.validate()?;
     let token = validate_token(&token)?;
     validate_target(data_listener.local_addr()?)?;
     validate_target(control_listener.local_addr()?)?;
@@ -299,38 +354,13 @@ pub async fn serve(
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            incoming = data_listener.accept() => {
-                let (mut tcp, _) = incoming?;
+            incoming = accept_with_retry(|| data_listener.accept(), &shutdown) => {
+                let Some((mut tcp, _)) = incoming else { break; };
                 let Ok(permit) = state.capacity.clone().try_acquire_owned() else {
                     let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await; continue;
                 };
                 let state = state.clone(); let shutdown = shutdown.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let stream = Uuid::new_v4();
-                    let (tx, rx) = oneshot::channel();
-                    let mut slot = state.session.lock().await;
-                    let Some(session) = slot.as_mut() else {
-                        drop(slot); let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await; return;
-                    };
-                    let id = session.id; let cancel = session.cancel.clone();
-                    session.pending.insert(stream, tx);
-                    if session.notices.try_send(stream).is_err() { session.pending.remove(&stream); return; }
-                    drop(slot);
-                    let socket = tokio::select! {
-                        _ = cancel.cancelled() => None,
-                        _ = shutdown.cancelled() => None,
-                        result = tokio::time::timeout(ATTACH, rx) => result.ok().and_then(Result::ok),
-                    };
-                    let mut slot = state.session.lock().await;
-                    if let Some(s) = slot.as_mut().filter(|s| s.id == id) { s.pending.remove(&stream); }
-                    drop(slot);
-                    if let Some(socket) = socket {
-                        let transport = socket.map(|result| result.map(ax_to_wire));
-                        let transport = transport.with(|message: Wire| async { Ok::<_, axum::Error>(wire_to_ax(message)) });
-                        let _ = bridge(tcp, Box::pin(transport), cancel.child_token()).await;
-                    } else { let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await; }
-                });
+                tokio::spawn(proxy_incoming(tcp, state, shutdown, options, permit));
             }
         }
     }
@@ -339,6 +369,58 @@ pub async fn serve(
     }
     server.await??;
     Ok(())
+}
+
+async fn proxy_incoming(
+    mut tcp: TcpStream,
+    state: Arc<Gateway>,
+    shutdown: CancellationToken,
+    options: RelayOptions,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let _permit = permit;
+    let stream = Uuid::new_v4();
+    let (tx, rx) = oneshot::channel();
+    let mut slot = state.session.lock().await;
+    let Some(session) = slot.as_mut() else {
+        drop(slot);
+        let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        return;
+    };
+    let id = session.id;
+    let cancel = session.cancel.clone();
+    session.pending.insert(stream, tx);
+    if session.notices.try_send(stream).is_err() {
+        session.pending.remove(&stream);
+        drop(slot);
+        unavailable(&mut tcp).await;
+        return;
+    }
+    drop(slot);
+    let socket = tokio::select! {
+        _ = cancel.cancelled() => None,
+        _ = shutdown.cancelled() => None,
+        result = tokio::time::timeout(ATTACH, rx) => result.ok().and_then(Result::ok),
+    };
+    let mut slot = state.session.lock().await;
+    if let Some(s) = slot.as_mut().filter(|s| s.id == id) {
+        s.pending.remove(&stream);
+    }
+    drop(slot);
+    if let Some(socket) = socket {
+        let transport = socket.map(|result| result.map(ax_to_wire));
+        let transport =
+            transport.with(|message: Wire| async { Ok::<_, axum::Error>(wire_to_ax(message)) });
+        let _ = bridge(
+            tcp,
+            Box::pin(transport),
+            cancel.child_token(),
+            options.idle_timeout,
+        )
+        .await;
+    } else {
+        let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+    }
 }
 
 #[derive(Debug)]
@@ -388,7 +470,12 @@ fn wire_to_ws(message: Wire) -> Message {
         _ => Message::Close(None),
     }
 }
-async fn bridge<W, E>(tcp: TcpStream, websocket: W, cancel: CancellationToken) -> Result<()>
+async fn bridge<W, E>(
+    tcp: TcpStream,
+    websocket: W,
+    cancel: CancellationToken,
+    idle_timeout: Duration,
+) -> Result<()>
 where
     W: Sink<Wire, Error = E> + Stream<Item = std::result::Result<Wire, E>> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
@@ -396,6 +483,7 @@ where
     let (mut read, mut write) = tcp.into_split();
     let (mut sink, mut source) = websocket.split();
     let (events_tx, mut events_rx) = mpsc::channel::<Wire>(8);
+    let (activity, mut activity_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
     let outgoing = async {
         let mut buffer = vec![0; CHUNK];
         let mut local_eof = false;
@@ -407,10 +495,10 @@ where
                 result = read.read(&mut buffer), if !local_eof => {
                     let n = result?;
                     if n == 0 { local_eof = true; Wire::Eof }
-                    else { Wire::Bytes(buffer[..n].to_vec()) }
+                    else { activity.send_replace(tokio::time::Instant::now()); Wire::Bytes(buffer[..n].to_vec()) }
                 },
-                event = events_rx.recv(), if !peer_eof => match event {
-                    Some(Wire::Eof) => { peer_eof = true; if local_eof { return Ok(()); } continue; },
+                event = events_rx.recv() => match event {
+                    Some(Wire::Eof) => { peer_eof = true; if local_eof { cancel.cancel(); return Ok(()); } continue; },
                     Some(event) => event,
                     None => return Ok(()),
                 },
@@ -421,27 +509,29 @@ where
                 result = tokio::time::timeout(LIVENESS, sink.send(message)) => { result.context("relay write timed out")??; }
             }
             if local_eof && peer_eof {
+                cancel.cancel();
                 return Ok(());
             }
         }
     };
     let incoming = async {
+        let mut peer_eof = false;
         loop {
             let message = tokio::select! {
                 _ = cancel.cancelled() => return Ok::<_, anyhow::Error>(()),
                 message = tokio::time::timeout(LIVENESS, source.next()) => message.context("relay heartbeat timed out")?,
             };
             match message {
-                Some(Ok(Wire::Bytes(bytes))) if bytes.len() <= CHUNK => {
+                Some(Ok(Wire::Bytes(bytes))) if !peer_eof && bytes.len() <= CHUNK => {
                     tokio::select! {
                         _ = cancel.cancelled() => return Ok(()),
-                        result = tokio::time::timeout(LIVENESS, write.write_all(&bytes)) => { result.context("target write timed out")??; }
+                        result = tokio::time::timeout(LIVENESS, write.write_all(&bytes)) => { result.context("target write timed out")??; if !bytes.is_empty() { activity.send_replace(tokio::time::Instant::now()); } }
                     }
                 }
-                Some(Ok(Wire::Eof)) => {
+                Some(Ok(Wire::Eof)) if !peer_eof => {
+                    peer_eof = true;
                     write.shutdown().await?;
                     let _ = events_tx.send(Wire::Eof).await;
-                    return Ok(());
                 }
                 Some(Ok(Wire::Ping(bytes))) => {
                     let _ = events_tx.try_send(Wire::Pong(bytes));
@@ -454,7 +544,17 @@ where
             }
         }
     };
-    tokio::try_join!(outgoing, incoming)?;
+    let idle = async {
+        loop {
+            let deadline = *activity_rx.borrow_and_update() + idle_timeout;
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok::<_, anyhow::Error>(()),
+                _ = tokio::time::sleep_until(deadline) => { if activity_rx.borrow().elapsed() >= idle_timeout { cancel.cancel(); return Ok(()); } },
+                changed = activity_rx.changed() => { if changed.is_err() { return Ok(()); } },
+            }
+        }
+    };
+    tokio::try_join!(outgoing, incoming, idle)?;
     Ok(())
 }
 
@@ -520,6 +620,26 @@ pub async fn connect(
     allow_loopback_ws: bool,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    connect_with_options(
+        endpoint,
+        target,
+        token,
+        allow_loopback_ws,
+        shutdown,
+        RelayOptions::default(),
+    )
+    .await
+}
+/// Connect with an explicit inactivity policy.
+pub async fn connect_with_options(
+    endpoint: &str,
+    target: SocketAddr,
+    token: String,
+    allow_loopback_ws: bool,
+    shutdown: CancellationToken,
+    options: RelayOptions,
+) -> Result<()> {
+    let options = options.validate()?;
     let token = validate_token(&token)?;
     let origin = validate_endpoint(endpoint, allow_loopback_ws)?;
     validate_target(target)?;
@@ -531,7 +651,15 @@ pub async fn connect(
             return Ok(());
         }
         let started = tokio::time::Instant::now();
-        let outcome = connector_session(&origin, target, &token, shutdown.clone()).await;
+        let outcome = connector_session(
+            &origin,
+            target,
+            &token,
+            shutdown.clone(),
+            options,
+            Arc::new(Semaphore::new(LIMIT)),
+        )
+        .await;
         if started.elapsed() >= Duration::from_secs(60) {
             backoff = Duration::from_secs(5);
         }
@@ -549,11 +677,13 @@ async fn connector_session(
     target: SocketAddr,
     token: &str,
     shutdown: CancellationToken,
+    options: RelayOptions,
+    capacity: Arc<Semaphore>,
 ) -> Result<()> {
     let mut control_url = origin.clone();
     control_url.set_path("/_mold/relay/control");
     let (mut socket, _) = tokio::time::timeout(ATTACH, connect_async_with_config(ws_request(&control_url, token)?, Some(websocket_config()), false)).await.map_err(|_| anyhow::anyhow!("relay enrollment timed out"))?.map_err(|error| {
-        if matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401 || response.status() == 403 || response.status() == 409) { anyhow::anyhow!("relay enrollment rejected") } else { anyhow::anyhow!("relay enrollment unavailable") }
+        if matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401 || response.status() == 403) { anyhow::anyhow!("relay enrollment rejected") } else { anyhow::anyhow!("relay enrollment unavailable") }
     })?;
     // The session fence is delivered once before any open notices.
     let session = match tokio::time::timeout(ATTACH, socket.next()).await {
@@ -563,7 +693,6 @@ async fn connector_session(
         _ => bail!("relay session unavailable"),
     };
     let cancel = CancellationToken::new();
-    let capacity = Arc::new(Semaphore::new(LIMIT));
     let mut tasks = tokio::task::JoinSet::new();
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut last = tokio::time::Instant::now();
@@ -576,7 +705,10 @@ async fn connector_session(
                 match message {
                     Some(Ok(Message::Text(text))) => {
                         let Ok(stream) = Uuid::parse_str(&text) else { break; };
-                        let Ok(permit) = capacity.clone().try_acquire_owned() else { break; };
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
+                            if !send_bounded(&mut socket, Message::Text(format!("reject {stream}").into()), &shutdown).await { break; }
+                            continue;
+                        };
                         let mut url = origin.clone(); url.set_path(&format!("/_mold/relay/data/{session}/{stream}"));
                         let token = token.to_owned(); let cancel = cancel.child_token();
                         tasks.spawn(async move {
@@ -592,7 +724,7 @@ async fn connector_session(
                             if let Ok(Ok((tcp, socket))) = attached {
                                 let transport = socket.map(|result| result.map(ws_to_wire));
                                 let transport = transport.with(|message: Wire| async { Ok::<_, tokio_tungstenite::tungstenite::Error>(wire_to_ws(message)) });
-                                let _ = bridge(tcp, Box::pin(transport), cancel).await;
+                                let _ = bridge(tcp, Box::pin(transport), cancel, options.idle_timeout).await;
                             }
                         });
                     },
@@ -633,5 +765,380 @@ where
     tokio::select! {
         _ = cancel.cancelled() => false,
         result = tokio::time::timeout(LIVENESS, sink.send(message)) => matches!(result, Ok(Ok(()))),
+    }
+}
+
+async fn unavailable(tcp: &mut TcpStream) {
+    let _ = tokio::time::timeout(
+        LIVENESS,
+        tcp.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+    )
+    .await;
+}
+
+async fn accept_with_retry<F, Fut>(
+    mut accept: F,
+    cancel: &CancellationToken,
+) -> Option<(TcpStream, SocketAddr)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<(TcpStream, SocketAddr)>>,
+{
+    loop {
+        let result =
+            tokio::select! { _ = cancel.cancelled() => return None, result = accept() => result };
+        if let Ok(incoming) = result {
+            return Some(incoming);
+        }
+        // Descriptor exhaustion and aborted connections need a bounded retry,
+        // rather than taking down a healthy control listener or spinning.
+        tokio::select! { _ = cancel.cancelled() => return None, _ = tokio::time::sleep(Duration::from_millis(250)) => {} }
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context as TaskContext, Poll},
+    };
+    struct TestSocket {
+        incoming: mpsc::UnboundedReceiver<Wire>,
+        outgoing: mpsc::UnboundedSender<Wire>,
+    }
+    impl Stream for TestSocket {
+        type Item = std::result::Result<Wire, std::io::Error>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            self.incoming.poll_recv(cx).map(|item| item.map(Ok))
+        }
+    }
+    impl Sink<Wire> for TestSocket {
+        type Error = std::io::Error;
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(self: Pin<&mut Self>, item: Wire) -> Result<(), Self::Error> {
+            self.outgoing
+                .send(item)
+                .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    async fn bridge_fixture() -> (
+        TcpStream,
+        TcpStream,
+        TestSocket,
+        mpsc::UnboundedSender<Wire>,
+        mpsc::UnboundedReceiver<Wire>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        (
+            client,
+            server,
+            TestSocket {
+                incoming: input_rx,
+                outgoing: output_tx,
+            },
+            input_tx,
+            output_rx,
+        )
+    }
+    #[tokio::test]
+    async fn exhausted_notice_queue_returns_http_unavailable() {
+        let (mut client, server, _socket, _input, _output) = bridge_fixture().await;
+        let (notice_tx, _notice_rx) = mpsc::channel(1);
+        notice_tx.try_send(Uuid::new_v4()).unwrap();
+        let cancel = CancellationToken::new();
+        let state = Arc::new(Gateway {
+            token: String::new(),
+            capacity: Arc::new(Semaphore::new(1)),
+            session: Mutex::new(Some(Session {
+                id: Uuid::new_v4(),
+                notices: notice_tx,
+                cancel: cancel.clone(),
+                pending: HashMap::new(),
+            })),
+        });
+        let permit = state.capacity.clone().acquire_owned().await.unwrap();
+        let task = tokio::spawn(proxy_incoming(
+            server,
+            state,
+            cancel,
+            RelayOptions::default(),
+            permit,
+        ));
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            response.starts_with(b"HTTP/1.1 503"),
+            "full notice queue silently dropped HTTP connection"
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn transient_accept_failures_retry_with_backoff_and_shutdown_is_prompt() {
+        let (_client, server, _socket, _input, _output) = bridge_fixture().await;
+        let address = server.peer_addr().unwrap();
+        let mut outcomes = std::collections::VecDeque::from([
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)),
+            Err(std::io::Error::from_raw_os_error(24)),
+            Ok((server, address)),
+        ]);
+        let started = tokio::time::Instant::now();
+        let received = accept_with_retry(
+            || {
+                let item = outcomes.pop_front().unwrap();
+                async { item }
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(received.is_some(), "accept error stopped listener");
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "failed accept retries spun without backoff"
+        );
+        let cancel = CancellationToken::new();
+        let signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            signal.cancel();
+        });
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            accept_with_retry(
+                || async { Err(std::io::Error::from_raw_os_error(24)) },
+                &cancel
+            )
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+    #[tokio::test]
+    async fn capacity_rejects_only_the_new_stream_and_keeps_control_alive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = url::Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+        let stream = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let (result_tx, result_rx) = oneshot::channel();
+        let result_tx = Arc::new(Mutex::new(Some(result_tx)));
+        let app = Router::new().route(
+            "/_mold/relay/control",
+            get(move |ws: WebSocketUpgrade| {
+                let result_tx = result_tx.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        socket
+                            .send(AxMessage::Text(session.to_string().into()))
+                            .await
+                            .unwrap();
+                        socket
+                            .send(AxMessage::Text(stream.to_string().into()))
+                            .await
+                            .unwrap();
+                        let rejected = loop {
+                            match socket.recv().await {
+                                Some(Ok(AxMessage::Text(text))) => {
+                                    break text == format!("reject {stream}")
+                                }
+                                Some(Ok(AxMessage::Ping(_))) | Some(Ok(AxMessage::Pong(_))) => {}
+                                _ => break false,
+                            }
+                        };
+                        if rejected {
+                            socket
+                                .send(AxMessage::Ping(b"alive".to_vec().into()))
+                                .await
+                                .unwrap();
+                            let alive = loop {
+                                match socket.recv().await {
+                                    Some(Ok(AxMessage::Pong(bytes)))
+                                        if bytes.as_ref() == b"alive" =>
+                                    {
+                                        break true
+                                    }
+                                    Some(Ok(AxMessage::Ping(_))) | Some(Ok(AxMessage::Pong(_))) => {
+                                    }
+                                    _ => break false,
+                                }
+                            };
+                            if let Some(tx) = result_tx.lock().await.take() {
+                                let _ = tx.send(alive);
+                            }
+                        } else if let Some(tx) = result_tx.lock().await.take() {
+                            let _ = tx.send(false);
+                        }
+                        let _ = socket.close().await;
+                    })
+                }
+            }),
+        );
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let task = tokio::spawn(connector_session_owned(
+            origin,
+            "127.0.0.1:1".parse().unwrap(),
+            shutdown.clone(),
+            Arc::new(Semaphore::new(0)),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), result_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            "capacity overflow killed control session"
+        );
+        task.await.unwrap().unwrap();
+        shutdown.cancel();
+    }
+    async fn connector_session_owned(
+        origin: url::Url,
+        target: SocketAddr,
+        shutdown: CancellationToken,
+        capacity: Arc<Semaphore>,
+    ) -> Result<()> {
+        connector_session(
+            &origin,
+            target,
+            "0123456789012345678901234567890123456789",
+            shutdown,
+            RelayOptions::default(),
+            capacity,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn application_bytes_in_either_direction_extend_idle_deadline() {
+        for outgoing in [true, false] {
+            let (mut client, server, socket, input, _output) = bridge_fixture().await;
+            let task = tokio::spawn(bridge(
+                server,
+                socket,
+                CancellationToken::new(),
+                Duration::from_millis(100),
+            ));
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if outgoing {
+                    client.write_all(b"progress").await.unwrap();
+                } else {
+                    input.send(Wire::Bytes(b"progress".to_vec())).unwrap();
+                }
+                tokio::task::yield_now().await;
+                assert!(
+                    !task.is_finished(),
+                    "application progress did not extend idle deadline"
+                );
+            }
+            tokio::time::timeout(Duration::from_millis(300), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn duplicate_eof_or_bytes_after_eof_fail_closed() {
+        for invalid in [Wire::Eof, Wire::Bytes(b"invalid after EOF".to_vec())] {
+            let (_client, server, socket, input, _output) = bridge_fixture().await;
+            let task = tokio::spawn(bridge(
+                server,
+                socket,
+                CancellationToken::new(),
+                Duration::from_secs(300),
+            ));
+            input.send(Wire::Eof).unwrap();
+            input.send(invalid).unwrap();
+            tokio::time::timeout(Duration::from_millis(200), task)
+                .await
+                .expect("invalid post-EOF frame kept tunnel open")
+                .unwrap()
+                .unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn heartbeats_do_not_extend_application_idle_deadline() {
+        let (_client, server, socket, input, _output) = bridge_fixture().await;
+        let task = tokio::spawn(bridge(
+            server,
+            socket,
+            CancellationToken::new(),
+            Duration::from_millis(50),
+        ));
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                if input.send(Wire::Pong(Vec::new())).is_err()
+                    || input.send(Wire::Bytes(Vec::new())).is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("heartbeat traffic kept idle stream alive")
+            .unwrap()
+            .unwrap();
+        heartbeat.abort();
+    }
+    #[tokio::test]
+    async fn half_closed_stream_still_handles_ping_and_close() {
+        let (_client, server, socket, input, mut output) = bridge_fixture().await;
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(bridge(server, socket, cancel, Duration::from_secs(300)));
+        input.send(Wire::Eof).unwrap();
+        input.send(Wire::Ping(b"after-eof".to_vec())).unwrap();
+        loop {
+            let message = tokio::time::timeout(Duration::from_millis(200), output.recv())
+                .await
+                .expect("half-close stopped polling WS")
+                .unwrap();
+            if matches!(message,Wire::Pong(ref bytes) if bytes==b"after-eof") {
+                break;
+            }
+        }
+        input.send(Wire::Close).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("WS Close did not stop half-closed tunnel")
+            .unwrap()
+            .unwrap();
     }
 }

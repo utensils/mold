@@ -6,8 +6,8 @@ use axum::{
     routing::any,
     Router,
 };
-use futures_util::StreamExt;
-use mold_relay::{authenticated_target, connect, serve};
+use futures_util::{SinkExt, StreamExt};
+use mold_relay::{authenticated_target, connect, serve_with_options, RelayOptions};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -32,6 +32,9 @@ impl Drop for Fixture {
     }
 }
 async fn fixture() -> Fixture {
+    fixture_with_options(RelayOptions::default()).await
+}
+async fn fixture_with_options(options: RelayOptions) -> Fixture {
     let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = target_listener.local_addr().unwrap();
     let cancel = CancellationToken::new();
@@ -85,7 +88,7 @@ async fn fixture() -> Fixture {
     let control = control_listener.local_addr().unwrap();
     let stop = cancel.clone();
     tokio::spawn(async move {
-        serve(data_listener, control_listener, TOKEN.into(), stop)
+        serve_with_options(data_listener, control_listener, TOKEN.into(), stop, options)
             .await
             .unwrap();
     });
@@ -498,4 +501,134 @@ async fn target_probe_rejects_ambiguous_or_nonpersistent_framing() {
         });
         assert!(authenticated_target(target).await.is_err());
     }
+}
+#[tokio::test]
+async fn occupied_enrollment_retries_after_owner_disconnects() {
+    let f = fixture().await;
+    let mut request = format!("ws://{}/_mold/relay/control", f.control)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let (mut owner, _) = connect_async(request).await.unwrap();
+    let _ = owner.next().await;
+    let endpoint = format!("ws://{}", f.control);
+    let target = f.target;
+    let cancel = f.cancel.clone();
+    let connector =
+        tokio::spawn(async move { connect(&endpoint, target, TOKEN.into(), true, cancel).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !connector.is_finished(),
+        "occupied relay killed reconnecting connector"
+    );
+    owner.close(None).await.unwrap();
+    let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        if client
+            .get(format!("http://{}", f.data))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            == 401
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connector never retried occupied enrollment"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    f.cancel.cancel();
+    connector.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn idle_partial_connections_close_without_taking_connector_offline() {
+    let f = fixture_with_options(RelayOptions {
+        idle_timeout: Duration::from_millis(100),
+    })
+    .await;
+    start_connector(&f).await;
+    let mut partial = TcpStream::connect(f.data).await.unwrap();
+    partial
+        .write_all(b"GET /partial HTTP/1.1\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), partial.read_to_end(&mut response))
+        .await
+        .expect("idle partial request held capacity indefinitely")
+        .unwrap();
+    assert!(response.is_empty());
+    assert_eq!(
+        reqwest::get(format!("http://{}/_mold/relay/health", f.control))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "online\n"
+    );
+    assert_eq!(
+        reqwest::get(format!("http://{}", f.data))
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+}
+#[tokio::test]
+async fn connector_stream_rejection_returns_503_and_preserves_other_pending_streams() {
+    let f = fixture().await;
+    let mut request = format!("ws://{}/_mold/relay/control", f.control)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let (mut owner, _) = connect_async(request).await.unwrap();
+    let _ = owner.next().await;
+    let mut first = TcpStream::connect(f.data).await.unwrap();
+    let _first_stream = loop {
+        if let Some(Ok(Message::Text(text))) = owner.next().await {
+            break text;
+        }
+    };
+    let mut second = TcpStream::connect(f.data).await.unwrap();
+    let second_stream = loop {
+        if let Some(Ok(Message::Text(text))) = owner.next().await {
+            break text;
+        }
+    };
+    owner
+        .send(Message::Text(format!("reject {second_stream}").into()))
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), second.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 503"));
+    let mut byte = [0];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), first.read(&mut byte))
+            .await
+            .is_err(),
+        "stream rejection killed unrelated pending tunnel"
+    );
+    assert_eq!(
+        reqwest::get(format!("http://{}/_mold/relay/health", f.control))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "online\n"
+    );
 }
