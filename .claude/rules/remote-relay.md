@@ -10,7 +10,9 @@ The relay is a GPU-independent Rust transport. `mold relay` forwards to this
 crate; standalone `mold-relay` is the cloud artifact. Preserve HTTP byte stream
 semantics (SSE, Range/HEAD, uploads, keepalive and directional EOF), bounded
 admission/backpressure, one-use session-owned stream IDs and cancellation.
-Never replay mutations after reconnect.
+Never replay mutations after reconnect. Bound stream inactivity using application
+bytes in either direction; WebSocket heartbeats never extend the deadline.
+The default is 300 seconds, configurable on gateway and connector.
 
 Tokens are separate from Mold API keys, owner-only file/env inputs, never URLs
 or argument values or logs. Verify WSS except explicit localhost development.

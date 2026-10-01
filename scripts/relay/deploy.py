@@ -4,12 +4,19 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shlex
 import subprocess
 import tempfile
 import time
+
+
+class AwsError(RuntimeError):
+    def __init__(self, service, operation, code="Unknown"):
+        self.code = code
+        super().__init__(f"AWS {service} {operation} failed ({code}); inspect the service separately")
 
 
 def aws(args, options):
@@ -19,7 +26,8 @@ def aws(args, options):
     )
     if result.returncode:
         # Commands may contain API responses; never forward captured output.
-        raise RuntimeError(f"AWS {args[0]} {args[1]} failed; inspect the service separately")
+        match = re.search(r"An error occurred \(([A-Za-z0-9_.-]+)\)", result.stderr)
+        raise AwsError(args[0], args[1], match.group(1) if match else "Unknown")
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
@@ -53,51 +61,111 @@ def provision_token(options):
     print("Enrollment token saved to the requested owner-only file; value omitted.")
 
 
+def remote_script(options, digest, key):
+    source = shlex.quote(f"s3://{options.bucket}/{key}")
+    region = shlex.quote(options.region)
+    # /run is root-owned. Keep staging and the deployment lock in an owner-only
+    # directory; no predictable file in a shared /tmp and no parallel swaps.
+    return f"""set -eu
+install -d -m 700 /run/mold-relay-deploy
+exec 9>/run/mold-relay-deploy/lock
+flock -w 60 9
+work=$(mktemp -d /run/mold-relay-deploy/staging.XXXXXX)
+changed=false
+committed=false
+check_gateway() {{
+  attempt=0
+  while [ "$attempt" -lt 15 ]; do
+    if systemctl is-active --quiet mold-relay && curl --max-time 2 --fail --silent http://127.0.0.1:7681/_mold/relay/health >/dev/null; then return 0; fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  return 1
+}}
+finish() {{
+  result=$?
+  trap - EXIT HUP INT TERM
+  if [ "$changed" = true ] && [ "$committed" = false ]; then
+    systemctl stop mold-relay || true
+    if [ -f "$work/previous" ]; then
+      install -m 755 "$work/previous" /usr/local/bin/mold-relay.next
+      mv /usr/local/bin/mold-relay.next /usr/local/bin/mold-relay
+      if ! systemctl restart mold-relay || ! check_gateway; then
+        printf 'Rollback service health could not be verified.\\n' >&2
+      fi
+    else
+      rm -f /usr/local/bin/mold-relay
+      printf 'First deployment failed; service is stopped and can be retried.\\n' >&2
+    fi
+  fi
+  rm -rf "$work"
+  exit "$result"
+}}
+trap finish EXIT
+trap 'exit 1' HUP INT TERM
+aws --region {region} s3 cp {source} "$work/mold-relay" --only-show-errors
+printf '%s  %s\\n' {digest} "$work/mold-relay" | sha256sum -c -
+chmod 755 "$work/mold-relay"
+"$work/mold-relay" --help >/dev/null
+if [ -f /usr/local/bin/mold-relay ]; then cp /usr/local/bin/mold-relay "$work/previous"; fi
+install -m 755 "$work/mold-relay" /usr/local/bin/mold-relay.next
+changed=true
+mv /usr/local/bin/mold-relay.next /usr/local/bin/mold-relay
+systemctl restart mold-relay
+check_gateway
+committed=true
+"""
+
+
 def deploy(options):
     artifact = options.artifact.resolve()
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     key = f"mold-relay/releases/{digest}/mold-relay"
     aws(["s3api", "put-object", "--bucket", options.bucket, "--key", key,
          "--body", str(artifact), "--server-side-encryption", "AES256"], options)
-    remote_file = f"/tmp/mold-relay-{digest}"
-    source = shlex.quote(f"s3://{options.bucket}/{key}")
-    commands = [
-        "set -eu",
-        f"aws --region {shlex.quote(options.region)} s3 cp {source} {remote_file} --only-show-errors",
-        f"printf '%s  %s\\n' {digest} {remote_file} | sha256sum -c -",
-        f"chmod 755 {remote_file}",
-        f"{remote_file} --help >/dev/null",
-        "rm -f /usr/local/bin/mold-relay.previous",
-        "if test -f /usr/local/bin/mold-relay; then cp /usr/local/bin/mold-relay /usr/local/bin/mold-relay.previous; fi",
-        f"install -m 755 {remote_file} /usr/local/bin/mold-relay.next",
-        "mv /usr/local/bin/mold-relay.next /usr/local/bin/mold-relay",
-        "if systemctl restart mold-relay && sleep 2 && systemctl is-active --quiet mold-relay && curl --fail --silent http://127.0.0.1:7681/_mold/relay/health; then rm -f /usr/local/bin/mold-relay.previous; else systemctl stop mold-relay; if test -f /usr/local/bin/mold-relay.previous; then mv /usr/local/bin/mold-relay.previous /usr/local/bin/mold-relay; systemctl restart mold-relay; else rm -f /usr/local/bin/mold-relay; fi; exit 1; fi",
-        f"rm -f {remote_file}",
-    ]
     request = {
         "InstanceIds": [options.instance_id], "DocumentName": "AWS-RunShellScript",
         "Comment": f"Deploy reviewed Mold relay {digest[:12]}",
-        "Parameters": {"commands": commands, "executionTimeout": ["300"]},
+        "TimeoutSeconds": 60,
+        "Parameters": {"commands": [remote_script(options, digest, key)], "executionTimeout": ["300"]},
     }
     with tempfile.TemporaryDirectory(prefix="mold-relay-deploy-") as directory:
         path = Path(directory) / "request.json"
         private_write(path, json.dumps(request))
         command = aws(["ssm", "send-command", "--cli-input-json", f"file://{path}"], options)["Command"]["CommandId"]
-    deadline = time.monotonic() + 330
+    # Covers bounded delivery + execution + response propagation. Only the
+    # documented not-yet-visible invocation is retryable; AccessDenied is fatal.
+    deadline = time.monotonic() + 390
     while time.monotonic() < deadline:
         time.sleep(3)
         try:
             result = aws(["ssm", "get-command-invocation", "--command-id", command,
                           "--instance-id", options.instance_id], options)
-        except RuntimeError:
-            continue  # SSM invocation appears asynchronously.
+        except AwsError as error:
+            if error.code == "InvocationDoesNotExist":
+                continue
+            raise
         status = result["Status"]
         if status == "Success":
             print(f"Deployed artifact sha256:{digest}; gateway service health verified.")
             return
         if status in {"Cancelled", "Failed", "TimedOut", "Cancelling"}:
             raise RuntimeError(f"SSM deployment {command} ended {status}; inspect its nonsecret output")
-    raise RuntimeError(f"SSM deployment {command} did not finish within 330 seconds")
+    # Stop our own outstanding command instead of allowing a late silent swap.
+    aws(["ssm", "cancel-command", "--command-id", command,
+         "--instance-ids", options.instance_id], options)
+    cancellation_deadline = time.monotonic() + 60
+    while time.monotonic() < cancellation_deadline:
+        time.sleep(3)
+        result = aws(["ssm", "get-command-invocation", "--command-id", command,
+                      "--instance-id", options.instance_id], options)
+        status = result["Status"]
+        if status == "Success":
+            print(f"Deployed artifact sha256:{digest}; SSM confirmed completion while cancellation was requested.")
+            return
+        if status in {"Cancelled", "Failed", "TimedOut"}:
+            raise RuntimeError(f"SSM deployment {command} exceeded its deadline and ended {status}; it can be retried after inspecting rollback health")
+    raise RuntimeError(f"SSM deployment {command} cancellation is unconfirmed; do not retry until its terminal state is verified")
 
 
 def main():
