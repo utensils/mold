@@ -99,8 +99,7 @@ final class PopulatedGenerationTests: XCTestCase {
         for _ in 0..<12 where !submit.isHittable { composer.swipeUp() }
         XCTAssertTrue(submit.isHittable, "Generate must be reachable in landscape; never tap it in UAT")
         let options = app.buttons.matching(NSPredicate(format: "label == 'Options' OR label == 'More Options'")).firstMatch
-        for _ in 0..<12 where !options.isHittable { composer.swipeDown() }
-        XCTAssertTrue(options.isHittable)
+        reveal(options, in: app)
         options.tap()
         XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
         attach(app)
@@ -131,13 +130,21 @@ final class PopulatedGenerationTests: XCTestCase {
             // Swipe the clear right edge. A centered swipe lands in the
             // horizontal picture wells and leaves the form where it was.
             let down = element.exists && element.frame.midY < top + 20
-            let origin = form.coordinate(withNormalizedOffset: .zero)
-            let x = app.frame.width - 24
-            let start = origin.withOffset(CGVector(dx: x, dy: app.frame.height * (down ? 0.34 : 0.70)))
-            let end = origin.withOffset(CGVector(dx: x, dy: app.frame.height * (down ? 0.70 : 0.34)))
-            start.press(forDuration: 0.05, thenDragTo: end)
+            // top/bottom are screen coordinates. Adding them to the form's
+            // origin put the gesture below its viewport, over fixed chrome.
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = form.frame.minX + form.frame.width * 0.9
+            let upper = max(top, form.frame.minY) + 20
+            let lower = min(bottom, form.frame.maxY) - 20
+            XCTAssertGreaterThan(lower, upper, "The form needs a visible scrolling viewport")
+            let high = upper + (lower - upper) * 0.2
+            let low = upper + (lower - upper) * 0.7
+            let start = origin.withOffset(CGVector(dx: x, dy: down ? high : low))
+            let end = origin.withOffset(CGVector(dx: x, dy: down ? low : high))
+            start.press(forDuration: 0.1, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
         }
-        XCTAssertTrue(element.isHittable, "The control must be reachable within the Generate form")
+        XCTAssertTrue(element.isHittable, "The control must be reachable within the Generate form: \(app.debugDescription)")
     }
 
     @MainActor private func attach(_ app: XCUIApplication) {
