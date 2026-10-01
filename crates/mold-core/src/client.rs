@@ -3868,7 +3868,6 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
     (event_type, data_lines.join("\n"))
 }
 
-/// Build a reqwest Client, optionally with a default `X-Api-Key` header.
 fn chain_follow_stopped(state: crate::chain_job::ChainJobState) -> bool {
     crate::chain_job::settled(state)
         || matches!(
@@ -3876,6 +3875,7 @@ fn chain_follow_stopped(state: crate::chain_job::ChainJobState) -> bool {
             crate::chain_job::ChainJobState::Paused | crate::chain_job::ChainJobState::Interrupted
         )
 }
+/// Build a reqwest Client, optionally with a default `X-Api-Key` header.
 fn build_client(api_key: Option<&str>) -> (Client, bool) {
     let mut builder = Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
