@@ -501,3 +501,28 @@ test("host private cache policy survives relay CORS enforcement", async () => {
   await f(event("/api/status", "GET", "", { "x-api-key": "fixture" }), out);
   assert.equal(out.headers["cache-control"], "private,max-age=300");
 });
+test("working media jobs fail after transfer deadline, not overall grant expiry", async () => {
+  const { credentialDigest } = await import("../transfers.mjs");
+  const headers = { "x-api-key": "fixture" };
+  const frontend = createFrontend({
+    store: {
+      get: async () => ({
+        state: "working",
+        workingAt: Math.floor(Date.now() / 1000) - 841,
+        expiresAt: Math.floor(Date.now() / 1000) + 50,
+        credential: credentialDigest(headers),
+      }),
+    },
+  });
+  const out = writer();
+  await frontend(
+    event(
+      "/_mold/relay/media/11111111-1111-4111-8111-111111111111",
+      "GET",
+      "",
+      headers,
+    ),
+    out,
+  );
+  assert.equal(JSON.parse(out.value()).state, "failed");
+});
