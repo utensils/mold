@@ -22,6 +22,7 @@ it("hashes empty mutation bodies without probing ordinary requests", async () =>
     headers: { "x-api-key": "secret" },
   });
   expect(fetch).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls[0]?.[1]?.body).toBeNull();
   expect(
     new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-amz-content-sha256"),
   ).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");

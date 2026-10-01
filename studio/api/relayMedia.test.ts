@@ -2,15 +2,13 @@ import { afterEach, expect, it, vi } from "vitest";
 import { resolveRelayMedia } from "./relayMedia";
 afterEach(() => vi.unstubAllGlobals());
 it("polls pending media and validates the ready object URL", async () => {
-  const fetch = vi
-    .fn()
-    .mockResolvedValue(
-      Response.json({
-        state: "ready",
-        url: "https://host.example/_mold/objects/a?Signature=short",
-        expires_at: 9999999999,
-      }),
-    );
+  const fetch = vi.fn().mockResolvedValue(
+    Response.json({
+      state: "ready",
+      url: "https://host.example/_mold/objects/a?Signature=short",
+      expires_at: 9999999999,
+    }),
+  );
   vi.stubGlobal("fetch", fetch);
   expect(
     await resolveRelayMedia(

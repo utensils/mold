@@ -284,7 +284,7 @@ export async function relayFetch(
         ...init,
         method,
         headers,
-        body: init?.body ?? (input instanceof Request ? bytes : undefined),
+        body: init?.body ?? (input instanceof Request ? bytes : null),
         ...(headers.has("x-api-key") ? { redirect: "error" as const } : {}),
       });
   } else {
