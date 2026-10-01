@@ -20,6 +20,13 @@ for phase, end in [("running", "finished"), ("finished", "failed"), ("failed", N
     assert "ActivityBrandIcon()" in body, phase
 CHECK
 asset=apps/ios/Sources/Widgets/Resources/Assets.xcassets/MoldLogo.imageset/MoldLogo.png
-cmp "$asset" apps/ios/Sources/Companion/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+# WidgetKit rejects oversized image archives: keep the logo within 128 pixels.
+python3 - "$asset" <<'PNG'
+import struct, sys
+with open(sys.argv[1], "rb") as image:
+    header = image.read(24)
+assert header[:8] == b"\x89PNG\r\n\x1a\n"
+assert struct.unpack(">II", header[16:24]) == (128, 128)
+PNG
 rg -q 'Image\("MoldLogo"\)' apps/ios/Sources/Widgets/ActivityBrandIcon.swift
 printf 'iOS notification branding ok\n'
