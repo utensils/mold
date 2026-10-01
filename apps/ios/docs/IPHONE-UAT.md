@@ -149,3 +149,9 @@ open and scrolls the opened tile back into view on return.
 - Independent review approved the selection lifecycle and shared filter
   contract. Physical-device gesture behavior remains unverified; the evidence
   above is Simulator UAT.
+- iPad Pro 13-inch Simulator, iPadOS 26.5: the same selection/edge-scroll/filter
+  regression passes against 300 mixed rows. The populated model/Options,
+  landscape prompt and largest-text model-search regression also passes. The
+  two explicitly phone-specific layout/Settings-route tests skip on iPad;
+  the full shell audit retains iPad composer, Machines, sidebar and Settings
+  coverage at all three text sizes in both appearances.
