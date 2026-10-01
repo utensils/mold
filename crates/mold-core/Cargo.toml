@@ -35,6 +35,9 @@ mesh-delight = ["mesh-matting"]
 
 [dependencies]
 anyhow = "1"
+http = "1"
+http-body-util = "0.1"
+futures-util = "0.3"
 console = "0.15"
 dirs = "6"
 fs2 = "0.4"

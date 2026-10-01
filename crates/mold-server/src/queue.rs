@@ -389,7 +389,46 @@ impl SavedOutputNames {
     /// The facts come from the same response the SSE complete event carries,
     /// so an attached observer and a durable child describe one render.
     pub(crate) fn terminal_json(&self, response: &mold_core::GenerateResponse) -> String {
+        let fallback = mold_core::ImageData {
+            data: Vec::new(),
+            format: mold_core::OutputFormat::Png,
+            width: 0,
+            height: 0,
+            index: 0,
+        };
+        let image = response.images.first().unwrap_or(&fallback);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(image.format.content_type()),
+        );
+        crate::routes::media_response_headers(response, image, &mut headers);
+        let mut response_headers: std::collections::BTreeMap<String, String> = headers
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (key.to_string(), value.to_string()))
+            })
+            .collect();
+        response_headers.insert("x-mold-seed-used".into(), response.seed_used.to_string());
+        response_headers.insert(
+            "x-mold-generation-time-ms".into(),
+            response.generation_time_ms.to_string(),
+        );
+        response_headers.insert("x-mold-model".into(), response.model.clone());
+        if let Some(gpu) = response.gpu {
+            response_headers.insert("x-mold-gpu".into(), gpu.to_string());
+        }
+        if !response.request_warnings.is_empty() {
+            response_headers.insert(
+                "x-mold-request-warning".into(),
+                response.request_warnings.join("; ").replace('\n', " "),
+            );
+        }
         serde_json::to_string(&mold_core::GenerationBatchResult {
+            response_headers,
             filename: self.output.clone(),
             original_filename: self.original.clone(),
             seed: Some(response.seed_used),
@@ -7240,6 +7279,60 @@ mod tests {
     /// separate field, and every `video_*` field stays empty so no client
     /// tries to seek frames in it.
     #[test]
+    fn durable_mesh_headers_match_direct_response_without_payload_cloning() {
+        let mesh = mold_core::MeshData {
+            data: vec![1, 2, 3],
+            format: OutputFormat::Glb,
+            vertex_count: 123,
+            face_count: 321,
+            bounds_min: [-1., -2., -3.],
+            bounds_max: [1., 2., 3.],
+            textured: true,
+            poster: vec![],
+            poster_width: 512,
+            poster_height: 512,
+            derived_media: vec![],
+        };
+        let response = mold_core::GenerateResponse {
+            mesh: Some(mesh),
+            audio: None,
+            images: vec![],
+            video: None,
+            generation_time_ms: 100,
+            model: "hunyuan3d".into(),
+            seed_used: 7,
+            gpu: Some(0),
+            request_warnings: vec![],
+            prefix_cache: None,
+        };
+        let image = ImageData {
+            data: vec![],
+            format: OutputFormat::Png,
+            width: 512,
+            height: 512,
+            index: 0,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        let body = crate::routes::apply_media_headers(&response, image, &mut headers);
+        assert_eq!(body, [1, 2, 3]);
+        let terminal: mold_core::GenerationBatchResult =
+            serde_json::from_str(&SavedOutputNames::default().terminal_json(&response)).unwrap();
+        for (key, value) in headers.iter() {
+            assert_eq!(
+                terminal.response_headers[key.as_str()],
+                value.to_str().unwrap()
+            );
+        }
+        assert_eq!(
+            terminal.response_headers["x-mold-mesh-bounds-min"],
+            "-1,-2,-3"
+        );
+        assert_eq!(terminal.response_headers["x-mold-mesh-vertices"], "123");
+        assert_eq!(terminal.response_headers["x-mold-mesh-textured"], "true");
+        assert_eq!(response.mesh.unwrap().data, [1, 2, 3]);
+    }
+
+    #[test]
     fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
         let audio = fake_audio(48_000);
         let resp = mold_core::GenerateResponse {
@@ -7254,6 +7347,18 @@ mod tests {
             gpu: Some(1),
             prefix_cache: None,
         };
+        let terminal: serde_json::Value =
+            serde_json::from_str(&SavedOutputNames::default().terminal_json(&resp)).unwrap();
+        assert_eq!(
+            terminal["response_headers"]["x-mold-audio-sample-rate"],
+            "48000"
+        );
+        assert_eq!(terminal["response_headers"]["x-mold-audio-channels"], "2");
+        assert_eq!(
+            terminal["response_headers"]["x-mold-generation-time-ms"],
+            "4321"
+        );
+        assert_eq!(terminal["response_headers"]["x-mold-gpu"], "1");
         let waveform_img = ImageData {
             data: audio.thumbnail.clone(),
             format: OutputFormat::Png,
@@ -7439,6 +7544,11 @@ mod tests {
             output: Some("generated-video.mp4".to_string()),
             original: None,
         };
+        let terminal: serde_json::Value =
+            serde_json::from_str(&saved.terminal_json(&resp)).unwrap();
+        assert_eq!(terminal["response_headers"]["x-mold-video-frames"], "25");
+        assert_eq!(terminal["response_headers"]["x-mold-video-fps"], "24");
+
         let metadata_only = build_sse_complete_event(
             &resp,
             &thumb_img,
