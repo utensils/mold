@@ -66,6 +66,7 @@ export function createRouter({
               connectionId: id,
               sid: randomUUID(),
               guests: {},
+              ready: false,
               expiresAt: now() + LIVE,
             },
       );
@@ -78,7 +79,7 @@ export function createRouter({
       return 200;
     }
     const host = await updateHost((old) => {
-      if (!old || old.expiresAt <= now()) return null;
+      if (!old || old.expiresAt <= now() || old.ready !== true) return null;
       const guests = Object.fromEntries(
         Object.entries(old.guests ?? {}).filter(
           ([, expires]) => expires > now(),
@@ -235,6 +236,16 @@ export function createRouter({
         rid: id,
         role: connection.role,
       });
+      if (connection.role === "host") {
+        const ready = await updateHost((old) =>
+          old?.sid === connection.sid &&
+          old.connectionId === id &&
+          old.expiresAt > now()
+            ? { ...old, ready: true }
+            : null,
+        );
+        if (!ready) return 503;
+      }
       if (connection.role === "frontend")
         await post(host.connectionId, {
           a: "open",

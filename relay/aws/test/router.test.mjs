@@ -101,6 +101,8 @@ test("role-specific admission, singleton lease, expired host and stale frames fa
 test("concurrent admission is bounded and expired guest capacity is reclaimed", async () => {
   const f = fixture();
   await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.delivered.length = 0;
   const result = await Promise.all(
     Array.from({ length: 40 }, (_, i) =>
       connect(f.router, `g${i}`, "frontend", "frontend-test"),
@@ -119,6 +121,8 @@ test("concurrent admission is bounded and expired guest capacity is reclaimed", 
 test("host cannot address a foreign guest, oversized and malformed frames are rejected", async () => {
   const f = fixture();
   await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.delivered.length = 0;
   const sid = f.rows.get("host").sid;
   await send(f.router, "h", {
     a: "data",
@@ -163,6 +167,8 @@ test("host cannot address a foreign guest, oversized and malformed frames are re
 test("concurrent guest hello opens the host stream once", async () => {
   const f = fixture();
   await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.delivered.length = 0;
   await connect(f.router, "g", "frontend", "frontend-test");
   await Promise.all([
     send(f.router, "g", { a: "hello", v: 2 }),
@@ -187,6 +193,8 @@ test("failure diagnostics expose only bounded error category, never details", as
 test("late host frames after guest disconnect do not evict the enrolled host", async () => {
   const f = fixture();
   await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.delivered.length = 0;
   await connect(f.router, "g", "frontend", "frontend-test");
   const sid = f.rows.get("host").sid;
   await f.router({
@@ -213,6 +221,8 @@ test("vanished guest during delivery drops harmlessly without host error packet"
     },
   });
   await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  f.delivered.length = 0;
   await connect(f.router, "g", "frontend", "frontend-test");
   await send(f.router, "g", { a: "hello", v: 2 });
   const sid = f.rows.get("host").sid;
@@ -239,6 +249,8 @@ test("stale host requests receive cancellation without forwarding or host evicti
   ]) {
     const f = fixture();
     await connect(f.router, "h", "host", "host-test");
+    await send(f.router, "h", { a: "hello", v: 2 });
+    f.delivered.length = 0;
     await connect(f.router, "g", "frontend", "frontend-test");
     await send(f.router, "g", { a: "hello", v: 2 });
     const host = f.rows.get("host"),
@@ -262,4 +274,19 @@ test("stale host requests receive cancellation without forwarding or host evicti
     assert.deepEqual(f.closed, []);
     assert.equal(f.rows.get("host").connectionId, "h");
   }
+});
+test("frontend admission waits for authenticated host hello readiness", async () => {
+  const f = fixture();
+  await connect(f.router, "h", "host", "host-test");
+  assert.equal(
+    (await connect(f.router, "early", "frontend", "frontend-test")).statusCode,
+    503,
+  );
+  assert.equal(f.rows.get("host").connectionId, "h");
+  assert.equal(f.rows.has("connection#early"), false);
+  await send(f.router, "h", { a: "hello", v: 2 });
+  assert.equal(
+    (await connect(f.router, "g", "frontend", "frontend-test")).statusCode,
+    200,
+  );
 });
