@@ -373,9 +373,14 @@ export function createFrontend(dependencies = {}) {
               (job.createdAt ?? job.expiresAt - 900) >
               90
               ? "failed"
-              : job.state === "working"
-                ? "pending"
-                : job.state,
+              : job.state === "working" &&
+                  Math.floor(Date.now() / 1000) -
+                    (job.workingAt ?? job.createdAt ?? job.expiresAt - 900) >
+                    840
+                ? "failed"
+                : job.state === "working"
+                  ? "pending"
+                  : job.state,
           ...(job.state === "ready"
             ? {
                 url: await deps.objectURL(
