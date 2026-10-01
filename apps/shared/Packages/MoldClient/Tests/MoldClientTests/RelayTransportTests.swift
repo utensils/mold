@@ -10,6 +10,8 @@ private final class RelayTransportStub: StubTransport {
     nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var infoStatus = 200
     nonisolated(unsafe) static var grantBody: Data?
+    nonisolated(unsafe) static var infoHTML: String?
+    nonisolated(unsafe) static var infoProtocol: String?
     override class func response(for path: String) -> (status: Int, body: Data)? {
         let json: String
         switch path {
@@ -45,7 +47,14 @@ private final class RelayTransportStub: StubTransport {
                 Self.grantBody = body
             }
         }
-        if request.url?.path == "/api/object" {
+        if request.url?.path == "/_mold/relay/info", let html = Self.infoHTML {
+            var headers = ["Content-Type": "text/html; charset=utf-8"]
+            if let marker = Self.infoProtocol { headers["x-mold-relay-protocol"] = marker }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(html.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        } else if request.url?.path == "/api/object" {
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                 headerFields: ["x-mold-relay-object": "1"])!
@@ -125,6 +134,36 @@ struct RelayTransportTests {
         RelayTransportStub.infoStatus = 503
         await #expect(throws: (any Error).self) {
             try await discovery.info(origin: URL(string: "https://unavailable.example")!, session: session)
+        }
+    }
+    @Test func legacyMoldShellDiscoveryIsNarrowAndBounded() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RelayTransportStub.self]
+        let session = URLSession(configuration: configuration)
+        defer { RelayTransportStub.infoHTML = nil; RelayTransportStub.infoProtocol = nil }
+        RelayTransportStub.requests = []
+        let shell = "<title>mold — studio</title><div id=\"app\"></div>"
+        RelayTransportStub.infoHTML = shell
+        let discovery = RelayDiscovery()
+        let info = try await discovery.info(origin: URL(string: "https://legacy-shell.example")!, session: session)
+        #expect(info.protocol != 2)
+        #expect(RelayTransportStub.requests.count == 1)
+        #expect(RelayTransportStub.requests.first?.value(forHTTPHeaderField: "X-Api-Key") == nil)
+        _ = try await discovery.info(origin: URL(string: "https://legacy-shell.example")!, session: session)
+        #expect(RelayTransportStub.requests.count == 1)
+        RelayTransportStub.infoHTML = "<html>gateway login</html>"
+        await #expect(throws: (any Error).self) {
+            try await discovery.info(origin: URL(string: "https://unknown-shell.example")!, session: session)
+        }
+        RelayTransportStub.infoHTML = shell
+        RelayTransportStub.infoProtocol = "2"
+        await #expect(throws: (any Error).self) {
+            try await discovery.info(origin: URL(string: "https://marked-shell.example")!, session: session)
+        }
+        RelayTransportStub.infoProtocol = nil
+        RelayTransportStub.infoHTML = shell + String(repeating: " ", count: 65_536)
+        await #expect(throws: (any Error).self) {
+            try await discovery.info(origin: URL(string: "https://oversized-shell.example")!, session: session)
         }
     }
     @Test func pendingMediaResolvesToTheSignedSameOriginURL() async throws {

@@ -117,6 +117,32 @@ function requestHeaders(headers: Headers): Record<string, string> {
     ),
   );
 }
+async function boundedDiscoveryText(response: Response): Promise<string> {
+  const limit = 65536;
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("Relay discovery response exceeds 64 KiB.");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const bytes = new Uint8Array(limit);
+  let size = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      if (size + part.value.byteLength > limit) {
+        await reader.cancel();
+        throw new Error("Relay discovery response exceeds 64 KiB.");
+      }
+      bytes.set(part.value, size);
+      size += part.value.byteLength;
+    }
+    return new TextDecoder().decode(bytes.subarray(0, size));
+  } finally {
+    reader.releaseLock();
+  }
+}
 async function relayInfo(
   origin: string,
   signal: AbortSignal | null = null,
@@ -130,10 +156,28 @@ async function relayInfo(
         signal,
       })
       .then(async (response) => {
-        if (response.status === 404) return null;
-        if (!response.ok)
+        if (response.status === 404) {
+          await response.body?.cancel();
+          return null;
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
           throw new Error(`Relay discovery failed: ${response.status}`);
-        const info = (await response.json()) as RelayInfo;
+        }
+        const text = await boundedDiscoveryText(response);
+        if (
+          response.status === 200 &&
+          response.headers
+            .get("content-type")
+            ?.split(";")[0]
+            ?.trim()
+            .toLowerCase() === "text/html" &&
+          !response.headers.has("x-mold-relay-protocol") &&
+          text.includes("<title>mold — studio</title>") &&
+          text.includes('<div id="app"></div>')
+        )
+          return null;
+        const info = JSON.parse(text) as RelayInfo;
         if (
           info.protocol !== 2 ||
           !Number.isSafeInteger(info.upload_threshold) ||

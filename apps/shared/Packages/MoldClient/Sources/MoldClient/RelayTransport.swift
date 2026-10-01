@@ -120,13 +120,29 @@ actor RelayDiscovery {
         let url = URL(string: "/_mold/relay/info", relativeTo: origin)!.absoluteURL
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        let (data, response) = try await session.data(for: request, delegate: RelayNoRedirect())
+        let (stream, response) = try await session.bytes(for: request, delegate: RelayNoRedirect())
+        defer { stream.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw MoldClientError.malformedResponse }
         if http.statusCode == 404 {
             origins[key] = .direct
             return .direct
         }
+        let ceiling = 65_536
+        guard http.expectedContentLength <= ceiling else {
+            throw MoldClientError.malformedResponse
+        }
+        let data = try await stream.collected(upTo: ceiling)
         try HTTPRefusal.check(http, data)
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";").first?
+            .trimmingCharacters(in: .whitespaces).lowercased()
+        if http.statusCode == 200, contentType == "text/html",
+            http.value(forHTTPHeaderField: "x-mold-relay-protocol") == nil,
+            let shell = String(data: data, encoding: .utf8),
+            shell.contains("<title>mold — studio</title>"), shell.contains("<div id=\"app\"></div>")
+        {
+            origins[key] = .direct
+            return .direct
+        }
         let info = try MoldJSON.decoder.decode(RelayTransport.Info.self, from: data)
         guard info.protocol == 2, info.uploadThreshold > 0,
             info.maxBodyBytes >= info.uploadThreshold, info.maxBodyBytes <= 67_108_864

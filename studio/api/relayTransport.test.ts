@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -273,3 +273,70 @@ it("preserves direct JSON body representation while adding its digest", async ()
     new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-amz-content-sha256"),
   ).toMatch(/^[a-f0-9]{64}$/);
 });
+
+it("recognizes only the bounded legacy Mold SPA as direct discovery", async () => {
+  const shellPath = ["web/index.html", "../web/index.html"]
+    .map((path) => resolve(process.cwd(), path))
+    .find(existsSync)!;
+  const shell = readFileSync(shellPath, "utf8");
+  const calls: string[] = [];
+  const fetch = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => {
+    calls.push(String(url));
+    return String(url).endsWith("/info")
+      ? new Response(shell, {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        })
+      : new Response("direct");
+  });
+  vi.stubGlobal("fetch", fetch);
+  const body = new Uint8Array(2097153);
+  await relayFetch("https://legacy.example/api/upload", {
+    method: "POST",
+    body,
+    headers: { "x-api-key": "secret" },
+  });
+  await relayFetch("https://legacy.example/api/upload", {
+    method: "POST",
+    body,
+  });
+  expect(calls).toEqual([
+    "https://legacy.example/_mold/relay/info",
+    "https://legacy.example/api/upload",
+    "https://legacy.example/api/upload",
+  ]);
+  expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("x-api-key")).toBe(
+    false,
+  );
+  expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("x-api-key")).toBe(
+    "secret",
+  );
+  expect(fetch.mock.calls[1]?.[1]?.body).toBe(body);
+});
+it.each([
+  ["<html>gateway login</html>", { "content-type": "text/html" }],
+  [
+    '<title>mold — studio</title><div id="app"></div>',
+    { "content-type": "text/html", "x-mold-relay-protocol": "2" },
+  ],
+  [
+    '<title>mold — studio</title><div id="app"></div>',
+    { "content-type": "application/json" },
+  ],
+  [
+    '<title>mold — studio</title><div id="app"></div>' + " ".repeat(65536),
+    { "content-type": "text/html" },
+  ],
+])(
+  "refuses unrecognized or oversized discovery responses %#",
+  async (body, headers) => {
+    const fetch = vi.fn().mockResolvedValue(new Response(body, { headers }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(
+      relayFetch("https://unknown.example/api/upload", {
+        method: "POST",
+        body: new Uint8Array(2097153),
+      }),
+    ).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledOnce();
+  },
+);
