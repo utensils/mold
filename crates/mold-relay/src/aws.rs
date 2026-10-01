@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, VecDeque};
 const WINDOW: usize = 4;
 const FRAME_LIMIT: usize = 24 * 1024;
 const PAYLOAD: usize = 16 * 1024;
-const GAP: Duration = Duration::from_secs(10);
-const RETRY: Duration = Duration::from_secs(2);
+const GAP: Duration = Duration::from_secs(30);
+const RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Frame {
@@ -28,6 +28,8 @@ struct Frame {
     #[serde(skip_serializing_if = "Option::is_none")]
     credit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ack_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
 }
 impl Frame {
@@ -41,6 +43,7 @@ impl Frame {
             d: None,
             next: None,
             credit: None,
+            ack_seq: None,
             role: None,
         }
     }
@@ -141,7 +144,7 @@ impl Inbox {
     }
 }
 
-fn validate_request_header(bytes: &[u8]) -> Result<()> {
+fn validate_request_header(bytes: &[u8]) -> Result<usize> {
     let text = std::str::from_utf8(bytes).context("invalid AWS relay HTTP header")?;
     let line = text
         .lines()
@@ -160,14 +163,84 @@ fn validate_request_header(bytes: &[u8]) -> Result<()> {
     if words.next() != Some("HTTP/1.1") || words.next().is_some() {
         bail!("invalid AWS relay HTTP version");
     }
-    if text.lines().skip(1).any(|line| {
-        line.split(':')
-            .next()
-            .is_some_and(|key| key.eq_ignore_ascii_case("upgrade"))
-    }) {
-        bail!("AWS relay upgrade forbidden");
+    let mut length = None;
+    let mut close = false;
+    for line in text.lines().skip(1).filter(|line| !line.is_empty()) {
+        if line.starts_with([' ', '\t']) {
+            bail!("AWS relay folded header forbidden");
+        }
+        let (key, value) = line.split_once(':').context("invalid AWS relay header")?;
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("upgrade") || key.eq_ignore_ascii_case("transfer-encoding") {
+            bail!("AWS relay upgrade or transfer encoding forbidden");
+        }
+        if key.eq_ignore_ascii_case("content-length") {
+            if length.is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("ambiguous AWS relay body length");
+            }
+            let n: usize = value.parse().context("invalid AWS relay body length")?;
+            if n > 64 * 1024 * 1024 {
+                bail!("AWS relay body exceeds limit");
+            }
+            length = Some(n);
+        }
+        if key.eq_ignore_ascii_case("connection") {
+            if close || !value.eq_ignore_ascii_case("close") {
+                bail!("AWS relay requires connection close");
+            }
+            close = true;
+        }
     }
-    Ok(())
+    if !close {
+        bail!("AWS relay requires connection close");
+    }
+    length.context("AWS relay requires explicit body length")
+}
+
+struct RequestBoundary {
+    header: Vec<u8>,
+    remaining: Option<usize>,
+}
+impl RequestBoundary {
+    fn new() -> Self {
+        Self {
+            header: Vec::new(),
+            remaining: None,
+        }
+    }
+    fn push(&mut self, bytes: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        if let Some(remaining) = self.remaining.as_mut() {
+            if bytes.len() > *remaining {
+                bail!("AWS relay data exceeds request body");
+            }
+            *remaining -= bytes.len();
+            return Ok(Some(bytes));
+        }
+        self.header.extend_from_slice(&bytes);
+        let Some(end) = self.header.windows(4).position(|p| p == b"\r\n\r\n") else {
+            if self.header.len() > 64 * 1024 {
+                bail!("AWS relay HTTP header exceeds limit");
+            }
+            return Ok(None);
+        };
+        let end = end + 4;
+        if end > 64 * 1024 {
+            bail!("AWS relay HTTP header exceeds limit");
+        }
+        let length = validate_request_header(&self.header[..end])?;
+        let body = self.header.len() - end;
+        if body > length {
+            bail!("AWS relay data exceeds request body");
+        }
+        self.remaining = Some(length - body);
+        Ok(Some(std::mem::take(&mut self.header)))
+    }
+    fn finish(&self) -> Result<()> {
+        if self.remaining != Some(0) {
+            bail!("incomplete AWS relay HTTP request");
+        }
+        Ok(())
+    }
 }
 
 /// AWS endpoints may include the API Gateway deployment stage path.
@@ -199,6 +272,7 @@ pub async fn connect(
     drop(authenticated_target(target).await?);
     let mut backoff = Duration::from_secs(5);
     loop {
+        diagnostic("connecting");
         let result = tokio::select! {_ = shutdown.cancelled()=>return Ok(()),result=session(&endpoint,target,&token,shutdown.clone(),options)=>result};
         if result
             .as_ref()
@@ -207,10 +281,44 @@ pub async fn connect(
         {
             return result;
         }
+        diagnostic("reconnecting");
         tokio::select! {_ = shutdown.cancelled()=>return Ok(()),_ = tokio::time::sleep(backoff)=>{}}
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
+fn diagnostic(reason: &'static str) {
+    if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some() {
+        eprintln!("mold-relay: {reason}");
+    }
+}
+
+async fn next_text<S>(source: &mut S) -> Result<Option<String>>
+where
+    S: futures_util::Stream<
+            Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
+{
+    loop {
+        match source.next().await {
+            Some(Ok(Message::Text(text))) => return Ok(Some(text.to_string())),
+            Some(Ok(Message::Ping(_))) => diagnostic("websocket_ping"),
+            Some(Ok(Message::Pong(_))) => diagnostic("websocket_pong"),
+            Some(Ok(Message::Close(_))) | None => {
+                diagnostic("websocket_closed");
+                return Ok(None);
+            }
+            Some(Ok(_)) => {
+                diagnostic("unexpected_websocket_frame");
+                bail!("invalid AWS relay WebSocket frame");
+            }
+            Some(Err(_)) => {
+                diagnostic("websocket_read_failed");
+                bail!("AWS relay WebSocket read failed");
+            }
+        }
+    }
+}
+
 async fn session(
     endpoint: &url::Url,
     target: SocketAddr,
@@ -223,6 +331,9 @@ async fn session(
         .headers_mut()
         .insert("x-mold-relay-role", "host".parse()?);
     let (socket,_)=tokio::time::timeout(ATTACH,connect_async_with_config(request,Some(websocket_config()),false)).await.context("AWS relay connection timed out")?.map_err(|e| {
+        if let tokio_tungstenite::tungstenite::Error::Http(response)=&e {
+            if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some(){eprintln!("mold-relay: handshake_http_status={}", response.status().as_u16());}
+        } else {diagnostic("handshake_transport_failed");}
         if matches!(&e,tokio_tungstenite::tungstenite::Error::Http(r) if r.status()==401||r.status()==403){anyhow::anyhow!("relay enrollment rejected")}else{anyhow::anyhow!("AWS relay unavailable")}
     })?;
     let (mut sink, mut source) = socket.split();
@@ -232,24 +343,23 @@ async fn session(
     sink.send(hello.text()?)
         .await
         .map_err(|_| anyhow::anyhow!("AWS relay hello failed"))?;
-    let ready = tokio::time::timeout(ATTACH, source.next())
+    let text = tokio::time::timeout(ATTACH, next_text(&mut source))
         .await
-        .context("AWS relay ready timed out")?;
-    let Some(Ok(Message::Text(text))) = ready else {
-        bail!("AWS relay ready unavailable");
-    };
+        .context("AWS relay ready timed out")??
+        .context("AWS relay ready unavailable")?;
     let ready = Frame::parse(&text)?;
     if ready.a != "ready" || ready.role.as_deref() != Some("host") {
         bail!("invalid AWS relay ready");
     }
     let sid = ready.sid.context("missing AWS relay epoch")?;
+    diagnostic("host_ready");
     let cancel = shutdown.child_token();
     let (control_tx, mut control_rx) = mpsc::channel::<Frame>(128);
     let (data_tx, mut data_rx) = mpsc::channel::<Frame>(128);
     let writer_cancel = cancel.clone();
     let writer = tokio::spawn(async move {
         // Priority controls, and a shared rate below API Gateway's route throttle.
-        let mut cadence = tokio::time::interval(Duration::from_millis(20));
+        let mut cadence = tokio::time::interval(Duration::from_millis(5));
         loop {
             let frame = tokio::select! {biased;_ = writer_cancel.cancelled()=>break,frame=control_rx.recv()=>frame,frame=data_rx.recv()=>frame};
             let Some(frame) = frame else {
@@ -260,6 +370,7 @@ async fn session(
                 break;
             };
             if !send_bounded(&mut sink, message, &writer_cancel).await {
+                diagnostic("websocket_write_failed");
                 break;
             }
         }
@@ -274,16 +385,18 @@ async fn session(
     let mut last = tokio::time::Instant::now();
     loop {
         tokio::select! {
-            _ = cancel.cancelled()=>break,
-            _ = &mut expiry=>break,
+            _ = cancel.cancelled()=>{diagnostic("session_cancelled");break;},
+            _ = &mut expiry=>{diagnostic("session_rotation");break;},
             result=tasks.join_next(),if !tasks.is_empty()=>{if let Some(Ok(rid))=result{requests.remove(&rid);}},
-            message=source.next()=>{
-                let Some(Ok(Message::Text(text)))=message else {break;};
-                let frame=match Frame::parse(&text){Ok(frame)=>frame,Err(_)=>break};
+            message=next_text(&mut source)=>{
+                let text=match message { Ok(Some(text))=>text, _=>break };
+                let frame=match Frame::parse(&text){Ok(frame)=>frame,Err(_)=>{
+                    if serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|value|value.get("message").is_some()) {diagnostic("api_gateway_error_envelope");} else {diagnostic("incoming_frame_invalid");} break;
+                }};
                 if frame.a=="heartbeat"{last=tokio::time::Instant::now();continue;}
-                if frame.sid.as_deref()!=Some(&sid){break;}
+                if frame.sid.as_deref()!=Some(&sid){diagnostic("epoch_mismatch");break;}
                 last=tokio::time::Instant::now();
-                let Some(rid)=frame.rid.clone() else {break;};
+                let Some(rid)=frame.rid.clone() else {diagnostic("missing_stream_identity");break;};
                 if frame.a=="open" {
                     if requests.contains_key(&rid){continue;}
                     let Ok(permit)=capacity.clone().try_acquire_owned() else {let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));continue;};
@@ -295,9 +408,9 @@ async fn session(
                 }
             },
             _ = heartbeat.tick()=>{
-                if last.elapsed()>Duration::from_secs(90){break;}
+                if last.elapsed()>Duration::from_secs(90){diagnostic("heartbeat_timeout");break;}
                 let mut ping=Frame::new("heartbeat","","");ping.sid=None;ping.rid=None;
-                if control_tx.try_send(ping).is_err(){break;}
+                if control_tx.try_send(ping).is_err(){diagnostic("control_queue_full");break;}
             }
         }
     }
@@ -307,6 +420,36 @@ async fn session(
     writer.await?;
     Ok(())
 }
+struct AckState {
+    serial: Option<u64>,
+    next: u64,
+    credit: usize,
+}
+impl AckState {
+    fn new() -> Self {
+        Self {
+            serial: None,
+            next: 0,
+            credit: WINDOW,
+        }
+    }
+    fn apply(&mut self, serial: u64, next: u64, credit: usize, sent: u64) -> Result<bool> {
+        if next > sent || credit > WINDOW || serial > 9_007_199_254_740_991 {
+            bail!("invalid AWS relay acknowledgement");
+        }
+        if self.serial.is_some_and(|last| serial <= last) {
+            return Ok(false);
+        }
+        if next < self.next {
+            bail!("regressive AWS relay acknowledgement");
+        }
+        self.serial = Some(serial);
+        self.next = next;
+        self.credit = credit;
+        Ok(true)
+    }
+}
+
 struct Pending {
     frame: Frame,
     sent: tokio::time::Instant,
@@ -329,16 +472,15 @@ async fn request_stream(
         .map_err(|_| anyhow::anyhow!("AWS relay closed"))?;
     let mut inbox = Inbox::new();
     let mut seq = 0;
-    let mut acknowledged = 0;
-    let mut credit = WINDOW;
+    let mut acknowledgement = AckState::new();
+    let mut ack_out = 0;
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
     let mut buffer = vec![0; PAYLOAD];
     let mut read_eof = false;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut activity = tokio::time::Instant::now();
     let mut gap_since = None;
-    let mut header = Vec::new();
-    let mut header_done = false;
+    let mut request = RequestBoundary::new();
     loop {
         tokio::select! {
             _ = cancel.cancelled()=>return Ok(()),
@@ -349,40 +491,34 @@ async fn request_stream(
                     "ack"=>{
                         let next=frame.next.context("missing AWS relay acknowledgement")?;
                         let available=frame.credit.context("missing AWS relay credit")?;
-                        if next>seq||available>WINDOW{bail!("invalid AWS relay acknowledgement");}
-                        if next>=acknowledged{acknowledged=next;pending.retain(|n,_|*n>=next);credit=available;}
+                        let serial=frame.ack_seq.context("missing AWS relay acknowledgement serial")?;
+                        if acknowledgement.apply(serial,next,available,seq)? { pending.retain(|n,_|*n>=next); }
                     },
                     "data"|"eof"=>{
                         let n=frame.seq.context("missing AWS relay sequence")?;
                         let payload=if frame.a=="eof"{Payload{bytes:Vec::new(),eof:true}}else{Payload{bytes:STANDARD.decode(frame.d.context("missing AWS relay payload")?).map_err(|_|anyhow::anyhow!("invalid AWS relay base64"))?,eof:false}};
                         let ready=inbox.insert(n,payload)?;
                         for payload in ready {
-                            if payload.eof && !header_done { bail!("incomplete AWS relay HTTP header"); }
+                            if payload.eof { request.finish()?; }
                             if !payload.eof {
-                                let bytes = if header_done { payload.bytes } else {
-                                    header.extend_from_slice(&payload.bytes);
-                                    if header.len() > 64 * 1024 { bail!("AWS relay HTTP header exceeds limit"); }
-                                    let Some(end) = header.windows(4).position(|p| p == b"\r\n\r\n") else { continue; };
-                                    validate_request_header(&header[..end + 4])?;
-                                    header_done = true; std::mem::take(&mut header)
-                                };
+                                let Some(bytes) = request.push(payload.bytes)? else { continue; };
                                 tokio::select!{_ = cancel.cancelled()=>return Ok(()),result=tokio::time::timeout(GAP,tcp.write_all(&bytes))=>{result.context("AWS relay target stalled")??;}}
                                 if !bytes.is_empty(){activity=tokio::time::Instant::now();}
                             }
                             // Request EOF is logical completion, never TCP FIN.
                         }
                         if inbox.held.is_empty(){gap_since=None;}else if gap_since.is_none(){gap_since=Some(tokio::time::Instant::now());}
-                        let mut ack=Frame::new("ack",sid,rid);ack.next=Some(inbox.next);ack.credit=Some(WINDOW-inbox.held.len());
+                        let mut ack=Frame::new("ack",sid,rid);ack.next=Some(inbox.next);ack.credit=Some(WINDOW-inbox.held.len());ack.ack_seq=Some(ack_out);ack_out+=1;
                         controls.send(ack).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;
                     },
                     _=>bail!("invalid AWS relay request action"),
                 }
             },
-            result=tcp.read(&mut buffer),if !read_eof && pending.len()<WINDOW && credit>0=>{
+            result=tcp.read(&mut buffer),if !read_eof && pending.len()<WINDOW && acknowledgement.credit>0=>{
                 let n=result?;let mut frame=Frame::new(if n==0{"eof"}else{"data"},sid,rid);frame.seq=Some(seq);
                 if n==0{read_eof=true;}else{frame.d=Some(STANDARD.encode(&buffer[..n]));activity=tokio::time::Instant::now();}
                 output.send(frame.clone()).await.map_err(|_|anyhow::anyhow!("AWS relay closed"))?;
-                pending.insert(seq,Pending{frame,sent:tokio::time::Instant::now(),retries:0});seq+=1;credit-=1;
+                pending.insert(seq,Pending{frame,sent:tokio::time::Instant::now(),retries:0});seq+=1;acknowledgement.credit-=1;
             },
             _ = tick.tick()=>{
                 if activity.elapsed()>options.idle_timeout || gap_since.is_some_and(|t:tokio::time::Instant|t.elapsed()>GAP){bail!("AWS relay stream stalled");}
@@ -457,14 +593,16 @@ mod tests {
             let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("missing hello")};assert_eq!(Frame::parse(&text).unwrap().a,"hello");
             let mut ready=Frame::new("ready","epoch","host");ready.role=Some("host".into());
             // Send ready directly as text (the v2 envelope is not v1 Wire).
+            socket.send(AxMessage::Ping(Vec::new().into())).await.unwrap();
             socket.send(AxMessage::Text(serde_json::to_string(&ready).unwrap().into())).await.unwrap();
+            socket.send(AxMessage::Pong(Vec::new().into())).await.unwrap();
             socket.send(AxMessage::Text(serde_json::to_string(&Frame::new("open","epoch","guest")).unwrap().into())).await.unwrap();
-            loop{let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("missing accept")};let frame=Frame::parse(&text).unwrap();if frame.a=="accept"{break;}}
+            loop{let message=socket.recv().await.unwrap().unwrap();let AxMessage::Text(text)=message else {continue;};let frame=Frame::parse(&text).unwrap();if frame.a=="accept"{break;}}
             let request=b"POST /echo HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\nContent-Length: 7\r\n\r\npayload";
             for(seq,bytes)in[(1,&request[40..]),(0,&request[..40]),(0,&request[..40])]{let mut data=Frame::new("data","epoch","guest");data.seq=Some(seq);data.d=Some(STANDARD.encode(bytes));socket.send(AxMessage::Text(serde_json::to_string(&data).unwrap().into())).await.unwrap();}
             let mut eof=Frame::new("eof","epoch","guest");eof.seq=Some(2);socket.send(AxMessage::Text(serde_json::to_string(&eof).unwrap().into())).await.unwrap();
             let mut response=Vec::new();let mut next=0;
-            loop{let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("response transport closed")};let frame=Frame::parse(&text).unwrap();if frame.a=="data"||frame.a=="eof"{assert_eq!(frame.seq,Some(next));next+=1;if let Some(data)=frame.d{response.extend(STANDARD.decode(data).unwrap());}let mut ack=Frame::new("ack","epoch","guest");ack.next=Some(next);ack.credit=Some(4);socket.send(AxMessage::Text(serde_json::to_string(&ack).unwrap().into())).await.unwrap();if frame.a=="eof"{break;}}}
+            loop{let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("response transport closed")};let frame=Frame::parse(&text).unwrap();if frame.a=="data"||frame.a=="eof"{assert_eq!(frame.seq,Some(next));next+=1;if let Some(data)=frame.d{response.extend(STANDARD.decode(data).unwrap());}let mut ack=Frame::new("ack","epoch","guest");ack.next=Some(next);ack.credit=Some(4);ack.ack_seq=Some(next);socket.send(AxMessage::Text(serde_json::to_string(&ack).unwrap().into())).await.unwrap();if frame.a=="eof"{break;}}}
             assert!(response.ends_with(b"payload"));
             while let Ok(Some(Ok(AxMessage::Text(text)))) = tokio::time::timeout(Duration::from_millis(100), socket.recv()).await {
                 assert_ne!(Frame::parse(&text).unwrap().a, "cancel", "successful EOF must not abort a frontend that is still consuming the response");
@@ -496,6 +634,16 @@ mod tests {
             .unwrap();
         cancel.cancel();
         connector.await.unwrap().unwrap();
+    }
+    #[test]
+    fn stale_ack_credit_cannot_stall_a_newer_window() {
+        let mut ack = AckState::new();
+        assert!(ack.apply(1, 0, 4, 4).unwrap());
+        assert!(!ack.apply(0, 0, 0, 4).unwrap());
+        assert_eq!(ack.credit, 4);
+        assert!(!ack.apply(1, 0, 0, 4).unwrap());
+        assert!(ack.apply(2, 1, 3, 4).unwrap());
+        assert_eq!((ack.next, ack.credit), (1, 3));
     }
     #[test]
     fn reorder_dedup_conflicts_and_window_are_bounded() {
@@ -538,6 +686,26 @@ mod tests {
         assert!(inbox.insert(1, bytes(b"late")).is_err());
     }
     #[test]
+    fn request_body_boundary_refuses_pipelined_bytes_and_ambiguous_headers() {
+        assert!(validate_request_header(
+            b"POST /api/upload HTTP/1.1\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\n"
+        )
+        .is_err());
+        assert!(validate_request_header(b"POST /api/upload HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").is_err());
+        let mut request = RequestBoundary::new();
+        assert!(request.push(b"POST /api/upload HTTP/1.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbodyGET /metrics HTTP/1.1\r\n\r\n".to_vec()).is_err());
+        let mut request = RequestBoundary::new();
+        assert!(request
+            .push(
+                b"POST /api/upload HTTP/1.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody"
+                    .to_vec()
+            )
+            .unwrap()
+            .is_some());
+        assert!(request.finish().is_ok());
+        assert!(request.push(b"extra".to_vec()).is_err());
+    }
+    #[test]
     fn request_header_blocks_private_metrics_and_upgrades() {
         assert!(
             validate_request_header(b"GET /metrics?x=1 HTTP/1.1\r\nHost: local\r\n\r\n").is_err()
@@ -548,7 +716,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            validate_request_header(b"GET /api/status HTTP/1.1\r\nHost: local\r\n\r\n").is_ok()
+            validate_request_header(b"GET /api/status HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").is_ok()
         );
     }
     #[test]

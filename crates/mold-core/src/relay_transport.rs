@@ -91,6 +91,13 @@ mod tests {
         assert!(!fetched.headers.contains_key("x-api-key"));
         assert!(!fetched.headers.contains_key("x-amz-content-sha256"));
     }
+    #[tokio::test]
+    async fn discovery_connection_failure_is_not_cached_as_direct_mode() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();drop(listener);
+        let client=RelayClient::new(Client::new());let url=Url::parse(&format!("https://{address}/api/status")).unwrap();
+        assert!(client.is_relay(&url).await.is_err());
+        assert!(!client.known.lock().unwrap().contains_key(&url.origin().ascii_serialization()));
+    }
     #[test]
     fn signed_object_handoff_stays_on_the_trusted_origin_and_prefix() {
         let origin = reqwest::Url::parse("https://mold-link.urandom.io/api/status").unwrap();
@@ -245,7 +252,9 @@ impl RelayClient {
                 );
                 true
             }
-            _ => false,
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => false,
+            Ok(response) => anyhow::bail!("relay discovery failed (HTTP {})", response.status().as_u16()),
+            Err(_) => anyhow::bail!("relay discovery temporarily unavailable; retry before sending the request"),
         };
         self.known.lock().unwrap().insert(key, value);
         Ok(value)
