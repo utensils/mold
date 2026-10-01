@@ -50,3 +50,24 @@ it("opens an auth-disabled local machine without asking for a key", async () => 
   expect(wrapper.find('[data-test="studio"]').exists()).toBe(true);
   wrapper.unmount();
 });
+it("suggests the direct HTTPS address for a refused keyed connection without diagnosing its cause", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch")),
+  );
+  const wrapper = mount(OriginAccess);
+  await flushPromises();
+  await wrapper.get("input").setValue("secret");
+  await wrapper.get("form").trigger("submit");
+  await flushPromises();
+  expect(wrapper.get('[role="alert"]').text()).toContain("unavailable");
+  expect(wrapper.get('[role="alert"]').text()).toContain(
+    "HTTPS address directly",
+  );
+  expect(wrapper.get('[role="alert"]').text()).not.toContain("was redirected");
+  expect(originApiKey()).toBeNull();
+  wrapper.unmount();
+});

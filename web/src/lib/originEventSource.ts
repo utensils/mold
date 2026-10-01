@@ -9,6 +9,7 @@ export function createOriginEventSource(url: string): EventSource {
   const source = Object.assign(target, {
     onerror: null as ((event: Event) => void) | null,
     onopen: null as ((event: Event) => void) | null,
+    onmessage: null as ((event: MessageEvent) => void) | null,
     close: () => controller.abort(),
   });
   void fetchEventSource(url, {
@@ -25,9 +26,12 @@ export function createOriginEventSource(url: string): EventSource {
       source.onopen?.(new Event("open"));
     },
     onmessage(message) {
-      source.dispatchEvent(
-        new MessageEvent(message.event || "message", { data: message.data }),
-      );
+      const event = new MessageEvent(message.event || "message", {
+        data: message.data,
+        lastEventId: message.id,
+      });
+      source.dispatchEvent(event);
+      if (event.type === "message") source.onmessage?.(event);
     },
     onerror(error) {
       throw error;

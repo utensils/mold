@@ -14,8 +14,8 @@ const error = ref("");
 async function connect() {
   busy.value = true;
   error.value = "";
+  const candidate = key.value.trim() || originApiKey();
   try {
-    const candidate = key.value.trim() || originApiKey();
     const response = await originAuthenticatedFetch("/api/status", {
       headers: candidate ? { "x-api-key": candidate } : {},
       redirect: "error",
@@ -33,7 +33,10 @@ async function connect() {
     ready.value = true;
   } catch {
     error.value =
-      "This machine is unavailable. Check the connection and try again.";
+      "This machine is unavailable. Check the connection and try again." +
+      (candidate
+        ? " For remote access, open the HTTPS address directly; API-key requests cannot follow redirects."
+        : "");
   } finally {
     busy.value = false;
   }
