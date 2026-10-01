@@ -94,7 +94,7 @@ lived signed object URLs without sending Mold keys to S3. These URLs expire
 within 15 minutes; resolve media again to renew access. Staged objects are capped
 at 8 GiB as a storage guard; each transfer must still finish within 840 seconds.
 Throughput and concurrent use can require a direct connection for large files.
-Gallery imports above the relay request cap require a direct connection. Static browser assets are served by the frontend from the private bucket.
+Gallery imports above the relay request cap require a direct connection. Signed S3 requests omit credentials and support browser shells served from LAN origins. Media staging that never starts fails after 90 seconds; event streams cannot be staged. Static browser assets are served by the frontend from the private bucket.
 
 A Lambda request is bounded by the platform's 15 minute limit. SSE connections
 close before that limit and clients reopen their read stream and reconcile state.
@@ -107,6 +107,8 @@ authenticated server and connector.
 
 Build and deploy reviewed runtime packages with the tooling under `scripts/relay/`.
 Inspect the complete scoped Terraform plan before applying infrastructure changes.
+Frontend capacity is 40 Lambda invocations with at most 32 active host tunnels, leaving headroom for control calls. These limits bound resource use; they do not authenticate callers or prevent every denial of service. `/health`, `/api/docs` and `/api/openapi.json` forward to the host rather than returning the offline browser shell.
+
 Lambda usage includes the lifetime of streaming requests; this is optional remote
 access, not a free cloud GPU service.
 
