@@ -1136,107 +1136,121 @@ impl MoldClient {
     ) -> Result<ChainJobOutcome> {
         use crate::chain_job::{ChainJobEvent, ChainJobState};
 
-        let mut resp = self
-            .client
-            .get(format!(
-                "{}/api/chain-jobs/{}/events",
-                self.base_url, job_id
-            ))
-            .send()
-            .await?;
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("server error {status}: {body}");
-        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(24 * 3600);
+        loop {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "chain stream still pending after 24 hours; inspect durable job"
+            );
+            let mut resp = self
+                .client
+                .get(format!(
+                    "{}/api/chain-jobs/{}/events",
+                    self.base_url, job_id
+                ))
+                .send()
+                .await?;
+            if resp.status().is_client_error() || resp.status().is_server_error() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("server error {status}: {body}");
+            }
 
-        let mut outcome = ChainJobOutcome {
-            state: ChainJobState::Running,
-            error: None,
-            output: None,
-        };
-        let mut buffer = SseFrameParser::new();
-        while let Some(chunk) = resp.chunk().await? {
-            buffer.push(&chunk);
-            while let Some(event_text) = buffer.next_frame() {
-                let (_, data) = parse_sse_event(&event_text);
-                let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
-                    continue;
-                };
-                match event {
-                    ChainJobEvent::Snapshot { job } => {
-                        outcome.state = job.summary.state;
-                        outcome.error = job.summary.error.clone();
-                        let _ = progress_tx.send(ChainProgressEvent::ChainStart {
-                            stage_count: job.summary.stage_count,
-                            estimated_total_frames: job
-                                .stages
-                                .iter()
-                                .filter_map(|stage| stage.frames_emitted)
-                                .sum(),
-                        });
-                        if crate::chain_job::settled(job.summary.state) {
-                            // A job that settled before we subscribed carries
-                            // its print in the manifest, not in a frame.
-                            outcome.output = job
-                                .finalizes
-                                .last()
-                                .and_then(|record| record.gallery_filename.clone());
-                            return Ok(outcome);
+            let mut outcome = ChainJobOutcome {
+                state: ChainJobState::Running,
+                error: None,
+                output: None,
+            };
+            let mut buffer = SseFrameParser::new();
+            while let Some(chunk) = resp.chunk().await? {
+                buffer.push(&chunk);
+                while let Some(event_text) = buffer.next_frame() {
+                    let (_, data) = parse_sse_event(&event_text);
+                    let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
+                        continue;
+                    };
+                    match event {
+                        ChainJobEvent::Snapshot { job } => {
+                            outcome.state = job.summary.state;
+                            outcome.error = job.summary.error.clone();
+                            let _ = progress_tx.send(ChainProgressEvent::ChainStart {
+                                stage_count: job.summary.stage_count,
+                                estimated_total_frames: job
+                                    .stages
+                                    .iter()
+                                    .filter_map(|stage| stage.frames_emitted)
+                                    .sum(),
+                            });
+                            if crate::chain_job::settled(job.summary.state) {
+                                // A job that settled before we subscribed carries
+                                // its print in the manifest, not in a frame.
+                                outcome.output = job
+                                    .finalizes
+                                    .last()
+                                    .and_then(|record| record.gallery_filename.clone());
+                                return Ok(outcome);
+                            }
                         }
-                    }
-                    ChainJobEvent::StageStart { stage_idx } => {
-                        let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
-                    }
-                    ChainJobEvent::DenoiseStep {
-                        stage_idx,
-                        step,
-                        total,
-                    } => {
-                        let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                        ChainJobEvent::StageStart { stage_idx } => {
+                            let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
+                        }
+                        ChainJobEvent::DenoiseStep {
                             stage_idx,
                             step,
                             total,
-                        });
-                    }
-                    ChainJobEvent::StageDone {
-                        stage_idx,
-                        frames_emitted,
-                        ..
-                    } => {
-                        let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                        } => {
+                            let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                                stage_idx,
+                                step,
+                                total,
+                            });
+                        }
+                        ChainJobEvent::StageDone {
                             stage_idx,
                             frames_emitted,
-                        });
-                    }
-                    ChainJobEvent::Finalizing { total_frames } => {
-                        let _ = progress_tx.send(ChainProgressEvent::Stitching { total_frames });
-                    }
-                    ChainJobEvent::Finalized {
-                        gallery_filename, ..
-                    } => outcome.output = gallery_filename,
-                    ChainJobEvent::StateChanged { state, error } => {
-                        outcome.state = state;
-                        if error.is_some() {
-                            outcome.error = error;
+                            ..
+                        } => {
+                            let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                                stage_idx,
+                                frames_emitted,
+                            });
                         }
-                        if crate::chain_job::settled(state) {
-                            return Ok(outcome);
+                        ChainJobEvent::Finalizing { total_frames } => {
+                            let _ =
+                                progress_tx.send(ChainProgressEvent::Stitching { total_frames });
                         }
+                        ChainJobEvent::Finalized {
+                            gallery_filename, ..
+                        } => outcome.output = gallery_filename,
+                        ChainJobEvent::StateChanged { state, error } => {
+                            outcome.state = state;
+                            if error.is_some() {
+                                outcome.error = error;
+                            }
+                            if crate::chain_job::settled(state) {
+                                return Ok(outcome);
+                            }
+                        }
+                        ChainJobEvent::Yielded { .. } => {}
                     }
-                    ChainJobEvent::Yielded { .. } => {}
                 }
             }
+            // Read-only reconciliation never resubmits the admitted chain.
+            let detail = self.get_chain_job(job_id).await?;
+            if crate::chain_job::settled(detail.summary.state) {
+                outcome.state = detail.summary.state;
+                outcome.error = detail.summary.error;
+                outcome.output = detail
+                    .finalizes
+                    .last()
+                    .and_then(|record| record.gallery_filename.clone());
+                return Ok(outcome);
+            }
+            if progress_tx.is_closed() {
+                anyhow::bail!("chain progress consumer closed before completion");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        // The runner closes the broadcast when the job settles, so a stream
-        // that ends without a terminal frame means the state changed while
-        // nobody was subscribed. Ask.
-        outcome.state = self
-            .get_chain_job(job_id)
-            .await
-            .map(|detail| detail.summary.state)
-            .unwrap_or(outcome.state);
-        Ok(outcome)
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
@@ -1796,6 +1810,16 @@ impl MoldClient {
         accept_licenses: &[crate::types::LicenseAcceptance],
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<()> {
+        if self
+            .client
+            .is_relay(&reqwest::Url::parse(&self.base_url)?)
+            .await?
+        {
+            return self
+                .pull_model_durable(model, accept_licenses, progress_tx)
+                .await
+                .map_err(|error| anyhow::anyhow!("relay pull could not be reconciled: {error}"));
+        }
         let mut resp = self
             .client
             .post(format!("{}/api/models/pull", self.base_url))
@@ -1852,7 +1876,66 @@ impl MoldClient {
             }
         }
 
-        Ok(())
+        anyhow::bail!("pull stream ended before completion; inspect the host download queue")
+    }
+
+    async fn pull_model_durable(
+        &self,
+        model: &str,
+        accept_licenses: &[crate::types::LicenseAcceptance],
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<()> {
+        let admitted = self.create_download(model, accept_licenses).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(24 * 3600);
+        loop {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "download still pending after 24 hours; inspect host download queue"
+            );
+            let listing = match self.list_downloads().await {
+                Ok(value) => value,
+                Err(error) if is_transient_request_error(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let job = listing
+                .active_jobs
+                .iter()
+                .chain(listing.active.iter())
+                .chain(listing.queued.iter())
+                .chain(listing.history.iter())
+                .find(|job| job.id == admitted.response.id)
+                .context("admitted download missing from host queue; outcome unknown")?;
+            match job.status {
+                crate::types::JobStatus::Completed => {
+                    let _ = progress_tx.send(SseProgressEvent::PullComplete {
+                        model: model.to_owned(),
+                    });
+                    return Ok(());
+                }
+                crate::types::JobStatus::Failed | crate::types::JobStatus::Cancelled => {
+                    anyhow::bail!(
+                        "host download failed: {}",
+                        job.error.as_deref().unwrap_or("cancelled")
+                    )
+                }
+                _ => {
+                    let _ = progress_tx.send(SseProgressEvent::DownloadProgress {
+                        filename: job.current_file.clone().unwrap_or_default(),
+                        file_index: job.files_done,
+                        total_files: job.files_total,
+                        bytes_downloaded: job.bytes_done,
+                        bytes_total: job.bytes_total,
+                        batch_bytes_downloaded: job.bytes_done,
+                        batch_bytes_total: job.bytes_total,
+                        batch_elapsed_ms: 0,
+                    });
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     }
 
     pub fn host(&self) -> &str {
@@ -3762,7 +3845,20 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
 
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
 fn build_client(api_key: Option<&str>) -> (Client, bool) {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        if attempt
+            .previous()
+            .last()
+            .is_some_and(|previous| previous.origin() != attempt.url().origin())
+        {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    }));
     let mut api_key_configured = false;
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -4049,6 +4145,132 @@ mod tests {
         unsafe { std::env::remove_var("MOLD_HOST") };
     }
 
+    #[tokio::test]
+    async fn chain_sse_reconnects_after_nonterminal_eof() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        Mock::given(method("GET")).and(path("/api/chain-jobs/fixture/events")).respond_with(move |_:&wiremock::Request|{
+            let state=if count.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {"running"}else{"completed"};
+            ResponseTemplate::new(200).set_body_string(format!("data: {{\"type\":\"state_changed\",\"state\":\"{state}\",\"error\":null}}\n\n")).insert_header("content-type","text/event-stream")
+        }).mount(&server).await;
+        let detail = crate::chain_job::ChainJobDetail {
+            summary: crate::chain_job::ChainJobSummary {
+                id: "fixture".into(),
+                state: crate::chain_job::ChainJobState::Running,
+                model: "fixture".into(),
+                stage_count: 1,
+                current_stage: 0,
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+                error: None,
+                ephemeral: false,
+                execution_phase: None,
+                cancelling: false,
+            },
+            stages: vec![],
+            finalizes: vec![],
+            retakes: vec![],
+            amends: vec![],
+            script: Default::default(),
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/chain-jobs/fixture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&detail))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = client.stream_chain_job_events("fixture", tx).await.unwrap();
+        assert_eq!(result.state, crate::chain_job::ChainJobState::Completed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn relay_pull_admits_once_and_uses_retained_terminal_state() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/pull"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"fixture-id","position":0})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/downloads")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"active_jobs":[],"queued":[],"history":[{"id":"fixture-id","model":"fixture","status":"completed","files_done":1,"files_total":1,"bytes_done":7,"bytes_total":7}]}))).expect(1).mount(&server).await;
+        let client = MoldClient::new(&server.uri());
+        client.client.mark_relay(&server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client
+            .pull_model_stream_accepting("fixture", &[], tx)
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await,Some(SseProgressEvent::PullComplete{model}) if model=="fixture")
+        );
+    }
+    #[tokio::test]
+    async fn pull_sse_eof_without_terminal_event_is_not_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/pull"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(": relay reconnect\n\n", "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        assert!(client
+            .pull_model_stream_accepting("fixture", &[], tx)
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn keyed_client_never_follows_cross_origin_redirects() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let source = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/target"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&other)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/target", other.uri())),
+            )
+            .mount(&source)
+            .await;
+        let (client, _) = build_client(Some("fixture-secret"));
+        assert_eq!(
+            client
+                .get(format!("{}/start", source.uri()))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            302
+        );
+    }
     #[test]
     fn test_is_connection_error_non_connect() {
         // A generic anyhow error is not a connection error

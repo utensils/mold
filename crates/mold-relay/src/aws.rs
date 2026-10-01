@@ -273,6 +273,7 @@ pub async fn connect(
     let mut backoff = Duration::from_secs(5);
     loop {
         diagnostic("connecting");
+        let started = tokio::time::Instant::now();
         let result = tokio::select! {_ = shutdown.cancelled()=>return Ok(()),result=session(&endpoint,target,&token,shutdown.clone(),options)=>result};
         if result
             .as_ref()
@@ -281,9 +282,22 @@ pub async fn connect(
         {
             return result;
         }
+        backoff = reconnect_delay(backoff, started.elapsed());
         diagnostic("reconnecting");
         tokio::select! {_ = shutdown.cancelled()=>return Ok(()),_ = tokio::time::sleep(backoff)=>{}}
         backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+fn writer_cadence() -> tokio::time::Interval {
+    let mut cadence = tokio::time::interval(Duration::from_millis(5));
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    cadence
+}
+fn reconnect_delay(previous: Duration, session_age: Duration) -> Duration {
+    if session_age >= Duration::from_secs(90) {
+        Duration::from_secs(5)
+    } else {
+        previous
     }
 }
 fn diagnostic(reason: &'static str) {
@@ -359,7 +373,7 @@ async fn session(
     let writer_cancel = cancel.clone();
     let writer = tokio::spawn(async move {
         // Priority controls, and a shared rate below API Gateway's route throttle.
-        let mut cadence = tokio::time::interval(Duration::from_millis(5));
+        let mut cadence = writer_cadence();
         loop {
             let frame = tokio::select! {biased;_ = writer_cancel.cancelled()=>break,frame=control_rx.recv()=>frame,frame=data_rx.recv()=>frame};
             let Some(frame) = frame else {
@@ -634,6 +648,21 @@ mod tests {
             .unwrap();
         cancel.cancel();
         connector.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn writer_cadence_delays_and_healthy_sessions_reset_backoff() {
+        assert_eq!(
+            writer_cadence().missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Delay
+        );
+        assert_eq!(
+            reconnect_delay(Duration::from_secs(30), Duration::from_secs(90)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            reconnect_delay(Duration::from_secs(30), Duration::from_secs(1)),
+            Duration::from_secs(30)
+        );
     }
     #[test]
     fn stale_ack_credit_cannot_stall_a_newer_window() {

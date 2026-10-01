@@ -98,12 +98,43 @@ mod tests {
         drop(listener);
         let client = RelayClient::new(Client::new());
         let url = Url::parse(&format!("https://{address}/api/status")).unwrap();
-        assert!(client.is_relay(&url).await.is_err());
+        let error = client.is_relay(&url).await.unwrap_err();
+        assert!(crate::client::MoldClient::is_connection_error(&error));
+        assert!(crate::client::is_transient_request_error(&error));
         assert!(!client
             .known
             .lock()
             .unwrap()
             .contains_key(&url.origin().ascii_serialization()));
+    }
+    #[test]
+    fn staged_metadata_omits_credentials_and_transport_headers() {
+        for name in [
+            "cookie",
+            "authorization",
+            "x-api-key",
+            "transfer-encoding",
+            "x-mold-viewer-id",
+            "x-mold-request-target",
+            "connection",
+        ] {
+            assert!(!stage_header_allowed(name), "{name}");
+        }
+        assert!(stage_header_allowed("content-type"));
+        assert!(stage_header_allowed("range"));
+    }
+    #[test]
+    fn signed_objects_require_the_discovered_bucket_identity() {
+        let url=Url::parse("https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com/_mold/objects/a?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        assert!(!trusted_signed_object(&url, None));
+        assert!(trusted_signed_object(
+            &url,
+            Some(&url.origin().ascii_serialization())
+        ));
+        assert!(!trusted_signed_object(
+            &url,
+            Some("https://mold-relay-999999999999-us-east-1.s3.dualstack.us-east-1.amazonaws.com")
+        ));
     }
     #[test]
     fn legacy_mold_spa_is_positive_direct_discovery_evidence() {
@@ -196,11 +227,32 @@ fn signed_mold_s3(url: &Url) -> bool {
             .is_some_and(|v| v.len() == 64 && v.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn stage_header_allowed(name: &str) -> bool {
+    !name.starts_with("x-mold-viewer-")
+        && !matches!(
+            name,
+            "authorization"
+                | "cookie"
+                | "transfer-encoding"
+                | "connection"
+                | "x-mold-request-target"
+                | "x-api-key"
+                | "host"
+                | "content-length"
+                | "x-amz-content-sha256"
+        )
+}
+fn trusted_signed_object(url: &Url, expected: Option<&str>) -> bool {
+    signed_mold_s3(url)
+        && expected.is_some_and(|origin| url.origin().ascii_serialization() == origin)
+}
+
 #[derive(Clone)]
 pub(crate) struct RelayClient {
     client: Client,
     unsigned: Client,
     known: Arc<Mutex<HashMap<String, bool>>>,
+    object_origins: Arc<Mutex<HashMap<String, String>>>,
 }
 impl RelayClient {
     pub(crate) fn new(client: Client) -> Self {
@@ -211,6 +263,7 @@ impl RelayClient {
                 .build()
                 .expect("TLS client"),
             known: Default::default(),
+            object_origins: Default::default(),
         }
     }
     #[cfg(test)]
@@ -273,16 +326,38 @@ impl RelayClient {
                     );
                     body.extend_from_slice(&chunk);
                 }
-                classify_discovery_body(&content_type, marked, &body)?
+                let detected = classify_discovery_body(&content_type, marked, &body)?;
+                if detected {
+                    let info: serde_json::Value = serde_json::from_slice(&body)?;
+                    if let Some(value) = info["object_origin"].as_str() {
+                        let object = Url::parse(value).context("invalid relay object origin")?;
+                        ensure!(
+                            object.scheme() == "https"
+                                && object.username().is_empty()
+                                && object.password().is_none()
+                                && object.query().is_none()
+                                && object.fragment().is_none()
+                                && object.path() == "/",
+                            "invalid relay object origin"
+                        );
+                        self.object_origins
+                            .lock()
+                            .unwrap()
+                            .insert(key.clone(), object.origin().ascii_serialization());
+                    }
+                }
+                detected
             }
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => false,
             Ok(response) => anyhow::bail!(
                 "relay discovery failed (HTTP {})",
                 response.status().as_u16()
             ),
-            Err(_) => anyhow::bail!(
-                "relay discovery temporarily unavailable; retry before sending the request"
-            ),
+            Err(error) => {
+                return Err(error.without_url()).context(
+                    "relay discovery temporarily unavailable; retry before sending the request",
+                )
+            }
         };
         self.known.lock().unwrap().insert(key, value);
         Ok(value)
@@ -387,16 +462,7 @@ impl RelayRequest {
             let headers: HashMap<String, String> = request
                 .headers()
                 .iter()
-                .filter(|(key, _)| {
-                    !matches!(
-                        key.as_str(),
-                        "authorization"
-                            | "x-api-key"
-                            | "host"
-                            | "content-length"
-                            | "x-amz-content-sha256"
-                    )
-                })
+                .filter(|(key, _)| stage_header_allowed(key.as_str()))
                 .filter_map(|(key, value)| {
                     value
                         .to_str()
@@ -427,8 +493,15 @@ impl RelayRequest {
             );
             let put_url = Url::parse(grant["url"].as_str().context("missing relay upload URL")?)?;
             ensure!(
-                signed_mold_s3(&put_url)
-                    && put_url.username().is_empty()
+                trusted_signed_object(
+                    &put_url,
+                    self.client
+                        .object_origins
+                        .lock()
+                        .unwrap()
+                        .get(&origin.origin().ascii_serialization())
+                        .map(String::as_str)
+                ) && put_url.username().is_empty()
                     && put_url.password().is_none(),
                 "untrusted relay upload URL"
             );
@@ -478,6 +551,19 @@ impl RelayRequest {
             &origin,
             object["url"].as_str().context("missing relay object URL")?,
         )?;
+        ensure!(
+            url.origin() == origin.origin()
+                || trusted_signed_object(
+                    &url,
+                    self.client
+                        .object_origins
+                        .lock()
+                        .unwrap()
+                        .get(&origin.origin().ascii_serialization())
+                        .map(String::as_str)
+                ),
+            "untrusted relay object bucket"
+        );
         let fetched = self
             .client
             .unsigned
