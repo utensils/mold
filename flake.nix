@@ -631,6 +631,7 @@
               fileset = lib.fileset.unions [
                 ./package.json
                 ./bun.lock
+                ./relay/aws/package.json
                 ./desktop/package.json
                 ./web
                 ./studio
@@ -681,6 +682,7 @@
               fileset = lib.fileset.unions [
                 ./package.json
                 ./bun.lock
+                ./relay/aws/package.json
                 ./desktop
                 ./web/package.json
                 ./studio
