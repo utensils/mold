@@ -1,3 +1,4 @@
+import { setOriginApiKey } from "../lib/originAuth";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
@@ -5662,6 +5663,58 @@ describe("CreatePage 3-D mesh prints", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["mesh", "audio"])(
+    "restores %s from the authenticated serving origin through a media ticket",
+    async (kind) => {
+      const job = meshJob();
+      job.result!.image = "";
+      job.result!.filename = kind === "mesh" ? "chair.glb" : "sound.wav";
+      if (kind === "audio") {
+        delete job.result!.mesh_vertices;
+        job.result!.format = "wav";
+        job.result!.audio_sample_rate = 48000;
+      }
+      streamJobsRef.value = [job];
+      setOriginApiKey("origin-mesh-secret");
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({
+              token: "mesh-ticket",
+              expires_at: 1700000000,
+              auth_required: true,
+            }),
+          ),
+      );
+      globalThis.fetch = fetchMock;
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      try {
+        await flushPromises();
+        const src = String(
+          wrapper
+            .getComponent({ name: "ResultCanvas" })
+            .props(kind === "mesh" ? "resultMeshSrc" : "resultAudioSrc"),
+        );
+        expect(src).toContain(`/api/gallery/image/${job.result!.filename}`);
+        expect(src).toContain("media_token=mesh-ticket");
+        expect(src).not.toContain("origin-mesh-secret");
+        const request = fetchMock.mock.calls.find(([url]) =>
+          String(url).endsWith("/api/gallery/media-token"),
+        );
+        expect(request).toBeDefined();
+        expect(new Headers(request?.[1]?.headers).get("x-api-key")).toBe(
+          "origin-mesh-secret",
+        );
+        expect(request?.[1]?.redirect).toBe("error");
+      } finally {
+        wrapper.unmount();
+        globalThis.fetch = originalFetch;
+        setOriginApiKey("");
+      }
+    },
+  );
+
   it("writes the shared mesh caption under the print", async () => {
     vi.stubGlobal("URL", {
       ...URL,
@@ -5821,6 +5874,7 @@ function pageStubs() {
         "stage",
         "resultSrc",
         "resultMeshSrc",
+        "resultAudioSrc",
         "emptyGuidance",
       ],
       template:

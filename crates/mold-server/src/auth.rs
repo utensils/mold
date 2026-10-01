@@ -556,6 +556,11 @@ fn is_browser_bootstrap_read(method: &Method, path: &str) -> bool {
     if method != Method::GET && method != Method::HEAD {
         return false;
     }
+    let path = if path == "/" {
+        path
+    } else {
+        path.strip_suffix('/').unwrap_or(path)
+    };
     if matches!(
         path,
         "/" | "/index.html"
@@ -566,6 +571,10 @@ fn is_browser_bootstrap_read(method: &Method, path: &str) -> bool {
             | "/machines"
             | "/settings"
             | "/logo.png"
+            | "/favicon.ico"
+            | "/favicon.png"
+            | "/favicon.svg"
+            | "/apple-touch-icon.png"
     ) {
         return true;
     }
@@ -1027,6 +1036,11 @@ mod tests {
         for path in [
             "/",
             "/index.html",
+            "/favicon.ico",
+            "/favicon.svg",
+            "/apple-touch-icon.png",
+            "/create/",
+            "/machines/origin/",
             "/create",
             "/library",
             "/machines/origin",
@@ -1050,6 +1064,10 @@ mod tests {
         }
         for path in [
             "/api/status",
+            "/api/status/",
+            "/api/shutdown",
+            "/secrets.json",
+            "/.env",
             "/api/unknown",
             "/unknown",
             "/assets/../api/status",
@@ -1073,6 +1091,31 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+    }
+
+    #[test]
+    fn browser_bootstrap_matches_concrete_web_router_paths() {
+        let router = include_str!("../../../web/src/router.ts");
+        let mut checked = 0;
+        for line in router.lines() {
+            let Some((_, path)) = line.split_once("path: ") else {
+                continue;
+            };
+            let path = path.trim_start_matches('"');
+            let path = path.split('"').next().unwrap();
+            if path.contains("pathMatch") {
+                continue;
+            }
+            let path = path.replace(":id", "render-machine");
+            assert!(is_browser_bootstrap_read(&Method::GET, &path), "{path}");
+            assert!(is_browser_bootstrap_read(&Method::HEAD, &path), "{path}");
+            assert!(!is_browser_bootstrap_read(&Method::POST, &path), "{path}");
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "the router source must still contain concrete paths"
+        );
     }
 
     fn protected_test_app(auth_state: AuthState) -> axum::Router {
@@ -1164,16 +1207,20 @@ mod tests {
             .unwrap();
         let auth = Some(key_set);
 
-        let denied = pairing_test_app(auth)
-            .oneshot(
-                Request::post("/api/pairing/sessions")
-                    .header("x-api-key", paired)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        for peer in ["192.0.2.1:12345", "127.0.0.1:12345", "[::1]:12345"] {
+            let mut request = Request::post("/api/pairing/sessions")
+                .header("x-api-key", &paired)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let denied = pairing_test_app(auth.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{peer}");
+        }
     }
 
     #[tokio::test]
