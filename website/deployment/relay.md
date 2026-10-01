@@ -79,9 +79,12 @@ untrusted forwarding headers and block public `/metrics`. The standalone
 Production hosts require WSS. Plain WS is permitted only with the explicit
 `--allow-insecure-loopback` development flag and a loopback relay address.
 The gateway has bounded connection admission and attachment deadlines. Streams
-close after 300 seconds without application bytes in either direction;
+close after 3,600 seconds without application bytes in either direction;
 WebSocket heartbeats do not extend this deadline. Set `--idle-timeout-secs`
-(1–86,400) on both gateway and connector to change it. A
+(1–86,400) on both gateway and connector to change it. Synchronous generation
+requests send no response bytes while queued or rendering; if those requests
+can take longer than an hour, raise the timeout on both endpoints. Streaming
+queue events keep their connection active. A
 second connector is rejected while the first owns the machine address. Token
 rotation requires restarting the gateway and connector, ending old sessions.
 Mold sees loopback proxy peers, so enabled per-IP rate limits aggregate remote

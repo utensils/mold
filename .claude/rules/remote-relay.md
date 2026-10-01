@@ -12,7 +12,7 @@ semantics (SSE, Range/HEAD, uploads, keepalive and directional EOF), bounded
 admission/backpressure, one-use session-owned stream IDs and cancellation.
 Never replay mutations after reconnect. Bound stream inactivity using application
 bytes in either direction; WebSocket heartbeats never extend the deadline.
-The default is 300 seconds, configurable on gateway and connector.
+The default is 3,600 seconds, configurable on gateway and connector.
 
 Tokens are separate from Mold API keys, owner-only file/env inputs, never URLs
 or argument values or logs. Verify WSS except explicit localhost development.
