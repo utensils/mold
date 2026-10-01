@@ -1,5 +1,10 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 export const FRAME_LIMIT = 24 * 1024;
+export function failureCategory(error) {
+  return /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error?.name ?? "")
+    ? error.name
+    : "Error";
+}
 const LIVE = 90,
   CAPACITY = 32;
 const equal = (a, b) =>
@@ -21,7 +26,12 @@ export function validFrame(f) {
     );
   if (f.a === "eof") return validInt(f.seq);
   if (f.a === "ack")
-    return validInt(f.next) && validInt(f.credit) && f.credit <= 4;
+    return (
+      validInt(f.next) &&
+      validInt(f.credit) &&
+      f.credit <= 4 &&
+      validInt(f.ack_seq)
+    );
   return f.a === "accept" || f.a === "cancel";
 }
 export function createRouter({
@@ -252,7 +262,8 @@ export function createRouter({
       const status = await message(id, event.body);
       if (status === 400 || status === 403) await close(id);
       return { statusCode: status };
-    } catch {
+    } catch (error) {
+      console.error("Mold relay router failure", failureCategory(error));
       return { statusCode: 503 };
     }
   };

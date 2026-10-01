@@ -13,6 +13,8 @@ export class RelayDuplex extends Duplex {
       allowHalfOpen: true,
     });
     Object.assign(this, { sid, rid, send, gapMs, retryMs });
+    this.ackOut = 0;
+    this.lastAckSeq = -1;
     this.out = 0;
     this.next = 0;
     this.credit = 4;
@@ -86,6 +88,7 @@ export class RelayDuplex extends Duplex {
         sid: this.sid,
         rid: this.rid,
         next: this.next,
+        ack_seq: this.ackOut++,
         credit: this.blocked ? 0 : Math.max(0, 4 - this.incoming.size),
       });
   }
@@ -105,6 +108,8 @@ export class RelayDuplex extends Duplex {
     }
     if (frame.a === "accept") return;
     if (frame.a === "ack") {
+      if (frame.ack_seq <= this.lastAckSeq) return;
+      this.lastAckSeq = frame.ack_seq;
       if (frame.next > this.out) {
         this.destroy(new Error("Invalid relay acknowledgement"));
         return;

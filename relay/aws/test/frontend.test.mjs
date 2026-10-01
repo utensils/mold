@@ -158,3 +158,108 @@ test("streaming Lambda metadata is emitted even for JSON and empty HEAD response
     globalThis.awslambda = before;
   }
 });
+test("missing keys never allocate a host stream and preflight204 has no body", async () => {
+  let calls = 0;
+  const frontend = createFrontend({
+    request: async () => {
+      calls++;
+      throw new Error("unexpected");
+    },
+  });
+  let out = writer();
+  await frontend(event("/api/events"), out);
+  assert.equal(out.status, 401);
+  assert.equal(calls, 0);
+  out = writer();
+  await frontend(event("/api/status", "OPTIONS"), out);
+  assert.equal(out.status, 204);
+  assert.equal(out.value(), "");
+  assert.equal(out.headers["access-control-max-age"], "600");
+});
+test("client disconnect during SSE backpressure releases its host session", async () => {
+  let closed = false;
+  const upstream = new Readable({
+    read() {
+      this.push(Buffer.alloc(4096));
+    },
+  });
+  Object.assign(upstream, {
+    headers: { "content-type": "text/event-stream" },
+    statusCode: 200,
+  });
+  const out = new Writable({
+    highWaterMark: 1,
+    write(chunk, encoding, done) {},
+  });
+  out.setMetadata = () => {};
+  const frontend = createFrontend({
+    request: async () => ({
+      response: upstream,
+      sid: "s",
+      close() {
+        closed = true;
+        upstream.destroy();
+      },
+    }),
+  });
+  const running = frontend(
+    event("/api/events", "GET", "", { "x-api-key": "fixture" }),
+    out,
+  );
+  setTimeout(() => out.destroy(), 20);
+  await Promise.race([
+    running,
+    new Promise((resolve, reject) =>
+      setTimeout(() => reject(new Error("host session leaked")), 200),
+    ),
+  ]);
+  assert.equal(closed, true);
+});
+test("media jobs persist object identity instead of signed credential URLs", async () => {
+  const rows = new Map();
+  let invoke;
+  const headers = { "x-api-key": "fixture" };
+  const frontend = createFrontend({
+    store: {
+      put: async (id, value) => rows.set(id, { ...value, revision: 1 }),
+      get: async (id) => rows.get(id),
+      cas: async (id, revision, value) => {
+        rows.set(id, { ...value, revision: 2 });
+        return true;
+      },
+    },
+    request: async () => ({
+      response: response("{}", { "content-length": "2" }),
+      sid: "epoch",
+      close() {},
+    }),
+    invoke: async (event) => {
+      invoke = event;
+    },
+    stage: async () => ({
+      key: "_mold/objects/fixture",
+      url: "https://secret.invalid/signed",
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+    }),
+    objectURL: async (key) => {
+      assert.equal(key, "_mold/objects/fixture");
+      return "https://fresh.invalid/signed";
+    },
+  });
+  let out = writer();
+  await frontend(
+    event(
+      "/_mold/relay/media",
+      "POST",
+      JSON.stringify({ path: "/api/gallery/image/a.png" }),
+      headers,
+    ),
+    out,
+  );
+  const id = JSON.parse(out.value()).relay.id;
+  await frontend(invoke, writer());
+  assert.equal(rows.get("media#" + id).url, undefined);
+  out = writer();
+  await frontend(event("/_mold/relay/media/" + id, "GET", "", headers), out);
+  assert.equal(JSON.parse(out.value()).url, "https://fresh.invalid/signed");
+});

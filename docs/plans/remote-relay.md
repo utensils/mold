@@ -28,7 +28,7 @@ IAM grants router only membership table operations and ManageConnections on its 
 
 Reuse the Zephra short Lambda invocation/message-routing pattern, not its lossy gap-skipping inbox: skipped byte frames corrupt HTTP. API Gateway supports text frames only. Each envelope carries version, session epoch, request ID, direction, sequence, cumulative acknowledgement and base64 payload. Cap decoded payload at 16 KiB and serialized JSON comfortably below 32 KiB. Use a bounded credit window (initially four frames), bounded out-of-order storage, digest-matching duplicate suppression and retransmission only within the same request/session. An unresolved gap, conflicting duplicate, reconnect or stale epoch terminates the request. Never resubmit a mutation on a replacement connection.
 
-Control/ACK frames have priority and a shared sender budget below the API throttle. Directional EOF preserves half-close; duplicate EOF/data-after-EOF is rejected. Cancellation tears down both sides. Heartbeats update short membership leases and do not extend application idle deadlines. Rejoin before API Gateway's two-hour cap. `$disconnect` conditionally clears only the current epoch. DynamoDB TTL is garbage collection, never authorization: explicitly check expiry. Use strongly consistent primary-key membership lookups rather than eventually consistent indexes.
+ACKs carry a monotonic `ack_seq`; reordered credit updates cannot close a newer open window. Control/ACK frames have priority and a shared sender budget below the API throttle. Request EOF is logical and does not half-close TCP before the response; duplicate EOF/data-after-EOF is rejected. Cancellation tears down both sides. Heartbeats update short membership leases and do not extend application idle deadlines. Rejoin before API Gateway's two-hour cap. `$disconnect` conditionally clears only the current epoch. DynamoDB TTL is garbage collection, never authorization: explicitly check expiry. Use strongly consistent primary-key membership lookups rather than eventually consistent indexes.
 
 Admission is conditional and bounded to 32 active frontend requests per host, allowing several SSE streams plus ordinary calls. No eight-guest Zephra limit. Lost-disconnect cleanup must reclaim expired guest leases without deleting a newer host epoch or leaking capacity. Offline/busy hosts return explicit 503, not a hanging HTTP request. Unauthorized enrollment returns 401/403 and is not retried indefinitely. Existing local gateway code may remain as a documented self-hosted development transport; production connect must explicitly select the AWS wire rather than infer it from an untrusted response.
 
@@ -84,3 +84,18 @@ Independent sub-agent approved the architecture after three blocking corrections
 ## Regional API Gateway review and live deployment pivot
 
 AWS rejected a new CloudFront distribution until account verification. An independent sub-agent reviewed the Regional REST alternative against current AWS documentation and approved direct AWS_PROXY STREAM integration, proxy-v1 event handling, 840-second completion/five-minute idle limits, dual-stack regional custom domain, and explicitly pinned private S3 signed URLs. The corrected plan above is authoritative. Remove only unused Mold CloudFront components/certificate created during this task; do not modify an existing distribution or contact AWS Support. Runtime code uses the documented write/pipeline then end behavior, including empty responses, so Lambda metadata framing is emitted; end(data) alone is not sufficient.
+
+## Operating cost example
+
+At AWS published x86 first-tier Lambda rates ($0.0000166667 per GB-second and
+$0.20 per million invocations), one 512 MiB frontend stream open for ten minutes
+costs about $0.005 in compute before any free allowance. Three concurrent
+read streams cost about $0.015 for that session, plus short router invocations,
+API Gateway REST/WebSocket usage, DynamoDB, S3 and transfer. An always-open
+stream is billable throughout its lifetime. Reserved concurrency caps work but
+is not an authentication control; missing-key requests are rejected before
+a host tunnel, while invalid nonempty keys still need the host's decision.
+WAF is optional after traffic evidence because it adds a fixed charge and can
+penalize shared NAT clients. Rates verified 2026-09-30 against
+[Lambda pricing](https://aws.amazon.com/lambda/pricing/) and
+[API Gateway pricing](https://aws.amazon.com/api-gateway/pricing/).

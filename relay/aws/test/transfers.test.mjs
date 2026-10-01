@@ -110,3 +110,31 @@ test("upload checksum header is signed rather than hoisted to query", async () =
   );
   assert.equal(url.searchParams.has("x-amz-checksum-sha256"), false);
 });
+test("consumed grants release admission without losing concurrent leases", async () => {
+  const { releaseUpload } = await import("../transfers.mjs");
+  let row = {
+    revision: 1,
+    leases: { consumed: 100, other: 100 },
+    expiresAt: 100,
+  };
+  let raced = false;
+  const storage = {
+    get: async () => structuredClone(row),
+    cas: async (id, rev, value) => {
+      if (!raced) {
+        raced = true;
+        row = {
+          ...row,
+          revision: 2,
+          leases: { ...row.leases, concurrent: 100 },
+        };
+        return false;
+      }
+      if (row.revision !== rev) return false;
+      row = { ...value, revision: rev + 1 };
+      return true;
+    },
+  };
+  await releaseUpload("consumed", storage);
+  assert.deepEqual(row.leases, { other: 100, concurrent: 100 });
+});

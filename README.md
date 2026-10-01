@@ -220,7 +220,9 @@ For access outside your network without opening the GPU host's inbound ports,
 use the optional [HTTPS reverse relay](https://utensils.io/mold/deployment/relay).
 Run `mold relay connect --transport aws` beside an authenticated server; every client uses the
 resulting HTTPS machine address with its existing API key or pairing flow.
-The trusted gateway can see traffic and publishes one machine per process.
+The trusted Lambda gateway can see traffic and publishes one machine per address.
+Authenticated servers allow their browser shell/assets to load before sign-in;
+API and media access still require their existing permissions.
 
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
 Add `--no-save` to keep one render out of a server's Library; the host still

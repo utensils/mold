@@ -174,9 +174,21 @@ export async function claimUpload(
     throw new Error("Upload already consumed");
   return entry;
 }
+export async function releaseUpload(id, storage = store) {
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const old = await storage.get("upload-admission");
+    if (!old || !old.leases?.[id]) return;
+    const leases = { ...old.leases };
+    delete leases[id];
+    if (await storage.cas("upload-admission", old.revision, { ...old, leases }))
+      return;
+  }
+  throw new Error("Upload admission release busy");
+}
 export async function consumeUpload(id, headers, sid) {
-  const entry = await claimUpload(id, headers, sid),
-    directory = await mkdtemp(join(tmpdir(), "mold-upload-")),
+  const entry = await claimUpload(id, headers, sid);
+  await releaseUpload(id);
+  const directory = await mkdtemp(join(tmpdir(), "mold-upload-")),
     path = join(directory, "body");
   let file;
   try {
@@ -220,6 +232,20 @@ export async function consumeUpload(id, headers, sid) {
       .catch(() => {});
     throw error;
   }
+}
+export async function objectURL(key, expiresIn = 900) {
+  if (
+    typeof key !== "string" ||
+    !/^_mold\/objects\/[a-f0-9-]+$/.test(key) ||
+    expiresIn <= 0 ||
+    expiresIn > 900
+  )
+    throw new Error("Invalid staged object identity");
+  return getSignedUrl(
+    s3,
+    new GetObjectCommand({ Bucket: bucket(), Key: key }),
+    { expiresIn },
+  );
 }
 export async function stageObject(
   stream,
@@ -295,5 +321,10 @@ export async function stageObject(
     new GetObjectCommand({ Bucket: bucket(), Key: key }),
     { expiresIn: 900 },
   );
-  return { url, expires_at: Math.floor(Date.now() / 1000) + 900, size: total };
+  return {
+    url,
+    key,
+    expires_at: Math.floor(Date.now() / 1000) + 900,
+    size: total,
+  };
 }

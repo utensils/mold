@@ -90,7 +90,9 @@ responses larger than 16 MiB, or with an unknown length, use private S3 objects;
 clients restore their original status and headers. Media players resolve short
 lived signed object URLs without sending Mold keys to S3. These URLs expire
 within 15 minutes; resolve media again to renew access. Staged objects are capped
-at 8 GiB. Gallery imports above the relay request cap require a direct connection. Static browser assets are served by the frontend from the private bucket.
+at 8 GiB as a storage guard; each transfer must still finish within 840 seconds.
+Throughput and concurrent use can require a direct connection for large files.
+Gallery imports above the relay request cap require a direct connection. Static browser assets are served by the frontend from the private bucket.
 
 A Lambda request is bounded by the platform's 15 minute limit. SSE connections
 close before that limit and clients reopen their read stream and reconcile state.

@@ -33,10 +33,26 @@ test("bounded sender waits for credit and sends EOF in sequence", async () => {
   socket.write(Buffer.alloc(6 * 16384));
   await tick();
   assert.equal(sent.filter((f) => f.a === "data").length, 4);
-  socket.receive({ a: "ack", v: 2, sid: "s", rid: "r", next: 4, credit: 4 });
+  socket.receive({
+    a: "ack",
+    v: 2,
+    sid: "s",
+    rid: "r",
+    next: 4,
+    credit: 4,
+    ack_seq: 0,
+  });
   await tick();
   assert.equal(sent.filter((f) => f.a === "data").length, 6);
-  socket.receive({ a: "ack", v: 2, sid: "s", rid: "r", next: 6, credit: 4 });
+  socket.receive({
+    a: "ack",
+    v: 2,
+    sid: "s",
+    rid: "r",
+    next: 6,
+    credit: 4,
+    ack_seq: 1,
+  });
   socket.end();
   await tick();
   assert.equal(sent.at(-1).a, "eof");
@@ -71,5 +87,29 @@ test("duplicate out-of-order frames cannot extend the missing sequence deadline"
   await new Promise((r) => setTimeout(r, 80));
   clearInterval(timer);
   assert.equal(socket.destroyed, true);
+  socket.destroy();
+});
+test("a reordered closed-window ACK cannot overwrite a newer open window", async () => {
+  const { socket } = fixture();
+  socket.on("error", () => {});
+  socket.receive({
+    a: "ack",
+    v: 2,
+    sid: "s",
+    rid: "r",
+    next: 0,
+    credit: 4,
+    ack_seq: 1,
+  });
+  socket.receive({
+    a: "ack",
+    v: 2,
+    sid: "s",
+    rid: "r",
+    next: 0,
+    credit: 0,
+    ack_seq: 0,
+  });
+  assert.equal(socket.credit, 4);
   socket.destroy();
 });

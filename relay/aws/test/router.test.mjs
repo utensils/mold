@@ -163,3 +163,16 @@ test("concurrent guest hello opens the host stream once", async () => {
   ]);
   assert.equal(f.delivered.filter((frame) => frame.a === "open").length, 1);
 });
+
+test("failure diagnostics expose only bounded error category, never details", async () => {
+  const { failureCategory } = await import("../router-core.mjs");
+  assert.equal(failureCategory(new Error("secret URL and token")), "Error");
+  assert.equal(
+    failureCategory({ name: "https://secret.invalid/?token=secret" }),
+    "Error",
+  );
+  assert.equal(
+    failureCategory({ name: "AccessDeniedException" }),
+    "AccessDeniedException",
+  );
+});

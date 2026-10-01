@@ -1,5 +1,5 @@
+import { failureCategory } from "./router-core.mjs";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 import { pipeline } from "node:stream/promises";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
@@ -10,6 +10,7 @@ import {
   prepareUpload,
   consumeUpload,
   stageObject,
+  objectURL,
   credentialDigest,
   MAX_BODY,
   THRESHOLD,
@@ -75,6 +76,7 @@ export function createFrontend(dependencies = {}) {
     prepareUpload,
     consumeUpload,
     stage: stageObject,
+    objectURL,
     shell: async (key) =>
       s3.send(
         new GetObjectCommand({
@@ -108,15 +110,17 @@ export function createFrontend(dependencies = {}) {
       "content-type": "application/json",
       ...headers,
     });
-    out.end(JSON.stringify(value));
+    out.end(status === 204 ? undefined : JSON.stringify(value));
     return out;
   };
   async function authenticated(headers) {
     credentialDigest(headers);
     const result = await deps.request({ path: "/api/status", headers });
     try {
+      let bytes = 0;
       for await (const chunk of result.response) {
-        /* Drain the small status response. */
+        bytes += chunk.length;
+        if (bytes > 1048576) throw new Error("Invalid host status response");
       }
       if (result.response.statusCode !== 200)
         throw new Error("Mold authentication refused");
@@ -168,10 +172,11 @@ export function createFrontend(dependencies = {}) {
         result.response,
         cleanHeaders(result.response.headers, { response: true }),
       );
+      const { url: unusedURL, ...facts } = object;
       await deps.store.put(`media#${event.id}`, {
         ...job,
         state: "ready",
-        ...object,
+        ...facts,
         expiresAt: object.expires_at,
       });
     } catch {
@@ -189,6 +194,7 @@ export function createFrontend(dependencies = {}) {
     let result,
       cleanup,
       hasOutput = false;
+    let mutationMayHaveExecuted = false;
     try {
       const request = normalizeEvent(event);
       if (request.method === "OPTIONS") {
@@ -205,6 +211,7 @@ export function createFrontend(dependencies = {}) {
             "access-control-allow-methods":
               "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
             "access-control-allow-headers": requested,
+            "access-control-max-age": "600",
           },
         );
         return;
@@ -224,6 +231,26 @@ export function createFrontend(dependencies = {}) {
           max_body_bytes: MAX_BODY,
           object_origin: objectOrigin(),
         });
+        return;
+      }
+      const readTicket =
+        ["GET", "HEAD"].includes(request.method) &&
+        /^\/api\/gallery\/(image|thumbnail|preview|assets|source-media)\//.test(
+          request.route,
+        ) &&
+        new URL(request.path, "https://mold.invalid").searchParams.has(
+          "media_token",
+        );
+      const publicClaim =
+        request.route === "/api/pairing/claim" && request.method === "POST";
+      if (
+        (request.route.startsWith("/api/") ||
+          request.route.startsWith("/_mold/relay/")) &&
+        !request.headers["x-api-key"] &&
+        !readTicket &&
+        !publicClaim
+      ) {
+        json(raw, 401, { error: "missing X-Api-Key header" });
         return;
       }
       if (
@@ -253,6 +280,9 @@ export function createFrontend(dependencies = {}) {
             sid,
           );
         cleanup = entry.cleanup;
+        mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
+          entry.method,
+        );
         result = await deps.request({
           method: entry.method,
           path: entry.path,
@@ -294,7 +324,19 @@ export function createFrontend(dependencies = {}) {
         json(raw, 200, {
           state: job.state === "working" ? "pending" : job.state,
           ...(job.state === "ready"
-            ? { url: job.url, expires_at: job.expires_at }
+            ? {
+                url: await deps.objectURL(
+                  job.key,
+                  Math.max(
+                    1,
+                    Math.min(
+                      900,
+                      job.expiresAt - Math.floor(Date.now() / 1000),
+                    ),
+                  ),
+                ),
+                expires_at: job.expires_at,
+              }
             : {}),
         });
         return;
@@ -320,7 +362,12 @@ export function createFrontend(dependencies = {}) {
         if (request.method === "HEAD") out.end();
         else await pipeline(shell.Body, out);
         return;
-      } else result = await deps.request(request);
+      } else {
+        mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
+          request.method,
+        );
+        result = await deps.request(request);
+      }
       const response = result.response,
         headers = cleanHeaders(response.headers, { response: true });
       if (
@@ -403,20 +450,31 @@ export function createFrontend(dependencies = {}) {
         );
         timer.unref();
         try {
-          for await (const chunk of response) {
-            if (out.destroyed || deadline) break;
-            if (!out.write(chunk)) await once(out, "drain");
-          }
-          if (!out.destroyed && !deadline) out.end();
+          await pipeline(response, out);
         } catch (error) {
           if (!deadline) throw error;
         } finally {
           clearTimeout(timer);
         }
       } else await pipeline(response, out);
-    } catch {
+    } catch (error) {
+      console.error("Mold relay frontend failure", failureCategory(error));
       if (!hasOutput)
-        json(raw, 503, { error: "Relay request unavailable or refused" });
+        json(
+          raw,
+          503,
+          {
+            error: "Relay request unavailable or refused",
+            request_state: mutationMayHaveExecuted
+              ? "outcome-unknown"
+              : "not-forwarded",
+          },
+          {
+            "x-mold-relay-request-state": mutationMayHaveExecuted
+              ? "outcome-unknown"
+              : "not-forwarded",
+          },
+        );
       else raw.destroy?.(new Error("Relay stream interrupted"));
     } finally {
       result?.close();
