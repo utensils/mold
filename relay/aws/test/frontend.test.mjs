@@ -440,3 +440,31 @@ test("health and public API documents forward instead of shell or admission401",
   }
   assert.deepEqual(paths, ["/health", "/api/docs", "/api/openapi.json"]);
 });
+test("encoded HEAD target preserves exact bytes on matching routed path", async () => {
+  let forwarded;
+  const frontend = createFrontend({
+    request: async (req) => {
+      forwarded = req;
+      return {
+        sid: "s",
+        response: response("", { "content-length": "0" }),
+        close() {},
+      };
+    },
+  });
+  const out = writer();
+  await frontend(
+    event("/api/gallery/image/a b.png", "HEAD", "", {
+      "x-api-key": "fixture",
+      "x-mold-request-target":
+        "/api/gallery/image/a%20b.png?media_token=fixture%2Bticket",
+    }),
+    out,
+  );
+  assert.equal(out.status, 200);
+  assert.equal(
+    forwarded.path,
+    "/api/gallery/image/a%20b.png?media_token=fixture%2Bticket",
+  );
+  assert.equal(forwarded.method, "HEAD");
+});
