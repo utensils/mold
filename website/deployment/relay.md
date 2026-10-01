@@ -84,14 +84,13 @@ terminate TLS and can see credentials and media. Enrollment and internal bridge
 tokens live in SSM SecureString, outside Terraform state. Public metrics are
 blocked. One enrolled host owns an address; another requires its own deployment.
 
-The shared clients stage requests larger than 2 MiB through private S3, preserving
-the existing 64 MiB request limit. Grants bind the original method, URL, headers,
+The shared clients stage requests larger than 2 MiB through private S3, with a 64 MiB relay request limit. Grants bind the original method, URL, headers,
 body checksum, host session and credential, and can be consumed once. Finite
 responses larger than 16 MiB, or with an unknown length, use private S3 objects;
 clients restore their original status and headers. Media players resolve short
 lived signed object URLs without sending Mold keys to S3. These URLs expire
 within 15 minutes; resolve media again to renew access. Staged objects are capped
-at 8 GiB. Static browser assets are served by the frontend from the private bucket.
+at 8 GiB. Gallery imports above the relay request cap require a direct connection. Static browser assets are served by the frontend from the private bucket.
 
 A Lambda request is bounded by the platform's 15 minute limit. SSE connections
 close before that limit and clients reopen their read stream and reconcile state.

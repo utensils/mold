@@ -88,6 +88,23 @@ export function validateObjectURL(value, origin) {
     throw new Error("Invalid media object URL");
   return url;
 }
+export async function uploadURL(
+  key,
+  checksum,
+  client = s3,
+  bucketName = bucket(),
+) {
+  return getSignedUrl(
+    client,
+    new PutObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      ContentType: "application/octet-stream",
+      ChecksumSHA256: checksum,
+    }),
+    { expiresIn: 900, unhoistableHeaders: new Set(["x-amz-checksum-sha256"]) },
+  );
+}
 export async function prepareUpload(value, headers, sid) {
   const spec = validateUpload(value),
     credential = credentialDigest(headers),
@@ -117,16 +134,7 @@ export async function prepareUpload(value, headers, sid) {
   }
   await store.put(`upload#${id}`, entry);
   const checksum = Buffer.from(spec.sha256, "hex").toString("base64");
-  const url = await getSignedUrl(
-    s3,
-    new PutObjectCommand({
-      Bucket: bucket(),
-      Key: key,
-      ContentType: "application/octet-stream",
-      ChecksumSHA256: checksum,
-    }),
-    { expiresIn: 900 },
-  );
+  const url = await uploadURL(key, checksum);
   return {
     id,
     url,

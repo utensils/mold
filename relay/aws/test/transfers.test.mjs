@@ -85,3 +85,28 @@ test("grant consumption is atomic, credential-bound and epoch-bound", async () =
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   await assert.rejects(claimUpload(id, headers, "epoch", storage, 1));
 });
+
+test("upload checksum header is signed rather than hoisted to query", async () => {
+  const { uploadURL } = await import("../transfers.mjs");
+  const { S3Client } = await import("@aws-sdk/client-s3");
+  const client = new S3Client({
+    region: "us-west-2",
+    credentials: { accessKeyId: "fixture", secretAccessKey: "fixture" },
+    useDualstackEndpoint: true,
+  });
+  const url = new URL(
+    await uploadURL(
+      "uploads/fixture",
+      "a".repeat(44),
+      client,
+      "mold-relay-042506291754-us-west-2",
+    ),
+  );
+  assert.ok(
+    url.searchParams
+      .get("X-Amz-SignedHeaders")
+      .split(";")
+      .includes("x-amz-checksum-sha256"),
+  );
+  assert.equal(url.searchParams.has("x-amz-checksum-sha256"), false);
+});
