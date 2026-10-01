@@ -222,3 +222,17 @@ it("refuses bodies above relay limits before issuing an upload grant", async () 
   ).rejects.toThrow("64 MiB");
   expect(fetch).toHaveBeenCalledOnce();
 });
+
+it("preserves direct JSON body representation while adding its digest", async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response("{}"));
+  vi.stubGlobal("fetch", fetch);
+  const body = JSON.stringify({ enabled: false });
+  await relayFetch("https://machine.example/api/devices/1", {
+    method: "PATCH",
+    body,
+  });
+  expect(fetch.mock.calls[0]?.[1]?.body).toBe(body);
+  expect(
+    new Headers(fetch.mock.calls[0]?.[1]?.headers).get("x-amz-content-sha256"),
+  ).toMatch(/^[a-f0-9]{64}$/);
+});

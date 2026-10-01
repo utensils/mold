@@ -626,6 +626,12 @@ describe("queue plan contract", () => {
           jobId: "job/1",
         },
       );
+      await vi.waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining("/api/generation-batches/batch-1"),
+          expect.anything(),
+        ),
+      );
       await vi.runAllTimersAsync();
       const outcome = await outcomePromise;
 
@@ -700,6 +706,12 @@ describe("queue plan contract", () => {
           jobId: "job/1",
         },
       );
+      await vi.waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining("/api/generation-batches/batch-1"),
+          expect.anything(),
+        ),
+      );
       await vi.runAllTimersAsync();
 
       await expect(outcomePromise).resolves.toMatchObject({
@@ -750,6 +762,12 @@ describe("queue plan contract", () => {
         clientBatchId: "client-1",
         jobId: "job/1",
       },
+    );
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/generation-batches/batch-1"),
+        expect.anything(),
+      ),
     );
     await vi.runAllTimersAsync();
 
