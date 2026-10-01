@@ -93,10 +93,25 @@ mod tests {
     }
     #[tokio::test]
     async fn discovery_connection_failure_is_not_cached_as_direct_mode() {
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();drop(listener);
-        let client=RelayClient::new(Client::new());let url=Url::parse(&format!("https://{address}/api/status")).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = RelayClient::new(Client::new());
+        let url = Url::parse(&format!("https://{address}/api/status")).unwrap();
         assert!(client.is_relay(&url).await.is_err());
-        assert!(!client.known.lock().unwrap().contains_key(&url.origin().ascii_serialization()));
+        assert!(!client
+            .known
+            .lock()
+            .unwrap()
+            .contains_key(&url.origin().ascii_serialization()));
+    }
+    #[test]
+    fn legacy_mold_spa_is_positive_direct_discovery_evidence() {
+        let html = "<!doctype html><meta name=\"description\" content=\"mold — local AI image and video studio.\"><title>mold — studio</title>";
+        assert!(!classify_discovery_body("text/html", false, html.as_bytes()).unwrap());
+        assert!(classify_discovery_body("text/html", true, html.as_bytes()).is_err());
+        assert!(classify_discovery_body("application/json", false, b"{}").is_err());
+        assert!(classify_discovery_body("text/html", false, b"<title>other</title>").is_err());
     }
     #[test]
     fn signed_object_handoff_stays_on_the_trusted_origin_and_prefix() {
@@ -242,23 +257,61 @@ impl RelayClient {
             .await
         {
             Ok(response) if response.status().is_success() => {
-                let info: serde_json::Value =
-                    response.json().await.context("invalid relay metadata")?;
-                ensure!(
-                    info["protocol"] == 2
-                        && info["upload_threshold"] == STAGE_THRESHOLD
-                        && info["max_body_bytes"] == MAX_BODY,
-                    "unsupported relay metadata"
-                );
-                true
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let marked = response.headers().contains_key("x-mold-relay-protocol");
+                let mut response = response;
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await.context("invalid relay metadata")? {
+                    ensure!(
+                        body.len() + chunk.len() <= 64 * 1024,
+                        "relay metadata exceeds limit"
+                    );
+                    body.extend_from_slice(&chunk);
+                }
+                classify_discovery_body(&content_type, marked, &body)?
             }
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => false,
-            Ok(response) => anyhow::bail!("relay discovery failed (HTTP {})", response.status().as_u16()),
-            Err(_) => anyhow::bail!("relay discovery temporarily unavailable; retry before sending the request"),
+            Ok(response) => anyhow::bail!(
+                "relay discovery failed (HTTP {})",
+                response.status().as_u16()
+            ),
+            Err(_) => anyhow::bail!(
+                "relay discovery temporarily unavailable; retry before sending the request"
+            ),
         };
         self.known.lock().unwrap().insert(key, value);
         Ok(value)
     }
+}
+
+fn classify_discovery_body(content_type: &str, marked: bool, body: &[u8]) -> Result<bool> {
+    if content_type
+        .split(';')
+        .next()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/html"))
+        && !marked
+    {
+        let html = std::str::from_utf8(body).context("invalid direct server metadata")?;
+        ensure!(
+            html.contains("<title>mold — studio</title>")
+                && html.contains("mold — local AI image and video studio."),
+            "unrecognized relay discovery HTML"
+        );
+        return Ok(false);
+    }
+    let info: serde_json::Value = serde_json::from_slice(body).context("invalid relay metadata")?;
+    ensure!(
+        info["protocol"] == 2
+            && info["upload_threshold"] == STAGE_THRESHOLD
+            && info["max_body_bytes"] == MAX_BODY,
+        "unsupported relay metadata"
+    );
+    Ok(true)
 }
 
 pub(crate) struct RelayRequest {
