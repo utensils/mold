@@ -1,3 +1,5 @@
+import { relayFetch as fetch } from "./relayTransport";
+
 export interface ApiTarget {
   baseUrl: string;
   apiKey: string | null;

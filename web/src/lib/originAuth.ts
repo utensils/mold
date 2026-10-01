@@ -1,4 +1,5 @@
 import type { InjectionKey } from "vue";
+import { relayFetch } from "@studio/api/relayTransport";
 export const ORIGIN_ACCESS_CHANGE_KEY: InjectionKey<() => void> = Symbol(
   "mold.origin.change-key",
 );
@@ -44,8 +45,8 @@ export function originAuthenticatedFetch(
       injected = true;
     }
   }
-  if (!headers.has("x-api-key")) return globalThis.fetch(input, init);
-  return globalThis.fetch(input, {
+  if (!headers.has("x-api-key")) return relayFetch(input, init);
+  return relayFetch(input, {
     ...init,
     ...(injected ? { headers } : {}),
     redirect: "error",

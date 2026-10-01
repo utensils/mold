@@ -1,4 +1,8 @@
 import { originAuthenticatedFetch as fetch } from "./originAuth";
+import {
+  resolveRelayMedia,
+  type RelayMediaTicket,
+} from "@studio/api/relayMedia";
 /*
  * Multi-host gallery media (Task #22). `<img>`/`<video>` elements cannot send
  * an `x-api-key` header and a durable key must never enter a URL, so remote
@@ -266,7 +270,7 @@ function trimThumbnailCache(): void {
   }
 }
 
-interface GalleryMediaTicket {
+interface GalleryMediaTicket extends RelayMediaTicket {
   token: string | null;
   expires_at: number | null;
   auth_required?: boolean;
@@ -305,6 +309,12 @@ export async function resolveStreamableSrc(
   }
   if (!res.ok) throw new Error(`media-token failed: ${res.status}`);
   const ticket = (await res.json()) as GalleryMediaTicket;
+  const relayUrl = await resolveRelayMedia(
+    ticket,
+    hostMediaBase(host),
+    authHeaders(host),
+  );
+  if (relayUrl) return relayUrl;
   if (ticket.auth_required === false) return directUrl;
   if (!ticket.token || !Number.isSafeInteger(ticket.expires_at)) {
     throw new Error("host returned an invalid gallery media ticket");
