@@ -99,6 +99,14 @@ export function createFrontend(dependencies = {}) {
     ...dependencies,
   };
   const output = (raw, status, headers) => {
+    if (
+      headers?.["cache-control"] &&
+      !/(?:^|,)\s*(?:private|no-store|no-cache)(?:\s*(?:,|=|$))/i.test(
+        headers["cache-control"],
+      )
+    ) {
+      headers = { ...headers, "cache-control": "no-store" };
+    }
     const out =
       typeof globalThis.awslambda?.HttpResponseStream?.from === "function"
         ? awslambda.HttpResponseStream.from(raw, {
