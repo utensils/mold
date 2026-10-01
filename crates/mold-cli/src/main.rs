@@ -2733,6 +2733,12 @@ Manage pods manually:
         action: RunpodAction,
     },
 
+    /// Connect a machine to an optional HTTPS reverse relay, or run a gateway
+    Relay {
+        #[command(subcommand)]
+        action: mold_relay::RelayAction,
+    },
+
     /// Deploy and manage private mold servers on Lambda Cloud
     #[command(after_long_help = "\
 Set up once:
@@ -3978,6 +3984,7 @@ async fn run() -> anyhow::Result<()> {
                 commands::runpod::run_run(opts).await?
             }
         },
+        Commands::Relay { action } => mold_relay::run(action).await?,
         Commands::Lambda { action } => match action {
             LambdaAction::Doctor => commands::lambda::run_doctor().await?,
             LambdaAction::Availability { json } => commands::lambda::run_availability(json).await?,
@@ -4460,6 +4467,44 @@ mod tests {
     /// Parse CLI args from a vector (simulates command-line invocation).
     fn parse(args: &[&str]) -> Cli {
         try_parse(args).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn relay_connector_uses_a_token_file_and_explicit_loopback_target() {
+        let cli = parse(&[
+            "relay",
+            "connect",
+            "--relay-url",
+            "wss://relay.example",
+            "--target",
+            "127.0.0.1:8765",
+            "--token-file",
+            "/private/relay-token",
+        ]);
+        let Commands::Relay {
+            action: mold_relay::RelayAction::Connect(args),
+        } = cli.command
+        else {
+            panic!("expected relay connector");
+        };
+        assert_eq!(args.relay_url, "wss://relay.example");
+        assert_eq!(args.target, "127.0.0.1:8765".parse().unwrap());
+        assert_eq!(
+            args.token_file,
+            Some(std::path::PathBuf::from("/private/relay-token"))
+        );
+        assert!(!args.allow_insecure_loopback);
+        let (files, _) = on_large_stack(path_completion_tokens);
+        assert!(files.contains(&"--token-file".to_owned()));
+        assert!(try_parse(&[
+            "relay",
+            "connect",
+            "--relay-url",
+            "wss://relay.example",
+            "--token",
+            "secret"
+        ])
+        .is_err());
     }
 
     /// The three remote families this PR adds take `--host` like every other

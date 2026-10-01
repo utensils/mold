@@ -29,6 +29,10 @@ MOLD_RELAY_TOKEN_FILE=/absolute/path/relay-token mold relay connect \
   --relay-url wss://mold-link.urandom.io --target 127.0.0.1:7680
 ```
 
+On Windows, where this connector cannot verify file ACLs, supply the token in
+`MOLD_RELAY_TOKEN` through your service environment instead. Never pass its
+value as a CLI argument. On Linux/macOS prefer the owner-only token file.
+
 The enrollment token admits the **host** to the gateway; it is not a Mold API
 key. Clients never need it. The connector accepts only a numeric loopback
 server address and refuses a server whose anonymous `/api/status` does not
