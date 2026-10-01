@@ -39,6 +39,7 @@ export function createRouter({
   tokens,
   post,
   close,
+  checkConnection,
   now = () => Math.floor(Date.now() / 1000),
 }) {
   async function updateHost(change) {
@@ -127,8 +128,9 @@ export function createRouter({
     }
     return 200;
   }
-  async function leave(id, cause = "disconnect") {
+  async function leave(id, cause = "disconnect", expectedSid) {
     const connection = await store.get(`connection#${id}`);
+    if (expectedSid && connection?.sid !== expectedSid) return;
     await store.remove(`connection#${id}`);
     if (!connection) return;
     let affected;
@@ -342,7 +344,41 @@ export function createRouter({
       await post(target, { ...safe, from: id });
     } catch (error) {
       if (error?.$metadata?.httpStatusCode === 410) {
-        await leave(target, "post-gone");
+        console.warn(
+          "Mold relay post gone",
+          connection.role,
+          frame.a,
+          target,
+          error.$metadata?.httpStatusCode,
+          /^[A-Za-z0-9-]{1,128}$/.test(error.$metadata?.requestId ?? "")
+            ? error.$metadata.requestId
+            : "unknown",
+        );
+        if (target === host.connectionId) {
+          const started = Date.now();
+          let confirmedGone = false;
+          let category = "unavailable";
+          try {
+            if (checkConnection) {
+              await checkConnection(target);
+              category = "alive";
+            }
+          } catch (checkError) {
+            confirmedGone = checkError?.$metadata?.httpStatusCode === 410;
+            category = confirmedGone ? "gone" : "transient";
+          }
+          console.warn(
+            "Mold relay connection verification",
+            category,
+            target,
+            Date.now() - started,
+          );
+          if (confirmedGone)
+            await leave(target, "post-gone-confirmed", host.sid);
+        } else {
+          await leave(target, "post-gone", host.sid);
+        }
+        // Never replay application mutations after uncertain delivery.
         return connection.role === "host" ? 200 : 503;
       }
       throw error;

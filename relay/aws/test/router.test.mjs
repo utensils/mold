@@ -39,6 +39,7 @@ function fixture(options = {}) {
         await options.post?.(id, frame);
         delivered.push({ id, ...frame });
       },
+      checkConnection: options.checkConnection,
       close: async (id) => {
         closed.push(id);
       },
@@ -383,4 +384,73 @@ test("replacement host resets readiness and stale hello cannot publish it", asyn
     403,
   );
   assert.equal(f.rows.get("host").ready, false);
+});
+
+for (const outcome of ["alive", "gone", "transient"]) {
+  test(`host Post410 confirms ${outcome} before eviction`, async () => {
+    let fail = false;
+    const f = fixture({
+      post: async (id) => {
+        if (fail && id === "h") throw { $metadata: { httpStatusCode: 410 } };
+      },
+      checkConnection: async () => {
+        if (outcome !== "alive")
+          throw {
+            $metadata: { httpStatusCode: outcome === "gone" ? 410 : 503 },
+          };
+      },
+    });
+    await connect(f.router, "h", "host", "host-test");
+    await send(f.router, "h", { a: "hello", v: 2 });
+    await connect(f.router, "g", "frontend", "frontend-test");
+    await send(f.router, "g", { a: "hello", v: 2 });
+    fail = true;
+    const result = await send(f.router, "g", {
+      a: "cancel",
+      v: 2,
+      sid: f.rows.get("host").sid,
+      rid: "g",
+    });
+    assert.equal(result.statusCode, 503);
+    assert.equal(f.rows.has("connection#h"), outcome !== "gone");
+    assert.equal(f.rows.get("host").expiresAt > 100, outcome !== "gone");
+    assert.deepEqual(f.closed, []);
+  });
+}
+test("confirmed host gone cannot evict a replacement epoch", async () => {
+  let fail = false;
+  let f;
+  f = fixture({
+    post: async (id) => {
+      if (fail && id === "h") throw { $metadata: { httpStatusCode: 410 } };
+    },
+    checkConnection: async () => {
+      const current = f.rows.get("host");
+      f.rows.set("host", {
+        ...current,
+        sid: "replacement",
+        connectionId: "new",
+      });
+      f.rows.set("connection#new", {
+        role: "host",
+        sid: "replacement",
+        expiresAt: 190,
+      });
+      throw { $metadata: { httpStatusCode: 410 } };
+    },
+  });
+  await connect(f.router, "h", "host", "host-test");
+  await send(f.router, "h", { a: "hello", v: 2 });
+  await connect(f.router, "g", "frontend", "frontend-test");
+  await send(f.router, "g", { a: "hello", v: 2 });
+  const sid = f.rows.get("host").sid;
+  fail = true;
+  assert.equal(
+    (await send(f.router, "g", { a: "cancel", v: 2, sid, rid: "g" }))
+      .statusCode,
+    503,
+  );
+  assert.equal(f.rows.get("host").sid, "replacement");
+  assert.equal(f.rows.get("host").expiresAt, 190);
+  assert.equal(f.rows.has("connection#new"), true);
 });

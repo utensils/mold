@@ -2,6 +2,7 @@ import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
   DeleteConnectionCommand,
+  GetConnectionCommand,
 } from "@aws-sdk/client-apigatewaymanagementapi";
 import { store, parameter } from "./aws-store.mjs";
 import { createRouter } from "./router-core.mjs";
@@ -21,6 +22,9 @@ export const handler = createRouter({
         Data: Buffer.from(JSON.stringify(frame)),
       }),
     );
+  },
+  checkConnection: async (id) => {
+    await api.send(new GetConnectionCommand({ ConnectionId: id }));
   },
   close: async (id) => {
     try {
