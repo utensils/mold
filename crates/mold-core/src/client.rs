@@ -322,6 +322,24 @@ impl MoldClient {
         req: &GenerateRequest,
         progress: Option<&tokio::sync::mpsc::UnboundedSender<SseProgressEvent>>,
     ) -> Result<reqwest::Response> {
+        self.relay_generation_response_inner(req, progress)
+            .await
+            .map_err(|error| {
+                if Self::is_model_not_found(&error) {
+                    error
+                } else {
+                    // A relay mutation may have committed even when its response
+                    // was lost. A transport source would authorize local fallback.
+                    anyhow::anyhow!("{error:#}")
+                }
+            })
+    }
+
+    async fn relay_generation_response_inner(
+        &self,
+        req: &GenerateRequest,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<SseProgressEvent>>,
+    ) -> Result<reqwest::Response> {
         anyhow::ensure!(req.save_to_gallery != Some(false), "long relay generation requires saved output; no-save jobs cannot be recovered after the Lambda deadline");
         anyhow::ensure!(
             self.gallery_persists_outputs().await != Some(false),
@@ -5665,6 +5683,23 @@ mod tests {
             .unwrap();
         assert_eq!(response.headers()["x-mold-seed-used"], "42");
         assert_eq!(response.bytes().await.unwrap(), &b"png"[..]);
+    }
+
+    #[tokio::test]
+    async fn uncertain_relay_admission_never_authorizes_local_replay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = MoldClient::new(&format!("http://{address}"));
+        let error = client
+            .relay_generation_response(&stream_request(), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("reconcile client batch"));
+        assert_eq!(
+            crate::control::classify_generate_error(&error),
+            crate::control::GenerateServerAction::SurfaceError
+        );
     }
 
     #[tokio::test]
