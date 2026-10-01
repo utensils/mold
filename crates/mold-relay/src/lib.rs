@@ -30,6 +30,7 @@ const LIMIT: usize = 64;
 const ATTACH: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const LIVENESS: Duration = Duration::from_secs(45);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Application-byte inactivity limit; heartbeat traffic does not extend it.
 #[derive(Clone, Copy)]
 pub struct RelayOptions {
@@ -38,7 +39,7 @@ pub struct RelayOptions {
 impl Default for RelayOptions {
     fn default() -> Self {
         Self {
-            idle_timeout: Duration::from_secs(300),
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
         }
     }
 }
@@ -65,7 +66,7 @@ pub struct ServeArgs {
     #[arg(long, env = "MOLD_RELAY_TOKEN_FILE", value_hint = clap::ValueHint::FilePath)]
     pub token_file: Option<PathBuf>,
     /// Close streams without application bytes for this long (heartbeats excluded).
-    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    #[arg(long, default_value_t = DEFAULT_IDLE_TIMEOUT.as_secs(), value_parser = clap::value_parser!(u64).range(1..=86400))]
     pub idle_timeout_secs: u64,
 }
 #[derive(Args)]
@@ -78,7 +79,7 @@ pub struct ConnectArgs {
     #[arg(long, env = "MOLD_RELAY_TOKEN_FILE", value_hint = clap::ValueHint::FilePath)]
     pub token_file: Option<PathBuf>,
     /// Close streams without application bytes for this long (heartbeats excluded).
-    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    #[arg(long, default_value_t = DEFAULT_IDLE_TIMEOUT.as_secs(), value_parser = clap::value_parser!(u64).range(1..=86400))]
     pub idle_timeout_secs: u64,
     #[arg(long)]
     pub allow_insecure_loopback: bool,
@@ -868,6 +869,13 @@ mod regression_tests {
             input_tx,
             output_rx,
         )
+    }
+    #[test]
+    fn default_idle_budget_allows_one_hour_synchronous_work() {
+        assert_eq!(
+            RelayOptions::default().idle_timeout,
+            Duration::from_secs(3600)
+        );
     }
     #[tokio::test]
     async fn exhausted_notice_queue_returns_http_unavailable() {
