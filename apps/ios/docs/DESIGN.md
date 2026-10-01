@@ -459,7 +459,7 @@ enabled.
 | Compact trailing | Progress ring |
 | Minimal | Progress ring |
 | Expanded | Leading: 44 pt preview thumbnail (App Group file). Trailing: `Text(timerInterval:)` ETA, in mono. Centre: the sentence. Bottom: the prompt (2 lines), a linear bar, "denoise 18/28 · workstation" in mono, and a Stop button (`LiveActivityIntent`). |
-| Lock Screen | The same content as Expanded |
+| Lock Screen | Translucent system-tinted card: 48 pt preview beside an app/status/prompt stack and a 44 pt circular Stop control. Full-width progress bar with separate step/ETA labels; proportional machine text and waiting count share the footer. `ViewThatFits` drops secondary content at large text sizes; 128 pt content plus 16 pt padding fits the system's 160 pt limit. |
 | Finished | Final thumbnail, "Finished on workstation" and View; dismissed after 15 minutes |
 
 **Honesty rule: the server has no push.**
@@ -589,7 +589,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 | Queue | Thumbnail beside text | same | same | Thumbnail above text; held-row buttons stacked full width; ETA on its own line |
 | Machine card | Dense | Dense | Figures wrap | Every label/value pair stacks; gauge full width; address wraps |
 | Models row | One line | Size trails | Size trails | Name, then sentence, then size, stacked; Get full width |
-| Live Activity / widgets | System-capped | | | `ViewThatFits` drops the mono line first |
+| Live Activity / widgets | System-capped | | | `ViewThatFits` drops secondary content first |
 
 ## 7. Microcopy
 

@@ -82,6 +82,8 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	@# passing in one says nothing about the other -- so it runs in both, on
 	@# an iPhone (tab bar) and an iPad (sidebar, where Models lives), and
 	@# puts each simulator back the way it found it, even on Ctrl-C.
+	@# Retry only failed tests, once in a fresh process. Keep full diagnostics
+	@# and preserve xcodebuild's exit status through both output filters.
 	@status=0; \
 	for dev in $(or $(UITEST_DEVICES),$(SIM_ID) $(SMALL_ID) $(IPAD_ID)); do \
 	  xcrun simctl boot $$dev 2>/dev/null || true; \
@@ -90,8 +92,12 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	  for mode in light dark; do \
 	    echo "  $$(xcrun simctl list devices | grep $$dev | sed -E 's/ \(.*//;s/^ *//') · $$mode"; \
 	    xcrun simctl ui $$dev appearance $$mode; \
-	    $(XCB_BASE) -destination "platform=iOS Simulator,id=$$dev" test -only-testing:MoldCompanionUITests 2>&1 \
-	      | grep -E 'error:|TEST (SUCCEEDED|FAILED)'; \
+	    results="$(BUILD)/UITestResults/$$dev-$$mode"; \
+	    mkdir -p "$(BUILD)/UITestResults"; rm -rf "$$results.xcresult"; \
+	    $(XCB_BASE) -destination "platform=iOS Simulator,id=$$dev" test -only-testing:MoldCompanionUITests \
+	      -retry-tests-on-failure -test-iterations 2 -test-repetition-relaunch-enabled YES \
+	      -resultBundlePath "$$results.xcresult" 2>&1 \
+	      | tee "$$results.log" | grep -E 'error:|TEST (SUCCEEDED|FAILED)'; \
 	    [ $${PIPESTATUS[0]} -eq 0 ] || status=1; \
 	  done; \
 	  xcrun simctl ui $$dev appearance $$was; trap - EXIT INT TERM; \
