@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRouter } from "../router-core.mjs";
-function fixture() {
+function fixture(options = {}) {
   const rows = new Map();
   const delivered = [];
   const closed = [];
@@ -34,6 +34,7 @@ function fixture() {
       now: () => now,
       tokens: async () => ({ host: "host-test", frontend: "frontend-test" }),
       post: async (id, frame) => {
+        await options.post?.(id, frame);
         delivered.push({ id, ...frame });
       },
       close: async (id) => {
@@ -201,4 +202,29 @@ test("late host frames after guest disconnect do not evict the enrolled host", a
   assert.equal(reply.statusCode, 200);
   assert.deepEqual(f.closed, []);
   assert.equal(f.rows.get("host").connectionId, "h");
+});
+test("vanished guest during delivery drops harmlessly without host error packet", async () => {
+  let vanished = false;
+  const f = fixture({
+    post: async (id) => {
+      if (vanished && id === "g") throw { $metadata: { httpStatusCode: 410 } };
+    },
+  });
+  await connect(f.router, "h", "host", "host-test");
+  await connect(f.router, "g", "frontend", "frontend-test");
+  await send(f.router, "g", { a: "hello", v: 2 });
+  const sid = f.rows.get("host").sid;
+  vanished = true;
+  const reply = await send(f.router, "h", {
+    a: "data",
+    v: 2,
+    sid,
+    rid: "g",
+    seq: 0,
+    d: "YQ==",
+  });
+  assert.equal(reply.statusCode, 200);
+  assert.equal(f.rows.get("host").connectionId, "h");
+  assert.equal(f.rows.has("connection#g"), false);
+  assert.equal(f.closed.includes("h"), false);
 });
