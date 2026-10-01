@@ -4,6 +4,7 @@ import { createRouter } from "../router-core.mjs";
 function fixture() {
   const rows = new Map();
   const delivered = [];
+  const closed = [];
   let now = 100;
   const store = {
     async get(id) {
@@ -24,6 +25,7 @@ function fixture() {
   return {
     rows,
     delivered,
+    closed,
     advance(n) {
       now += n;
     },
@@ -34,7 +36,9 @@ function fixture() {
       post: async (id, frame) => {
         delivered.push({ id, ...frame });
       },
-      close: async () => {},
+      close: async (id) => {
+        closed.push(id);
+      },
     }),
   };
 }
@@ -175,4 +179,26 @@ test("failure diagnostics expose only bounded error category, never details", as
     failureCategory({ name: "AccessDeniedException" }),
     "AccessDeniedException",
   );
+});
+
+test("late host frames after guest disconnect do not evict the enrolled host", async () => {
+  const f = fixture();
+  await connect(f.router, "h", "host", "host-test");
+  await connect(f.router, "g", "frontend", "frontend-test");
+  const sid = f.rows.get("host").sid;
+  await f.router({
+    requestContext: { routeKey: "$disconnect", connectionId: "g" },
+  });
+  const reply = await send(f.router, "h", {
+    a: "ack",
+    v: 2,
+    sid,
+    rid: "g",
+    next: 1,
+    credit: 4,
+    ack_seq: 1,
+  });
+  assert.equal(reply.statusCode, 410);
+  assert.deepEqual(f.closed, []);
+  assert.equal(f.rows.get("host").connectionId, "h");
 });
