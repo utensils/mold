@@ -288,7 +288,7 @@ async fn session(
                     let Ok(permit)=capacity.clone().try_acquire_owned() else {let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));continue;};
                     let (tx,rx)=mpsc::channel(16);requests.insert(rid.clone(),tx);
                     let sid=sid.clone();let controls=control_tx.clone();let data=data_tx.clone();let stop=cancel.child_token();
-                    tasks.spawn(async move {let _permit=permit;let _=request_stream(target,(&sid,&rid),rx,controls.clone(),data,stop,options).await;let _=controls.try_send(Frame::new("cancel",&sid,&rid));rid});
+                    tasks.spawn(async move {let _permit=permit;if request_stream(target,(&sid,&rid),rx,controls.clone(),data,stop,options).await.is_err() { let _=controls.try_send(Frame::new("cancel",&sid,&rid)); } rid});
                 } else if let Some(tx)=requests.get(&rid) {
                     if tx.try_send(frame).is_err(){requests.remove(&rid);let _=control_tx.try_send(Frame::new("cancel",&sid,&rid));}
                 }
@@ -464,7 +464,11 @@ mod tests {
             let mut eof=Frame::new("eof","epoch","guest");eof.seq=Some(2);socket.send(AxMessage::Text(serde_json::to_string(&eof).unwrap().into())).await.unwrap();
             let mut response=Vec::new();let mut next=0;
             loop{let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("response transport closed")};let frame=Frame::parse(&text).unwrap();if frame.a=="data"||frame.a=="eof"{assert_eq!(frame.seq,Some(next));next+=1;if let Some(data)=frame.d{response.extend(STANDARD.decode(data).unwrap());}let mut ack=Frame::new("ack","epoch","guest");ack.next=Some(next);ack.credit=Some(4);socket.send(AxMessage::Text(serde_json::to_string(&ack).unwrap().into())).await.unwrap();if frame.a=="eof"{break;}}}
-            assert!(response.ends_with(b"payload"));if let Some(tx)=done_tx.lock().await.take(){let _=tx.send(());}
+            assert!(response.ends_with(b"payload"));
+            while let Ok(Some(Ok(AxMessage::Text(text)))) = tokio::time::timeout(Duration::from_millis(100), socket.recv()).await {
+                assert_ne!(Frame::parse(&text).unwrap().a, "cancel", "successful EOF must not abort a frontend that is still consuming the response");
+            }
+            if let Some(tx)=done_tx.lock().await.take(){let _=tx.send(());}
         })}}));
         let stop = cancel.clone();
         tokio::spawn(async move {
