@@ -44,6 +44,8 @@ URLs, command arguments, repository files or deployment logs.
 `mold relay connect` stays running and reconnects after a network interruption.
 In-flight requests fail when their connection drops; the relay never replays a
 mutation. Accepted generation jobs remain owned by the host's durable queue.
+Set `MOLD_RELAY_DIAGNOSTICS=1` for static connection/reconnect categories during
+troubleshooting; diagnostics never include tokens, headers, URLs or raw frames.
 Stop the connector to withdraw remote access. A sleeping or offline host is
 unavailable; the relay does not supply a cloud GPU fallback.
 

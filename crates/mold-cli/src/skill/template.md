@@ -97,4 +97,5 @@ recovery and requires saved output; `--no-save` is refused before admission.
 `mold relay serve` remains a direct local-development gateway. One
 gateway publishes one machine. The proxy can see credentials/media; do not
 claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
+Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
 See the deployment guide for safe TLS, streaming and metrics routing.
