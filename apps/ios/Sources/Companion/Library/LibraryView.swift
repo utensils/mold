@@ -60,6 +60,9 @@ struct LibraryView: View {
         .modifier(ShelfTitleMenu(enabled: fixedScope == nil,
                                  scope: scope, choose: setScope, query: $query))
         .toolbar { toolbar(showing) }
+        // A modal owns navigation while open; keep the presenting floating
+        // tab chrome out of its layout and restore it on dismissal.
+        .toolbarVisibility(managingCollections ? .hidden : .automatic, for: .tabBar)
         .sheet(isPresented: $managingCollections) {
             CollectionsSheet { scope in
                 if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }

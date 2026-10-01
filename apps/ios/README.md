@@ -153,6 +153,7 @@ including hidden ones, and offers **Hide from All Prints**. Hiding or showing a
 collection updates every machine holding it. Hidden collections remain directly
 accessible from the shelf picker and sidebar, while their prints stay out of
 the general grid, including when another machine holds the tile’s leading copy.
+While Manage Collections is open, the main tab chrome is hidden. Dismissing the sheet restores the Library and its scroll position.
 
 ## Optional remote HTTPS access
 

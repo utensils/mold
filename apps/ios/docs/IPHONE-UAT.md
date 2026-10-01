@@ -155,3 +155,13 @@ open and scrolls the opened tile back into view on return.
   two explicitly phone-specific layout/Settings-route tests skip on iPad;
   the full shell audit retains iPad composer, Machines, sidebar and Settings
   coverage at all three text sizes in both appearances.
+- The full iPad run exposed a pre-existing Collections modal audit timeout.
+  The same AX5 test on main (`158e7690e`) reproduced it. A runtime sample
+  caught the private Dynamic Type auditor spinning in UIKit floating-tab
+  pagination. Hiding the presenting tab chrome while Collections is open
+  makes the actual Large/AX5 modal pass every original audit type; no audit
+  type or issue was exempted.
+- Follow-up iPad regression passes after both Done and a full downward
+  dismissal drag: the Library tab becomes hittable again and the same print's
+  vertical position is restored within two points. Viewer-return also passes,
+  explicitly checking that the main Library tab stays hidden in the viewer.
