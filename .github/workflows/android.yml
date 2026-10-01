@@ -214,6 +214,7 @@ jobs:
           disable-animations: true
           script: |
             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+            (cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.utensils.mold.mobile_native.AndroidOverlayBackInstrumentedTest)
             MOLD_ANDROID_EVIDENCE=/tmp/mold-android-36 bun scripts/tests/android-app-smoke.mjs
       - name: Run Android 28 public Downloads acceptance
         uses: reactivecircus/android-emulator-runner@v2
