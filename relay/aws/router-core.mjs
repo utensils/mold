@@ -289,7 +289,16 @@ export function createRouter({
         return { statusCode: 200 };
       }
       const status = await message(id, event.body);
-      if (status === 400 || status === 403) await close(id);
+      if (status === 400 || status === 403) {
+        const membership = await store.get(`connection#${id}`);
+        console.warn(
+          "Mold relay connection close",
+          status,
+          membership?.role ?? "unknown",
+          id,
+        );
+        await close(id);
+      }
       return { statusCode: status };
     } catch (error) {
       console.error("Mold relay router failure", failureCategory(error));
