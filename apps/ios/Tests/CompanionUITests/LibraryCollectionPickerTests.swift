@@ -39,9 +39,9 @@ final class LibraryCollectionPickerTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
         XCTAssertTrue(print.waitForExistence(timeout: 10))
-        let picker = app.descendants(matching: .any)["library-collections"].firstMatch
+        let picker = app.navigationBars.buttons["All Prints"].firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertTrue(picker.isHittable, "The inline phone shelf picker must be visible at \(size)")
+        XCTAssertTrue(picker.isHittable, "The navigation title shelf picker must be visible at \(size)")
         XCTAssertTrue(picker.label.contains("All Prints"))
 
         try app.performAccessibilityAudit(for: .contrast) { issue in

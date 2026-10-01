@@ -165,7 +165,7 @@ final class GenerationInteractionTests: XCTestCase {
     @MainActor func testLibraryShelvesAndSettingsAreReachableOnPhone() throws {
         let app = launch(size: "UICTContentSizeCategoryAccessibilityXXXL")
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        let shelves = app.buttons["library-collections"]
+        let shelves = app.navigationBars.buttons["All Prints"].firstMatch
         XCTAssertTrue(shelves.waitForExistence(timeout: 5))
         XCTAssertTrue(shelves.isHittable)
         shelves.tap()
@@ -175,7 +175,7 @@ final class GenerationInteractionTests: XCTestCase {
         app.buttons["Settings"].firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         app.buttons["Done"].firstMatch.tap()
-        XCTAssertTrue(shelves.exists)
+        XCTAssertTrue(app.navigationBars.buttons["Favourites"].firstMatch.exists)
     }
 
     @MainActor func testModelChooserAndDownloadRoute() throws {

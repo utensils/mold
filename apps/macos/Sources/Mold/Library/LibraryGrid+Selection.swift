@@ -7,6 +7,7 @@ import SwiftUI
 extension LibraryGrid {
 
     func click(_ entry: LibraryEntry) {
+        keyboardReveal = nil
         selection = cursor.clicking(entry.id, ClickModifiers.current, from: selection)
     }
 
@@ -14,6 +15,7 @@ extension LibraryGrid {
         switch action {
         case let .move(move, modifier):
             selection = cursor.moving(move, modifier, from: selection)
+            keyboardReveal = selection.lead
             return .handled
         case .open: return openLead()
         case .quickLook: return quickLookSelection()

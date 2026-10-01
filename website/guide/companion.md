@@ -74,7 +74,11 @@ keeps its original filename and file type.
 - **Library** shows every machine's prints as one grid, a print found on two
   machines once. Favourites, tags, collections and Recently Deleted work the
   way they do on the Mac, across every machine that holds a copy. On iPhone,
-  the shelf menu is visible above the grid. Search
+  tap the navigation title to change shelves; it stays readable as you scroll.
+  **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
+  Tap **Select**, then tap tiles or sweep sideways across them. Starting on
+  a selected tile deselects the range; reverse to shorten it, or hold near
+  an edge to scroll. Vertical swipes still scroll in Select mode. Search
   understands `is:video`, `is:mesh`, `tag:` and `on:`.
 - **Queue** lists what each machine is rendering and waiting on. A held job
   says why in words, with **Pull and Retry** when a model is missing, **Retry**

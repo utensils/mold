@@ -12,7 +12,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let collectionFixture: Bool
     private var collectionHidden = false
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false) throws {
         self.collectionFixture = collectionFixture
         var root = URL(fileURLWithPath: #filePath)
         while root.pathComponents.count > 1,
@@ -29,7 +29,7 @@ final class FixtureMachine: @unchecked Sendable {
                     "description": name, "downloaded": true, "generation_profile": row["profile"]!]
         })
         gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
-            ["filename": "fixture-\(index).png", "timestamp": 1_790_000_000 - index,
+            ["filename": "fixture-\(index).\(mixedMedia ? ["png", "mp4", "glb"][index % 3] : "png")", "timestamp": 1_790_000_000 - index,
              "favorite": index < galleryFavorites,
              "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
              "metadata": ["prompt": "Fixture \(index)"]] as [String: Any]
