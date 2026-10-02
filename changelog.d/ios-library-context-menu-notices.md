@@ -1,2 +1,3 @@
 - **Native iOS Library and notifications.** Fix the crash when holding a Library tile, retain the thumbnail loader in drag previews, keep source-image pickers open during healthy connection refreshes, and preserve the authored notification icon colors in light and dark appearances.
 - **Native iOS delivery.** Run light and dark audits in parallel, and keep native workflow edits from triggering unrelated builds while preserving TestFlight validation.
+- Fixed source-image selection from a merged Library print whose first machine is offline but another copy is reachable.

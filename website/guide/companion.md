@@ -149,3 +149,5 @@ Render completion notifications use the native iOS banner and Mold Studio app ic
 Generate Options shows aspect-ratio icons in their actual proportions. With a source picture attached, Fit offers centered Crop to fill by default, Fit with borders, Stretch to fill, and Fit + repaint borders when masks are supported. Crop positioning offers horizontal and vertical alignment. Source pixels and painted masks are fitted together before submission. Seed defaults to Random; choose Fixed to reuse a seed. Reset returns fitting to centered Crop to fill and the seed to Random. Explicit saved settings and draft choices remain restorable.
 
 Hold a Library tile to preview it and open its actions. Source-image selection also remains usable after a long press. The notification icon uses the same Mold logo in light and dark appearances; the system controls the notification card background.
+
+When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.

@@ -74,11 +74,14 @@ struct LibraryPicker: View {
     }
 
     private func choose(_ entry: LibraryEntry) {
-        guard let host = hosts.host(entry.hostID) else { return }
+        // A merged tile can lead with a saved copy on an offline machine.
+        // Prefer the same print on a machine that is currently answering.
+        let source = entry.presented(onAnyOf: Set(hosts.upHosts.map(\.id))) ?? entry
+        guard let host = hosts.host(source.hostID) else { return }
         Task {
             do {
-                let data = try await hosts.backend(for: host).media(entry.print.filename, trashed: false)
-                picked(data, entry.print.filename)
+                let data = try await hosts.backend(for: host).media(source.print.filename, trashed: false)
+                picked(data, source.print.filename)
                 dismiss()
             } catch {
                 hosts.report(host, doing: String(localized: "fetch that picture"), error)

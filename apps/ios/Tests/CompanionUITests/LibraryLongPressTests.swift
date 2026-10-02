@@ -26,7 +26,7 @@ final class LibraryLongPressTests: XCTestCase {
 
     @MainActor func testSourceLibraryLongPressAndSelectionRemainUsable() async throws {
         continueAfterFailure = false
-        let app = try await populatedLibrary()
+        let app = try await populatedLibrary(offlineCopy: true)
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         app.buttons["choose-model"].tap()
         let model = app.buttons["model-flux-dev:q4"]
@@ -67,22 +67,48 @@ final class LibraryLongPressTests: XCTestCase {
         attach(app, name: "iPad library after drag preview")
     }
 
-    @MainActor private func populatedLibrary() async throws -> XCUIApplication {
+    @MainActor private func populatedLibrary(offlineCopy: Bool = false) async throws -> XCUIApplication {
+        if offlineCopy {
+            let earlier = try FixtureMachine(galleryPrints: 6, collectionFixture: true)
+            let port = try await earlier.start()
+            let app = XCUIApplication()
+            cleanUpFixture(earlier, port: port, app: app)
+            app.launch()
+            pair(port, in: app, name: "Offline Source Fixture")
+            XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+            XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+            earlier.stop()
+            app.terminate()
+        }
         let machine = try FixtureMachine(galleryPrints: 6, collectionFixture: true)
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)
         app.launch()
+        pair(port, in: app, name: offlineCopy ? "Live Source Fixture" : nil)
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        if offlineCopy {
+            let merged = app.buttons.matching(NSPredicate(format:
+                "label BEGINSWITH 'Fixture 0,' AND label CONTAINS 'Offline Source Fixture' AND label CONTAINS 'Live Source Fixture'")).firstMatch
+            XCTAssertTrue(merged.waitForExistence(timeout: 10), "Both machine copies must join the source tile")
+        }
+        return app
+    }
+
+    @MainActor private func pair(_ port: UInt16, in app: XCUIApplication, name: String? = nil) {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        if let name {
+            let field = app.textFields["machine-name"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            field.tap(); field.typeText(name)
+        }
         let address = app.textFields["machine-address"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("127.0.0.1:\(port)")
         app.buttons["Add"].firstMatch.tap()
-        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
-        return app
     }
 
     @MainActor private func fixturePrint(in app: XCUIApplication) -> XCUIElement {

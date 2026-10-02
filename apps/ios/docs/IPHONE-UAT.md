@@ -193,3 +193,8 @@ The native unit suite passes (136 tests); lint and CI routing/branding/runner
 contracts pass. Independent peer review corrected the PNG fixture checksum and
 isolated controller tests from saved machine preferences. No generation was
 submitted; physical-device acceptance remains separate from Simulator evidence.
+
+The iPad sweep also exposed source selection fetching an offline merged lead.
+The picker now prefers a reachable copy; the source regression deliberately
+pairs a saved offline copy and a live copy before selection. iPad drag and
+context-menu interactions pass, including opening the viewer afterward.
