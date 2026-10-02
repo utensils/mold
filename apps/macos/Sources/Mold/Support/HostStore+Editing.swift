@@ -33,6 +33,7 @@ extension HostStore {
         var updated = host
         if !HostAddress.sameOrigin(updated.baseURL, self.host(updated.id)?.baseURL ?? updated.baseURL)
             || updated.apiKey != self.host(updated.id)?.apiKey {
+            updated.connectionOriginalURL = nil
             updated.connectionEndpoints = nil
             updated.connectionInstanceID = nil
         }

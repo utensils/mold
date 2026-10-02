@@ -270,6 +270,8 @@ impl QueueHandle {
         }
     }
 
+    // fetch_update is retained for the Rust 1.93 MSRV; try_update is newer.
+    #[allow(deprecated)]
     pub fn decrement(&self) {
         let _ = self
             .pending_count

@@ -15,15 +15,18 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     public var apiKey: String?
     public var connectionEndpoints: [ConnectionEndpoint]?
     public var connectionInstanceID: String?
+    /// Original user-approved origin, retained when the active route roams.
+    public var connectionOriginalURL: URL?
 
     public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
-                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil) {
+                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil, connectionOriginalURL: URL? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.connectionEndpoints = connectionEndpoints
         self.connectionInstanceID = connectionInstanceID
+        self.connectionOriginalURL = connectionOriginalURL
     }
 }
 

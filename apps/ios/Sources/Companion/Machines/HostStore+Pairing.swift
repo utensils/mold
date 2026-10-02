@@ -28,6 +28,7 @@ extension HostStore {
 
     private func rememberRoutes(_ answer: PairingClaim, payload: MobilePairingPayload, host: MoldHost) -> MoldHost {
         var updated = host
+        updated.connectionOriginalURL = URL(string: payload.baseURL)
         updated.connectionEndpoints = ConnectionRoutes.sanitized(answer.endpoints ?? payload.endpoints ?? [])
         updated.connectionInstanceID = answer.instanceId
         applyConnection(updated)

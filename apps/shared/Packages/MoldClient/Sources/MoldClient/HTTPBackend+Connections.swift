@@ -13,8 +13,23 @@ public extension HTTPBackend {
         guard let endpoints = host.connectionEndpoints, !endpoints.isEmpty,
               let identity = host.connectionInstanceID, let key = host.apiKey, !key.isEmpty else { return nil }
         var resolved = host
-        resolved.baseURL = try await ConnectionRoutes.select(endpoints: endpoints, secret: key, kind: "api",
-                                                             instanceID: identity, session: session)
+        try Task.checkCancellation()
+        resolved.connectionOriginalURL = host.connectionOriginalURL ?? host.baseURL
+        guard key.range(of: "^mold_pair_[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil else {
+            guard let original = host.connectionOriginalURL, original != host.baseURL else { return nil }
+            resolved.baseURL = original
+            return resolved
+        }
+        do {
+            resolved.baseURL = try await ConnectionRoutes.select(endpoints: endpoints, secret: key, kind: "api",
+                                                                 instanceID: identity, session: session)
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { throw error }
+            // Only the user's saved origin is trusted without a new route proof.
+            // The subsequent authenticated status read learns fresh addresses.
+            resolved.baseURL = resolved.connectionOriginalURL!
+        }
         return resolved
     }
 }

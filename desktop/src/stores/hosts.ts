@@ -1,4 +1,4 @@
-import { connectionHealth } from "@studio/api/connectionRoutes";
+import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
@@ -504,6 +504,7 @@ export const useHostsStore = defineStore("hosts", {
             const urlChanged = live.url !== url;
             const needsRevival = twin.status !== "ready" || twin.stale;
             const authorityChanged = keyChanged || urlChanged;
+            if (authorityChanged) forgetConnectionRoutes(twin.id);
             if (authorityChanged || needsRevival) {
               // Fence a status/capability response started under the retired
               // address or credential before mutating the live authority.
@@ -552,6 +553,7 @@ export const useHostsStore = defineStore("hosts", {
             previousInstanceId !== instanceId) ||
           unverifiedAddressReplacement
         ) {
+          forgetConnectionRoutes(id);
           retiredExistingAuthority = true;
           delete this.telemetry[id];
           delete this.capabilities[id];
@@ -576,6 +578,7 @@ export const useHostsStore = defineStore("hosts", {
     },
     /** Drop a live extra host. Its saved entry and key stay for later. */
     async disconnect(id: string) {
+      forgetConnectionRoutes(id);
       useDownloadsStore().unsubscribeHost(id);
       // Retire every request issued before the explicit disconnect. URL/key
       // equality is insufficient when the same slug reconnects to a replaced

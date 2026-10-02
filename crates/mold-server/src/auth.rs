@@ -134,9 +134,8 @@ impl ApiKeySet {
         };
         match kind {
             "api" => {
-                for secret in &self.operator_keys {
-                    consider(Sha256::digest(secret.as_bytes()).into());
-                }
+                // Arbitrary operator strings have no trustworthy entropy evidence.
+                // Only server-minted random paired grants may expose a hash tag.
                 let clients = self
                     .paired_clients
                     .lock()
@@ -162,9 +161,7 @@ impl ApiKeySet {
         if ambiguous {
             return None;
         }
-        let mut mac = HmacSha256::new_from_slice(&matched?).expect("SHA256 HMAC key is valid");
-        mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\n{instance}").as_bytes());
-        Some(crate::connections::hex(&mac.finalize().into_bytes()))
+        Some(connection_proof_mac(&matched?, kind, nonce, instance))
     }
 
     fn authenticate(&self, candidate: &str) -> Option<AuthenticationKind> {
@@ -542,6 +539,12 @@ pub(crate) fn load_api_keys_with_db(
     let key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
         .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
     Ok(Some(Arc::new(key_set)))
+}
+
+fn connection_proof_mac(hash: &[u8; 32], kind: &str, nonce: &str, instance: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(hash).expect("SHA256 HMAC key is valid");
+    mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\n{instance}").as_bytes());
+    crate::connections::hex(&mac.finalize().into_bytes())
 }
 
 /// Paths that are exempt from API key authentication.
@@ -972,26 +975,43 @@ mod tests {
     }
 
     #[test]
+    fn connection_proof_never_uses_operator_credentials() {
+        for secret in [
+            "password",
+            "0123456789abcdef".repeat(4).as_str(),
+            "mold_pair_operator_configured_looks_random_but_is_not",
+        ] {
+            let keys = ApiKeySet::new(HashSet::from([secret.to_string()]));
+            let tag = crate::connections::hex(&Sha256::digest(secret.as_bytes())[..8]);
+            assert!(
+                keys.connection_proof("api", &tag, &"a".repeat(64), "machine")
+                    .is_none(),
+                "operator key was eligible for anonymous proof"
+            );
+            assert!(
+                keys.contains(secret),
+                "normal operator authentication must remain available"
+            );
+        }
+    }
+
+    #[test]
     fn connection_proof_matches_shared_cross_surface_golden_vector() {
-        let secret = "test-only-route-secret";
-        let key_set = ApiKeySet::new(HashSet::from([secret.to_string()]));
-        let digest = Sha256::digest(secret.as_bytes());
-        assert_eq!(crate::connections::hex(&digest[..8]), "e4c8e720b2b762b8");
+        let hash: [u8; 32] = Sha256::digest(b"test-only-route-secret").into();
+        assert_eq!(crate::connections::hex(&hash[..8]), "e4c8e720b2b762b8");
         assert_eq!(
-            key_set
-                .connection_proof(
-                    "api",
-                    "e4c8e720b2b762b8",
-                    &"0123456789abcdef".repeat(4),
-                    "fixture-machine"
-                )
-                .as_deref(),
-            Some("09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979")
+            connection_proof_mac(
+                &hash,
+                "api",
+                &"0123456789abcdef".repeat(4),
+                "fixture-machine"
+            ),
+            "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979"
         );
     }
 
     #[test]
-    fn connection_proof_covers_operator_pairing_and_revocation_without_touching() {
+    fn connection_proof_covers_pairing_and_revocation_without_touching() {
         let ks = ApiKeySet::new_with_metadata_db(
             HashSet::from(["operator".to_string()]),
             Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
@@ -1017,17 +1037,9 @@ mod tests {
                 .collect();
             assert_eq!(proof, expected);
         };
-        assert_eq!(
-            ks.connection_proof("api", &tag("operator"), &nonce, "server-a")
-                .as_deref(),
-            Some("bfc270018dccec8f6721a0e3fb82043139f69ab827cd7672d908c1d35482142a")
-        );
-        verify(
-            "operator",
-            "api",
-            ks.connection_proof("api", &tag("operator"), &nonce, "server-a")
-                .unwrap(),
-        );
+        assert!(ks
+            .connection_proof("api", &tag("operator"), &nonce, "server-a")
+            .is_none());
         assert!(ks
             .connection_proof("api", &tag("wrong"), &nonce, "server-a")
             .is_none());

@@ -1026,6 +1026,8 @@ impl GpuWorker {
         self.legacy_pending.fetch_add(1, Ordering::SeqCst);
     }
 
+    // fetch_update is retained for the Rust 1.93 MSRV; try_update is newer.
+    #[allow(deprecated)]
     pub(crate) fn settle_legacy_transport(&self) {
         self.legacy_pending
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {

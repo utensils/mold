@@ -12,6 +12,8 @@ export interface ConnectionAddresses {
   endpoints: ConnectionEndpoint[];
 }
 const OriginURL = URL;
+const pairedCredential = (secret: string): boolean =>
+  /^mold_pair_[A-Za-z0-9_-]{43}$/.test(secret);
 export function parseConnectionEndpoints(value: unknown): ConnectionEndpoint[] {
   if (!Array.isArray(value) || value.length > 8)
     throw new Error("Invalid connection addresses.");
@@ -26,7 +28,23 @@ export function parseConnectionEndpoints(value: unknown): ConnectionEndpoint[] {
     )
       throw new Error("Invalid connection address.");
     const url = new OriginURL(item.url);
+    const hostname = url.hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, "")
+      .replace(/\.$/, "");
+    const forbidden =
+      hostname === "localhost" ||
+      hostname.endsWith(".localhost") ||
+      hostname === "::" ||
+      hostname === "::1" ||
+      hostname === "0.0.0.0" ||
+      hostname.startsWith("127.") ||
+      hostname.startsWith("169.254.") ||
+      /^fe[89ab][0-9a-f]:/.test(hostname) ||
+      hostname.includes("%");
     if (
+      forbidden ||
+      (url.port !== "" && (Number(url.port) < 1 || Number(url.port) > 65535)) ||
       !["http:", "https:"].includes(url.protocol) ||
       url.username ||
       url.password ||
@@ -76,6 +94,8 @@ export async function selectConnectionRoute(options: {
   secureContext?: boolean;
   signal?: AbortSignal | undefined;
 }): Promise<string> {
+  if (options.kind === "api" && !pairedCredential(options.secret))
+    throw new Error("Automatic roaming requires a paired credential.");
   if (!options.expectedInstanceId || !options.secret)
     throw new Error("Connection proof requires an identity and credential.");
   const secure =
@@ -168,7 +188,12 @@ export function forgetConnectionRoutes(hostId: string): void {
   try {
     const data = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}");
     delete data[hostId];
-    localStorage.setItem(ROUTES_KEY, JSON.stringify(data));
+    localStorage.setItem(
+      ROUTES_KEY,
+      JSON.stringify(data, (key, value) =>
+        key === "keyTag" ? undefined : value,
+      ),
+    );
   } catch {
     /* optional persistence */
   }
@@ -179,6 +204,10 @@ export function rememberConnectionRoutes(
   secret: string,
   endpoints: unknown,
 ): void {
+  if (!pairedCredential(secret)) {
+    forgetConnectionRoutes(hostId);
+    return;
+  }
   const record: RouteRecord = {
     instanceId,
     keyTag: secretTag(secret),
@@ -188,8 +217,16 @@ export function rememberConnectionRoutes(
   records.set(hostId, record);
   try {
     const data = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}");
-    data[hostId] = record;
-    localStorage.setItem(ROUTES_KEY, JSON.stringify(data));
+    data[hostId] = {
+      instanceId: record.instanceId,
+      endpoints: record.endpoints,
+    };
+    localStorage.setItem(
+      ROUTES_KEY,
+      JSON.stringify(data, (key, value) =>
+        key === "keyTag" ? undefined : value,
+      ),
+    );
   } catch {
     /* optional persistence */
   }
@@ -203,12 +240,27 @@ function knownRoutes(
   if (!record) {
     try {
       const raw = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}")[hostId];
-      if (raw)
+      if (raw) {
         record = {
           instanceId: raw.instanceId,
-          keyTag: raw.keyTag,
+          // A cached catalog is only a candidate list; prove with the current key before using alternatives.
+          keyTag: secretTag(secret),
           endpoints: parseConnectionEndpoints(raw.endpoints),
         };
+        if ("keyTag" in raw) {
+          const data = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}");
+          data[hostId] = {
+            instanceId: record.instanceId,
+            endpoints: record.endpoints,
+          };
+          localStorage.setItem(
+            ROUTES_KEY,
+            JSON.stringify(data, (key, value) =>
+              key === "keyTag" ? undefined : value,
+            ),
+          );
+        }
+      }
     } catch {
       /* ignore corrupt optional cache */
     }
@@ -244,7 +296,9 @@ export async function connectionHealth<
       throw new DOMException("Host connection changed.", "AbortError");
   };
   assertCurrent();
-  const secret = options.apiKey;
+  const secret =
+    options.apiKey && pairedCredential(options.apiKey) ? options.apiKey : null;
+  if (!secret) forgetConnectionRoutes(options.hostId);
   let url = options.baseUrl;
   const record =
     secret && options.instanceId

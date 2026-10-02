@@ -3,6 +3,12 @@ import Testing
 @testable import MoldClient
 
 struct ConnectionRoutesTests {
+    @Test func localOnlyAddressesAreRejected() {
+        for host in ["localhost", "test.localhost", "127.0.0.2", "0.0.0.0", "[::]", "[::1]", "169.254.1.2", "[fe80::1]"] {
+            #expect(ConnectionRoutes.sanitized([ConnectionEndpoint(url: "http://\(host):7680", kind: .lan)]).isEmpty)
+        }
+    }
+
     @Test func advertisedOriginsAreBoundedAndCredentialFree() {
         let endpoints = [
             ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan),
@@ -11,12 +17,21 @@ struct ConnectionRoutesTests {
             ConnectionEndpoint(url: "https://wrong.example/path?key=x", kind: .relay)]
         #expect(ConnectionRoutes.sanitized(endpoints).count == 2)
     }
+    @Test func ordinaryHostnamesAreNotMistakenForLinkLocalIPv6() {
+        #expect(ConnectionRoutes.sanitized([ConnectionEndpoint(url: "https://features.example", kind: .relay)]).count == 1)
+    }
+
+    @Test func oversizedOriginsAreRejectedConsistently() {
+        let url = "https://" + String(repeating: "x", count: 2050) + ".example"
+        #expect(ConnectionRoutes.sanitized([ConnectionEndpoint(url: url, kind: .relay)]).isEmpty)
+    }
+
     @Test func proofIsBoundToKindNonceAndIdentity() {
         let nonce = String(repeating: "a", count: 64)
-        let proof = ConnectionRoutes.proof(secret: "random-secret", kind: "api", nonce: nonce, instanceID: "machine")
-        #expect(ConnectionRoutes.verifies(proof, secret: "random-secret", kind: "api", nonce: nonce, instanceID: "machine"))
-        #expect(!ConnectionRoutes.verifies(proof, secret: "random-secret", kind: "pairing", nonce: nonce, instanceID: "machine"))
-        #expect(!ConnectionRoutes.verifies(proof, secret: "random-secret", kind: "api", nonce: nonce, instanceID: "wrong"))
+        let proof = ConnectionRoutes.proof(secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "machine")
+        #expect(ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "machine"))
+        #expect(!ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "pairing", nonce: nonce, instanceID: "machine"))
+        #expect(!ConnectionRoutes.verifies(proof, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", nonce: nonce, instanceID: "wrong"))
     }
     @Test func proofMatchesTheSharedProtocolVector() {
         let nonce = String(repeating: "0123456789abcdef", count: 4)
@@ -46,13 +61,20 @@ struct ConnectionProbeTests {
         return URLSession(configuration: configuration)
     }
 
+    @Test func operatorKeysNeverProbeLearnedAddresses() async {
+        await #expect(throws: MoldClientError.self) {
+            _ = try await ConnectionRoutes.select(endpoints: [ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
+                                                  secret: "password", kind: "api", instanceID: "machine", session: session())
+        }
+    }
+
     @Test func failedLANFallsBackToRelayWithoutForwardingCredentials() async throws {
         ConnectionProbeProtocol.failLAN = true
         ConnectionProbeProtocol.badProof = false
         let url = try await ConnectionRoutes.select(endpoints: [
             ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan),
             ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
-            secret: "random-secret", kind: "api", instanceID: "machine", session: session())
+            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", instanceID: "machine", session: session())
         #expect(url.absoluteString == "https://relay.example")
     }
 
@@ -61,12 +83,12 @@ struct ConnectionProbeTests {
         ConnectionProbeProtocol.badProof = false
         let routes = [ConnectionEndpoint(url: "https://relay.example", kind: .relay),
                       ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)]
-        let url = try await ConnectionRoutes.select(endpoints: routes, secret: "random-secret", kind: "api",
+        let url = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
                                                      instanceID: "machine", session: session())
         #expect(url.host == "192.168.1.2")
         ConnectionProbeProtocol.badProof = true
         await #expect(throws: (any Error).self) {
-            _ = try await ConnectionRoutes.select(endpoints: routes, secret: "random-secret", kind: "api",
+            _ = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
                                                    instanceID: "machine", session: session())
         }
     }
@@ -93,11 +115,11 @@ private final class ConnectionProbeProtocol: URLProtocol {
             return Data(bytes.prefix(max(0, count)))
         } ?? Data()
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] ?? [:]
-        #expect(body["key_tag"] == ConnectionRoutes.tag("random-secret"))
-        #expect(!String(decoding: data, as: UTF8.self).contains("random-secret"))
-        let proof = Self.badProof ? "wrong" : ConnectionRoutes.proof(secret: "random-secret", kind: body["kind"] ?? "",
+        #expect(body["key_tag"] == ConnectionRoutes.tag("mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"))
+        #expect(!String(decoding: data, as: UTF8.self).contains("mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"))
+        let proof = Self.badProof ? "wrong" : ConnectionRoutes.proof(secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: body["kind"] ?? "",
                                                                        nonce: body["nonce"] ?? "", instanceID: "machine")
-        let answer = try! JSONSerialization.data(withJSONObject: ["instance_id": "machine", "proof": proof])
+        let answer = try! JSONSerialization.data(withJSONObject: ["instance_id": "machine", "proof": proof, "version": 1])
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

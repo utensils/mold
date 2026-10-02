@@ -20,14 +20,16 @@ public enum ConnectionRoutes {
     public static func sanitized(_ endpoints: [ConnectionEndpoint]) -> [ConnectionEndpoint] {
         var seen = Set<String>()
         return endpoints.prefix(8).compactMap { endpoint in
-            guard let parts = URLComponents(string: endpoint.url),
+            guard endpoint.url.utf8.count <= 2048, let parts = URLComponents(string: endpoint.url),
                   let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
-                  let host = parts.host?.lowercased(), !host.isEmpty,
+                  let host = parts.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")), !host.isEmpty,
                   parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
                   parts.path.isEmpty || parts.path == "/",
                   parts.port.map({ (1...65535).contains($0) }) ?? true,
-                  !["localhost", "::1", "[::1]", "0.0.0.0", "::"].contains(host),
-                  !host.hasPrefix("127."), !host.contains("%"),
+                  !["localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"].contains(host),
+                  !host.hasPrefix("127."), !host.hasSuffix(".localhost"), !host.hasPrefix("169.254."),
+                  !host.contains("%"),
+                  host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).range(of: "^fe[89ab][0-9a-f]:", options: .regularExpression) == nil,
                   endpoint.kind != .relay || scheme == "https",
                   let url = parts.url else { return nil }
             let value = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -50,10 +52,15 @@ public enum ConnectionRoutes {
         return zip(actual, expected).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
     }
 
+    public static func supportsAutomaticRouting(_ secret: String) -> Bool {
+        secret.range(of: "^mold_pair_[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil
+    }
+
     public static func select(
         endpoints: [ConnectionEndpoint], secret: String, kind: String, instanceID: String,
         session: URLSession = APISession.api
     ) async throws -> URL {
+        guard kind != "api" || supportsAutomaticRouting(secret) else { throw MoldClientError.unauthorized }
         let configuration = session.configuration
         configuration.httpAdditionalHeaders = nil
         configuration.httpCookieStorage = nil
@@ -67,7 +74,7 @@ public enum ConnectionRoutes {
         let nonce = hex((0..<32).map { _ in UInt8.random(in: .min ... .max) })
         let body = try JSONSerialization.data(withJSONObject: ["kind": kind, "key_tag": tag(secret), "nonce": nonce])
         // Every candidate has its own deadline; the group is bounded to eight.
-        let cacheKey = instanceID + ":" + tag(secret) + ":" + candidates.map(\.url).joined(separator: "|")
+        let cacheKey = kind + ":" + instanceID + ":" + tag(secret) + ":" + candidates.map(\.url).joined(separator: "|")
         let preferred = await ConnectionRouteMemory.shared.preferred(for: cacheKey)
         let valid = await withTaskGroup(of: Int?.self, returning: [Int].self) { group in
             for (index, endpoint) in candidates.enumerated() {
@@ -89,9 +96,9 @@ public enum ConnectionRoutes {
                         }
                         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                               data.count <= 1024,
-                              let value = try JSONSerialization.jsonObject(with: data) as? [String: String],
-                              value["instance_id"] == instanceID, let proof = value["proof"],
-                              verifies(proof, secret: secret, kind: kind, nonce: nonce, instanceID: instanceID)
+                              let value = try? MoldJSON.decoder.decode(ConnectionProbeResponse.self, from: data),
+                              value.instanceId == instanceID,
+                              verifies(value.proof, secret: secret, kind: kind, nonce: nonce, instanceID: instanceID)
                         else { return nil }
                         return index
                     } catch { return nil }
@@ -129,4 +136,9 @@ private actor ConnectionRouteMemory {
         if routes.count >= 128 { routes.removeAll() }
         routes[key] = (url, Date())
     }
+}
+
+private struct ConnectionProbeResponse: Decodable {
+    let instanceId: String
+    let proof: String
 }

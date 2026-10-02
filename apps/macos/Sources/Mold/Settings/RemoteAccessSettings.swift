@@ -34,7 +34,7 @@ struct RemoteAccessSettings: View {
                         Text(host.baseURL.absoluteString).textSelection(.enabled)
                         CopyButton(what: "Address", value: host.baseURL.absoluteString)
                     }
-                    Text("Your pairing follows this machine across local network, Tailscale and configured HTTPS relay routes. Keep the machine connected while this app learns its addresses; no new pairing is needed when you leave the network.")
+                    Text("Paired clients follow this machine across local network, Tailscale and configured HTTPS relay routes. Keep the machine connected while this app learns its addresses; no new pairing is needed when you leave the network.")
                         .foregroundStyle(.secondary)
                     if let routes = host.connectionEndpoints, !routes.isEmpty {
                         ForEach(routes, id: \.url) { route in
@@ -45,7 +45,7 @@ struct RemoteAccessSettings: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("Connection routes have not been learned yet. A newer authenticated server can advertise them automatically.")
+                        Text("Connection routes have not been learned yet. Automatic roaming requires a paired client and a newer authenticated server. Manually entered API keys use their saved address.")
                             .foregroundStyle(.secondary)
                     }
                     Link("Set Up Remote Access", destination: URL(string: "https://utensils.io/mold/deployment/relay")!)

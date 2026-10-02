@@ -12,6 +12,7 @@ struct HostList: Codable, Equatable {
         var baseURL: URL
         var connectionEndpoints: [ConnectionEndpoint]? = nil
         var connectionInstanceID: String? = nil
+        var connectionOriginalURL: URL? = nil
     }
 
     var entries: [Entry] = []

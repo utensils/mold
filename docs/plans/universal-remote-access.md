@@ -1,7 +1,7 @@
 # Universal remote access
 
 A saved machine is one identity and credential with several connection routes.
-Existing pairings learn routes from the authenticated server while reachable;
+Existing server-minted pairings learn routes from the authenticated server while reachable;
 leaving LAN does not require pairing again. A new QR carries an additive,
 bounded list of LAN, Tailscale and public HTTPS relay origins. QR version 1 and
 its original base_url remain compatible with older clients.
@@ -11,7 +11,13 @@ loopback, wildcard and unusable addresses. Its relay HTTPS origin is explicit
 MOLD_PUBLIC_URL configuration, never inferred from request forwarding headers.
 The connector remains outbound and does not change the engine listener.
 
-Clients store routes alongside the existing host UUID and secret-store entry.
+Only random server-minted paired credentials and one-use pairing tokens authorize
+route proofs. Operator API keys use the saved address and never send probe tags
+to learned origins, because weak operator secrets permit offline dictionary
+attacks against hash tags. Plain HTTP still requires a trusted network.
+
+Clients preserve the original user-approved hostname for recovery when advertised
+addresses go stale or a server is rolled back. Clients store routes alongside the existing host UUID and secret-store entry.
 They prefer usable direct routes and retain healthy routes briefly to avoid
 oscillation. Health/reconnect resolves a route before subsequent operations;
 there is no automatic mutation replay. Existing durable IDs and read-stream

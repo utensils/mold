@@ -19,6 +19,7 @@ struct ConnectionPersistenceTests {
         routed.connectionEndpoints = [ConnectionEndpoint(url: routed.baseURL.absoluteString, kind: .relay)]
         hosts.applyConnection(routed, expectedURL: host.baseURL)
         let restored = HostStore(list: file, credentials: credentials, makeBackend: { _ in FakeBackend() })
+        #expect(restored.host(host.id)?.connectionOriginalURL == host.baseURL)
         #expect(restored.hosts.count == 1)
         #expect(restored.host(host.id)?.apiKey == "test-key")
         #expect(restored.host(host.id)?.connectionEndpoints == routed.connectionEndpoints)

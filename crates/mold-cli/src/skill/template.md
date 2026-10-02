@@ -107,3 +107,8 @@ One gateway publishes one machine. The proxy can see credentials/media; do not
 claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
 Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
 See the deployment guide for safe TLS, streaming and metrics routing.
+
+Automatic roaming requires a server-minted paired credential. Operator API keys
+remain tied to the explicitly saved address; pair once to enable route learning.
+Probes expose a stable digest tag, so arbitrary operator keys never participate
+in anonymous route proofs. Plain HTTP still requires a trusted network.

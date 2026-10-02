@@ -6,6 +6,7 @@ import {
   selectConnectionRoute,
   parseConnectionEndpoints,
 } from "./connectionRoutes";
+const PAIRED_KEY = "mold_pair_" + "A".repeat(43);
 afterEach(() => vi.unstubAllGlobals());
 it("validates origins and bounded endpoint lists", () => {
   expect(() =>
@@ -23,7 +24,7 @@ it("validates origins and bounded endpoint lists", () => {
   ).toThrow();
 });
 it("proves direct routes without sending secrets and prefers LAN", async () => {
-  const secret = "fixture-secret";
+  const secret = PAIRED_KEY;
   const key = sha256(new TextEncoder().encode(secret));
   const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -76,7 +77,7 @@ it("rejects forged identity/proof without credential fallback", async () => {
     selectConnectionRoute({
       endpoints: [{ url: "https://host.test", kind: "relay" }],
       expectedInstanceId: "instance",
-      secret: "key",
+      secret: PAIRED_KEY,
       kind: "api",
     }),
   ).rejects.toThrow();
@@ -84,7 +85,7 @@ it("rejects forged identity/proof without credential fallback", async () => {
 it("does not trust a persisted active URL and does not roam on authentication refusal", async () => {
   const { connectionHealth, rememberConnectionRoutes, forgetConnectionRoutes } =
     await import("./connectionRoutes");
-  rememberConnectionRoutes("auth-test", "instance", "key", [
+  rememberConnectionRoutes("auth-test", "instance", PAIRED_KEY, [
     { url: "https://host.test", kind: "relay" },
   ]);
   const read = vi
@@ -97,7 +98,7 @@ it("does not trust a persisted active URL and does not roam on authentication re
       hostId: "auth-test",
       baseUrl: "https://host.test",
       instanceId: "instance",
-      apiKey: "key",
+      apiKey: PAIRED_KEY,
       read,
     }),
   ).rejects.toThrow("refused");
@@ -114,7 +115,7 @@ it("does not learn after a host has been removed while status is pending", async
     connectionHealth({
       hostId: "removed-test",
       baseUrl: "https://host.test",
-      apiKey: "key",
+      apiKey: PAIRED_KEY,
       isCurrent: () => current,
       read: async () => {
         current = false;
@@ -125,7 +126,7 @@ it("does not learn after a host has been removed while status is pending", async
   expect(fetch).not.toHaveBeenCalled();
 });
 it("HTTPS browsers never probe insecure advertised addresses", async () => {
-  const secret = "key",
+  const secret = PAIRED_KEY,
     key = sha256(new TextEncoder().encode(secret));
   const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
     const b = JSON.parse(String(init?.body));
@@ -165,7 +166,7 @@ it("HTTPS browsers never probe insecure advertised addresses", async () => {
 it("retains a healthy proven route briefly rather than probing every health refresh", async () => {
   const { connectionHealth, rememberConnectionRoutes, forgetConnectionRoutes } =
     await import("./connectionRoutes");
-  const secret = "key",
+  const secret = PAIRED_KEY,
     key = sha256(new TextEncoder().encode(secret));
   rememberConnectionRoutes("hysteresis", "instance", secret, [
     { url: "http://lan.test", kind: "lan" },
@@ -222,7 +223,7 @@ it("does not delay authenticated status while additive address discovery stalls"
     connectionHealth({
       hostId: "slow-learning",
       baseUrl: "https://host.test",
-      apiKey: "key",
+      apiKey: PAIRED_KEY,
       signal: controller.signal,
       read: async () => ({ instance_id: "instance" }),
     }),
@@ -252,7 +253,7 @@ it("matches the independent cross-language proof vector", () => {
 it("never forwards a credential to an unproven cached active URL", async () => {
   const { connectionHealth, forgetConnectionRoutes } =
     await import("./connectionRoutes");
-  const keyTag = bytesToHex(sha256(new TextEncoder().encode("key"))).slice(
+  const keyTag = bytesToHex(sha256(new TextEncoder().encode(PAIRED_KEY))).slice(
     0,
     16,
   );
@@ -277,10 +278,104 @@ it("never forwards a credential to an unproven cached active URL", async () => {
   await connectionHealth({
     hostId: "tampered",
     baseUrl: "https://host.test",
-    apiKey: "key",
+    apiKey: PAIRED_KEY,
     instanceId: "instance",
     read,
   });
   expect(read).toHaveBeenCalledExactlyOnceWith("https://host.test");
   forgetConnectionRoutes("tampered");
+});
+it.each([
+  "http://localhost",
+  "http://box.localhost",
+  "http://127.0.0.1",
+  "http://127.1",
+  "http://0.0.0.0",
+  "http://[::]",
+  "http://[::1]",
+  "http://169.254.42.1",
+  "http://[fe80::1]",
+  "http://[febf::abcd]",
+  "http://host.test:0",
+])("rejects reserved or link-local candidate %s", (url) => {
+  expect(() => parseConnectionEndpoints([{ url, kind: "lan" }])).toThrow();
+});
+it("persists addresses without a credential tag and fences a changed credential in memory", async () => {
+  const { rememberConnectionRoutes, connectionHealth, forgetConnectionRoutes } =
+    await import("./connectionRoutes");
+  rememberConnectionRoutes("private-tag", "instance", PAIRED_KEY, [
+    { url: "https://relay.test", kind: "relay" },
+    { url: "http://lan.test", kind: "lan" },
+  ]);
+  const stored = localStorage.getItem("mold.connection-routes.v1")!;
+  expect(stored).not.toContain("keyTag");
+  expect(stored).not.toContain("e4c8e720b2b762b8");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("", { status: 404 })),
+  );
+  const read = vi.fn(async () => ({ instance_id: "instance" }));
+  await connectionHealth({
+    hostId: "private-tag",
+    baseUrl: "https://edited.test",
+    instanceId: "instance",
+    apiKey: "mold_pair_" + "B".repeat(43),
+    read,
+  });
+  expect(read).toHaveBeenCalledExactlyOnceWith("https://edited.test");
+  forgetConnectionRoutes("private-tag");
+});
+it("never emits an operator-key tag to candidate addresses, even from a stale catalog", async () => {
+  const { connectionHealth } = await import("./connectionRoutes");
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  await expect(
+    selectConnectionRoute({
+      endpoints: [{ url: "https://alternate.test", kind: "relay" }],
+      expectedInstanceId: "instance",
+      secret: "operator-password",
+      kind: "api",
+    }),
+  ).rejects.toThrow();
+  localStorage.setItem(
+    "mold.connection-routes.v1",
+    JSON.stringify({
+      operator: {
+        instanceId: "instance",
+        endpoints: [{ url: "https://alternate.test", kind: "relay" }],
+      },
+    }),
+  );
+  const read = vi.fn(async () => ({ instance_id: "instance" }));
+  await connectionHealth({
+    hostId: "operator",
+    baseUrl: "https://explicit.test",
+    instanceId: "instance",
+    apiKey: "operator-password",
+    read,
+  });
+  expect(fetch).not.toHaveBeenCalled();
+  expect(read).toHaveBeenCalledExactlyOnceWith("https://explicit.test");
+  expect(
+    JSON.parse(localStorage.getItem("mold.connection-routes.v1") ?? "{}")
+      .operator,
+  ).toBeUndefined();
+});
+it("removes legacy credential tags for other hosts when writing the catalog", async () => {
+  const { rememberConnectionRoutes, forgetConnectionRoutes } =
+    await import("./connectionRoutes");
+  localStorage.setItem(
+    "mold.connection-routes.v1",
+    JSON.stringify({
+      legacy: { instanceId: "legacy", keyTag: "legacy-tag", endpoints: [] },
+    }),
+  );
+  rememberConnectionRoutes("migration", "instance", PAIRED_KEY, [
+    { url: "https://relay.test", kind: "relay" },
+  ]);
+  expect(localStorage.getItem("mold.connection-routes.v1")).not.toContain(
+    "keyTag",
+  );
+  forgetConnectionRoutes("migration");
+  forgetConnectionRoutes("legacy");
 });

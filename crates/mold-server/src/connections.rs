@@ -153,13 +153,20 @@ pub(crate) struct ConnectionProbeResponse {
     proof: String,
 }
 #[utoipa::path(get, path = "/api/connection-addresses", tag = "server", responses((status = 200, body = ConnectionAddressResponse), (status = 401, description = "Authentication required")))]
-pub(crate) async fn addresses(State(state): State<crate::state::AppState>) -> impl IntoResponse {
+pub(crate) async fn addresses(
+    State(state): State<crate::state::AppState>,
+    authority: Option<Extension<crate::auth::PairingAuthority>>,
+) -> impl IntoResponse {
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(ConnectionAddressResponse {
             version: 1,
             instance_id: state.instance_id.to_string(),
-            endpoints: state.connection_addresses.endpoints(),
+            endpoints: if authority.is_some() {
+                Vec::new()
+            } else {
+                state.connection_addresses.endpoints()
+            },
         }),
     )
 }
@@ -237,9 +244,16 @@ mod tests {
             )
             .unwrap();
         let instance = state.instance_id.to_string();
-        let keys = std::sync::Arc::new(crate::auth::ApiKeySet::new(
+        let keys = std::sync::Arc::new(crate::auth::ApiKeySet::new_with_metadata_db(
             std::collections::HashSet::from(["operator".into()]),
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            instance.clone(),
         ));
+        let (token, _) = keys.issue_pairing_token().unwrap();
+        let paired = keys
+            .claim_pairing_token(&token, "fixture", "iphone")
+            .unwrap()
+            .unwrap();
         let app = crate::routes::create_router(state)
             .layer(middleware::from_fn(crate::auth::require_api_key))
             .layer(middleware::from_fn_with_state(
@@ -260,7 +274,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/api/connection-addresses")
-                    .header("x-api-key", "operator")
+                    .header("x-api-key", &paired)
                     .header("host", "evil.example")
                     .header("forwarded", "host=evil.example;proto=https")
                     .body(Body::empty())
@@ -278,7 +292,7 @@ mod tests {
             json["endpoints"],
             serde_json::json!([{ "url":"https://relay.example", "kind":"relay" }])
         );
-        let tag = hex(&sha2::Sha256::digest(b"operator")[..8]);
+        let tag = hex(&sha2::Sha256::digest(paired.as_bytes())[..8]);
         let nonce = "01".repeat(32);
         let body = serde_json::json!({"kind":"api","key_tag":tag,"nonce":nonce}).to_string();
         let proof = app
@@ -316,6 +330,55 @@ mod tests {
                 .unwrap();
             assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(invalid.headers()["cache-control"], "no-store");
+        }
+    }
+    #[tokio::test]
+    async fn keyless_and_operator_routes_refuse_proofs_without_breaking_original_auth() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::{Request, StatusCode},
+            middleware,
+        };
+        use tower::ServiceExt;
+        for operator in [true, false] {
+            let state = crate::state::AppState::for_tests();
+            state
+                .connection_addresses
+                .configure(
+                    "127.0.0.1:7680".parse().unwrap(),
+                    Some("https://relay.example"),
+                )
+                .unwrap();
+            let auth = operator.then(|| {
+                std::sync::Arc::new(crate::auth::ApiKeySet::new(
+                    std::collections::HashSet::from(["password".to_string()]),
+                ))
+            });
+            let app = crate::routes::create_router(state)
+                .layer(middleware::from_fn(crate::auth::require_api_key))
+                .layer(middleware::from_fn_with_state(
+                    auth,
+                    crate::auth::inject_auth_state,
+                ));
+            let response = app.clone().oneshot(Request::post("/api/connection-probe").header("content-type","application/json").body(Body::from(serde_json::json!({"kind":"api","key_tag":hex(&sha2::Sha256::digest(b"password")[..8]),"nonce":"a".repeat(64)}).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let response = app
+                .oneshot(
+                    Request::get("/api/connection-addresses")
+                        .header("x-api-key", "password")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let json: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            if operator {
+                assert_eq!(json["endpoints"], serde_json::json!([]));
+            }
         }
     }
     #[test]

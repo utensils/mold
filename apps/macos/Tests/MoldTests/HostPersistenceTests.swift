@@ -58,3 +58,14 @@ struct HostPersistenceTests {
         #expect(defaults.data(forKey: HostPersistence.unreadableKey) == data)
     }
 }
+
+@MainActor @Test func originalApprovedOriginSurvivesActiveRoutePersistence() throws {
+    let defaults = UserDefaults(suiteName: "mold.recovery.\(UUID())")!
+    let directory = FileManager.default.temporaryDirectory.appending(path: "mold.recovery.\(UUID())")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let secrets = SecretStore(directory: directory)
+    let original = URL(string: "http://workstation.local:7680")!
+    let host = MoldHost(name: "Machine", baseURL: URL(string: "https://relay.example")!, connectionOriginalURL: original)
+    HostPersistence.save([host], to: defaults)
+    #expect(HostPersistence.load(from: defaults, secrets: secrets)?.first?.connectionOriginalURL == original)
+}

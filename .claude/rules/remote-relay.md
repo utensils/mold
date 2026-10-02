@@ -54,3 +54,12 @@ nonce- and kind-bound credential-free proof. This detects accidental address
 reuse, not HTTP forwarding MITM. Keyless and legacy servers retain the original
 route. Saved route metadata must preserve host UUID and secret-store identity,
 respect edits/removal/rekey, and never replay uncertain mutations.
+
+Anonymous API route proofs accept only server-minted random paired grants;
+arbitrary operator API keys remain explicit-address only and receive empty
+authenticated route catalogs. Gate clients before computing/sending a hash tag,
+including cached catalogs. Pairing-token proofs remain bounded to active minted
+tokens; probes never consume or extend them. A hash tag is stable and would
+permit offline guessing of weak secrets; never opt arbitrary operator strings
+in based on length or apparent randomness. Normal operator authentication is
+unchanged. Plain HTTP still trusts the network.

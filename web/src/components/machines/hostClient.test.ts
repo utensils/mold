@@ -574,7 +574,7 @@ it("roams a remembered machine without duplicating its entry or forwarding the k
   const host = addHost({
     url: "https://roaming-relay.test",
     name: "Roaming",
-    apiKey: "test-only-route-secret",
+    apiKey: "mold_pair_" + "A".repeat(43),
     instanceId: "fixture-machine",
   });
   const random = vi.spyOn(crypto, "getRandomValues").mockImplementation(((
@@ -600,7 +600,7 @@ it("roams a remembered machine without duplicating its entry or forwarding the k
           JSON.stringify({
             instance_id: "fixture-machine",
             proof:
-              "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979",
+              "9a36badafd938d50de299050a33365f5e7eedcff7201b02d096f41a3eb9cc4de",
           }),
         );
       }

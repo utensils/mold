@@ -122,7 +122,7 @@ extension MobilePairingPayload {
         var endpoints: [ConnectionEndpoint]?
         if let value = f["endpoints"] {
             guard let data = try? JSONSerialization.data(withJSONObject: value),
-                  let decoded = try? JSONDecoder().decode([ConnectionEndpoint].self, from: data),
+                  let decoded = try? MoldJSON.decoder.decode([ConnectionEndpoint].self, from: data),
                   decoded.count <= 8, ConnectionRoutes.sanitized(decoded).count == decoded.count
             else { throw .unsupported }
             endpoints = decoded

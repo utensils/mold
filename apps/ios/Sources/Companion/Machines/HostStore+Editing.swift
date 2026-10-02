@@ -65,6 +65,7 @@ extension HostStore {
         host.baseURL = url
         setHosts(hosts.map { $0.id == id ? host : $0 })
         if moved || previousKey != host.apiKey {
+            host.connectionOriginalURL = nil
             host.connectionEndpoints = nil
             host.connectionInstanceID = nil
             setHosts(hosts.map { $0.id == id ? host : $0 })
