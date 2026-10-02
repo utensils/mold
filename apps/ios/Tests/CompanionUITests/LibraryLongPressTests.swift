@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Context menus and drag previews are separately hosted by UIKit. Exercise
 /// their real long-press boundary with a populated library, not just a tap.
@@ -49,6 +50,21 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Choose from Library"].waitForNonExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Start from"].firstMatch.waitForExistence(timeout: 5))
         attach(app, name: "Source selected after long press")
+    }
+
+    @MainActor func testIPadDragPreviewRemainsUsable() async throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "iPad drag interaction")
+        continueAfterFailure = false
+        let app = try await populatedLibrary()
+        let tile = fixturePrint(in: app)
+        let start = tile.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let outside = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.03))
+        start.press(forDuration: 1, thenDragTo: outside)
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(tile.waitForExistence(timeout: 5))
+        tile.tap()
+        XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        attach(app, name: "iPad library after drag preview")
     }
 
     @MainActor private func populatedLibrary() async throws -> XCUIApplication {

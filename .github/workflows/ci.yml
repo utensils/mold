@@ -35,7 +35,7 @@ concurrency:
 jobs:
   linux-cpu:
     needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.release == 'true' || needs.changes.outputs.rust == 'true')
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.cpu_release == 'true' || needs.changes.outputs.rust == 'true')
     uses: ./.github/workflows/linux-cpu.yml
 
   changes:
@@ -53,6 +53,7 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
       nix: ${{ steps.filter.outputs.nix }}
       release: ${{ steps.filter.outputs.release }}
+      cpu_release: ${{ steps.filter.outputs.cpu_release }}
       workflow: ${{ steps.filter.outputs.workflow }}
       workflow_static: ${{ steps.filter.outputs.workflow_static }}
       trusted_release_pr: ${{ steps.policy.outputs.trusted_release_pr }}
@@ -84,7 +85,6 @@ jobs:
               - 'Cargo.lock'
               - 'scripts/test-h3-cuda-server.sh'
               - 'scripts/tests/h3-cuda-server-tests.sh'
-              - '.github/workflows/ci.yml'
             rust:
               - 'crates/**'
               - 'Cargo.toml'
@@ -144,7 +144,6 @@ jobs:
               - 'crates/mold-inference/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
             website:
               - 'website/**'
             web:
@@ -164,6 +163,24 @@ jobs:
               - 'flake.nix'
               - 'flake.lock'
               - 'nix/**'
+            cpu_release:
+              - '.cargo/**'
+              - 'desktop/package.json'
+              - 'relay/aws/package.json'
+              - '.github/workflows/linux-cpu.yml'
+              - 'scripts/ensure-web-dist.sh'
+              - 'scripts/package-cpu-release-archive.sh'
+              - 'scripts/verify-cpu-release-binary.sh'
+              - 'scripts/lib/cuda-release-archive.sh'
+              - 'scripts/tests/cpu-release-smoke.py'
+              - 'scripts/tests/aur-smoke-script.sh'
+              - 'scripts/aur/**'
+              - 'packaging/aur/**'
+              - 'web/**'
+              - 'studio/**'
+              - 'ui/**'
+              - 'package.json'
+              - 'bun.lock'
             release:
               # Every cargo manifest and lockfile in the repo, including roots
               # that do not exist yet. `candle-single-identity.sh` discovers
@@ -351,7 +368,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changes.result != 'success' ||
        ((needs.changes.outputs.website == 'true' ||
-         needs.changes.outputs.workflow == 'true') &&
+         (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) &&
         needs.changes.outputs.trusted_release_pr != 'true'))
     runs-on: ubuntu-latest
     steps:
@@ -385,7 +402,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changes.result != 'success' ||
        ((needs.changes.outputs.web == 'true' ||
-         needs.changes.outputs.workflow == 'true') &&
+         (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) &&
         needs.changes.outputs.trusted_release_pr != 'true'))
     runs-on: ubuntu-latest
     steps:
@@ -787,7 +804,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changes.result != 'success' ||
        ((needs.changes.outputs.rust == 'true' ||
-         needs.changes.outputs.workflow == 'true') &&
+         (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) &&
         needs.changes.outputs.trusted_release_pr != 'true'))
     runs-on: windows-latest
     steps:
@@ -852,9 +869,9 @@ jobs:
     timeout-minutes: 60
     needs: changes
     if: >-
-      github.event_name == 'pull_request' &&
       needs.changes.outputs.trusted_release_pr != 'true' &&
-      needs.changes.outputs.cuda_typecheck == 'true'
+      ((github.event_name == 'pull_request' && needs.changes.outputs.cuda_typecheck == 'true') ||
+       (github.event_name == 'push' && needs.changes.outputs.workflow == 'true'))
     runs-on: ubuntu-latest
     env:
       # candle-kernels emits PTX for one capability. sm_89 is the default
@@ -921,7 +938,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       needs.changes.outputs.trusted_release_pr != 'true' &&
-      (needs.changes.outputs.gpu == 'true' || needs.changes.outputs.workflow == 'true')
+      needs.changes.outputs.gpu == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v6

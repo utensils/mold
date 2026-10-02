@@ -29,7 +29,12 @@ require_ci_release_path() {
   )"
   [[ -n "$block" ]] || fail ".github/workflows/ci.yml has no release path classifier"
   if [[ "$path" == .github/workflows/* ]] \
-    && grep -Fq -- "- '.github/workflows/**'" <<<"$block"; then
+    && { grep -Fq -- "- '.github/workflows/**'" <<<"$block" || {
+      # Picomatch's negated basename extglob includes every workflow except
+      # these two platform-only files (including workflows in subdirectories).
+      [[ ${path##*/} != ios-native.yml && ${path##*/} != testflight-ios-native.yml ]] \
+        && grep -Fq -- "- '.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'" <<<"$block"
+    }; }; then
     return 0
   fi
   grep -Fq -- "- '${path}'" <<<"$block" \

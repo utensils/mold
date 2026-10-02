@@ -16,10 +16,13 @@ on:
       - 'ui/**'
       - 'web/**'
       - 'desktop/package.json'
-      - 'scripts/**'
-      - '.github/workflows/docker-validation.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/release-plz.yml'
+      # Only inputs copied into or executed by the image, not unrelated CI scripts.
+      # Workflow edits retain static actionlint/routing proof and main candidate builds.
+      - 'relay/aws/package.json'
+      - 'docker/**'
+      - 'scripts/seal-cuda-ptx-manifest.py'
+      - 'scripts/probe-cuda-embedded-ptx.py'
+      - 'scripts/verify-h3-release-exclusion.sh'
   push:
     # The tag gate needs an exact-SHA result even for changelog-only repairs.
     branches: [main]
