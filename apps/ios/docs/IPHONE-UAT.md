@@ -129,3 +129,46 @@ open and scrolls the opened tile back into view on return.
 - UAT uses the Debug-only `--live-activity-fixture` launch argument; no render was submitted. Physical-device presentation remains to be confirmed in TestFlight.
 - All 129 iOS unit tests and architecture lints pass. The Release Simulator build passes, with both Debug UAT fixture types absent from the binary. Also visually checked a real preview image and the no-step "Working on it" state; the latter shows no fabricated progress bar.
 - The final suite has 130 passing tests, including a height invariant that measures all three normal rows with UIKit text metrics and accounts for the card padding. The final Release build also passes.
+
+## Library selection, title and media filters — 2026-10-01
+
+- Reproduced selection moving a scrolled tile upward by 39 points with a
+  failing iPhone Simulator regression. The fixed grid observes visibility
+  separately from explicit viewer-return and pinch scroll requests.
+- iPhone 17 Pro Simulator, iOS 26.5: tapping multiple prints retains tile
+  position within two points. Horizontal finger sweeps select and deselect a
+  range; holding near the bottom edge scrolls the grid upward to expose later
+  rows. A subsequent vertical swipe still scrolls normally in Select mode.
+- Videos filters pictures out, remains active when switching to Favourites,
+  and All Media restores the unfiltered shelf. The loopback fixture supplies
+  picture, clip and mesh rows; no generation or remote mutation occurs.
+- The retained-position screenshot shows one inline All Prints title/menu
+  above the grid, with no duplicate blue shelf link. Focused title contrast
+  checks pass at extra-small, normal and AX5 text. Viewer-return UI coverage
+  and all 134 native unit tests pass.
+- Independent review approved the selection lifecycle and shared filter
+  contract. Physical-device gesture behavior remains unverified; the evidence
+  above is Simulator UAT.
+- iPad Pro 13-inch Simulator, iPadOS 26.5: the same selection/edge-scroll/filter
+  regression passes against 300 mixed rows. The populated model/Options,
+  landscape prompt and largest-text model-search regression also passes. The
+  two explicitly phone-specific layout/Settings-route tests skip on iPad;
+  the full shell audit retains iPad composer, Machines, sidebar and Settings
+  coverage at all three text sizes in both appearances.
+- The full iPad run exposed a pre-existing Collections modal audit timeout.
+  The same AX5 test on main (`158e7690e`) reproduced it. A runtime sample
+  caught the private Dynamic Type auditor spinning in UIKit floating-tab
+  pagination. Hiding the presenting tab chrome while Collections is open
+  makes the actual Large/AX5 modal pass every original audit type; no audit
+  type or issue was exempted.
+- Follow-up iPad regression passes after both Done and a full downward
+  dismissal drag: the Library tab becomes hittable again and the same print's
+  vertical position is restored within two points. Viewer-return also passes,
+  explicitly checking that the main Library tab stays hidden in the viewer.
+- Populated Library/Search AX5 audits exposed status notices covering the
+  date heading and first row. The focused date-heading contrast regression
+  failed at all three sizes before replacing the overlay with a top safe-area
+  inset; notices now reserve their own space above the grid.
+- The saved-gallery notice itself failed small/normal-text contrast on its
+  translucent material. Primary text on an opaque semantic background passes
+  focused XS/Large/AX5 contrast, with the fixture deliberately taken offline.

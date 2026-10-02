@@ -1,0 +1,119 @@
+import XCTest
+
+final class LibrarySelectionTests: XCTestCase {
+    override func setUp() { super.setUp(); acceptCompanionPermissions() }
+
+    @MainActor func testSelectionKeepsViewportAndDragSelectsRange() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(galleryPrints: 300, galleryFavorites: 45, collectionFixture: true, mixedMedia: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let address = app.textFields["machine-address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5))
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let grid = app.scrollViews.firstMatch
+        grid.swipeUp(velocity: .slow)
+        grid.swipeUp(velocity: .slow)
+        app.buttons["Select"].tap()
+        let tiles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture '"))
+        let visibleElements = visiblePrints(in: tiles, limit: 3)
+        let visible = visibleElements.map { app.buttons[$0.label].firstMatch }
+        XCTAssertGreaterThanOrEqual(visible.count, 3)
+        let first = visible[0]
+        let before = first.frame
+        first.tap()
+        XCTAssertEqual(first.frame.minY, before.minY, accuracy: 2, "a selection must not re-anchor the scroll view")
+        visible[1].tap()
+        XCTAssertEqual(first.frame.minY, before.minY, accuracy: 2)
+        first.tap() // Begin the drag on an unselected tile.
+        first.press(forDuration: 0.05, thenDragTo: visible[2])
+        XCTAssertTrue(first.isSelected)
+        XCTAssertTrue(visible[1].isSelected)
+        XCTAssertTrue(visible[2].isSelected)
+        XCTAssertEqual(first.frame.minY, before.minY, accuracy: 2)
+        first.press(forDuration: 0.05, thenDragTo: visible[2])
+        XCTAssertFalse(first.isSelected)
+        XCTAssertFalse(visible[1].isSelected)
+        XCTAssertFalse(visible[2].isSelected)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Selection stays at its scrolled position"
+        shot.lifetime = .keepAlways
+        add(shot)
+        let sweptTiles = visiblePrints(in: tiles)
+        let bottomY = try XCTUnwrap(sweptTiles.map(\.frame.minY).max())
+        let edgeStart = try XCTUnwrap(sweptTiles.first { abs($0.frame.minY - bottomY) < 2 })
+        let stableEdge = app.buttons[edgeStart.label].firstMatch
+        let edgeBefore = stableEdge.frame.minY
+        let endY = app.buttons["Delete"].firstMatch.frame.minY - 10
+        let startPoint = stableEdge.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+        let endPoint = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: app.frame.maxX - 12, dy: endY))
+        startPoint.press(forDuration: 0.05, thenDragTo: endPoint,
+                         withVelocity: .slow, thenHoldForDuration: 1.2)
+        XCTAssertTrue(!stableEdge.isHittable || stableEdge.frame.minY < edgeBefore - 10,
+                      "holding a sweep at the edge should move the starting print upward")
+        let scrollingTile = try XCTUnwrap(visiblePrints(in: tiles, limit: 1).first)
+        let scrollingPrint = app.buttons[scrollingTile.label].firstMatch
+        let oldY = scrollingPrint.frame.minY
+        grid.swipeUp(velocity: .slow)
+        XCTAssertTrue(!scrollingPrint.isHittable || scrollingPrint.frame.minY < oldY - 20,
+                      "vertical scrolling remains available in Select mode")
+        app.buttons["Done"].tap()
+        let modalTile = try XCTUnwrap(visiblePrints(in: tiles, limit: 1).first)
+        let modalPrint = app.buttons[modalTile.label].firstMatch
+        let modalY = modalPrint.frame.minY
+        for dismissBySwipe in [false, true] {
+            app.buttons["View Options"].tap()
+            app.buttons["Manage Collections…"].firstMatch.tap()
+            let collections = app.navigationBars["Collections"]
+            XCTAssertTrue(collections.waitForExistence(timeout: 5))
+            if dismissBySwipe {
+                let start = collections.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+                let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
+                start.press(forDuration: 0.05, thenDragTo: end,
+                            withVelocity: .slow, thenHoldForDuration: 0.1)
+            } else { collections.buttons["Done"].tap() }
+            XCTAssertTrue(collections.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Library"].firstMatch.isHittable, "Library tab returns after modal dismissal")
+            XCTAssertEqual(modalPrint.frame.minY, modalY, accuracy: 2,
+                           "Dismissing Collections must preserve the scrolled Library")
+        }
+        app.buttons["View Options"].tap()
+        let media = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Media Type'")).firstMatch
+        if media.waitForExistence(timeout: 2) { media.tap() }
+        app.buttons["Videos"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["All Prints · Videos"].waitForExistence(timeout: 5))
+        let video = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'clip'"))
+        XCTAssertTrue(video.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'picture'")).firstMatch.exists)
+        app.chooseLibraryShelf("Favourites")
+        XCTAssertTrue(app.navigationBars["Favourites · Videos"].waitForExistence(timeout: 5))
+        app.buttons["View Options"].tap()
+        let mediaAgain = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Media Type'")).firstMatch
+        if mediaAgain.waitForExistence(timeout: 2) { mediaAgain.tap() }
+        app.buttons["All Media"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Favourites"].waitForExistence(timeout: 5))
+    }
+
+    /// Stop after the visible rows: a 300-row fixture exports offscreen AX
+    /// elements too, and fetching all their frames adds minutes per gesture.
+    @MainActor private func visiblePrints(in tiles: XCUIElementQuery, limit: Int = .max) -> [XCUIElement] {
+        var found: [XCUIElement] = []
+        for tile in tiles.allElementsBoundByIndex {
+            let frame = tile.frame
+            if !found.isEmpty, frame.minY >= 650 { break }
+            if tile.isHittable, frame.minY > 180, frame.maxY < 650 {
+                found.append(tile)
+                if found.count == limit { break }
+            }
+        }
+        return found
+    }
+}

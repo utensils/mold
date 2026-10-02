@@ -75,6 +75,7 @@ extension LibraryPane {
     /// A new shelf is a new list, and a selection made in the old one names
     /// prints that may not be in it.
     func clearSelection() {
+        gridReturn = nil
         selection = LibraryCursor.Selection.empty
         viewing = nil
     }
@@ -82,6 +83,7 @@ extension LibraryPane {
     /// Leaving the viewer puts the cursor back on the print you were looking
     /// at, so the arrow keys carry on from there rather than from nothing.
     func close(_ viewed: PrintID) {
+        gridReturn = (viewed, navigation.scope, navigation.query)
         selection = LibraryCursor.Selection(items: [viewed], anchor: viewed, lead: viewed)
         viewing = nil
     }

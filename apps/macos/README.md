@@ -627,3 +627,8 @@ Hosting requires an explicitly running authenticated `mold serve` and connector.
 Native macOS This Mac remains private; the GUI does not automatically open a
 tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
 are never replayed by the relay.
+
+Library’s **Media Type** toolbar picker shows All Media, Photos, Videos or 3D
+within the current shelf, preserving search and machine filters. Clicking or
+Command/Shift-clicking a visible tile keeps the viewport in place;
+keyboard navigation still reveals tiles outside the viewport.

@@ -35,6 +35,18 @@ extension LibraryPane {
             .help("Show prints from one machine (\(machineFilterTitle))")
         }
         ToolbarItem {
+            Picker("Media Type", selection: Binding(get: {
+                LibraryMediaFilter.selected(in: navigation.query)
+            }, set: { filter in
+                guard let filter else { return }
+                navigation.query = filter.applying(to: navigation.query)
+                clearSelection()
+            })) {
+                ForEach(LibraryMediaFilter.allCases) { filter in Text(filter.title).tag(Optional(filter)) }
+            }
+            .help("Show all media, photos, videos or 3D in this shelf")
+        }
+        ToolbarItem {
             Menu {
                 Picker("Sort By", selection: $navigation.query.sort) {
                     ForEach(LibrarySort.allCases, id: \.self) { order in

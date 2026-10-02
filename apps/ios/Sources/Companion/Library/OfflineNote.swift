@@ -19,9 +19,10 @@ struct OfflineNote: View {
                 Image(systemName: "icloud.slash").accessibilityHidden(true)
             }
             .font(.footnote)
+            .foregroundStyle(.primary)
             .padding(.horizontal, 12).padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: .rect(cornerRadius: 10))
+            .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 10))
             .padding(.horizontal, 12)
             .padding(.top, 4)
         }

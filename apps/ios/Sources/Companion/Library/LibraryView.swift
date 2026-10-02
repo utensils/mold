@@ -55,27 +55,14 @@ struct LibraryView: View {
                     .id(LibraryGridContext(scope: scope, query: query))
             }
         }
-        .navigationTitle(scope.title(in: library.shelves))
-        .modifier(ShelfTitleMenu(enabled: fixedScope == nil && UIDevice.current.userInterfaceIdiom != .phone,
-                                 scope: scope, choose: setScope))
-        .safeAreaInset(edge: .top) {
-            if fixedScope == nil && UIDevice.current.userInterfaceIdiom == .phone {
-                Menu {
-                    ShelfMenu(scope: scope, choose: setScope)
-                } label: {
-                    Label(scope.title(in: library.shelves), systemImage: scope.symbol)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityIdentifier("library-collections")
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-            }
-        }
+        .navigationTitle(libraryTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .modifier(ShelfTitleMenu(enabled: fixedScope == nil,
+                                 scope: scope, choose: setScope, query: $query))
         .toolbar { toolbar(showing) }
+        // A modal owns navigation while open; keep the presenting floating
+        // tab chrome out of its layout and restore it on dismissal.
+        .toolbarVisibility(managingCollections ? .hidden : .automatic, for: .tabBar)
         .sheet(isPresented: $managingCollections) {
             CollectionsSheet { scope in
                 if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }
@@ -110,15 +97,26 @@ struct LibraryView: View {
             }
             return true
         }
-        .overlay(alignment: .top) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 4) {
                 FailureBanner()
                 OfflineNote()
             }
         }
         .onChange(of: sort) { query.sort = sort }
-        .onChange(of: query) { scrollPosition.reset() }
+        .onChange(of: query) { scrollPosition.reset(); selection = [] }
         .onAppear { query.sort = sort }
+    }
+
+    private var libraryTitle: String {
+        let kinds = query.tokens.compactMap { token -> PrintKind? in
+            if case let .kind(kind) = token { kind } else { nil }
+        }
+        guard kinds.count == 1,
+              let filter = LibraryMediaFilter.allCases.first(where: { $0.kind == kinds.first }) else {
+            return scope.title(in: library.shelves)
+        }
+        return "\(scope.title(in: library.shelves)) · \(filter.title)"
     }
 
     private var machines: [(id: MoldHost.ID, name: String)] { hosts.hosts.map { ($0.id, $0.name) } }
@@ -170,6 +168,8 @@ struct LibraryView: View {
                     Button("Manage Collections…", systemImage: "rectangle.stack") { managingCollections = true }
                     Divider()
                 }
+                LibraryMediaPicker(query: $query)
+                Divider()
                 Picker("Sort By", selection: $sort) {
                     ForEach(LibrarySort.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
@@ -225,10 +225,15 @@ private struct ShelfTitleMenu: ViewModifier {
     let enabled: Bool
     let scope: LibraryScope
     let choose: (LibraryScope) -> Void
+    @Binding var query: LibraryQuery
 
     func body(content: Content) -> some View {
         if enabled {
-            content.toolbarTitleMenu { ShelfMenu(scope: scope, choose: choose) }
+            content.toolbarTitleMenu {
+                ShelfMenu(scope: scope, choose: choose)
+                Divider()
+                LibraryMediaPicker(query: $query)
+            }
         } else {
             content
         }

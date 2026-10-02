@@ -1,6 +1,6 @@
 import XCTest
 
-/// The phone's inline shelf picker must remain readable on a populated
+/// The inline shelf picker and date heading must remain readable on a populated
 /// Library. The runner audits each size in both system appearances.
 final class LibraryCollectionPickerTests: XCTestCase {
     override func setUp() {
@@ -39,18 +39,29 @@ final class LibraryCollectionPickerTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 0,'")).firstMatch
         XCTAssertTrue(print.waitForExistence(timeout: 10))
-        let picker = app.descendants(matching: .any)["library-collections"].firstMatch
+        // Reopen the saved gallery with its fixture offline, so the status
+        // notice is audited even on a fresh simulator with no saved machines.
+        machine.stop()
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let offlineNote = app.staticTexts.matching(NSPredicate(format:
+            "label CONTAINS 'Showing' AND label CONTAINS 'saved prints.'")).firstMatch
+        XCTAssertTrue(offlineNote.waitForExistence(timeout: 10))
+        let picker = app.navigationBars.buttons["All Prints"].firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertTrue(picker.isHittable, "The inline phone shelf picker must be visible at \(size)")
+        XCTAssertTrue(picker.isHittable, "The navigation title shelf picker must be visible at \(size)")
         XCTAssertTrue(picker.label.contains("All Prints"))
+        let dayHeader = app.staticTexts["day-header"].firstMatch
+        XCTAssertTrue(dayHeader.waitForExistence(timeout: 5))
 
         try app.performAccessibilityAudit(for: .contrast) { issue in
             // Unknown audit targets must fail. Scope only known, unrelated
             // elements out of this focused control regression; the full shell
             // audit owns the rest of the populated Library.
             guard let element = issue.element else { return false }
-            if element.identifier == picker.identifier,
-               element.elementType == picker.elementType, element.frame == picker.frame {
+            if [picker, dayHeader, offlineNote].contains(where: { element.identifier == $0.identifier
+                && element.elementType == $0.elementType && element.frame == $0.frame }) {
                 return false
             }
             let descendants = picker.descendants(matching: element.elementType)
@@ -59,7 +70,7 @@ final class LibraryCollectionPickerTests: XCTestCase {
             return !descendants.allElementsBoundByIndex.contains { $0.frame == element.frame }
         }
         let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Phone collection picker contrast at \(size)"
+        screenshot.name = "Library title and date heading contrast at \(size)"
         screenshot.lifetime = .keepAlways
         add(screenshot)
     }

@@ -17,11 +17,15 @@ struct LibraryGrid: View {
     let enclosingShelf: CollectionShelf?
     let trashCount: Int
     @Binding var selection: LibraryCursor.Selection
+    let returnToPrint: PrintID?
+    let onReturnRestored: () -> Void
     let onOpen: (PrintID) -> Void
 
     /// Not `private`: the cursor the keyboard drives is built in
     /// `+Selection`, and `private` does not cross a file boundary.
     @State var columns = 1
+    @State var keyboardReveal: PrintID?
+    @State private var visibleIDs: Set<PrintID> = []
     /// The grid must HOLD key focus, or its arrows, Return and Space never
     /// reach it -- including when the viewer closes and hands the cursor back.
     @FocusState private var focused: Bool
@@ -50,9 +54,21 @@ struct LibraryGrid: View {
                     }
                 }
                 .padding(16)
+                .scrollTargetLayout()
             }
-            .onChange(of: selection.lead) { _, lead in
-                guard let lead else { return }
+            .onAppear {
+                // A newly created grid after closing the viewer should reveal
+                // its returned cursor once; pointer selections never request a scroll.
+                if let returnToPrint {
+                    scroller.scrollTo(returnToPrint, anchor: .center)
+                    onReturnRestored()
+                }
+            }
+            .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.95) { ids in
+                visibleIDs = Set(ids)
+            }
+            .onChange(of: keyboardReveal) { _, lead in
+                guard let lead, !visibleIDs.contains(lead) else { return }
                 withAnimation(.snappy) { scroller.scrollTo(lead, anchor: .center) }
             }
         }

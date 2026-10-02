@@ -25,6 +25,8 @@ struct LibraryGrid: View {
     @State private var pinchStart: TileSize?
     /// `anchor` as the pinch began: the print to bring back into place.
     @State private var pinchAnchor: PrintID?
+    @State private var frames: [PrintID: CGRect] = [:]
+    @State private var dragSelection: LibraryDragSelection?
 
     var body: some View {
         let minimum = tile.basePoints * scale
@@ -38,6 +40,12 @@ struct LibraryGrid: View {
                             ForEach(section.items) { entry in
                                 cell(entry, points: minimum * 1.25, showsHost: showsHost)
                                     .id(entry.id)
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(key: LibraryTileFrames.self,
+                                                                   value: [entry.id: geometry.frame(in: .global)])
+                                        }
+                                    }
                             }
                         } header: {
                             if let day = section.day {
@@ -58,8 +66,18 @@ struct LibraryGrid: View {
                 }
                 .scrollTargetLayout()
             }
-            .scrollPosition(id: Binding(get: { position.id }, set: { position.report($0) }), anchor: .top)
-            .gesture(PinchRecognizer(changed: pinched, ended: { pinchStart = nil; pinchAnchor = nil }))
+            // Visibility is an observation, not a request to re-anchor every redraw.
+            .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.1) { ids in
+                position.report(visible.first { ids.contains($0.id) }?.id)
+            }
+            .onPreferenceChange(LibraryTileFrames.self) { frames = $0 }
+            .gesture(LibrarySelectionRecognizer(enabled: selecting,
+                                                canStart: { hit($0) != nil },
+                                                changed: sweep,
+                                                ended: { dragSelection = nil }))
+            .onChange(of: selecting) { _, _ in dragSelection = nil }
+            .onDisappear { dragSelection = nil }
+            .gesture(PinchRecognizer(changed: { pinched($0, reader: reader) }, ended: { pinchStart = nil; pinchAnchor = nil }))
             .sensoryFeedback(.selection, trigger: tile)
             .accessibilityRotor("Days") {
                 ForEach(sections.filter { $0.day != nil }) { section in
@@ -110,7 +128,7 @@ struct LibraryGrid: View {
     }
 
     /// Walks the sizes live as the fingers move, keeping the top print put.
-    private func pinched(_ scale: CGFloat) {
+    private func pinched(_ scale: CGFloat, reader: ScrollViewProxy) {
         let start = pinchStart ?? tile
         if pinchStart == nil {
             pinchStart = start
@@ -123,10 +141,23 @@ struct LibraryGrid: View {
         // layout exists (writing the same id in the same pass does nothing).
         if let keep = pinchAnchor {
             Task { @MainActor in
-                position.reset()
+                reader.scrollTo(keep, anchor: .top)
                 position.report(keep)
             }
         }
+    }
+
+    private func hit(_ point: CGPoint) -> PrintID? {
+        visible.first { frames[$0.id]?.contains(point) == true }?.id
+    }
+
+    private func sweep(_ point: CGPoint, start: CGPoint) {
+        if dragSelection == nil, let id = hit(start) {
+            dragSelection = LibraryDragSelection(ids: visible.map(\.id), start: id, selection: selection)
+        }
+        guard let dragSelection, let id = hit(point) else { return }
+        let next = dragSelection.selection(through: id)
+        if next != selection { selection = next }
     }
 
     private func toggle(_ id: PrintID) {
@@ -145,4 +176,11 @@ struct LibraryScrollPosition {
     }
 
     mutating func reset() { id = nil }
+}
+
+private struct LibraryTileFrames: PreferenceKey {
+    static let defaultValue: [PrintID: CGRect] = [:]
+    static func reduce(value: inout [PrintID: CGRect], nextValue: () -> [PrintID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
 }

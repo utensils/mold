@@ -87,3 +87,8 @@ For distribution builds, `make engine` passes the app's resolved marketing
 version as `MOLD_BUILD_VERSION` to Rust. This keeps the version reported by
 This Mac and `/api/status` aligned with About Mold Studio on Nightly; ordinary
 Rust builds use the workspace package version.
+
+In Library, **Media Type** filters the current shelf to All Media, Photos,
+Videos or 3D while keeping search and machine filters. Multi-select with
+Command-click or Shift-click without recentering tiles already in view.
+Arrow-key navigation still reveals offscreen selections.

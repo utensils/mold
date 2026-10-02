@@ -326,3 +326,7 @@ Model checksums are verified when files are downloaded. Complete installed model
 The [public website privacy policy](https://utensils.io/mold/privacy) describes
 Google Analytics on the documentation website. Analytics loads automatically
 without a popup; this integration is not included in Mold apps or servers.
+
+Native iOS and macOS Libraries offer All Media, Photos, Videos and 3D filters
+within each shelf. iOS Select supports finger sweeps across a range, including
+edge scrolling, and keeps the viewport stable when selecting.

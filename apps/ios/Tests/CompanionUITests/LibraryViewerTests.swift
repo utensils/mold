@@ -30,6 +30,7 @@ final class LibraryViewerTests: XCTestCase {
         XCTAssertTrue(print.isHittable, "the test print must be reached below the first screen")
         print.tap()
         XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Library"].firstMatch.isHittable, "Viewer keeps main tab chrome hidden")
         app.navigationBars.buttons["BackButton"].tap()
         XCTAssertTrue(app.navigationBars["All Prints"].waitForExistence(timeout: 5))
         XCTAssertTrue(print.waitForExistence(timeout: 5))
