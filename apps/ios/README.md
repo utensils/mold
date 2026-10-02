@@ -83,12 +83,18 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make uitest`             | Accessibility audit: every destination at xSmall, Large and AX5, in light and dark, on an iPhone, an iPhone SE when one is installed (`xcrun simctl create "Companion SE" com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation <iOS 26 runtime>`), and an iPad |
 | `make lint`               | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`)                                                                                                                                                                                                   |
 
-UI tests retry a failed test once in a fresh test process to tolerate hosted
-Simulator timing failures. A repeated failure still fails the audit. Full logs
-and result bundles are kept under `build/UITestResults/` for each device and
-appearance; CI uploads them even when the audit fails. Run
-`bash scripts/tests/ios-uitest-runner.sh` from the repository root to verify the
-runner's retry limit, reports, and failure propagation without Xcode.
+UI tests make one complete pass, then retry only identified failed methods once
+in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSON
+and verifies that every requested retry actually ran and passed; incomplete
+reports and infrastructure failures fail the audit. Original and retry logs
+and result bundles remain under `build/UITestResults/`, uploaded even on failure.
+CI splits all test classes into app and Library groups, each in light and dark,
+while unit/shared-package tests run independently. `make uitest` locally still
+runs the full target in both appearances; `UITEST_CLASSES` and
+`UITEST_APPEARANCES` select a focused run. Run
+`bash scripts/tests/ios-uitest-runner.sh` and
+`python3 scripts/tests/ios-uitest-retry.py` from the repository root to verify
+selection, retry bounds, reports, and failure propagation without Xcode.
 
 On iPad, the audit checks the Settings form through its sidebar page, while
 interaction tests cover the sheet’s Done and Add a Machine actions. This avoids
@@ -174,6 +180,6 @@ are never replayed by the relay.
 
 Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.
 
-Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs light and dark audits in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
+Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.

@@ -871,8 +871,18 @@ from pathlib import Path
 native, testflight = (Path(p).read_text() for p in sys.argv[1:])
 assert 'appearance: [light, dark]' in native
 assert 'UITEST_APPEARANCES: ${{ matrix.appearance }}' in native
-assert 'ios-ui-test-reports-${{ matrix.appearance }}-' in native
+assert 'ios-ui-test-reports-${{ matrix.suite.name }}-${{ matrix.appearance }}-' in native
 assert 'fail-fast: false' in native
+assert 'UITEST_CLASSES: ${{ matrix.suite.classes }}' in native
+from collections import Counter
+import re
+classes = []
+for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*.swift'):
+    classes.extend(re.findall(r'\bclass\s+(\w+)\s*:\s*XCTestCase', path.read_text()))
+suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
+assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
+assert len(suites) == 2 and set(re.findall(r'          - name: (\w+)', native)) == {'app', 'library'}
+assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests']
 check, audit = native.split('  audit:', 1)
 assert 'make packages-test' in check and 'make test' in check
 assert 'make uitest' not in check and 'needs: check' not in audit

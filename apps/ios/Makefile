@@ -16,7 +16,8 @@ SIM_OR_PICK = $(or $(SIM),$(shell scripts/pick-simulator.sh iPhone))
 SIM_ID = $(eval SIM_ID := $(SIM_OR_PICK))$(SIM_ID)
 IPAD_ID = $(eval IPAD_ID := $(or $(IPAD),$(shell scripts/pick-simulator.sh iPad)))$(IPAD_ID)
 # `UITEST_DEVICES` overrides which simulators the audit sweeps (CI: iPhones).
-# `UITEST_APPEARANCES` defaults to both; CI runs light and dark on parallel runners.
+# `UITEST_APPEARANCES` defaults to both; CI runs each appearance in two shards.
+# `UITEST_CLASSES` defaults to the full target; CI names every class exactly once.
 # The smallest screen, when an iPhone SE simulator is installed (not created).
 SMALL_ID = $(eval SMALL_ID := $(or $(SMALL),$(shell scripts/pick-simulator.sh small)))$(SMALL_ID)
 DEST = platform=iOS Simulator,id=$(SIM_ID)
@@ -84,7 +85,7 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	@# an iPhone (tab bar) and an iPad (sidebar, where Models lives), and
 	@# puts each simulator back the way it found it, even on Ctrl-C.
 	@# Retry only failed tests, once in a fresh process. Keep full diagnostics
-	@# and preserve xcodebuild's exit status through both output filters.
+	@# and verify the targeted retry result before accepting success.
 	@status=0; \
 	for dev in $(or $(UITEST_DEVICES),$(SIM_ID) $(SMALL_ID) $(IPAD_ID)); do \
 	  xcrun simctl boot $$dev 2>/dev/null || true; \
@@ -94,12 +95,10 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	    echo "  $$(xcrun simctl list devices | grep $$dev | sed -E 's/ \(.*//;s/^ *//') · $$mode"; \
 	    xcrun simctl ui $$dev appearance $$mode; \
 	    results="$(BUILD)/UITestResults/$$dev-$$mode"; \
-	    mkdir -p "$(BUILD)/UITestResults"; rm -rf "$$results.xcresult"; \
-	    $(XCB_BASE) -destination "platform=iOS Simulator,id=$$dev" test -only-testing:MoldCompanionUITests \
-	      -retry-tests-on-failure -test-iterations 2 -test-repetition-relaunch-enabled YES \
-	      -resultBundlePath "$$results.xcresult" 2>&1 \
-	      | tee "$$results.log" | grep -E 'error:|TEST (SUCCEEDED|FAILED)'; \
-	    [ $${PIPESTATUS[0]} -eq 0 ] || status=1; \
+	    python3 scripts/run-uitests.py --results "$$results" -- \
+	      $(XCB_BASE) -destination "platform=iOS Simulator,id=$$dev" test \
+	      $(if $(UITEST_CLASSES),$(foreach test_class,$(UITEST_CLASSES),-only-testing:MoldCompanionUITests/$(test_class)),-only-testing:MoldCompanionUITests) \
+	      || status=1; \
 	  done; \
 	  xcrun simctl ui $$dev appearance $$was; trap - EXIT INT TERM; \
 	done; exit $$status

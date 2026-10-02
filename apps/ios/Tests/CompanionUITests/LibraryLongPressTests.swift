@@ -45,9 +45,14 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(picked.waitForExistence(timeout: 5))
         picked.press(forDuration: 1)
         XCTAssertEqual(app.state, .runningForeground)
-        // A source tile is a picker button, not an organizing context menu.
-        if app.navigationBars["Choose from Library"].exists { picked.tap() }
-        XCTAssertTrue(app.navigationBars["Choose from Library"].waitForNonExistence(timeout: 10))
+        // Releasing the long press can select the picker button. Wait for its
+        // asynchronous fetch and dismissal before attempting a fallback tap.
+        let picker = app.navigationBars["Choose from Library"]
+        if !picker.waitForNonExistence(timeout: 10) {
+            XCTAssertTrue(picked.waitForExistence(timeout: 5))
+            picked.tap()
+        }
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Start from"].firstMatch.waitForExistence(timeout: 5))
         attach(app, name: "Source selected after long press")
     }

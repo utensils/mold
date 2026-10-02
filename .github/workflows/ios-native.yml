@@ -16,6 +16,7 @@ on:
       - ".github/workflows/ios-native.yml"
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
+      - "scripts/tests/ios-uitest-retry.py"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -28,6 +29,7 @@ on:
       - ".github/workflows/ios-native.yml"
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
+      - "scripts/tests/ios-uitest-retry.py"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -69,6 +71,7 @@ jobs:
         run: |
           make lint
           bash ../../scripts/tests/ios-uitest-runner.sh
+          python3 ../../scripts/tests/ios-uitest-retry.py
 
       # The shared packages on the phone's platform: MoldClient's suite on an
       # iOS simulator, so a macOS-only API cannot land in them unnoticed.
@@ -79,13 +82,18 @@ jobs:
         run: make test
 
   audit:
-    name: Accessibility audit (${{ matrix.appearance }})
+    name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
     runs-on: macos-26
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         appearance: [light, dark]
+        suite:
+          - name: app
+            classes: GenerationInteractionTests PopulatedGenerationTests ShellAccessibilityTests
+          - name: library
+            classes: HiddenCollectionTests LibraryCollectionPickerTests LibraryLongPressTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
     defaults:
       run:
         working-directory: apps/ios
@@ -102,13 +110,14 @@ jobs:
       - name: Accessibility audit
         env:
           UITEST_APPEARANCES: ${{ matrix.appearance }}
+          UITEST_CLASSES: ${{ matrix.suite.classes }}
         run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"
 
       - name: Upload UI test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-ui-test-reports-${{ matrix.appearance }}-${{ github.run_attempt }}
+          name: ios-ui-test-reports-${{ matrix.suite.name }}-${{ matrix.appearance }}-${{ github.run_attempt }}
           path: apps/ios/build/UITestResults/
           if-no-files-found: ignore
           retention-days: 7
