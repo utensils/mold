@@ -566,3 +566,62 @@ describe("hostClient library organization plumbing", () => {
     ).rejects.toThrow(/404/);
   });
 });
+it("roams a remembered machine without duplicating its entry or forwarding the key in probes", async () => {
+  const { rememberConnectionRoutes, forgetConnectionRoutes } =
+    await import("@studio/api/connectionRoutes");
+  const { addHost, listStoredHosts, removeHost } =
+    await import("../../lib/hostRegistry");
+  const host = addHost({
+    url: "https://roaming-relay.test",
+    name: "Roaming",
+    apiKey: "test-only-route-secret",
+    instanceId: "fixture-machine",
+  });
+  const random = vi.spyOn(crypto, "getRandomValues").mockImplementation(((
+    array: Uint8Array,
+  ) => {
+    for (let i = 0; i < array.length; i++)
+      array[i] = [1, 35, 69, 103, 137, 171, 205, 239][i % 8]!;
+    return array;
+  }) as typeof crypto.getRandomValues);
+  rememberConnectionRoutes(host.id, "fixture-machine", host.apiKey!, [
+    { url: "https://roaming-relay.test", kind: "relay" },
+    { url: "http://roaming-lan.test:7680", kind: "lan" },
+  ]);
+  const status = { ...currentStatus, instance_id: "fixture-machine" };
+  fetchMock.mockImplementation(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/connection-probe")) {
+        expect(new Headers(init?.headers).has("x-api-key")).toBe(false);
+        expect(JSON.parse(String(init?.body)).nonce).toBe(
+          "0123456789abcdef".repeat(4),
+        );
+        return new Response(
+          JSON.stringify({
+            instance_id: "fixture-machine",
+            proof:
+              "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979",
+          }),
+        );
+      }
+      expect(String(input)).toBe("http://roaming-lan.test:7680/api/status");
+      expect(new Headers(init?.headers).get("x-api-key")).toBe(host.apiKey);
+      return ok(status);
+    },
+  );
+  try {
+    expect(await hostStatus(host)).toEqual(status);
+    expect(
+      listStoredHosts().filter(
+        (entry) => entry.instanceId === "fixture-machine",
+      ),
+    ).toHaveLength(1);
+    expect(listStoredHosts().find((entry) => entry.id === host.id)?.url).toBe(
+      "http://roaming-lan.test:7680",
+    );
+  } finally {
+    random.mockRestore();
+    removeHost(host.id);
+    forgetConnectionRoutes(host.id);
+  }
+});

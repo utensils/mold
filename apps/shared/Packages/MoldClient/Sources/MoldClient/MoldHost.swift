@@ -13,12 +13,17 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
     /// `nil` on a keyless host, which is a first-class state and NOT an error:
     /// a mold server with no `MOLD_API_KEY` leaves every route open.
     public var apiKey: String?
+    public var connectionEndpoints: [ConnectionEndpoint]?
+    public var connectionInstanceID: String?
 
-    public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil) {
+    public init(id: UUID = UUID(), name: String, baseURL: URL, apiKey: String? = nil,
+                connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.connectionEndpoints = connectionEndpoints
+        self.connectionInstanceID = connectionInstanceID
     }
 }
 

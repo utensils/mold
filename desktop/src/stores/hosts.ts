@@ -1,3 +1,4 @@
+import { connectionHealth } from "@studio/api/connectionRoutes";
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
@@ -1330,7 +1331,34 @@ export const useHostsStore = defineStore("hosts", {
           try {
             const previousTelemetry = this.telemetry[host.id];
             const previousInstanceId = previousTelemetry?.instanceId ?? host.instanceId ?? null;
-            const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
+            const statusRequest =
+              host.id === "local"
+                ? apiJsonTo<ServerStatus>(target, "/api/status")
+                : connectionHealth({
+                    hostId: host.id,
+                    baseUrl: target.baseUrl,
+                    apiKey: target.apiKey,
+                    instanceId: previousInstanceId,
+                    isCurrent,
+                    secureContext: false,
+                    read: (baseUrl) =>
+                      apiJsonTo<ServerStatus>({ ...target, baseUrl }, "/api/status"),
+                  }).then(async (resolved) => {
+                    if (!isCurrent()) throw new DOMException("Host changed.", "AbortError");
+                    if (resolved.baseUrl !== target.baseUrl) {
+                      const extra = this.extras.find((candidate) => candidate.id === host.id);
+                      if (extra) extra.url = resolved.baseUrl;
+                      target.baseUrl = resolved.baseUrl;
+                      host.baseUrl = resolved.baseUrl;
+                      await this.persist(
+                        host.id,
+                        resolved.baseUrl,
+                        this.names[host.id] ?? null,
+                        resolved.value.instance_id ?? null,
+                      );
+                    }
+                    return resolved.value;
+                  });
             const queueRequest = statusRequest.then((status) => {
               const capacity = status.queue_capacity;
               const request =
@@ -1345,10 +1373,12 @@ export const useHostsStore = defineStore("hosts", {
             });
             const [status, devicesResult, queueResult] = await Promise.all([
               statusRequest,
-              listDevices(target).then(
-                (snapshot) => ({ value: snapshot.devices, error: null }),
-                (error: unknown) => ({ value: null, error }),
-              ),
+              statusRequest
+                .then(() => listDevices(target))
+                .then(
+                  (snapshot) => ({ value: snapshot.devices, error: null }),
+                  (error: unknown) => ({ value: null, error }),
+                ),
               queueRequest.then(
                 (listing) => ({ value: listing, error: null }),
                 (error: unknown) => ({ value: null, error }),

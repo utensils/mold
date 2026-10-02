@@ -41,7 +41,7 @@ extension HostStore {
         var delay: Duration = .seconds(2)
         while !Task.isCancelled {
             do {
-                for try await event in backend(for: host).events() {
+                for try await event in backend(for: self.host(host.id) ?? host).events() {
                     delay = .seconds(2)
                     deliver(event, from: host)
                 }

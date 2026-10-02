@@ -123,9 +123,34 @@ Use `--transport direct` on its connector. Plain WS requires the explicit
 `--allow-insecure-loopback` flag. Direct streams default to a 3,600 second
 application-byte inactivity limit, configurable with `--idle-timeout-secs`.
 
-Native macOS: open **Settings ▸ Remote Access**, beside Machines. Select the
-machine to see its connection address, show an inline pairing QR code, and
-manage paired devices. For access outside the local network, first add the
-machine’s public HTTPS relay address in Settings ▸ Machines. This Mac’s private
-loopback engine cannot issue a reachable phone code; this pane does not start
-a tunnel. Pairing uses the existing one-use token and expiry.
+Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
+connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
+and paired-device controls. An existing pairing learns routes from a reachable
+authenticated server and keeps one machine and key when the connection changes.
+Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
+origin. The private built-in This Mac engine remains private.
+
+## One pairing across networks
+
+Set `MOLD_PUBLIC_URL=https://mold-link.urandom.io` on the authenticated server
+actually attached to that gateway. Mold advertises the addresses its listener
+serves, including Tailscale interfaces, plus this explicitly configured HTTPS
+origin. The connector does not open a listener or change firewall rules.
+
+New pairing codes carry these routes. Existing saved machines learn them during
+an authenticated connection check, so let the updated app connect while the
+machine is still reachable. The same saved machine and credential then use a
+reachable direct route or the relay; another pairing is unnecessary. A machine
+that has never advertised a relay cannot be reached through a guessed gateway.
+Older servers and older codes retain their original address.
+
+Clients verify a fresh credential-free proof before using an alternate route,
+prefer direct connections, and retain a healthy choice briefly to avoid
+oscillation. Public routes require verified HTTPS. Plain HTTP retains the
+existing trusted-network assumption; the proof detects accidental address reuse
+and does not provide TLS channel binding against a forwarding attacker.
+Keyless servers retain their original address. HTTPS browser pages may be unable
+to probe HTTP LAN routes because of browser mixed-content restrictions; the
+HTTPS relay remains usable. Changing routes never resubmits an interrupted
+mutation: durable jobs are reconciled by their existing IDs and read streams
+reconnect.

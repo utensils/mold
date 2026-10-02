@@ -62,6 +62,10 @@ extension MobilePairingPayload {
         fields["expires_at"] = value("expires_at").map { Double($0) ?? .nan } ?? NSNull()
         fields["instance_id"] = value("instance_id")
         fields["name"] = value("name")
+        if let raw = value("endpoints"), let data = raw.data(using: .utf8) {
+            guard let list = try? JSONSerialization.jsonObject(with: data) else { throw .unsupported }
+            fields["endpoints"] = list
+        }
         return fields
     }
 
@@ -115,7 +119,15 @@ extension MobilePairingPayload {
             expiresAt = UInt64(seconds)
         default: throw .unsupported
         }
+        var endpoints: [ConnectionEndpoint]?
+        if let value = f["endpoints"] {
+            guard let data = try? JSONSerialization.data(withJSONObject: value),
+                  let decoded = try? JSONDecoder().decode([ConnectionEndpoint].self, from: data),
+                  decoded.count <= 8, ConnectionRoutes.sanitized(decoded).count == decoded.count
+            else { throw .unsupported }
+            endpoints = decoded
+        }
         return MobilePairingPayload(baseURL: base, token: token, expiresAt: expiresAt,
-                                    instanceId: instance, name: name)
+                                    instanceId: instance, name: name, endpoints: endpoints)
     }
 }

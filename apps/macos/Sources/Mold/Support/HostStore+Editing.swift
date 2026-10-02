@@ -31,6 +31,11 @@ extension HostStore {
     func update(_ host: MoldHost) {
         guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
         var updated = host
+        if !HostAddress.sameOrigin(updated.baseURL, self.host(updated.id)?.baseURL ?? updated.baseURL)
+            || updated.apiKey != self.host(updated.id)?.apiKey {
+            updated.connectionEndpoints = nil
+            updated.connectionInstanceID = nil
+        }
         updated.baseURL = HostAddress.normalize(host.baseURL.absoluteString) ?? host.baseURL
         updated.name = resolvedName(host.name, for: updated.baseURL)
         hosts[index] = updated

@@ -729,9 +729,9 @@ claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
 Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
 See the deployment guide for safe TLS, streaming and metrics routing.
 
-Native macOS: open **Settings ▸ Remote Access**, beside Machines. Select the
-machine to see its connection address, show an inline pairing QR code, and
-manage paired devices. For access outside the local network, first add the
-machine’s public HTTPS relay address in Settings ▸ Machines. This Mac’s private
-loopback engine cannot issue a reachable phone code; this pane does not start
-a tunnel. Pairing uses the existing one-use token and expiry.
+Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
+connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
+and paired-device controls. An existing pairing learns routes from a reachable
+authenticated server and keeps one machine and key when the connection changes.
+Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
+origin. The private built-in This Mac engine remains private.

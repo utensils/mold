@@ -1,3 +1,9 @@
+import { connectionHealth } from "@studio/api/connectionRoutes";
+import {
+  listStoredHosts,
+  updateHost,
+  ORIGIN_HOST_ID,
+} from "../../lib/hostRegistry";
 import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
 /*
  * Per-host fetch client for the Machines workspace. Dependency-free plain
@@ -112,9 +118,42 @@ async function send(
 }
 
 export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
-  const value = await getJson<unknown>(host, "/api/status", signal);
-  parseCurrentServerStatus(value);
-  return value as HostStatus;
+  const read = async (url: string) => {
+    const value = await getJson<unknown>(
+      { ...host, url },
+      "/api/status",
+      signal,
+    );
+    parseCurrentServerStatus(value);
+    return value as HostStatus;
+  };
+  if (host.id === ORIGIN_HOST_ID) return read(host.url);
+  const initial = listStoredHosts().find((entry) => entry.id === host.id);
+  const isCurrent = () => {
+    if (!initial) return true;
+    const current = listStoredHosts().find((entry) => entry.id === host.id);
+    return (
+      !!current &&
+      (current.url === initial.url || current.url === host.url) &&
+      current.apiKey === initial.apiKey &&
+      current.instanceId === initial.instanceId &&
+      current.connected !== false
+    );
+  };
+  const resolved = await connectionHealth({
+    hostId: host.id,
+    baseUrl: host.url,
+    apiKey: host.apiKey,
+    instanceId: host.instanceId,
+    signal,
+    isCurrent,
+    read,
+  });
+  if (initial && isCurrent() && resolved.baseUrl !== host.url) {
+    updateHost(host.id, { url: resolved.baseUrl }, true);
+    host.url = resolved.baseUrl;
+  }
+  return resolved.value;
 }
 
 /** Current servers expose the authoritative full device inventory here.
@@ -454,18 +493,23 @@ export function useHostPoll(
       return;
     }
     try {
+      const statusRequest = hostStatus(target, signal);
       const [nextStatus, resourceResult, deviceResult] = await Promise.all([
-        hostStatus(target, signal),
+        statusRequest,
         options.withResources
-          ? hostResources(target, signal).then(
-              (value) => ({ value, error: null }),
-              (error: unknown) => ({ value: null, error }),
-            )
+          ? statusRequest
+              .then(() => hostResources(target, signal))
+              .then(
+                (value) => ({ value, error: null }),
+                (error: unknown) => ({ value: null, error }),
+              )
           : Promise.resolve({ value: null, error: null }),
-        hostDevices(target, signal).then(
-          (value) => ({ value, error: null }),
-          (error: unknown) => ({ value: null, error }),
-        ),
+        statusRequest
+          .then(() => hostDevices(target, signal))
+          .then(
+            (value) => ({ value, error: null }),
+            (error: unknown) => ({ value: null, error }),
+          ),
       ]);
       if (signal.aborted || !isCurrentTarget(target)) return;
       const auxiliaryAuthorityError = [

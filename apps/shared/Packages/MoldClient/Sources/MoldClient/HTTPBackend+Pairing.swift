@@ -7,6 +7,8 @@ public struct PairingClaim: Codable, Hashable, Sendable {
     public let apiKey: String?
     public let instanceId: String
     public let hostname: String?
+    public var endpoints: [ConnectionEndpoint]?
+    public var resolvedBaseURL: URL?
 }
 
 public enum PairingClaimError: Error, Equatable, LocalizedError {
@@ -44,8 +46,13 @@ public extension HTTPBackend {
     ) async throws -> PairingClaim {
         if payload.isExpired(at: now) { throw PairingClaimError.expiredOrUsed }
         guard let base = URL(string: payload.baseURL) else { throw MobilePairingPayload.ParseError.unsupported }
-        let backend = HTTPBackend(host: MoldHost(name: payload.name, baseURL: base), session: session)
-        let claim: PairingClaim
+        let target: URL
+        if let endpoints = payload.endpoints, !endpoints.isEmpty, let token = payload.token {
+            target = try await ConnectionRoutes.select(endpoints: endpoints, secret: token, kind: "pairing",
+                                                       instanceID: payload.instanceId, session: session)
+        } else { target = base }
+        let backend = HTTPBackend(host: MoldHost(name: payload.name, baseURL: target), session: session)
+        var claim: PairingClaim
         do {
             claim = try await backend.post(
                 "/api/pairing/claim",
@@ -54,6 +61,7 @@ public extension HTTPBackend {
             throw PairingClaimError.expiredOrUsed
         }
         guard claim.instanceId == payload.instanceId else { throw PairingClaimError.wrongMachine }
+        claim.resolvedBaseURL = target
         return claim
     }
 }

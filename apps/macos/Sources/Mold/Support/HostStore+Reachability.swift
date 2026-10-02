@@ -31,9 +31,33 @@ extension HostStore {
         reconcileEventStreams()
     }
 
-    func refresh(_ host: MoldHost) async {
+    func refresh(_ original: MoldHost) async {
+        defer {
+            if let current = self.host(original.id), current.baseURL != original.baseURL {
+                watchers.removeValue(forKey: original.id)?.cancel()
+            }
+            reconcileEventStreams()
+        }
+        var host = original
+        if let current = self.host(original.id) { host = current }
+        do {
+            if let resolved = try await backend(for: host).resolvedConnection() {
+                guard let current = self.host(host.id), current.apiKey == host.apiKey,
+                      current.baseURL == host.baseURL else { return }
+                let previousURL = host.baseURL
+                host = resolved
+                applyConnection(host, expectedURL: previousURL)
+            }
+        } catch {
+            guard let current = self.host(host.id), current.apiKey == host.apiKey,
+                  current.baseURL == host.baseURL, !Task.isCancelled else { return }
+            recordConnectionFailure(error, on: host.id)
+            return
+        }
         reachability[host.id] = .checking
         let state = await check(host)
+        guard let current = self.host(host.id), current.apiKey == host.apiKey,
+              current.baseURL == host.baseURL, !Task.isCancelled else { return }
         reachability[host.id] = state
         // It answered, so whatever "can't be reached" line it was carrying
         // is no longer true -- a real refusal, if this same check also
@@ -45,8 +69,14 @@ extension HostStore {
         // reachability check is plenty. Reconciling comes AFTER them, because
         // whether a machine wants watching is something its capabilities say.
         defer { reconcileEventStreams() }
-        guard case .up = state, capabilities[host.id] == nil else { return }
+        guard case let .up(status) = state else { return }
         let client = backend(for: host)
+        if let info = try? await client.connectionAddresses(), info.instanceId == status.instanceId {
+            host.connectionEndpoints = ConnectionRoutes.sanitized(info.endpoints)
+            host.connectionInstanceID = info.instanceId
+            applyConnection(host, expectedURL: host.baseURL)
+        }
+        guard capabilities[host.id] == nil else { return }
         capabilities[host.id] = try? await client.capabilities()
         exportOptions[host.id] = try? await client.exportOptions()
     }

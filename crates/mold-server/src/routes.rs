@@ -311,6 +311,8 @@ use crate::queue::clean_error_message;
         create_gallery_media_token,
         gallery_export_options,
         export_gallery_media,
+        crate::connections::addresses,
+        crate::connections::probe,
         create_pairing_session,
         claim_pairing_session,
         list_paired_clients,
@@ -464,6 +466,10 @@ use crate::queue::clean_error_message;
         mold_core::HealthStatus,
         mold_core::HealthState,
         mold_core::DurableMediaStatus,
+        crate::connections::ConnectionEndpoint,
+        crate::connections::ConnectionAddressResponse,
+        crate::connections::ConnectionProbeRequest,
+        crate::connections::ConnectionProbeResponse,
         PairingSessionResponse,
         PairingClaimRequest,
         PairingClaimResponse,
@@ -791,6 +797,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/gallery/trash/sweep",
             post(crate::gallery_trash::sweep_gallery_trash),
         )
+        .route(
+            "/api/connection-addresses",
+            get(crate::connections::addresses),
+        )
+        .route("/api/connection-probe", post(crate::connections::probe))
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
         .route("/api/pairing/clients", get(list_paired_clients))
@@ -9643,6 +9654,7 @@ pub(crate) struct GalleryExportOptionsResponse {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingSessionResponse {
+    pub(crate) endpoints: Vec<crate::connections::ConnectionEndpoint>,
     pub(crate) token: Option<String>,
     pub(crate) expires_at: Option<u64>,
     pub(crate) auth_required: bool,
@@ -9659,6 +9671,7 @@ pub(crate) struct PairingClaimRequest {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimResponse {
+    pub(crate) endpoints: Vec<crate::connections::ConnectionEndpoint>,
     pub(crate) api_key: Option<String>,
     pub(crate) instance_id: String,
     pub(crate) hostname: Option<String>,
@@ -9733,6 +9746,7 @@ async fn create_pairing_session(
     Ok((
         headers,
         Json(PairingSessionResponse {
+            endpoints: state.connection_addresses.endpoints(),
             token,
             expires_at,
             auth_required,
@@ -9744,7 +9758,7 @@ async fn create_pairing_session(
 
 /// Redeem the QR bearer once. This is the sole unauthenticated API route that
 /// can return a durable key; its random token is single-use, short-lived, kept
-/// only as an HMAC server-side, and the response is explicitly non-cacheable.
+/// only as server-side hashes, and the response is explicitly non-cacheable.
 #[utoipa::path(
     post,
     path = "/api/pairing/claim",
@@ -9800,6 +9814,7 @@ async fn claim_pairing_session(
     Ok((
         headers,
         Json(PairingClaimResponse {
+            endpoints: state.connection_addresses.endpoints(),
             api_key,
             instance_id: (*state.instance_id).clone(),
             hostname: pairing_hostname(),
@@ -12536,6 +12551,7 @@ mod tests {
         );
         let created = response_json(created).await;
         assert_eq!(created["auth_required"], true);
+        assert_eq!(created["endpoints"], serde_json::json!([]));
         assert_eq!(created["instance_id"], *state.instance_id);
         let token = created["token"].as_str().unwrap().to_string();
 
@@ -12561,6 +12577,7 @@ mod tests {
         assert!(paired_key.starts_with("mold_pair_"));
         assert_ne!(claimed["api_key"], "phone-key");
         assert_eq!(claimed["instance_id"], *state.instance_id);
+        assert_eq!(claimed["endpoints"], serde_json::json!([]));
         assert!(key_set.contains(&paired_key));
 
         let clients = list_paired_clients(

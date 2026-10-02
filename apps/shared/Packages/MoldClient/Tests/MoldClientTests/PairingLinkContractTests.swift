@@ -14,6 +14,7 @@ struct PairingLinkContractTests {
             let expiresAt: UInt64?
             let instanceId: String
             let name: String
+            let endpoints: [ConnectionEndpoint]?
         }
 
         let payload: Payload
@@ -23,7 +24,7 @@ struct PairingLinkContractTests {
         var expected: MobilePairingPayload {
             MobilePairingPayload(baseURL: payload.baseUrl, token: payload.token,
                                  expiresAt: payload.expiresAt, instanceId: payload.instanceId,
-                                 name: payload.name)
+                                 name: payload.name, endpoints: payload.endpoints)
         }
     }
 

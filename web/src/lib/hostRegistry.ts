@@ -1,3 +1,4 @@
+import { forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { originApiKey } from "./originAuth";
 /*
  * Machines host registry (spec §08 G1) — the browser's list of mold servers
@@ -397,11 +398,20 @@ export function recordSuccessfulHostInstance(
 export function updateHost(
   id: string,
   patch: Partial<Omit<HostEntry, "id">>,
+  preserveConnectionRoutes = false,
 ): HostEntry | null {
   if (id === ORIGIN_HOST_ID) return null;
   const stored = listStoredHosts();
   const current = stored.find((h) => h.id === id);
   if (!current) return null;
+  if (
+    !preserveConnectionRoutes &&
+    ((patch.url !== undefined && patch.url !== current.url) ||
+      (patch.apiKey !== undefined && patch.apiKey !== current.apiKey) ||
+      (patch.instanceId !== undefined &&
+        patch.instanceId !== current.instanceId))
+  )
+    forgetConnectionRoutes(id);
   const updated: HostEntry = { ...current, ...patch, id };
   writeStoredHosts(stored.map((h) => (h.id === id ? updated : h)));
   return updated;
@@ -409,6 +419,7 @@ export function updateHost(
 
 /** Remove a stored host. The immutable primary is never removed. */
 export function removeHost(id: string): void {
+  forgetConnectionRoutes(id);
   if (id === ORIGIN_HOST_ID) return;
   writeStoredHosts(listStoredHosts().filter((h) => h.id !== id));
 }

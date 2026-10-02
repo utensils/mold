@@ -14,25 +14,31 @@ public struct StoredHost: Codable, Hashable, Sendable {
     public let id: UUID
     public var name: String
     public var baseURL: URL
+    public var connectionEndpoints: [ConnectionEndpoint]?
+    public var connectionInstanceID: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case name
         case baseURL = "base_url"
+        case connectionEndpoints = "connection_endpoints"
+        case connectionInstanceID = "connection_instance_id"
     }
 
-    public init(id: UUID, name: String, baseURL: URL) {
+    public init(id: UUID, name: String, baseURL: URL, connectionEndpoints: [ConnectionEndpoint]? = nil, connectionInstanceID: String? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
+        self.connectionEndpoints = connectionEndpoints
+        self.connectionInstanceID = connectionInstanceID
     }
 
     public init(_ host: MoldHost) {
-        self.init(id: host.id, name: host.name, baseURL: host.baseURL)
+        self.init(id: host.id, name: host.name, baseURL: host.baseURL, connectionEndpoints: host.connectionEndpoints, connectionInstanceID: host.connectionInstanceID)
     }
 
     /// Rejoined with the key the secrets file was holding for it.
     public func host(apiKey: String?) -> MoldHost {
-        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey)
+        MoldHost(id: id, name: name, baseURL: baseURL, apiKey: apiKey, connectionEndpoints: connectionEndpoints, connectionInstanceID: connectionInstanceID)
     }
 }

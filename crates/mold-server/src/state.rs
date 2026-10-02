@@ -345,6 +345,8 @@ pub struct AppState {
     /// from `crate::instance::resolve_instance_id` before the router (and the
     /// mDNS TXT records) are built.
     pub instance_id: Arc<String>,
+    /// Actual bound listener and explicit relay origin; request headers are never trusted.
+    pub connection_addresses: Arc<crate::connections::ConnectionAddresses>,
     /// Long-lived DNS-SD browser cache used by `/api/discovery/peers`.
     pub discovery: Arc<DiscoveryState>,
     // ── Multi-GPU fields ────────────────────────────────────────────────────
@@ -713,6 +715,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            connection_addresses: Arc::new(Default::default()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
@@ -790,6 +793,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            connection_addresses: Arc::new(Default::default()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
@@ -878,6 +882,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            connection_addresses: Arc::new(Default::default()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
@@ -935,6 +940,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         let state = Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            connection_addresses: Arc::new(Default::default()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
@@ -989,6 +995,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            connection_addresses: Arc::new(Default::default()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new().into(),

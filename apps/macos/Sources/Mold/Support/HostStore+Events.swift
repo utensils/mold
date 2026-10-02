@@ -86,7 +86,7 @@ extension HostStore {
             var attempt = 0
             while !Task.isCancelled {
                 do {
-                    for try await event in backend(for: host).events() {
+                    for try await event in backend(for: self.host(host.id) ?? host).events() {
                         attempt = 0
                         deliver(event, from: host.id)
                     }

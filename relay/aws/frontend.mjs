@@ -287,6 +287,33 @@ export function createFrontend(dependencies = {}) {
         new URL(request.path, "https://mold.invalid").searchParams.has(
           "media_token",
         );
+      const publicProbe =
+        request.route === "/api/connection-probe" && request.method === "POST";
+      if (publicProbe) {
+        let proof;
+        try {
+          if (request.body.length <= 512)
+            proof = JSON.parse(request.body.toString());
+        } catch {
+          /* Generic refusal below. */
+        }
+        if (
+          request.body.length > 512 ||
+          request.headers["x-api-key"] ||
+          request.headers.authorization ||
+          request.path.includes("?") ||
+          !proof ||
+          !["api", "pairing"].includes(proof.kind) ||
+          typeof proof.key_tag !== "string" ||
+          typeof proof.nonce !== "string" ||
+          !/^[a-f0-9]{16}$/.test(proof.key_tag ?? "") ||
+          !/^[a-f0-9]{64}$/.test(proof.nonce ?? "") ||
+          Object.keys(proof).length !== 3
+        ) {
+          json(raw, 401, { error: "Connection proof refused" });
+          return;
+        }
+      }
       const publicClaim =
         request.route === "/api/pairing/claim" && request.method === "POST";
       if (
@@ -295,6 +322,7 @@ export function createFrontend(dependencies = {}) {
         !request.headers["x-api-key"] &&
         !readTicket &&
         !publicClaim &&
+        !publicProbe &&
         !publicRead
       ) {
         json(raw, 401, { error: "missing X-Api-Key header" });

@@ -8,8 +8,11 @@ struct RemoteAccessSettings: View {
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) private var selectedMachine = ""
     @State private var showingCode = false
 
-    static func canPair(hostID: MoldHost.ID) -> Bool {
-        hostID != MoldEngine.localHostID
+    static func canPair(_ host: MoldHost) -> Bool {
+        guard MoldEngine.isPairable(host) else { return false }
+        let name = host.baseURL.host?.lowercased() ?? ""
+        return !["localhost", "127.0.0.1", "::1", "[::1]"].contains(name)
+            && !name.hasPrefix("127.")
     }
 
     private var selected: MoldHost? { hosts.machine(selected: selectedMachine) }
@@ -31,11 +34,23 @@ struct RemoteAccessSettings: View {
                         Text(host.baseURL.absoluteString).textSelection(.enabled)
                         CopyButton(what: "Address", value: host.baseURL.absoluteString)
                     }
-                    Text("For access outside your local network, add the machine’s public HTTPS relay address in Settings ▸ Machines, then select it here. A pairing code does not create a tunnel.")
+                    Text("Your pairing follows this machine across local network, Tailscale and configured HTTPS relay routes. Keep the machine connected while this app learns its addresses; no new pairing is needed when you leave the network.")
                         .foregroundStyle(.secondary)
+                    if let routes = host.connectionEndpoints, !routes.isEmpty {
+                        ForEach(routes, id: \.url) { route in
+                            LabeledContent(route.kind == .lan ? "Local Network" : route.kind == .tailscale ? "Tailscale" : "HTTPS Relay", value: route.url)
+                        }
+                        if !routes.contains(where: { $0.kind == .relay }) {
+                            Text("A public relay address has not been configured on this machine yet.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("Connection routes have not been learned yet. A newer authenticated server can advertise them automatically.")
+                            .foregroundStyle(.secondary)
+                    }
                     Link("Set Up Remote Access", destination: URL(string: "https://utensils.io/mold/deployment/relay")!)
                 }
-                if Self.canPair(hostID: host.id) {
+                if Self.canPair(host) {
                     Section("Phone Pairing") {
                         if showingCode {
                             PairingSheet(host: host, showsDone: false).id(host.id)
@@ -45,7 +60,7 @@ struct RemoteAccessSettings: View {
                             Button("Show Pairing Code") { showingCode = true }
                         }
                     }
-                    PairingSection(host: host)
+                    PairingSection(host: host, showsPairButton: false)
                 } else {
                     Section("This Mac") {
                         Text("This Mac’s built-in engine is private and uses a loopback address. To share a machine, set up an authenticated server and relay, then add its public address in Machines.")
@@ -57,7 +72,7 @@ struct RemoteAccessSettings: View {
         .formStyle(.grouped)
         .onChange(of: selected?.id) { showingCode = false }
         .task(id: selected?.id) {
-            guard let host = selected, Self.canPair(hostID: host.id) else { return }
+            guard let host = selected, Self.canPair(host) else { return }
             await pairing.load(on: host.id)
         }
     }

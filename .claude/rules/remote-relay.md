@@ -45,3 +45,12 @@ for inline expiring QR codes and device revocation. The Settings scene must
 inject the shared pairing store. Codes carry the selected saved host address;
 never substitute a gateway URL without explicitly adding that machine. The
 private This Mac host does not offer pairing and this pane never starts a tunnel.
+
+Connection advertisements come from the actual bound listener and its interfaces,
+plus explicit `MOLD_PUBLIC_URL`; never request Host/Forwarded headers. Routes are
+bounded, exact credential-free origins. Existing clients learn only through an
+already authenticated origin; alternative routes require the instance-bound,
+nonce- and kind-bound credential-free proof. This detects accidental address
+reuse, not HTTP forwarding MITM. Keyless and legacy servers retain the original
+route. Saved route metadata must preserve host UUID and secret-store identity,
+respect edits/removal/rekey, and never replay uncertain mutations.
