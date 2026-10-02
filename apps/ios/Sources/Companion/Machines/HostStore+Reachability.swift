@@ -3,6 +3,12 @@ import MoldClient
 
 // Asking each machine whether it is there, and what it can do.
 extension HostStore {
+    func recordConnectionFailure(_ error: any Error, on id: MoldHost.ID) {
+        guard host(id) != nil else { return }
+        setReachability(.down(error.reasonSentence), for: id)
+        reconcileWatchers()
+    }
+
     func refreshAll() async {
         await withTaskGroup(of: Void.self) { group in
             for host in hosts {
@@ -12,9 +18,33 @@ extension HostStore {
         reconcileWatchers()
     }
 
-    func refresh(_ host: MoldHost) async {
+    func refresh(_ original: MoldHost) async {
+        defer {
+            if let current = self.host(original.id), current.baseURL != original.baseURL {
+                stopWatching(original.id)
+            }
+            reconcileWatchers()
+        }
+        var host = original
+        if let current = self.host(original.id) { host = current }
+        do {
+            if let resolved = try await backend(for: host).resolvedConnection() {
+                guard let current = self.host(host.id), current.apiKey == host.apiKey,
+                      current.baseURL == host.baseURL else { return }
+                let previousURL = host.baseURL
+                host = resolved
+                applyConnection(host, expectedURL: previousURL)
+            }
+        } catch {
+            guard let current = self.host(host.id), current.apiKey == host.apiKey,
+                  current.baseURL == host.baseURL, !Task.isCancelled else { return }
+            recordConnectionFailure(error, on: host.id)
+            return
+        }
         setReachability(.checking, for: host.id)
         let state = await check(host)
+        guard let current = self.host(host.id), current.apiKey == host.apiKey,
+              current.baseURL == host.baseURL, !Task.isCancelled else { return }
         // Removed while we asked: nothing to record.
         guard self.host(host.id) != nil else { return }
         setReachability(state, for: host.id)
@@ -23,6 +53,11 @@ extension HostStore {
         setLastAnswered(.now, for: host.id)
         clearFailures(for: host.id, doing: HostFailure.reachVerb)
         let client = backend(for: host)
+        if let info = try? await client.connectionAddresses(), info.instanceId == instanceID(of: host.id) {
+            host.connectionEndpoints = ConnectionRoutes.sanitized(info.endpoints)
+            host.connectionInstanceID = info.instanceId
+            applyConnection(host, expectedURL: host.baseURL)
+        }
         if capabilities[host.id] == nil {
             setCapabilities(try? await client.capabilities(), for: host.id)
         }

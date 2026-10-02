@@ -1,0 +1,2 @@
+- Added a dedicated Remote Access tab in native macOS Settings with an inline phone pairing QR code, learned connection routes and paired-device controls.
+- Added authenticated LAN, Tailscale and HTTPS relay route discovery and universal pairing: updated clients retain one machine and credential while reconnecting across networks, without replaying interrupted requests.

@@ -330,3 +330,15 @@ without a popup; this integration is not included in Mold apps or servers.
 Native iOS and macOS Libraries offer All Media, Photos, Videos and 3D filters
 within each shelf. iOS Select supports finger sweeps across a range, including
 edge scrolling, and keeps the viewport stable when selecting.
+
+Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
+connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
+and paired-device controls. An existing pairing learns routes from a reachable
+authenticated server and keeps one machine and key when the connection changes.
+Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
+origin. The private built-in This Mac engine remains private.
+
+Automatic roaming requires a server-minted paired credential. Operator API keys
+remain tied to the explicitly saved address; pair once to enable route learning.
+Probes expose a stable digest tag, so arbitrary operator keys never participate
+in anonymous route proofs. Plain HTTP still requires a trusted network.

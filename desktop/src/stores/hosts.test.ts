@@ -2840,3 +2840,42 @@ describe("hosts store", () => {
     expect(persisted.generateTargetHost).toBe("local");
   });
 });
+it("clears learned routes when an operator disconnects a desktop host", async () => {
+  const { rememberConnectionRoutes } = await import("@studio/api/connectionRoutes");
+  testRemoteHost.mockResolvedValue({
+    ok: true,
+    instanceId: "route-fixture",
+    version: null,
+    error: null,
+  });
+  const hosts = useHostsStore();
+  await hosts.connect("hal9000", "mold_pair_" + "A".repeat(43), null);
+  rememberConnectionRoutes("hal9000-7680", "route-fixture", "mold_pair_" + "A".repeat(43), [
+    { url: "http://hal9000:7680", kind: "lan" },
+  ]);
+  await hosts.disconnect("hal9000-7680");
+  expect(
+    JSON.parse(localStorage.getItem("mold.connection-routes.v1") ?? "{}")["hal9000-7680"],
+  ).toBeUndefined();
+});
+it("clears learned routes when an operator adopts a different address for the same desktop machine", async () => {
+  const { rememberConnectionRoutes } = await import("@studio/api/connectionRoutes");
+  testRemoteHost.mockResolvedValue({
+    ok: true,
+    instanceId: "route-fixture",
+    version: null,
+    error: null,
+  });
+  const hosts = useHostsStore();
+  await hosts.connect("hal9000", "mold_pair_" + "A".repeat(43), null);
+  rememberConnectionRoutes("hal9000-7680", "route-fixture", "mold_pair_" + "A".repeat(43), [
+    { url: "http://hal9000:7680", kind: "lan" },
+  ]);
+  await hosts.connect("hal9000-new", "mold_pair_" + "A".repeat(43), null);
+  expect(hosts.all.find((host) => host.id === "hal9000-7680")?.baseUrl).toBe(
+    "http://hal9000-new:7680",
+  );
+  expect(
+    JSON.parse(localStorage.getItem("mold.connection-routes.v1") ?? "{}")["hal9000-7680"],
+  ).toBeUndefined();
+});

@@ -674,6 +674,8 @@ pub type HfFallbackTokenProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>
 ///
 /// The real implementation in `HfPullDriver` calls
 /// `mold_core::download::pull_and_configure_with_callback`. Tests inject a stub.
+// async-trait adds must_use to an already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait PullDriver: Send + Sync + 'static {
     async fn pull(
@@ -702,6 +704,8 @@ pub trait PullDriver: Send + Sync + 'static {
 /// `PullDriver` so the existing 6 manifest-driver implementations don't
 /// need to change. The driver task picks between them based on whether
 /// the queue stored a recipe payload for the job id.
+// async-trait adds must_use to an already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait RecipePullDriver: Send + Sync + 'static {
     async fn pull(

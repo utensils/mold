@@ -122,3 +122,43 @@ remove spoofed forwarding headers, block metrics, and stream HTTP/1.1 responses.
 Use `--transport direct` on its connector. Plain WS requires the explicit
 `--allow-insecure-loopback` flag. Direct streams default to a 3,600 second
 application-byte inactivity limit, configurable with `--idle-timeout-secs`.
+
+Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
+connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
+and paired-device controls. An existing pairing learns routes from a reachable
+authenticated server and keeps one machine and key when the connection changes.
+Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
+origin. The private built-in This Mac engine remains private.
+
+## One pairing across networks
+
+Set `MOLD_PUBLIC_URL=https://mold-link.urandom.io` on the authenticated server
+actually attached to that gateway. Mold advertises the addresses its listener
+serves, including Tailscale interfaces, plus this explicitly configured HTTPS
+origin. The connector does not open a listener or change firewall rules.
+
+New pairing codes carry these routes. Existing saved machines learn them during
+an authenticated connection check, so let the updated app connect while the
+machine is still reachable. The same saved machine and credential then use a
+reachable direct route or the relay; another pairing is unnecessary. A machine
+that has never advertised a relay cannot be reached through a guessed gateway.
+Older servers and older codes retain their original address.
+
+Automatic roaming requires a server-minted paired credential. Operator API keys
+remain tied to the explicitly saved address; pair once to enable route learning.
+Probes expose a stable digest tag, so arbitrary operator keys never participate
+in anonymous route proofs. Plain HTTP still requires a trusted network. Protect
+`mold.db` and its backups as credentials: stored paired-key verifiers can
+produce route proofs, so a stolen backup plus control of a candidate address
+can impersonate the server during discovery.
+
+Clients verify a fresh credential-free proof before using an alternate route,
+prefer direct connections, and retain a healthy choice briefly to avoid
+oscillation. Public routes require verified HTTPS. Plain HTTP retains the
+existing trusted-network assumption; the proof detects accidental address reuse
+and does not provide TLS channel binding against a forwarding attacker.
+Keyless servers retain their original address. HTTPS browser pages may be unable
+to probe HTTP LAN routes because of browser mixed-content restrictions; the
+HTTPS relay remains usable. Changing routes never resubmits an interrupted
+mutation: durable jobs are reconciled by their existing IDs and read streams
+reconnect.

@@ -10,6 +10,7 @@ struct PairingSection: View {
     @Environment(HostStore.self) private var hosts
     @Environment(PairingStore.self) private var pairing
     let host: MoldHost
+    var showsPairButton = true
     @State private var showingSheet = false
     @State private var pendingRevoke: Destruction?
 
@@ -55,7 +56,7 @@ struct PairingSection: View {
             Section("Pairing") {
                 Text("This machine needs no key, so a phone connects with its address alone.")
                     .foregroundStyle(.secondary)
-                Button("Pair a Phone…") { showingSheet = true }
+                if showsPairButton { Button("Pair a Phone…") { showingSheet = true } }
             }
         case .needsOperator:
             Section("Pairing") {
@@ -70,7 +71,7 @@ struct PairingSection: View {
         case let .clients(clients):
             Section("Pairing") {
                 ForEach(clients) { client in row(client) }
-                Button("Pair a Phone…") { showingSheet = true }
+                if showsPairButton { Button("Pair a Phone…") { showingSheet = true } }
             }
         }
     }

@@ -12,15 +12,17 @@ public struct PairingSession: Codable, Hashable, Sendable {
     public let authRequired: Bool
     public let instanceId: String
     public let hostname: String?
+    public let endpoints: [ConnectionEndpoint]?
 
     public init(
-        token: String?, expiresAt: UInt64?, authRequired: Bool, instanceId: String, hostname: String?
+        token: String?, expiresAt: UInt64?, authRequired: Bool, instanceId: String, hostname: String?, endpoints: [ConnectionEndpoint]? = nil
     ) {
         self.token = token
         self.expiresAt = expiresAt
         self.authRequired = authRequired
         self.instanceId = instanceId
         self.hostname = hostname
+        self.endpoints = endpoints
     }
 }
 

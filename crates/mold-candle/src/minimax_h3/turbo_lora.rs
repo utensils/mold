@@ -4201,6 +4201,8 @@ mod tests {
     }
 
     impl H3ComfyInt8Cancellation for CancelAfter {
+        // fetch_update is retained for the Rust 1.93 MSRV; try_update is newer.
+        #[allow(deprecated)]
         fn is_cancelled(&self) -> bool {
             self.remaining
                 .fetch_update(

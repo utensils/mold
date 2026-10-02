@@ -1,3 +1,4 @@
+import { connectionHealth, forgetConnectionRoutes } from "@studio/api/connectionRoutes";
 import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
@@ -503,6 +504,7 @@ export const useHostsStore = defineStore("hosts", {
             const urlChanged = live.url !== url;
             const needsRevival = twin.status !== "ready" || twin.stale;
             const authorityChanged = keyChanged || urlChanged;
+            if (authorityChanged) forgetConnectionRoutes(twin.id);
             if (authorityChanged || needsRevival) {
               // Fence a status/capability response started under the retired
               // address or credential before mutating the live authority.
@@ -551,6 +553,7 @@ export const useHostsStore = defineStore("hosts", {
             previousInstanceId !== instanceId) ||
           unverifiedAddressReplacement
         ) {
+          forgetConnectionRoutes(id);
           retiredExistingAuthority = true;
           delete this.telemetry[id];
           delete this.capabilities[id];
@@ -575,6 +578,7 @@ export const useHostsStore = defineStore("hosts", {
     },
     /** Drop a live extra host. Its saved entry and key stay for later. */
     async disconnect(id: string) {
+      forgetConnectionRoutes(id);
       useDownloadsStore().unsubscribeHost(id);
       // Retire every request issued before the explicit disconnect. URL/key
       // equality is insufficient when the same slug reconnects to a replaced
@@ -1330,7 +1334,34 @@ export const useHostsStore = defineStore("hosts", {
           try {
             const previousTelemetry = this.telemetry[host.id];
             const previousInstanceId = previousTelemetry?.instanceId ?? host.instanceId ?? null;
-            const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
+            const statusRequest =
+              host.id === "local"
+                ? apiJsonTo<ServerStatus>(target, "/api/status")
+                : connectionHealth({
+                    hostId: host.id,
+                    baseUrl: target.baseUrl,
+                    apiKey: target.apiKey,
+                    instanceId: previousInstanceId,
+                    isCurrent,
+                    secureContext: false,
+                    read: (baseUrl) =>
+                      apiJsonTo<ServerStatus>({ ...target, baseUrl }, "/api/status"),
+                  }).then(async (resolved) => {
+                    if (!isCurrent()) throw new DOMException("Host changed.", "AbortError");
+                    if (resolved.baseUrl !== target.baseUrl) {
+                      const extra = this.extras.find((candidate) => candidate.id === host.id);
+                      if (extra) extra.url = resolved.baseUrl;
+                      target.baseUrl = resolved.baseUrl;
+                      host.baseUrl = resolved.baseUrl;
+                      await this.persist(
+                        host.id,
+                        resolved.baseUrl,
+                        this.names[host.id] ?? null,
+                        resolved.value.instance_id ?? null,
+                      );
+                    }
+                    return resolved.value;
+                  });
             const queueRequest = statusRequest.then((status) => {
               const capacity = status.queue_capacity;
               const request =
@@ -1345,10 +1376,12 @@ export const useHostsStore = defineStore("hosts", {
             });
             const [status, devicesResult, queueResult] = await Promise.all([
               statusRequest,
-              listDevices(target).then(
-                (snapshot) => ({ value: snapshot.devices, error: null }),
-                (error: unknown) => ({ value: null, error }),
-              ),
+              statusRequest
+                .then(() => listDevices(target))
+                .then(
+                  (snapshot) => ({ value: snapshot.devices, error: null }),
+                  (error: unknown) => ({ value: null, error }),
+                ),
               queueRequest.then(
                 (listing) => ({ value: listing, error: null }),
                 (error: unknown) => ({ value: null, error }),

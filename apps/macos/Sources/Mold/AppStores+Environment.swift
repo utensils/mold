@@ -44,6 +44,7 @@ extension View {
     func moldSettingsEnvironment(_ stores: AppStores) -> some View {
         self
             .environment(stores.hosts)
+            .environment(stores.pairing)
             .environment(stores.engine)
             .environment(stores.materializer)
             // Settings ▸ Empty Now empties BOTH caches.

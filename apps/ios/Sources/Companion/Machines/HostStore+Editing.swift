@@ -53,6 +53,7 @@ extension HostStore {
         if let clash = hosts.first(where: { $0.id != id && HostAddress.sameOrigin($0.baseURL, url) }) {
             throw .duplicate(clash.name)
         }
+        let previousKey = host.apiKey
         if let apiKey {
             let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             do { try credentials.setAPIKey(key, for: id) } catch { throw .keychain(error.reasonSentence) }
@@ -63,7 +64,13 @@ extension HostStore {
         let moved = !HostAddress.sameOrigin(host.baseURL, url)
         host.baseURL = url
         setHosts(hosts.map { $0.id == id ? host : $0 })
-        if moved { setCapabilities(nil, for: id) }
+        if moved || previousKey != host.apiKey {
+            host.connectionOriginalURL = nil
+            host.connectionEndpoints = nil
+            host.connectionInstanceID = nil
+            setHosts(hosts.map { $0.id == id ? host : $0 })
+            setCapabilities(nil, for: id)
+        }
         try save()
         stopWatching(id)
         Task { await refresh(host) }

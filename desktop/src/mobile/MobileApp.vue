@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import {
+  connectionHealth,
+  selectConnectionRoute,
+  rememberConnectionRoutes,
+  forgetConnectionRoutes,
+} from "@studio/api/connectionRoutes";
 import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
 import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 
@@ -4680,6 +4686,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     };
     if (existing) {
       if (existing.baseUrl !== baseUrl || existing.apiKey !== successfulApiKey) {
+        forgetConnectionRoutes(existing.id);
         cancelHostProbe(existing.id);
         retireMobileHostAuthority(existing.id);
         pruneHostOrganization(existing.id);
@@ -4783,7 +4790,16 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     if (payload.expires_at !== null && payload.expires_at <= Math.floor(Date.now() / 1000)) {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
-    const baseUrl = normalizeRemoteAddress(payload.base_url);
+    const baseUrl =
+      payload.endpoints?.length && payload.token
+        ? await selectConnectionRoute({
+            endpoints: payload.endpoints,
+            expectedInstanceId: payload.instance_id,
+            secret: payload.token,
+            kind: "pairing",
+            secureContext: false,
+          })
+        : normalizeRemoteAddress(payload.base_url);
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -4798,6 +4814,24 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     hostInput.address = baseUrl;
     hostInput.apiKey = claim.api_key ?? "";
     await connectHost();
+    const paired = hosts.value.find(
+      (host) => host.baseUrl === baseUrl && host.instanceId === claim.instance_id,
+    );
+    if (paired && claim.api_key && (claim.endpoints?.length || payload.endpoints?.length)) {
+      // Fence discovery started by connectHost before approving the QR origin.
+      forgetConnectionRoutes(paired.id);
+      try {
+        rememberConnectionRoutes(
+          paired.id,
+          claim.instance_id,
+          claim.api_key,
+          claim.endpoints ?? payload.endpoints,
+          normalizeRemoteAddress(payload.base_url),
+        );
+      } catch {
+        // Optional route metadata cannot undo an already redeemed pairing.
+      }
+    }
   } catch (error) {
     if (!pairingScannerCancelled) hostError.value = describeTransportError(error);
   } finally {
@@ -4989,12 +5023,33 @@ async function probeHost(host: MobileHost): Promise<void> {
   const epoch = ++hostProbeEpoch;
   const wasUnavailable = !host.online || host.stale || Boolean(host.instanceMismatch);
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
+  const credential = host.apiKey;
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
   try {
-    const status = await apiJsonTo<ServerStatus>(mobileHostTarget(host), "/api/status", {
+    const resolved = await connectionHealth({
+      hostId: host.id,
+      baseUrl: host.baseUrl,
+      apiKey: host.apiKey,
+      instanceId: host.instanceId,
       signal: controller.signal,
+      isCurrent: () =>
+        !controller.signal.aborted &&
+        hosts.value.includes(host) &&
+        host.connected !== false &&
+        host.apiKey === credential &&
+        (hostProbes.get(host.id)?.epoch === epoch || !hostProbes.has(host.id)),
+      secureContext: false,
+      read: (baseUrl) =>
+        apiJsonTo<ServerStatus>({ ...mobileHostTarget(host), baseUrl }, "/api/status", {
+          signal: controller.signal,
+        }),
     });
+    const status = resolved.value;
+    if (hostProbes.get(host.id)?.epoch === epoch && resolved.baseUrl !== host.baseUrl) {
+      host.baseUrl = resolved.baseUrl;
+      persistHosts();
+    }
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
     const verified = updateHostStatus({ id: host.id, status });
@@ -5139,6 +5194,7 @@ function reconnectHost(id: string): void {
 }
 
 function removeHost(id: string): void {
+  forgetConnectionRoutes(id);
   cancelHostProbe(id);
   knownHostReachability.delete(id);
   retireMobileHostAuthority(id);

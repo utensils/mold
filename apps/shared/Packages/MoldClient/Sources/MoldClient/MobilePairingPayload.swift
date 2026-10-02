@@ -11,13 +11,15 @@ public struct MobilePairingPayload: Hashable, Sendable {
     public let expiresAt: UInt64?
     public let instanceId: String
     public let name: String
+    public let endpoints: [ConnectionEndpoint]?
 
-    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String) {
+    init(baseURL: String, token: String?, expiresAt: UInt64?, instanceId: String, name: String, endpoints: [ConnectionEndpoint]? = nil) {
         self.baseURL = baseURL
         self.token = token
         self.expiresAt = expiresAt
         self.instanceId = instanceId
         self.name = name
+        self.endpoints = endpoints
     }
 
     /// A keyless machine's code carries its address and identity alone --
@@ -31,6 +33,7 @@ public struct MobilePairingPayload: Hashable, Sendable {
         expiresAt = session.expiresAt
         instanceId = session.instanceId
         self.name = name
+        endpoints = session.endpoints
     }
 
     /// Where a pairing code points (`MOBILE_PAIRING_LINK` in `pairing.ts`): a
@@ -46,12 +49,21 @@ public struct MobilePairingPayload: Hashable, Sendable {
     /// all -- the parser on the other end synthesises it. `nil` only if
     /// `FormURLEncoded`'s output somehow failed to parse as a URL, which does
     /// not happen for its own escaping.
+    private static func endpointData(_ endpoints: [ConnectionEndpoint]) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try? encoder.encode(ConnectionRoutes.sanitized(endpoints))
+    }
+
     public var url: URL? {
         var pairs: [(String, String)] = [("version", String(Self.version)), ("base_url", baseURL)]
         if let token { pairs.append(("token", token)) }
         if let expiresAt { pairs.append(("expires_at", String(expiresAt))) }
         pairs.append(("instance_id", instanceId))
         pairs.append(("name", name))
+        if let endpoints, !endpoints.isEmpty,
+           let data = Self.endpointData(endpoints),
+           let json = String(data: data, encoding: .utf8) { pairs.append(("endpoints", json)) }
         return URL(string: "\(Self.link.absoluteString)#\(FormURLEncoded.queryString(pairs))")
     }
 }

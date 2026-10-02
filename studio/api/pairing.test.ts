@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type MobilePairingPayload,
   claimPairingSession,
   mobilePairingUrl,
   parseMobilePairingPayload,
@@ -66,11 +67,14 @@ describe("parseMobilePairingPayload", () => {
 
 describe("the shared pairing-link contract (pairing.fixtures.json)", () => {
   // The Swift port (MoldClient's MobilePairingPayload) reads the same file.
-  const envelope = (p: (typeof fixtures.links)[number]["payload"]) => ({
-    type: "mold.mobile-pairing" as const,
-    version: 1 as const,
-    ...p,
-  });
+  const envelope = (
+    p: (typeof fixtures.links)[number]["payload"],
+  ): MobilePairingPayload =>
+    ({
+      type: "mold.mobile-pairing" as const,
+      version: 1 as const,
+      ...p,
+    }) as MobilePairingPayload;
 
   it.each(fixtures.links)("prints $link", (fixture) => {
     expect(mobilePairingUrl(envelope(fixture.payload))).toBe(fixture.link);

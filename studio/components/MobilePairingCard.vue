@@ -93,6 +93,7 @@ async function startPairing(): Promise<void> {
       expires_at: next.expires_at,
       instance_id: next.instance_id,
       name: props.hostLabel || next.hostname || new URL(baseUrl).hostname,
+      ...(next.endpoints?.length ? { endpoints: next.endpoints } : {}),
     };
     qrDataUrl.value = await QRCode.toDataURL(mobilePairingUrl(payload), {
       width: 320,

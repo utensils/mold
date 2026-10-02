@@ -17,16 +17,27 @@ extension HostStore {
         let answer = try await claim(payload, client.name, client.kind)
         if let known = existing(for: payload) {
             try update(known.id, name: known.name,
-                       address: payload.baseURL, apiKey: answer.apiKey ?? "")
-            return host(known.id) ?? known
+                       address: (answer.resolvedBaseURL?.absoluteString ?? payload.baseURL), apiKey: answer.apiKey ?? "")
+            return rememberRoutes(answer, payload: payload, host: host(known.id) ?? known)
         }
         let name = answer.hostname.flatMap { $0.isEmpty ? nil : $0 } ?? payload.name
-        return try add(name: name, address: payload.baseURL, apiKey: answer.apiKey,
+        let added = try add(name: name, address: (answer.resolvedBaseURL?.absoluteString ?? payload.baseURL), apiKey: answer.apiKey,
                        makeDefault: hosts.isEmpty)
+        return rememberRoutes(answer, payload: payload, host: added)
+    }
+
+    private func rememberRoutes(_ answer: PairingClaim, payload: MobilePairingPayload, host: MoldHost) -> MoldHost {
+        var updated = host
+        updated.connectionOriginalURL = URL(string: payload.baseURL)
+        updated.connectionEndpoints = ConnectionRoutes.sanitized(answer.endpoints ?? payload.endpoints ?? [])
+        updated.connectionInstanceID = answer.instanceId
+        applyConnection(updated)
+        return updated
     }
 
     private func existing(for payload: MobilePairingPayload) -> MoldHost? {
         hosts.first { host in
+            if host.connectionInstanceID == payload.instanceId { return true }
             if case let .up(status) = reachability(of: host), status.instanceId == payload.instanceId {
                 return true
             }

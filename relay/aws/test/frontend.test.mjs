@@ -526,3 +526,77 @@ test("working media jobs fail after transfer deadline, not overall grant expiry"
   );
   assert.equal(JSON.parse(out.value()).state, "failed");
 });
+test("credential-free connection proof forwards only bounded exact POST contract", async () => {
+  const calls = [];
+  const frontend = createFrontend({
+    request: async (request) => {
+      calls.push(request);
+      return {
+        response: response('{"id":"fixture","proof":"bounded"}', {
+          "content-length": "34",
+        }),
+        sid: "s",
+        close() {},
+      };
+    },
+  });
+  const body = JSON.stringify({
+    kind: "api",
+    key_tag: "0123456789abcdef",
+    nonce: "a".repeat(64),
+  });
+  const out = writer();
+  await frontend(
+    event("/api/connection-probe", "POST", body, {
+      "content-type": "application/json",
+    }),
+    out,
+  );
+  assert.equal(out.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers["x-api-key"], undefined);
+  assert.equal(calls[0].headers.authorization, undefined);
+  assert.equal(calls[0].body.toString(), body);
+});
+test("anonymous connection proof rejects malformed oversized and credential-bearing requests before host access", async () => {
+  let calls = 0;
+  const frontend = createFrontend({
+    request: async () => {
+      calls++;
+      throw Error("unexpected");
+    },
+  });
+  const valid = JSON.stringify({
+    kind: "pairing",
+    key_tag: "0123456789abcdef",
+    nonce: "a".repeat(64),
+  });
+  for (const [method, body, headers, path] of [
+    ["GET", "", {}, "/api/connection-probe"],
+    ["POST", "{}", {}, "/api/connection-probe"],
+    ["POST", "x".repeat(513), {}, "/api/connection-probe"],
+    [
+      "POST",
+      JSON.stringify({
+        kind: "api",
+        key_tag: ["0123456789abcdef"],
+        nonce: "a".repeat(64),
+      }),
+      {},
+      "/api/connection-probe",
+    ],
+    ["POST", valid, { "x-api-key": "fixture" }, "/api/connection-probe"],
+    [
+      "POST",
+      valid,
+      { authorization: "Bearer fixture" },
+      "/api/connection-probe",
+    ],
+    ["POST", valid, {}, "/api/connection-addresses"],
+  ]) {
+    const out = writer();
+    await frontend(event(path, method, body, headers), out);
+    assert.equal(out.status, 401);
+  }
+  assert.equal(calls, 0);
+});

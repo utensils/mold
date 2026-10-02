@@ -6,6 +6,7 @@ pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 mod chain_source_media;
+mod connections;
 mod cuda_peak;
 pub(crate) mod dir_sync;
 mod durable_admission_authority;
@@ -1390,6 +1391,7 @@ async fn run_server_inner(
     // the request future could be spawned. Keep the dispatcher handle so the
     // server can prove it no longer owns background polling at shutdown.
     let video_upscale_dispatcher = video_upscale::recover_at_startup(&state);
+    let connection_addresses = state.connection_addresses.clone();
     #[allow(unused_mut)]
     let mut app = routes::create_router(state)
         .merge(web_ui::router())
@@ -1446,6 +1448,13 @@ async fn run_server_inner(
         Some(listener) => listener,
         None => TcpListener::bind(addr).await?,
     };
+
+    let public_url = match std::env::var("MOLD_PUBLIC_URL") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => anyhow::bail!("MOLD_PUBLIC_URL must be valid UTF-8"),
+    };
+    connection_addresses.configure(listener.local_addr()?, public_url.as_deref())?;
 
     // ── mDNS/DNS-SD advertising ─────────────────────────────────────────────
     // Advertise this server as `_mold._tcp.local.` so desktop clients and

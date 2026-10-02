@@ -10,6 +10,9 @@ struct HostList: Codable, Equatable {
         let id: UUID
         var name: String
         var baseURL: URL
+        var connectionEndpoints: [ConnectionEndpoint]? = nil
+        var connectionInstanceID: String? = nil
+        var connectionOriginalURL: URL? = nil
     }
 
     var entries: [Entry] = []

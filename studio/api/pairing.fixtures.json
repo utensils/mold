@@ -36,9 +36,30 @@
         "token": "t+k/=",
         "expires_at": 4000000000,
         "instance_id": "inst-2",
-        "name": "Café ☕ box"
+        "name": "Caf\u00e9 \u2615 box"
       },
       "link": "https://utensils.io/mold/pair#version=1&base_url=http%3A%2F%2F192.168.1.20%3A7680&token=t%2Bk%2F%3D&expires_at=4000000000&instance_id=inst-2&name=Caf%C3%A9+%E2%98%95+box",
+      "legacy": []
+    },
+    {
+      "payload": {
+        "base_url": "https://relay.example",
+        "token": "one-time",
+        "expires_at": 4000000000,
+        "instance_id": "inst-roaming",
+        "name": "Roaming Studio",
+        "endpoints": [
+          {
+            "url": "http://192.168.1.20:7680",
+            "kind": "lan"
+          },
+          {
+            "url": "https://relay.example",
+            "kind": "relay"
+          }
+        ]
+      },
+      "link": "https://utensils.io/mold/pair#version=1&base_url=https%3A%2F%2Frelay.example&token=one-time&expires_at=4000000000&instance_id=inst-roaming&name=Roaming+Studio&endpoints=%5B%7B%22kind%22%3A%22lan%22%2C%22url%22%3A%22http%3A%2F%2F192.168.1.20%3A7680%22%7D%2C%7B%22kind%22%3A%22relay%22%2C%22url%22%3A%22https%3A%2F%2Frelay.example%22%7D%5D",
       "legacy": []
     }
   ],

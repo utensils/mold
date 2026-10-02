@@ -1,7 +1,12 @@
+import {
+  parseConnectionEndpoints,
+  type ConnectionEndpoint,
+} from "./connectionRoutes";
 import type { ApiTarget } from "./client";
 import { apiFetchTo, apiJsonTo } from "./client";
 
 export interface PairingSession {
+  endpoints?: ConnectionEndpoint[];
   token: string | null;
   expires_at: number | null;
   auth_required: boolean;
@@ -10,6 +15,7 @@ export interface PairingSession {
 }
 
 export interface PairingClaim {
+  endpoints?: ConnectionEndpoint[];
   api_key: string | null;
   instance_id: string;
   hostname: string | null;
@@ -35,6 +41,7 @@ export interface PairedClientsResponse {
 }
 
 export interface MobilePairingPayload {
+  endpoints?: ConnectionEndpoint[];
   type: "mold.mobile-pairing";
   version: 1;
   base_url: string;
@@ -61,6 +68,16 @@ export function mobilePairingUrl(payload: MobilePairingPayload): string {
     fields.set("expires_at", String(payload.expires_at));
   fields.set("instance_id", payload.instance_id);
   fields.set("name", payload.name);
+  if (payload.endpoints?.length)
+    fields.set(
+      "endpoints",
+      JSON.stringify(
+        parseConnectionEndpoints(payload.endpoints).map(({ kind, url }) => ({
+          kind,
+          url,
+        })),
+      ),
+    );
   return `${MOBILE_PAIRING_LINK}#${fields.toString()}`;
 }
 
@@ -160,6 +177,9 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
         expires_at: expiresAt === null ? null : Number(expiresAt),
         instance_id: fields.get("instance_id"),
         name: fields.get("name"),
+        ...(fields.has("endpoints")
+          ? { endpoints: JSON.parse(fields.get("endpoints")!) }
+          : {}),
       };
     } catch {
       throw new Error("That QR code is not a Mold pairing code.");
@@ -182,5 +202,7 @@ export function parseMobilePairingPayload(raw: string): MobilePairingPayload {
   ) {
     throw new Error("That QR code is not a supported Mold pairing code.");
   }
+  if (payload.endpoints !== undefined)
+    payload.endpoints = parseConnectionEndpoints(payload.endpoints);
   return payload as MobilePairingPayload;
 }

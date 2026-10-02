@@ -40,6 +40,8 @@ pub struct ApiKeySet {
 
 struct PairingSession {
     expires_at: u64,
+    /// Ephemeral digest for credential-free route proofs; never persisted.
+    connection_secret_hash: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -107,6 +109,59 @@ impl ApiKeySet {
 
     pub fn contains(&self, candidate: &str) -> bool {
         self.authenticate(candidate).is_some()
+    }
+
+    pub(crate) fn connection_proof(
+        &self,
+        kind: &str,
+        tag: &str,
+        nonce: &str,
+        instance: &str,
+    ) -> Option<String> {
+        if !crate::connections::lower_hex(tag, 16) || !crate::connections::lower_hex(nonce, 64) {
+            return None;
+        }
+        let mut matched: Option<[u8; 32]> = None;
+        let mut ambiguous = false;
+        let mut consider = |hash: [u8; 32]| {
+            let prefix = crate::connections::hex(&hash[..8]);
+            if bool::from(prefix.as_bytes().ct_eq(tag.as_bytes())) {
+                if matched.is_some_and(|old| old != hash) {
+                    ambiguous = true;
+                }
+                matched = Some(hash);
+            }
+        };
+        match kind {
+            "api" => {
+                // Arbitrary operator strings have no trustworthy entropy evidence.
+                // Only server-minted random paired grants may expose a hash tag.
+                let clients = self
+                    .paired_clients
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                for hash in clients.keys() {
+                    consider(*hash);
+                }
+            }
+            "pairing" => {
+                let sessions = self
+                    .pairing_sessions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                for session in sessions
+                    .values()
+                    .filter(|s| s.expires_at > unix_timestamp())
+                {
+                    consider(session.connection_secret_hash);
+                }
+            }
+            _ => return None,
+        }
+        if ambiguous {
+            return None;
+        }
+        Some(connection_proof_mac(&matched?, kind, nonce, instance))
     }
 
     fn authenticate(&self, candidate: &str) -> Option<AuthenticationKind> {
@@ -228,7 +283,13 @@ impl ApiKeySet {
                 sessions.remove(&oldest);
             }
         }
-        sessions.insert(token_hash, PairingSession { expires_at });
+        sessions.insert(
+            token_hash,
+            PairingSession {
+                expires_at,
+                connection_secret_hash: Sha256::digest(token.as_bytes()).into(),
+            },
+        );
         Ok((token, expires_at))
     }
 
@@ -480,12 +541,19 @@ pub(crate) fn load_api_keys_with_db(
     Ok(Some(Arc::new(key_set)))
 }
 
+fn connection_proof_mac(hash: &[u8; 32], kind: &str, nonce: &str, instance: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(hash).expect("SHA256 HMAC key is valid");
+    mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\n{instance}").as_bytes());
+    crate::connections::hex(&mac.finalize().into_bytes())
+}
+
 /// Paths that are exempt from API key authentication.
 const EXEMPT_PATHS: &[&str] = &[
     "/health",
     "/api/docs",
     "/api/openapi.json",
     "/api/pairing/claim",
+    "/api/connection-probe",
 ];
 
 /// Axum middleware that enforces API key authentication.
@@ -906,6 +974,115 @@ mod tests {
         assert!(ks.contains(WEAK_API_KEY));
     }
 
+    #[test]
+    fn connection_proof_never_uses_operator_credentials() {
+        for secret in [
+            "password",
+            "0123456789abcdef".repeat(4).as_str(),
+            "mold_pair_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let keys = ApiKeySet::new(HashSet::from([secret.to_string()]));
+            let tag = crate::connections::hex(&Sha256::digest(secret.as_bytes())[..8]);
+            assert!(
+                keys.connection_proof("api", &tag, &"a".repeat(64), "machine")
+                    .is_none(),
+                "operator key was eligible for anonymous proof"
+            );
+            assert!(
+                keys.contains(secret),
+                "normal operator authentication must remain available"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_proof_matches_shared_cross_surface_golden_vector() {
+        let hash: [u8; 32] = Sha256::digest(b"test-only-route-secret").into();
+        assert_eq!(crate::connections::hex(&hash[..8]), "e4c8e720b2b762b8");
+        assert_eq!(
+            connection_proof_mac(
+                &hash,
+                "api",
+                &"0123456789abcdef".repeat(4),
+                "fixture-machine"
+            ),
+            "09588691253e789f49c73ec7c6bbe10c6373119985a328df283f2bb610ad6979"
+        );
+    }
+
+    #[test]
+    fn connection_proof_covers_pairing_and_revocation_without_touching() {
+        let ks = ApiKeySet::new_with_metadata_db(
+            HashSet::from(["operator".to_string()]),
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            "server-a",
+        );
+        let tag = |secret: &str| {
+            let hash = Sha256::digest(secret.as_bytes());
+            hash[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let nonce = "01".repeat(32);
+        let verify = |secret: &str, kind: &str, proof: String| {
+            let hash = Sha256::digest(secret.as_bytes());
+            let mut mac = HmacSha256::new_from_slice(&hash).unwrap();
+            mac.update(format!("mold-connection-proof-v1\n{kind}\n{nonce}\nserver-a").as_bytes());
+            let expected: String = mac
+                .finalize()
+                .into_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assert_eq!(proof, expected);
+        };
+        assert!(ks
+            .connection_proof("api", &tag("operator"), &nonce, "server-a")
+            .is_none());
+        assert!(ks
+            .connection_proof("api", &tag("wrong"), &nonce, "server-a")
+            .is_none());
+        assert!(ks
+            .connection_proof("pairing", &tag("operator"), &nonce, "server-a")
+            .is_none());
+        let (token, _) = ks.issue_pairing_token().unwrap();
+        verify(
+            &token,
+            "pairing",
+            ks.connection_proof("pairing", &tag(&token), &nonce, "server-a")
+                .unwrap(),
+        );
+        let paired = ks
+            .claim_pairing_token(&token, "client", "iphone")
+            .unwrap()
+            .unwrap();
+        assert!(ks
+            .connection_proof("pairing", &tag(&token), &nonce, "server-a")
+            .is_none());
+        verify(
+            &paired,
+            "api",
+            ks.connection_proof("api", &tag(&paired), &nonce, "server-a")
+                .unwrap(),
+        );
+        assert_eq!(ks.paired_clients()[0].last_used_at_ms, None);
+        let id = ks.paired_clients()[0].id.clone();
+        ks.revoke_paired_client(&id).unwrap();
+        assert!(ks
+            .connection_proof("api", &tag(&paired), &nonce, "server-a")
+            .is_none());
+        let (expired, _) = ks.issue_pairing_token().unwrap();
+        ks.pairing_sessions
+            .lock()
+            .unwrap()
+            .get_mut(&ks.pairing_token_hash(&expired))
+            .unwrap()
+            .expires_at = 0;
+        assert!(ks
+            .connection_proof("pairing", &tag(&expired), &nonce, "server-a")
+            .is_none());
+    }
     #[test]
     fn pairing_token_is_random_url_safe_and_single_use() {
         let ks = ApiKeySet::new_with_metadata_db(
