@@ -4686,6 +4686,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     };
     if (existing) {
       if (existing.baseUrl !== baseUrl || existing.apiKey !== successfulApiKey) {
+        forgetConnectionRoutes(existing.id);
         cancelHostProbe(existing.id);
         retireMobileHostAuthority(existing.id);
         pruneHostOrganization(existing.id);
@@ -4822,6 +4823,7 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
         claim.instance_id,
         claim.api_key,
         claim.endpoints ?? payload.endpoints,
+        payload.base_url,
       );
   } catch (error) {
     if (!pairingScannerCancelled) hostError.value = describeTransportError(error);

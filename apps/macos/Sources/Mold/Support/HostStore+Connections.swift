@@ -13,10 +13,4 @@ extension HostStore {
         hosts = hosts.map { $0.id == updated.id ? current : $0 }
         HostPersistence.save(hosts.filter { $0.id != MoldEngine.localHostID })
     }
-
-    func recordConnectionFailure(_ error: any Error, on id: MoldHost.ID) {
-        guard host(id) != nil else { return }
-        reachability[id] = .down(error.reasonSentence)
-        reconcileEventStreams()
-    }
 }

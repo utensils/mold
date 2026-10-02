@@ -175,6 +175,8 @@ interface RouteRecord {
   checkedAt?: number;
   learnedAt?: number;
   activeURL?: string;
+  originalURL?: string;
+  originalProof?: string;
 }
 const records = new Map<string, RouteRecord>();
 const revisions = new Map<string, number>();
@@ -198,28 +200,34 @@ export function forgetConnectionRoutes(hostId: string): void {
     /* optional persistence */
   }
 }
-export function rememberConnectionRoutes(
+function originalProof(
   hostId: string,
   instanceId: string,
   secret: string,
-  endpoints: unknown,
-): void {
-  if (!pairedCredential(secret)) {
-    forgetConnectionRoutes(hostId);
-    return;
-  }
-  const record: RouteRecord = {
-    instanceId,
-    keyTag: secretTag(secret),
-    endpoints: parseConnectionEndpoints(endpoints),
-    learnedAt: Date.now(),
-  };
-  records.set(hostId, record);
+  url: string,
+): string {
+  return bytesToHex(
+    hmac(
+      sha256,
+      sha256(new TextEncoder().encode(secret)),
+      new TextEncoder().encode(
+        `mold-connection-original-v1\n${hostId}\n${instanceId}\n${url}`,
+      ),
+    ),
+  );
+}
+function saveRecord(hostId: string, record: RouteRecord): void {
   try {
     const data = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}");
     data[hostId] = {
       instanceId: record.instanceId,
       endpoints: record.endpoints,
+      ...(record.originalURL
+        ? {
+            originalURL: record.originalURL,
+            originalProof: record.originalProof,
+          }
+        : {}),
     };
     localStorage.setItem(
       ROUTES_KEY,
@@ -231,40 +239,95 @@ export function rememberConnectionRoutes(
     /* optional persistence */
   }
 }
+function approveOriginal(
+  hostId: string,
+  record: RouteRecord,
+  secret: string,
+  url: string,
+): void {
+  const parsed = new OriginURL(url);
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.pathname !== "/"
+  )
+    throw new Error("Invalid original connection address.");
+  record.originalURL = parsed.origin;
+  record.originalProof = originalProof(
+    hostId,
+    record.instanceId,
+    secret,
+    parsed.origin,
+  );
+  saveRecord(hostId, record);
+}
+export function rememberConnectionRoutes(
+  hostId: string,
+  instanceId: string,
+  secret: string,
+  endpoints: unknown,
+  originalURL?: string,
+): void {
+  if (!pairedCredential(secret)) {
+    forgetConnectionRoutes(hostId);
+    return;
+  }
+  const record: RouteRecord = {
+    instanceId,
+    keyTag: secretTag(secret),
+    endpoints: parseConnectionEndpoints(endpoints),
+    learnedAt: Date.now(),
+  };
+  const previous = records.get(hostId);
+  const original =
+    originalURL ??
+    (previous?.instanceId === instanceId && previous.keyTag === record.keyTag
+      ? previous.originalURL
+      : undefined);
+  if (original) approveOriginal(hostId, record, secret, original);
+  records.set(hostId, record);
+  saveRecord(hostId, record);
+}
 function knownRoutes(
   hostId: string,
   instanceId: string,
   secret: string,
 ): RouteRecord | null {
   let record = records.get(hostId);
+  let invalidOriginal = false;
   if (!record) {
     try {
       const raw = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}")[hostId];
       if (raw) {
+        invalidOriginal =
+          raw.originalURL !== undefined &&
+          (typeof raw.originalURL !== "string" ||
+            raw.originalProof !==
+              originalProof(hostId, raw.instanceId, secret, raw.originalURL));
         record = {
           instanceId: raw.instanceId,
           // A cached catalog is only a candidate list; prove with the current key before using alternatives.
           keyTag: secretTag(secret),
           endpoints: parseConnectionEndpoints(raw.endpoints),
+          ...(typeof raw.originalURL === "string" &&
+          raw.originalProof ===
+            originalProof(hostId, raw.instanceId, secret, raw.originalURL)
+            ? { originalURL: raw.originalURL, originalProof: raw.originalProof }
+            : {}),
         };
-        if ("keyTag" in raw) {
-          const data = JSON.parse(localStorage.getItem(ROUTES_KEY) ?? "{}");
-          data[hostId] = {
-            instanceId: record.instanceId,
-            endpoints: record.endpoints,
-          };
-          localStorage.setItem(
-            ROUTES_KEY,
-            JSON.stringify(data, (key, value) =>
-              key === "keyTag" ? undefined : value,
-            ),
-          );
-        }
+        if ("keyTag" in raw) saveRecord(hostId, record);
       }
     } catch {
       /* ignore corrupt optional cache */
     }
   }
+  if (invalidOriginal)
+    throw new Error(
+      "The saved original connection address could not be verified. Edit the address to approve it again.",
+    );
   if (!record) return null;
   if (record.instanceId !== instanceId || record.keyTag !== secretTag(secret)) {
     forgetConnectionRoutes(hostId);
@@ -305,10 +368,16 @@ export async function connectionHealth<
       ? knownRoutes(options.hostId, options.instanceId, secret)
       : null;
   revision = revisions.get(options.hostId) ?? 0;
+  if (record && !record.originalURL)
+    approveOriginal(options.hostId, record, secret!, options.baseUrl);
+  const approvedOriginal = record?.originalURL ?? options.baseUrl;
+  const age =
+    record?.checkedAt === undefined ? Infinity : Date.now() - record.checkedAt;
+  const cachedHealthy = !!record?.activeURL && age >= 0 && age <= 30_000;
   if (
     record &&
-    record.endpoints.length > 1 &&
-    Date.now() - (record.checkedAt ?? 0) > 30_000
+    !cachedHealthy &&
+    (record.endpoints.length > 1 || url !== approvedOriginal)
   ) {
     try {
       url = await selectConnectionRoute({
@@ -323,10 +392,20 @@ export async function connectionHealth<
       });
       record.checkedAt = Date.now();
       record.activeURL = url;
-    } catch {
-      options.signal?.throwIfAborted();
+    } catch (error) {
+      assertCurrent();
+      if (url !== approvedOriginal) {
+        const secure =
+          options.secureContext ??
+          (typeof location !== "undefined" && location.protocol === "https:");
+        if (secure && !approvedOriginal.startsWith("https:")) throw error;
+        url = approvedOriginal;
+        record.learnedAt = 0;
+        record.activeURL = url;
+        record.checkedAt = Date.now();
+      }
     }
-  } else if (record?.activeURL) url = record.activeURL;
+  } else if (cachedHealthy && record?.activeURL) url = record.activeURL;
   assertCurrent();
   let value: T;
   try {
@@ -342,16 +421,32 @@ export async function connectionHealth<
       options.signal?.aborted
     )
       throw error;
-    const winner = await selectConnectionRoute({
-      endpoints: record.endpoints,
-      expectedInstanceId: record.instanceId,
-      secret,
-      kind: "api",
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.secureContext !== undefined
-        ? { secureContext: options.secureContext }
-        : {}),
-    });
+    let winner: string;
+    try {
+      winner = await selectConnectionRoute({
+        endpoints: record.endpoints,
+        expectedInstanceId: record.instanceId,
+        secret,
+        kind: "api",
+        signal: options.signal,
+        ...(options.secureContext !== undefined
+          ? { secureContext: options.secureContext }
+          : {}),
+      });
+    } catch {
+      assertCurrent();
+      const secure =
+        options.secureContext ??
+        (typeof location !== "undefined" && location.protocol === "https:");
+      if (
+        !record.originalURL ||
+        record.originalURL === url ||
+        (secure && !record.originalURL.startsWith("https:"))
+      )
+        throw error;
+      winner = record.originalURL;
+      record.learnedAt = 0;
+    }
     assertCurrent();
     if (winner === url) throw error;
     url = winner;
@@ -398,6 +493,7 @@ export async function connectionHealth<
             instanceId,
             secret,
             addresses.endpoints,
+            approvedOriginal,
           );
           const learned = records.get(options.hostId)!;
           learned.activeURL = url;

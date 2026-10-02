@@ -4,6 +4,12 @@ import MoldClient
 // Asking each machine whether it is there, and what it can do.
 @MainActor
 extension HostStore {
+    func recordConnectionFailure(_ error: any Error, on id: MoldHost.ID) {
+        guard host(id) != nil else { return }
+        reachability[id] = .down(error.reasonSentence)
+        reconcileEventStreams()
+    }
+
     /// The single place a concrete backend is built. `make lint` fails if
     /// one is constructed anywhere else, which keeps "what is this app
     /// talking to" a decision in one file -- and is what makes swapping in

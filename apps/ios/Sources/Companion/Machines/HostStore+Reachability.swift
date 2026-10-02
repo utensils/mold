@@ -3,6 +3,12 @@ import MoldClient
 
 // Asking each machine whether it is there, and what it can do.
 extension HostStore {
+    func recordConnectionFailure(_ error: any Error, on id: MoldHost.ID) {
+        guard host(id) != nil else { return }
+        setReachability(.down(error.reasonSentence), for: id)
+        reconcileWatchers()
+    }
+
     func refreshAll() async {
         await withTaskGroup(of: Void.self) { group in
             for host in hosts {

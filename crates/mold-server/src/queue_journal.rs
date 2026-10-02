@@ -1172,6 +1172,8 @@ impl QueueJournal {
             .map_err(|error| format!("could not migrate generation receipt: {error:#}"))
     }
 
+    // Test injection retains fetch_update for the Rust 1.93 MSRV.
+    #[cfg_attr(test, allow(deprecated))]
     pub fn durable_generation_batch(
         &self,
         id: &str,
@@ -2200,6 +2202,8 @@ impl QueueTicket {
     /// SQLite cannot commit. Observer-bearing execution paths retry this
     /// operation before reporting success; a returned retry ticket has inert
     /// drop semantics and is therefore safe to retain for restart.
+    // Test injection retains fetch_update for the Rust 1.93 MSRV.
+    #[cfg_attr(test, allow(deprecated))]
     pub(crate) fn complete_exact_with_result(mut self, result_json: Option<&str>) -> RetainOutcome {
         let Some(token) = self.claim_token.as_deref() else {
             self.complete_with_result(result_json);

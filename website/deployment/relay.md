@@ -147,7 +147,10 @@ Older servers and older codes retain their original address.
 Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
-in anonymous route proofs. Plain HTTP still requires a trusted network.
+in anonymous route proofs. Plain HTTP still requires a trusted network. Protect
+`mold.db` and its backups as credentials: stored paired-key verifiers can
+produce route proofs, so a stolen backup plus control of a candidate address
+can impersonate the server during discovery.
 
 Clients verify a fresh credential-free proof before using an alternate route,
 prefer direct connections, and retain a healthy choice briefly to avoid

@@ -12,10 +12,4 @@ extension HostStore {
         setHosts(hosts.map { $0.id == updated.id ? current : $0 })
         do { try persist() } catch { report(updated.id, name: updated.name, doing: "remember its connection routes", error) }
     }
-
-    func recordConnectionFailure(_ error: any Error, on id: MoldHost.ID) {
-        guard host(id) != nil else { return }
-        setReachability(.down(error.reasonSentence), for: id)
-        reconcileWatchers()
-    }
 }

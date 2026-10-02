@@ -379,3 +379,147 @@ it("removes legacy credential tags for other hosts when writing the catalog", as
   forgetConnectionRoutes("migration");
   forgetConnectionRoutes("legacy");
 });
+it("recovers the approved original hostname after a persisted roam and failed probes, then learns fresh routes", async () => {
+  let routes = await import("./connectionRoutes");
+  const endpoints = [
+    { url: "http://old-ip.test", kind: "lan" as const },
+    { url: "https://old-relay.test", kind: "relay" as const },
+  ];
+  routes.rememberConnectionRoutes(
+    "recovery",
+    "instance",
+    PAIRED_KEY,
+    endpoints,
+    "http://approved-name.test",
+  );
+  let reachable = true;
+  const key = sha256(new TextEncoder().encode(PAIRED_KEY));
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith("/api/connection-addresses"))
+      return new Response(
+        JSON.stringify({
+          version: 1,
+          instance_id: "instance",
+          endpoints: [{ url: "http://new-ip.test", kind: "lan" }],
+        }),
+      );
+    if (!reachable) return new Response("", { status: 404 });
+    const { nonce } = JSON.parse(String(init?.body));
+    return new Response(
+      JSON.stringify({
+        instance_id: "instance",
+        proof: bytesToHex(
+          hmac(
+            sha256,
+            key,
+            new TextEncoder().encode(
+              `mold-connection-proof-v1\napi\n${nonce}\ninstance`,
+            ),
+          ),
+        ),
+      }),
+    );
+  });
+  vi.stubGlobal("fetch", fetch);
+  expect(
+    (
+      await routes.connectionHealth({
+        hostId: "recovery",
+        baseUrl: "http://approved-name.test",
+        apiKey: PAIRED_KEY,
+        instanceId: "instance",
+        secureContext: false,
+        read: async () => ({ instance_id: "instance" }),
+      })
+    ).baseUrl,
+  ).toBe("http://old-ip.test");
+  reachable = false;
+  vi.resetModules();
+  routes = await import("./connectionRoutes");
+  const read = vi.fn(async (url: string) => {
+    if (url !== "http://approved-name.test") throw new TypeError("offline");
+    return { instance_id: "instance" };
+  });
+  expect(
+    (
+      await routes.connectionHealth({
+        hostId: "recovery",
+        baseUrl: "http://old-ip.test",
+        apiKey: PAIRED_KEY,
+        instanceId: "instance",
+        secureContext: false,
+        read,
+      })
+    ).baseUrl,
+  ).toBe("http://approved-name.test");
+  expect(read).toHaveBeenCalledExactlyOnceWith("http://approved-name.test");
+  await vi.waitFor(() =>
+    expect(
+      JSON.parse(localStorage.getItem("mold.connection-routes.v1") ?? "{}")
+        .recovery.endpoints[0].url,
+    ).toBe("http://new-ip.test"),
+  );
+  routes.forgetConnectionRoutes("recovery");
+});
+it("does not trust a tampered persisted original recovery address", async () => {
+  let routes = await import("./connectionRoutes");
+  routes.rememberConnectionRoutes(
+    "original-tamper",
+    "instance",
+    PAIRED_KEY,
+    [{ url: "https://stale.test", kind: "relay" }],
+    "https://approved.test",
+  );
+  const data = JSON.parse(localStorage.getItem("mold.connection-routes.v1")!);
+  data["original-tamper"].originalURL = "https://attacker.test";
+  localStorage.setItem("mold.connection-routes.v1", JSON.stringify(data));
+  vi.resetModules();
+  routes = await import("./connectionRoutes");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("", { status: 404 })),
+  );
+  const read = vi.fn(async () => {
+    throw new TypeError("offline");
+  });
+  await expect(
+    routes.connectionHealth({
+      hostId: "original-tamper",
+      baseUrl: "https://stale.test",
+      instanceId: "instance",
+      apiKey: PAIRED_KEY,
+      read,
+    }),
+  ).rejects.toThrow();
+  expect(read).not.toHaveBeenCalled();
+  routes.forgetConnectionRoutes("original-tamper");
+});
+it("proves a single cached alternative before any credential read", async () => {
+  const routes = await import("./connectionRoutes");
+  routes.rememberConnectionRoutes(
+    "single-alternative",
+    "instance",
+    PAIRED_KEY,
+    [{ url: "https://stale.test", kind: "relay" }],
+    "https://approved.test",
+  );
+  const fetch = vi.fn().mockResolvedValue(new Response("", { status: 404 }));
+  vi.stubGlobal("fetch", fetch);
+  const read = vi.fn(async () => ({ instance_id: "instance" }));
+  expect(
+    (
+      await routes.connectionHealth({
+        hostId: "single-alternative",
+        baseUrl: "https://stale.test",
+        apiKey: PAIRED_KEY,
+        instanceId: "instance",
+        read,
+      })
+    ).baseUrl,
+  ).toBe("https://approved.test");
+  expect(read).toHaveBeenCalledExactlyOnceWith("https://approved.test");
+  expect(String(fetch.mock.calls[0]?.[0])).toBe(
+    "https://stale.test/api/connection-probe",
+  );
+  routes.forgetConnectionRoutes("single-alternative");
+});
