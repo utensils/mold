@@ -92,7 +92,9 @@ final class FixtureMachine: @unchecked Sendable {
             let allowed = request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let body = patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
-            var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+            let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/")
+                ? "image/png" : "application/json"
+            var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
             connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
         }
@@ -103,6 +105,12 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func response(_ path: String) -> Data {
+        // A valid tiny PNG lets previews decode and source selection exercise
+        // real image import; no generation or external machine is involved.
+        if (path.hasPrefix("/api/gallery/image/fixture-") && path.hasSuffix(".png"))
+            || path.hasPrefix("/api/gallery/thumbnail/fixture-") {
+            return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")!
+        }
         let json: String
         switch path {
         case "/api/models": return models

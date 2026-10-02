@@ -173,3 +173,5 @@ tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
 are never replayed by the relay.
 
 Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.
+
+Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs light and dark audits in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.

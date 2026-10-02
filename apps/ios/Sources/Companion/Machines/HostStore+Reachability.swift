@@ -41,7 +41,10 @@ extension HostStore {
             recordConnectionFailure(error, on: host.id)
             return
         }
-        setReachability(.checking, for: host.id)
+        // Rechecking an answered machine is not an outage. Hiding its
+        // models here destroys source wells and any picker they present.
+        // Initial checks still say Checking; the answer records real failure.
+        if !isUp(host) { setReachability(.checking, for: host.id) }
         let state = await check(host)
         guard let current = self.host(host.id), current.apiKey == host.apiKey,
               current.baseURL == host.baseURL, !Task.isCancelled else { return }

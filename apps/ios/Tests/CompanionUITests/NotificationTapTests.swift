@@ -36,6 +36,10 @@ final class NotificationTapTests: XCTestCase {
         let notification = springboard.buttons.matching(NSPredicate(format:
             "label CONTAINS 'Notification tap regression fixture'")).firstMatch
         XCTAssertTrue(notification.waitForExistence(timeout: 35))
+        let banner = XCTAttachment(screenshot: springboard.screenshot())
+        banner.name = "Notification Center banner before activation"
+        banner.lifetime = .keepAlways
+        add(banner)
         notification.tap()
         XCTAssertTrue(app.staticTexts["Not in the Library"].waitForExistence(timeout: 10),
                       "A system notification tap must keep the app alive and route to its print viewer")

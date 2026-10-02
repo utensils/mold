@@ -20,6 +20,7 @@ struct LibraryGrid: View {
     static let dayHeader = "day-header"
 
     @Environment(HostStore.self) private var hosts
+    @Environment(ThumbnailLoader.self) private var thumbnails
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
     /// The size a pinch began at; `nil` between pinches.
     @State private var pinchStart: TileSize?
@@ -118,10 +119,15 @@ struct LibraryGrid: View {
                 // iPad: drag the print itself out -- to Files, Photos, another
                 // app, or a picture well -- fetched only when dropped.
                 .draggable(DraggedPrint(entry, backend: hosts.backend(for: entry.hostID))) {
-                    PrintThumbnail(entry: entry, points: 120, trashed: trashed).frame(width: 120, height: 120)
+                    PrintThumbnail(entry: entry, points: 120, trashed: trashed)
+                        .environment(thumbnails)
+                        .frame(width: 120, height: 120)
                 }
                 .contextMenu { PrintMenu(entries: [entry], trashed: trashed) } preview: {
+                    // UIKit hosts this preview outside the grid's environment.
+                    // The drag preview above crosses the same boundary.
                     PrintThumbnail(entry: entry, points: 360, trashed: trashed)
+                        .environment(thumbnails)
                         .frame(width: 360, height: 360)
                 }
         }
