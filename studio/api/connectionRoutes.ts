@@ -326,7 +326,7 @@ function knownRoutes(
   }
   if (invalidOriginal)
     throw new Error(
-      "The saved original connection address could not be verified. Edit the address to approve it again.",
+      "The saved original connection address could not be verified. Remove and re-add this machine to approve its address again.",
     );
   if (!record) return null;
   if (record.instanceId !== instanceId || record.keyTag !== secretTag(secret)) {

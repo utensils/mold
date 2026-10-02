@@ -4817,14 +4817,21 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     const paired = hosts.value.find(
       (host) => host.baseUrl === baseUrl && host.instanceId === claim.instance_id,
     );
-    if (paired && claim.api_key && (claim.endpoints?.length || payload.endpoints?.length))
-      rememberConnectionRoutes(
-        paired.id,
-        claim.instance_id,
-        claim.api_key,
-        claim.endpoints ?? payload.endpoints,
-        payload.base_url,
-      );
+    if (paired && claim.api_key && (claim.endpoints?.length || payload.endpoints?.length)) {
+      // Fence discovery started by connectHost before approving the QR origin.
+      forgetConnectionRoutes(paired.id);
+      try {
+        rememberConnectionRoutes(
+          paired.id,
+          claim.instance_id,
+          claim.api_key,
+          claim.endpoints ?? payload.endpoints,
+          normalizeRemoteAddress(payload.base_url),
+        );
+      } catch {
+        // Optional route metadata cannot undo an already redeemed pairing.
+      }
+    }
   } catch (error) {
     if (!pairingScannerCancelled) hostError.value = describeTransportError(error);
   } finally {
