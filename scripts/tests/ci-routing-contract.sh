@@ -194,11 +194,25 @@ rust_text = rust.group(1)
 run_suite = (
     "needs.changes.outputs.trusted_release_pr != 'true' && "
     "(needs.changes.outputs.rust == 'true' || "
-    "needs.changes.outputs.workflow == 'true')"
+    "(github.event_name == 'push' && needs.changes.outputs.workflow == 'true'))"
 )
 match = re.search(r"RUN_RUST_SUITE:\s*\$\{\{\s*(.*?)\s*\}\}", rust_text, re.S)
 if match is None or normalize(match.group(1)) != run_suite:
     raise SystemExit("FAIL: protected Rust suite selector does not match the complete policy")
+
+# Workflow-only PRs retain the protected static-contract status without a
+# workspace compile; main still validates the changed runner environment.
+for event, rust_changed, workflow_changed, trusted_release, expected in (
+    ("pull_request", False, True, False, False),
+    ("pull_request", True, True, False, True),
+    ("pull_request", True, False, False, True),
+    ("push", False, True, False, True),
+    ("push", False, False, False, False),
+    ("pull_request", True, True, True, False),
+):
+    actual = not trusted_release and (rust_changed or (event == "push" and workflow_changed))
+    if actual != expected:
+        raise SystemExit("FAIL: workflow-only Rust suite truth table mismatch")
 
 run_format = (
     "needs.changes.outputs.trusted_release_pr != 'true' && "
@@ -229,12 +243,10 @@ expected_step_conditions = {
         "needs.changes.outputs.trusted_release_pr == 'true'"
     ),
     "Validate workflow syntax": (
-        "github.event_name == 'pull_request' && "
-        "needs.changes.outputs.workflow == 'true'"
+        "needs.changes.outputs.workflow_static == 'true'"
     ),
     "Validate CI routing policy": (
-        "github.event_name == 'pull_request' && "
-        "needs.changes.outputs.workflow == 'true'"
+        "needs.changes.outputs.workflow_static == 'true'"
     ),
     "Run protected release contracts": (
         "needs.changes.outputs.release == 'true'"
@@ -413,6 +425,34 @@ grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$metal_block"
 # change can land green and break every shipping CUDA build with E0061.
 # `cuda-typecheck` is that missing arm. It is a `cargo check`, not a release
 # build: the retired 40-minute forced-local job is still refused above.
+# The protected static gate covers workflow-only PRs. Live CUDA checks remain
+# on CUDA-dependent source PRs and dynamic workflow pushes to main.
+python3 - "$ci" <<'PYCUDAROUTE'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+block = re.search(r"(?ms)^  cuda-typecheck:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n)", text).group(1)
+condition = re.search(r"(?ms)^    if: >-\n(.*?)(?=^    [A-Za-z0-9_-]+:)", block).group(1)
+expected = (
+    "needs.changes.outputs.trusted_release_pr != 'true' && "
+    "((github.event_name == 'pull_request' && needs.changes.outputs.cuda_typecheck == 'true') || "
+    "(github.event_name == 'push' && needs.changes.outputs.workflow == 'true'))"
+)
+assert ' '.join(condition.split()) == expected, 'CUDA workflow-only policy drifted'
+for event, cuda, workflow, trusted, expected_run in (
+    ('pull_request', False, True, False, False),
+    ('pull_request', True, True, False, True),
+    ('pull_request', True, False, False, True),
+    ('push', False, True, False, True),
+    ('push', True, False, False, False),
+    ('push', False, False, False, False),
+    ('pull_request', True, True, True, False),
+):
+    actual = not trusted and ((event == 'pull_request' and cuda) or (event == 'push' and workflow))
+    assert actual == expected_run, (event, cuda, workflow, trusted)
+PYCUDAROUTE
+
 cuda_typecheck_block="$(extract_job "$ci" cuda-typecheck)"
 [[ -n "$cuda_typecheck_block" ]] \
   || fail "no pull-request job compiles the CUDA cfg arm of the mold-cli/mold-server seam"
@@ -452,6 +492,9 @@ cuda_typecheck_keys="$(grep -o 'shared-key: [A-Za-z0-9_-]*' <<< "$cuda_typecheck
 [[ "$cuda_typecheck_keys" == "shared-key: workspace-default" ]] \
   || fail "the CUDA typecheck must restore the shared workspace-default key and introduce none of its own"
 cuda_typecheck_filter="$(extract_filter "$ci" cuda_typecheck)"
+if grep -Fq '.github/workflows/ci.yml' <<< "$cuda_typecheck_filter"; then
+  fail "workflow-only PRs still launch the CUDA build"
+fi
 for reached in \
   "'crates/mold-cli/**'" \
   "'crates/mold-server/**'" \
@@ -614,7 +657,7 @@ for classifier in rust gpu website web nix; do
     fail "workflow-only edits still force the $classifier dynamic build on PRs"
   fi
 done
-workflow_filter="$(extract_filter "$ci" workflow)"
+workflow_filter="$(extract_filter "$ci" workflow_static)"
 for path in .github/actionlint.yaml .github/workflows/\*\* scripts/tests/ci-routing-contract.sh; do
   grep -Fxq "              - '$path'" <<< "$workflow_filter" \
     || fail "workflow policy classifier omits $path"
@@ -641,8 +684,12 @@ grep -Fxq "              - 'scripts/create-desktop-dmg.sh'" <<< "$release_filter
   || fail "release classifier omits the desktop DMG packager"
 grep -Fxq "              - 'scripts/tests/desktop-dmg-packaging.sh'" <<< "$release_filter" \
   || fail "release classifier omits the desktop DMG packaging contract"
-grep -Fq "'.github/workflows/**'" <<< "$release_filter" \
-  || fail "workflow changes do not reach protected actionlint and routing contracts"
+for classifier in workflow release; do
+  grep -Fq "'.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'" <<< "$(extract_filter "$ci" "$classifier")" \
+    || fail "$classifier must exclude native iOS workflow edits from unrelated dynamic builds"
+done
+require_text "$ci" "needs.changes.outputs.workflow_static == 'true'" \
+  "native iOS workflow edits must retain static syntax and routing validation"
 
 # Both guards below exist because the defect they catch is invisible to every
 # PR check: the Linux AppImage prep and the Linux `dev-bins,h3-private-uat`
@@ -815,5 +862,86 @@ require_text "$android" 'bash scripts/tests/android-legacy-downloads.sh' \
   "Android workflow omits the permission and public Downloads test"
 require_text "$android_gradle" 'com.google.mlkit:barcode-scanning:17.3.0' \
   "Android pairing does not bundle its barcode decoder for first-run and offline use"
+
+# Native iOS audits are independent matrix legs; TestFlight remains gated on
+# success of the entire workflow at the originating main SHA.
+python3 - "$repo_root/.github/workflows/ios-native.yml" "$repo_root/.github/workflows/testflight-ios-native.yml" <<'PYTEST'
+import sys
+from pathlib import Path
+native, testflight = (Path(p).read_text() for p in sys.argv[1:])
+assert 'appearance: [light, dark]' in native
+assert 'UITEST_APPEARANCES: ${{ matrix.appearance }}' in native
+assert 'ios-ui-test-reports-${{ matrix.suite.name }}-${{ matrix.appearance }}-' in native
+assert 'fail-fast: false' in native
+assert 'UITEST_CLASSES: ${{ matrix.suite.classes }}' in native
+from collections import Counter
+import re
+classes = []
+for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*.swift'):
+    classes.extend(re.findall(r'\bclass\s+(\w+)\s*:\s*XCTestCase', path.read_text()))
+suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
+assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
+assert len(suites) == 2 and set(re.findall(r'          - name: (\w+)', native)) == {'app', 'library'}
+assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests']
+check, audit = native.split('  audit:', 1)
+assert 'make packages-test' in check and 'make test' in check
+assert 'make uitest' not in check and 'needs: check' not in audit
+assert "github.event.workflow_run.event == 'push'" in testflight
+assert "github.event.workflow_run.conclusion == 'success'" in testflight
+assert "github.event.workflow_run.head_branch == 'main'" in testflight
+assert 'ref: ${{ github.event.workflow_run.head_sha || github.ref }}' in testflight
+PYTEST
+
+for job in docs web windows-rust; do
+  block="$(extract_job "$ci" "$job")"
+  grep -Fq "(github.event_name == 'push' && needs.changes.outputs.workflow == 'true')" <<< "$block" \
+    || fail "$job still fans workflow-only PRs out to unrelated dynamic builds"
+done
+metal_block="$(extract_job "$ci" metal-check)"
+if grep -Fq "needs.changes.outputs.workflow == 'true'" <<< "$metal_block"; then
+  fail "workflow-only PRs still launch the Metal build"
+fi
+cpu_block="$(extract_job "$ci" linux-cpu)"
+grep -Fq "needs.changes.outputs.cpu_release == 'true'" <<< "$cpu_block" \
+  || fail "CPU release builds still use the unrelated broad release-contract classifier"
+cpu_filter="$(extract_filter "$ci" cpu_release)"
+for reached in .cargo/\*\* .github/workflows/linux-cpu.yml scripts/package-cpu-release-archive.sh scripts/verify-cpu-release-binary.sh scripts/lib/cuda-release-archive.sh scripts/ensure-web-dist.sh scripts/tests/cpu-release-smoke.py scripts/aur/\*\* packaging/aur/\*\*; do
+  grep -Fq "'$reached'" <<< "$cpu_filter" || fail "CPU release classifier omits $reached"
+done
+if grep -Fq '.github/workflows/**' <<< "$cpu_filter"; then
+  fail "CPU release classifier still includes unrelated workflows"
+fi
+
+# Exercise the actual release-contract helper against the Picomatch basename
+# exclusion. Protected workflows must remain included and native-only ones
+# excluded; removing the classifier must fail closed.
+python3 - "$repo_root" <<'PYMATCH'
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+root = Path(sys.argv[1])
+source = (root / 'scripts/tests/cuda-distribution-contract.sh').read_text()
+helper = source.split('require_ci_release_path() {', 1)[1].split('\nrelease_job_text()', 1)[0]
+helper = 'require_ci_release_path() {' + helper
+with tempfile.TemporaryDirectory() as directory:
+    fixture = Path(directory)
+    workflow = fixture / '.github/workflows/ci.yml'
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("            release:\n              - '.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'\n            workflow:\n")
+    script = 'set -euo pipefail\nrepo_root=$1\nfail() { exit 1; }\n' + helper + '\nrequire_ci_release_path "$2"'
+    for path, expected in (
+        ('.github/workflows/nix-cache.yml', True),
+        ('.github/workflows/release.yml', True),
+        ('.github/workflows/nested/guard.yaml', True),
+        ('.github/workflows/ios-native.yml', False),
+        ('.github/workflows/testflight-ios-native.yml', False),
+    ):
+        result = subprocess.run(['bash', '-c', script, 'fixture', directory, path], capture_output=True)
+        assert (result.returncode == 0) == expected, path
+    workflow.write_text('            release:\n            workflow:\n')
+    result = subprocess.run(['bash', '-c', script, 'fixture', directory, '.github/workflows/nix-cache.yml'], capture_output=True)
+    assert result.returncode != 0, 'missing release classifier must fail closed'
+PYMATCH
 
 echo "PASS: CI routing contract"

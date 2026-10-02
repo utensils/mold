@@ -38,11 +38,12 @@ final class GenerateController {
     @ObservationIgnored var restoringChoice = false
 
     init(hosts: HostStore, ledger: PendingLedger = .shared,
-         drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion"))) {
+         drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion")),
+         initialMachine: MachineChoice? = nil) {
         self.hosts = hosts
         self.ledger = ledger
         self.drafts = drafts
-        machine = MachineChoice.load()
+        machine = initialMachine ?? MachineChoice.load()
         restoreDraft()
     }
 

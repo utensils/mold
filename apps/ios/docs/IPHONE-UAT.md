@@ -172,3 +172,29 @@ open and scrolls the opened tile back into view on return.
 - The saved-gallery notice itself failed small/normal-text contrast on its
   translucent material. Primary text on an opaque semantic background passes
   focused XS/Large/AX5 contrast, with the fixture deliberately taken offline.
+
+## Library long press and notification appearance (2026-10-02)
+
+A populated iPhone Simulator reproduced an EXC_BREAKPOINT on long press:
+`No Observable object of type ThumbnailLoader found` in the UIKit-hosted
+context-menu preview. Both context-menu and drag preview roots now receive
+the existing loader explicitly. The Library regression opens the menu, uses
+its settings action, and opens/dismisses the viewer without crashing.
+
+Source-library UAT exposed healthy reconnect checks temporarily removing the
+source controls. A routine refresh now retains the last answering state until
+its response; a unit regression covers success and actual authorization failure.
+The source chooser remains usable after a long press and attaches a real
+loopback PNG. Notification Center warm/cold taps pass, and the app icon catalog
+uses the same authored image for Any/Dark appearances. Card backgrounds remain
+system controlled. Tests retain notification screenshots before activation.
+
+The native unit suite passes (136 tests); lint and CI routing/branding/runner
+contracts pass. Independent peer review corrected the PNG fixture checksum and
+isolated controller tests from saved machine preferences. No generation was
+submitted; physical-device acceptance remains separate from Simulator evidence.
+
+The iPad sweep also exposed source selection fetching an offline merged lead.
+The picker now prefers a reachable copy; the source regression deliberately
+pairs a saved offline copy and a live copy before selection. iPad drag and
+context-menu interactions pass, including opening the viewer afterward.

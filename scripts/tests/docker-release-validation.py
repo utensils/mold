@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Exercise candidate selection and the fail-closed Docker release gate."""
 
+import fnmatch
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -39,6 +41,31 @@ class DockerReleaseValidation(unittest.TestCase):
                            cwd=cwd, check=True, capture_output=True,
                            env={**os.environ, 'EVENT_NAME': event, 'GITHUB_OUTPUT': str(output)})
             return dict(line.split('=', 1) for line in output.read_text().splitlines())
+
+    def test_pr_builds_only_for_container_inputs(self):
+        pr = WORKFLOW.split('  pull_request:', 1)[1].split('  push:', 1)[0]
+        patterns = re.findall(r"^      - '([^']+)'", pr, re.M)
+        cases = {
+            'scripts/tests/ios-uitest-runner.sh': False,
+            'scripts/tests/ci-routing-contract.sh': False,
+            'scripts/tests/docker-release-validation.py': False,
+            '.github/workflows/docker-validation.yml': False,
+            '.github/workflows/ci.yml': False,
+            'apps/ios/Sources/LibraryView.swift': False,
+            'Dockerfile': True,
+            'docker/start.sh': True,
+            'crates/mold-server/src/lib.rs': True,
+            'web/src/main.ts': True,
+            'relay/aws/package.json': True,
+            'scripts/seal-cuda-ptx-manifest.py': True,
+            'scripts/probe-cuda-embedded-ptx.py': True,
+            'scripts/verify-h3-release-exclusion.sh': True,
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(any(fnmatch.fnmatchcase(path, p) for p in patterns), expected)
+        push = WORKFLOW.split('  push:', 1)[1].split('  workflow_dispatch:', 1)[0]
+        self.assertNotIn('paths:', push)
 
     def test_pr_builds_both_feature_paths_even_with_existing_tag(self):
         result = self.select('pull_request', True)

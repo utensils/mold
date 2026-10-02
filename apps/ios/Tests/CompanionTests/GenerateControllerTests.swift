@@ -55,7 +55,7 @@ struct GenerateControllerTests {
         await hosts.refreshAll()
         let ledger = PendingLedger(url: FileManager.default.temporaryDirectory.appending(path: "p-\(UUID()).json"))
         let drafts = DraftStore(directory: FileManager.default.temporaryDirectory.appending(path: "d-\(UUID())"))
-        let generate = GenerateController(hosts: hosts, ledger: ledger, drafts: drafts)
+        let generate = GenerateController(hosts: hosts, ledger: ledger, drafts: drafts, initialMachine: .auto)
         generate.settleChoice()
         generate.draft.prompt = "a lighthouse at dusk"
         return (generate, fake)
@@ -209,7 +209,7 @@ struct GenerateControllerTests {
         // The composition root restores the draft before any machine answers.
         original.hosts.setModels(nil, for: host.id)
         original.hosts.setReachability(nil, for: host.id)
-        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto)
         restored.settleChoice()
         original.hosts.setModels([savedModel], for: host.id)
         original.hosts.setReachability(.up(try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
@@ -240,7 +240,7 @@ struct GenerateControllerTests {
         original.hosts.setReachability(.checking, for: slow.id)
         original.hosts.setModels(nil, for: slow.id)
 
-        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts, initialMachine: .auto)
         restored.settleChoice()
         #expect(restored.modelName == clip.name, "the fast picture machine must not replace the saved clip")
         original.hosts.setModels([clip], for: slow.id)

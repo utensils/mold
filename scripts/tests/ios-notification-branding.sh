@@ -30,3 +30,18 @@ assert struct.unpack(">II", header[16:24]) == (128, 128)
 PNG
 grep -Fq 'Image("MoldLogo")' apps/ios/Sources/Widgets/ActivityBrandIcon.swift
 printf 'iOS notification branding ok\n'
+# Notification Center resolves the bundle icon's light/dark slots. Use the
+# same authored image in both so iOS need not synthesize a darkened logo.
+python3 - <<'ICON'
+import json
+from pathlib import Path
+root = Path("apps/ios/Sources/Companion/Resources/Assets.xcassets/AppIcon.appiconset")
+images = json.loads((root / "Contents.json").read_text())["images"]
+def appearance(image):
+    return next((a["value"] for a in image.get("appearances", []) if a["appearance"] == "luminosity"), "any")
+slots = {appearance(image): image for image in images}
+assert "dark" in slots, "Notification Center needs an explicit dark icon variant"
+assert slots["any"]["filename"] == slots["dark"]["filename"], "Keep the logo identical across appearances"
+for image in slots.values():
+    assert (root / image["filename"]).is_file()
+ICON

@@ -71,6 +71,30 @@ struct HostStoreTests {
         #expect(hosts.installed[host.id] == 0)
     }
 
+    @Test(arguments: [false, true])
+    func recheckingAnAnsweredMachineKeepsItsControlsUntilTheAnswer(fails: Bool) async throws {
+        let fake = FakeBackend()
+        let answer = try status()
+        fake.stub("status()", returning: answer)
+        fake.stub("models()", returning: [Model]())
+        let (hosts, _, _) = store(fake)
+        let host = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
+        await hosts.refresh(host)
+        hosts.stopWatching()
+        fake.stub("status()") { _ in
+            await MainActor.run {
+                #expect(hosts.isUp(host), "A routine refresh must not remove source wells and their presented picker")
+                #expect(hosts.instanceID(of: host.id) == answer.instanceId)
+            }
+            if fails { throw MoldClientError.unauthorized }
+            return answer
+        }
+        await hosts.refresh(host)
+        hosts.stopWatching()
+        #expect(hosts.isUp(host) == !fails)
+        if fails { #expect(hosts.reachability(of: host) == .needsKey) }
+    }
+
     @Test func aRefusalReadsAsNeedsAKeyNotAsDown() async throws {
         let fake = FakeBackend()
         fake.stub("status()", throwing: MoldClientError.unauthorized)
