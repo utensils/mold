@@ -979,7 +979,7 @@ mod tests {
         for secret in [
             "password",
             "0123456789abcdef".repeat(4).as_str(),
-            "mold_pair_operator_configured_looks_random_but_is_not",
+            "mold_pair_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             let keys = ApiKeySet::new(HashSet::from([secret.to_string()]));
             let tag = crate::connections::hex(&Sha256::digest(secret.as_bytes())[..8]);
