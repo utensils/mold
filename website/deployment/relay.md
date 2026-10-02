@@ -122,3 +122,10 @@ remove spoofed forwarding headers, block metrics, and stream HTTP/1.1 responses.
 Use `--transport direct` on its connector. Plain WS requires the explicit
 `--allow-insecure-loopback` flag. Direct streams default to a 3,600 second
 application-byte inactivity limit, configurable with `--idle-timeout-secs`.
+
+Native macOS: open **Settings ▸ Remote Access**, beside Machines. Select the
+machine to see its connection address, show an inline pairing QR code, and
+manage paired devices. For access outside the local network, first add the
+machine’s public HTTPS relay address in Settings ▸ Machines. This Mac’s private
+loopback engine cannot issue a reachable phone code; this pane does not start
+a tunnel. Pairing uses the existing one-use token and expiry.

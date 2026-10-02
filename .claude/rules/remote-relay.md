@@ -39,3 +39,9 @@ Public proxy must block metrics, remove spoofed forwarding headers, use
 HTTP/1.1 upstream and disable response buffering. AWS resources belong to
 URandom Terraform; code/deployment artifacts belong to Mold. Never put tokens
 in Terraform state/user-data or SSM command logs.
+
+Native macOS Settings ▸ Remote Access reuses PairingStore and PairingSheet
+for inline expiring QR codes and device revocation. The Settings scene must
+inject the shared pairing store. Codes carry the selected saved host address;
+never substitute a gateway URL without explicitly adding that machine. The
+private This Mac host does not offer pairing and this pane never starts a tunnel.

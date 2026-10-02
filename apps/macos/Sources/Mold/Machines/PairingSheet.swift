@@ -10,6 +10,7 @@ struct PairingSheet: View {
     @Environment(PairingStore.self) private var pairing
     @Environment(\.dismiss) private var dismiss
     let host: MoldHost
+    var showsDone = true
 
     enum SheetState: Equatable {
         case waiting
@@ -109,9 +110,11 @@ struct PairingSheet: View {
                     unavailable
                 }
             }
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            if showsDone {
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(24)

@@ -1,13 +1,13 @@
 import MoldClient
 import SwiftUI
 
-/// Nine tabs, in the design's own pane-map order: this Mac's own
+/// Ten tabs, in the design's own pane-map order: this Mac's own
 /// preferences, then what a render is made of, then the fleet, then the raw
 /// table. A stable string id per case, so `SettingsUAT` can open one at
 /// launch without a menu press and a selection binding can survive a rename
 /// of `title`.
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, generation, expansion, library, performance, accounts, machines, thisMac, advanced
+    case general, generation, expansion, library, performance, accounts, machines, remoteAccess, thisMac, advanced
 
     var id: String { rawValue }
 
@@ -20,6 +20,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .performance: "Performance"
         case .accounts: "Accounts"
         case .machines: "Machines"
+        case .remoteAccess: "Remote Access"
         case .thisMac: "This Mac"
         case .advanced: "Advanced"
         }
@@ -34,6 +35,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .performance: "speedometer"
         case .accounts: "key"
         case .machines: "server.rack"
+        case .remoteAccess: "qrcode"
         case .thisMac: "cpu"
         case .advanced: "gearshape.2"
         }
@@ -65,6 +67,7 @@ struct SettingsView: View {
         case .performance: PerformanceSettings()
         case .accounts: AccountsSettings()
         case .machines: MachinesSettings()
+        case .remoteAccess: RemoteAccessSettings()
         case .thisMac: LocalEngineSettings()
         case .advanced: AdvancedSettings()
         }

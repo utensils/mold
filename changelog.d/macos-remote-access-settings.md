@@ -1,0 +1,1 @@
+- Added a dedicated Remote Access tab in native macOS Settings with the connection address, inline phone pairing QR code, and paired-device controls.
