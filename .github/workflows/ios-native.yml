@@ -14,6 +14,8 @@ on:
       - "apps/ios/**"
       - "apps/shared/**"
       - ".github/workflows/ios-native.yml"
+      - ".github/workflows/testflight-ios-native.yml"
+      - "scripts/tests/ios-uitest-runner.sh"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -24,6 +26,8 @@ on:
       - "apps/ios/**"
       - "apps/shared/**"
       - ".github/workflows/ios-native.yml"
+      - ".github/workflows/testflight-ios-native.yml"
+      - "scripts/tests/ios-uitest-runner.sh"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -40,11 +44,9 @@ permissions:
 
 jobs:
   check:
-    name: Lint, test and audit
+    name: Lint and unit tests
     runs-on: macos-26
-    # The audit alone is four passes (iPhone and iPad, light and dark) of
-    # three text sizes, about 45 minutes on a fast Mac.
-    timeout-minutes: 120
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: apps/ios
@@ -76,17 +78,37 @@ jobs:
       - name: Unit tests
         run: make test
 
+  audit:
+    name: Accessibility audit (${{ matrix.appearance }})
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        appearance: [light, dark]
+    defaults:
+      run:
+        working-directory: apps/ios
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install xcodegen
+        run: brew install xcodegen
+
       # The iPhone passes. The hosted runner times the iPad's audits out
       # (the audit itself, UI snapshots, even synthesized taps), so the iPad
       # sweep is the local `make uitest`'s -- run it before merging iPad work.
       - name: Accessibility audit
+        env:
+          UITEST_APPEARANCES: ${{ matrix.appearance }}
         run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"
 
       - name: Upload UI test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-ui-test-reports-${{ github.run_attempt }}
+          name: ios-ui-test-reports-${{ matrix.appearance }}-${{ github.run_attempt }}
           path: apps/ios/build/UITestResults/
           if-no-files-found: ignore
           retention-days: 7

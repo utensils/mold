@@ -54,6 +54,7 @@ jobs:
       nix: ${{ steps.filter.outputs.nix }}
       release: ${{ steps.filter.outputs.release }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      workflow_static: ${{ steps.filter.outputs.workflow_static }}
       trusted_release_pr: ${{ steps.policy.outputs.trusted_release_pr }}
     steps:
       - name: Detect the trusted release-plz PR
@@ -305,13 +306,18 @@ jobs:
               - 'scripts/tests/changelog-fragments-contract.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/actionlint.yaml'
-              - '.github/workflows/**'
-            # Workflow-only PRs get static actionlint/routing-contract proof.
-            # After merge, exercise every dynamic path against the real runner
-            # environment without putting those expensive jobs on the PR.
-            workflow:
+              - '.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'
+            # Every workflow gets static syntax/routing proof. Native iOS
+            # workflows have their own platform gates and must not wake
+            # unrelated Rust, web, Windows, or release builds.
+            workflow_static:
               - '.github/actionlint.yaml'
               - '.github/workflows/**'
+              - 'scripts/tests/ci-routing-contract.sh'
+              - 'scripts/tests/ci-affected-packages.sh'
+            workflow:
+              - '.github/actionlint.yaml'
+              - '.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'
               - 'scripts/tests/ci-routing-contract.sh'
               - 'scripts/tests/ci-affected-packages.sh'
 
@@ -429,11 +435,12 @@ jobs:
       (needs.changes.result != 'success' ||
        needs.changes.outputs.trusted_release_pr == 'true' ||
        needs.changes.outputs.release == 'true' ||
+       needs.changes.outputs.workflow_static == 'true' ||
        needs.changes.outputs.rust == 'true' ||
        needs.changes.outputs.workflow == 'true')
     runs-on: ubuntu-latest
     env:
-      RUN_RUST_SUITE: ${{ needs.changes.outputs.trusted_release_pr != 'true' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true') }}
+      RUN_RUST_SUITE: ${{ needs.changes.outputs.trusted_release_pr != 'true' && (needs.changes.outputs.rust == 'true' || (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) }}
       RUN_RUST_FORMAT: ${{ needs.changes.outputs.trusted_release_pr != 'true' && needs.changes.outputs.rust_format == 'true' }}
       # Full debuginfo is the single largest cost in a test build's codegen and
       # link and in the cache save/restore; line tables keep test backtraces
@@ -518,10 +525,10 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
         if: needs.changes.outputs.release == 'true'
       - name: Validate workflow syntax
-        if: github.event_name == 'pull_request' && needs.changes.outputs.workflow == 'true'
+        if: needs.changes.outputs.workflow_static == 'true'
         uses: docker://rhysd/actionlint:1.7.12
       - name: Validate CI routing policy
-        if: github.event_name == 'pull_request' && needs.changes.outputs.workflow == 'true'
+        if: needs.changes.outputs.workflow_static == 'true'
         run: |
           bash scripts/tests/ci-routing-contract.sh
           bash scripts/tests/ci-affected-packages.sh

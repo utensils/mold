@@ -194,11 +194,25 @@ rust_text = rust.group(1)
 run_suite = (
     "needs.changes.outputs.trusted_release_pr != 'true' && "
     "(needs.changes.outputs.rust == 'true' || "
-    "needs.changes.outputs.workflow == 'true')"
+    "(github.event_name == 'push' && needs.changes.outputs.workflow == 'true'))"
 )
 match = re.search(r"RUN_RUST_SUITE:\s*\$\{\{\s*(.*?)\s*\}\}", rust_text, re.S)
 if match is None or normalize(match.group(1)) != run_suite:
     raise SystemExit("FAIL: protected Rust suite selector does not match the complete policy")
+
+# Workflow-only PRs retain the protected static-contract status without a
+# workspace compile; main still validates the changed runner environment.
+for event, rust_changed, workflow_changed, trusted_release, expected in (
+    ("pull_request", False, True, False, False),
+    ("pull_request", True, True, False, True),
+    ("pull_request", True, False, False, True),
+    ("push", False, True, False, True),
+    ("push", False, False, False, False),
+    ("pull_request", True, True, True, False),
+):
+    actual = not trusted_release and (rust_changed or (event == "push" and workflow_changed))
+    if actual != expected:
+        raise SystemExit("FAIL: workflow-only Rust suite truth table mismatch")
 
 run_format = (
     "needs.changes.outputs.trusted_release_pr != 'true' && "
@@ -229,12 +243,10 @@ expected_step_conditions = {
         "needs.changes.outputs.trusted_release_pr == 'true'"
     ),
     "Validate workflow syntax": (
-        "github.event_name == 'pull_request' && "
-        "needs.changes.outputs.workflow == 'true'"
+        "needs.changes.outputs.workflow_static == 'true'"
     ),
     "Validate CI routing policy": (
-        "github.event_name == 'pull_request' && "
-        "needs.changes.outputs.workflow == 'true'"
+        "needs.changes.outputs.workflow_static == 'true'"
     ),
     "Run protected release contracts": (
         "needs.changes.outputs.release == 'true'"
@@ -614,7 +626,7 @@ for classifier in rust gpu website web nix; do
     fail "workflow-only edits still force the $classifier dynamic build on PRs"
   fi
 done
-workflow_filter="$(extract_filter "$ci" workflow)"
+workflow_filter="$(extract_filter "$ci" workflow_static)"
 for path in .github/actionlint.yaml .github/workflows/\*\* scripts/tests/ci-routing-contract.sh; do
   grep -Fxq "              - '$path'" <<< "$workflow_filter" \
     || fail "workflow policy classifier omits $path"
@@ -641,8 +653,12 @@ grep -Fxq "              - 'scripts/create-desktop-dmg.sh'" <<< "$release_filter
   || fail "release classifier omits the desktop DMG packager"
 grep -Fxq "              - 'scripts/tests/desktop-dmg-packaging.sh'" <<< "$release_filter" \
   || fail "release classifier omits the desktop DMG packaging contract"
-grep -Fq "'.github/workflows/**'" <<< "$release_filter" \
-  || fail "workflow changes do not reach protected actionlint and routing contracts"
+for classifier in workflow release; do
+  grep -Fq "'.github/workflows/**/!(ios-native.yml|testflight-ios-native.yml)'" <<< "$(extract_filter "$ci" "$classifier")" \
+    || fail "$classifier must exclude native iOS workflow edits from unrelated dynamic builds"
+done
+require_text "$ci" "needs.changes.outputs.workflow_static == 'true'" \
+  "native iOS workflow edits must retain static syntax and routing validation"
 
 # Both guards below exist because the defect they catch is invisible to every
 # PR check: the Linux AppImage prep and the Linux `dev-bins,h3-private-uat`
@@ -815,5 +831,24 @@ require_text "$android" 'bash scripts/tests/android-legacy-downloads.sh' \
   "Android workflow omits the permission and public Downloads test"
 require_text "$android_gradle" 'com.google.mlkit:barcode-scanning:17.3.0' \
   "Android pairing does not bundle its barcode decoder for first-run and offline use"
+
+# Native iOS audits are independent matrix legs; TestFlight remains gated on
+# success of the entire workflow at the originating main SHA.
+python3 - "$repo_root/.github/workflows/ios-native.yml" "$repo_root/.github/workflows/testflight-ios-native.yml" <<'PYTEST'
+import sys
+from pathlib import Path
+native, testflight = (Path(p).read_text() for p in sys.argv[1:])
+assert 'appearance: [light, dark]' in native
+assert 'UITEST_APPEARANCES: ${{ matrix.appearance }}' in native
+assert 'ios-ui-test-reports-${{ matrix.appearance }}-' in native
+assert 'fail-fast: false' in native
+check, audit = native.split('  audit:', 1)
+assert 'make packages-test' in check and 'make test' in check
+assert 'make uitest' not in check and 'needs: check' not in audit
+assert "github.event.workflow_run.event == 'push'" in testflight
+assert "github.event.workflow_run.conclusion == 'success'" in testflight
+assert "github.event.workflow_run.head_branch == 'main'" in testflight
+assert 'ref: ${{ github.event.workflow_run.head_sha || github.ref }}' in testflight
+PYTEST
 
 echo "PASS: CI routing contract"

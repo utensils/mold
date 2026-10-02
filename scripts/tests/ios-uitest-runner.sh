@@ -34,7 +34,7 @@ export PATH="$work/bin:$PATH" UITEST_CALLS="$work/calls"
 run_audit() {
   make -s -C "$root/apps/ios" -o gen -o require-sim uitest \
     SIM=fixture-device UITEST_DEVICES=fixture-device BUILD="$work/build" \
-    MARKETING_VERSION=0.0.0 BUILD_NUMBER=1
+    MARKETING_VERSION=0.0.0 BUILD_NUMBER=1 "$@"
 }
 run_audit
 [[ $(wc -l < "$UITEST_CALLS" | tr -d ' ') == 2 ]]
@@ -47,4 +47,8 @@ done
 rm "$UITEST_CALLS"
 if UITEST_FAIL=1 run_audit; then echo 'FAIL: repeated test failure was swallowed' >&2; exit 1; fi
 [[ $(wc -l < "$UITEST_CALLS" | tr -d ' ') == 2 ]]
+rm "$UITEST_CALLS"
+run_audit UITEST_APPEARANCES=dark
+[[ $(wc -l < "$UITEST_CALLS" | tr -d ' ') == 1 ]]
+grep -q 'fixture-device-dark.xcresult' "$UITEST_CALLS"
 echo 'ios-uitest-runner: ok'

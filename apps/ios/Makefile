@@ -16,6 +16,7 @@ SIM_OR_PICK = $(or $(SIM),$(shell scripts/pick-simulator.sh iPhone))
 SIM_ID = $(eval SIM_ID := $(SIM_OR_PICK))$(SIM_ID)
 IPAD_ID = $(eval IPAD_ID := $(or $(IPAD),$(shell scripts/pick-simulator.sh iPad)))$(IPAD_ID)
 # `UITEST_DEVICES` overrides which simulators the audit sweeps (CI: iPhones).
+# `UITEST_APPEARANCES` defaults to both; CI runs light and dark on parallel runners.
 # The smallest screen, when an iPhone SE simulator is installed (not created).
 SMALL_ID = $(eval SMALL_ID := $(or $(SMALL),$(shell scripts/pick-simulator.sh small)))$(SMALL_ID)
 DEST = platform=iOS Simulator,id=$(SIM_ID)
@@ -89,7 +90,7 @@ uitest: require-sim gen ## The accessibility audit: every destination at xSmall,
 	  xcrun simctl boot $$dev 2>/dev/null || true; \
 	  was=$$(xcrun simctl ui $$dev appearance); \
 	  trap "xcrun simctl ui $$dev appearance $$was" EXIT INT TERM; \
-	  for mode in light dark; do \
+	  for mode in $(or $(UITEST_APPEARANCES),light dark); do \
 	    echo "  $$(xcrun simctl list devices | grep $$dev | sed -E 's/ \(.*//;s/^ *//') · $$mode"; \
 	    xcrun simctl ui $$dev appearance $$mode; \
 	    results="$(BUILD)/UITestResults/$$dev-$$mode"; \
