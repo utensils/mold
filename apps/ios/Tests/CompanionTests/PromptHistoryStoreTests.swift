@@ -67,6 +67,18 @@ import Testing
         #expect(draft == expected)
     }
 
+    @Test func recalledPromptClearsPriorTransformationProvenance() {
+        var draft = RenderDraft()
+        draft.prompt = "expanded words"
+        draft.originalPrompt = "short words"
+        draft.promptTransform = PromptTransformProvenance(
+            operation: .expand, rootPrompt: "short words", sourcePrompt: "short words", task: .textToImage)
+        PromptHistoryStore.recall("saved prompt", into: &draft)
+        #expect(draft.prompt == "saved prompt")
+        #expect(draft.originalPrompt == nil)
+        #expect(draft.promptTransform == nil)
+    }
+
     @Test func failedClearKeepsTheLoadedRows() async throws {
         let (_, hosts, fake) = try await QueueStoreTests.setUp()
         let history = PromptHistoryStore(host: hosts.hosts[0], hosts: hosts)

@@ -54,5 +54,9 @@ import MoldClient
         }
     }
 
-    static func recall(_ prompt: String, into draft: inout RenderDraft) { draft.prompt = prompt }
+    static func recall(_ prompt: String, into draft: inout RenderDraft) {
+        draft.prompt = prompt
+        draft.originalPrompt = nil
+        draft.promptTransform = nil
+    }
 }
