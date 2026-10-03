@@ -136,24 +136,22 @@ final class PopulatedGenerationTests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
-        if app.buttons["ToggleSideBar"].exists || app.buttons["Models"].exists {
-            XCTAssertTrue(app.navigateToDestination("Models", shortcut: "4"))
-            app.buttons["models-pane"].tap()
-            app.buttons["Discover"].firstMatch.tap()
-        } else {
-            XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
-            let card = app.descendants(matching: .any).matching(NSPredicate(format:
-                "identifier BEGINSWITH 'machine-card-' AND label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
-            XCTAssertTrue(card.waitForExistence(timeout: 5))
-            card.tap()
-            XCTAssertTrue(app.navigationBars["Media Fixture"].waitForExistence(timeout: 5))
-            let modelsLink = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Models'")).firstMatch
-            XCTAssertTrue(modelsLink.waitForExistence(timeout: 5))
-            for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
-            modelsLink.tap()
-            app.buttons["models-pane"].tap()
-            app.buttons["Discover"].firstMatch.tap()
-        }
+        // Select the fixture explicitly: global Models follows the saved
+        // preferred machine, which another full-suite test may leave offline.
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        let card = app.descendants(matching: .any).matching(NSPredicate(format:
+            "identifier BEGINSWITH 'machine-card-' AND label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        card.tap()
+        XCTAssertTrue(app.navigationBars["Media Fixture"].waitForExistence(timeout: 5))
+        // The installed count distinguishes this detail link from the iPad sidebar.
+        let modelsLink = app.buttons.matching(NSPredicate(format:
+            "label BEGINSWITH 'Models' AND label CONTAINS 'installed'")).firstMatch
+        XCTAssertTrue(modelsLink.waitForExistence(timeout: 5))
+        for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
+        modelsLink.tap()
+        app.buttons["models-pane"].tap()
+        app.buttons["Discover"].firstMatch.tap()
         let curated = app.descendants(matching: .any)["curated-model-flux-dev:q4"].firstMatch
         XCTAssertTrue(curated.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Hugging Face"].firstMatch.exists)
