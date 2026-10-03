@@ -38,6 +38,31 @@ fn valid_digest(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
+// IPC numbers have JavaScript precision; only the native server offer carries
+// the exact u64 seed. Preserve every other field as an expected snapshot.
+fn normalize_hint(
+    hint: Option<serde_json::Value>,
+    authority: Option<&mold_core::OutputMetadata>,
+) -> Result<Option<Box<mold_core::OutputMetadata>>, String> {
+    let Some(mut hint) = hint else {
+        return Ok(None);
+    };
+    if let Some(seed) = hint.get("seed").and_then(serde_json::Value::as_f64) {
+        if seed > 9_007_199_254_740_991.0 && seed.is_finite() && seed.fract() == 0.0 {
+            let exact = authority.ok_or("This older host cannot preserve the print's exact seed. Update the host before copying it.")?;
+            if seed != exact.seed as f64 {
+                return Err(
+                    "The print's settings changed. Refresh the Library before copying it.".into(),
+                );
+            }
+            hint["seed"] = serde_json::Value::from(exact.seed);
+        }
+    }
+    serde_json::from_value(hint)
+        .map(Some)
+        .map_err(|_| "Invalid print settings; refresh the Library before copying it.".into())
+}
+
 fn has_source_markers(metadata: &mold_core::OutputMetadata) -> bool {
     metadata.source_image_sha256.is_some()
         || metadata.id_image_sha256.is_some()
@@ -187,7 +212,10 @@ mod tests {
             output_sha256: Some(digest(b"abc")),
             output_size_bytes: Some(3),
             metadata: Some(Box::new(mold_core::OutputMetadata::from_generate_request(
-                &request, 1, None, "test",
+                &request,
+                u64::MAX,
+                None,
+                "test",
             ))),
         };
         assert!(same_output(&offer, &offer).is_ok());
@@ -258,6 +286,37 @@ mod tests {
             .unwrap();
         assert!(bounded_response(response, 3).await.is_err());
         worker.join().unwrap();
+    }
+    #[test]
+    fn unsafe_seed_hint_uses_exact_authority_only_when_rounded_values_match() {
+        let request = serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+            "prompt": "original", "model": "flux-dev:q4", "width": 8, "height": 8,
+            "steps": 4, "guidance": 1.0, "batch_size": 1
+        }))
+        .unwrap();
+        let mut exact =
+            mold_core::OutputMetadata::from_generate_request(&request, u64::MAX, None, "test");
+        let mut hint = serde_json::to_value(&exact).unwrap();
+        hint["seed"] = serde_json::from_str("18446744073709552000").unwrap();
+        let normalized = normalize_hint(Some(hint.clone()), Some(&exact))
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized.seed, u64::MAX);
+        assert_eq!(*normalized, exact);
+        assert!(
+            normalize_hint(Some(hint.clone()), None).is_err(),
+            "older hosts cannot silently lose precision"
+        );
+        hint["seed"] = serde_json::json!(9007199254740992_u64);
+        assert!(
+            normalize_hint(Some(hint), Some(&exact)).is_err(),
+            "different high seeds are not rounding errors"
+        );
+        exact.seed = 1;
+        let safe = normalize_hint(Some(serde_json::to_value(&exact).unwrap()), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(safe.seed, 1);
     }
     fn read_http(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
         use std::io::BufRead;
@@ -345,7 +404,10 @@ mod tests {
         }))
         .unwrap();
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-            &request, 1, None, "test",
+            &request,
+            u64::MAX,
+            None,
+            "test",
         ));
         let origin_offer = Offer {
             archive_identity_sha256: "a".repeat(64),
@@ -421,7 +483,9 @@ mod tests {
             api_key: Some("destination-key".into()),
             port: 0,
         };
-        let copied = mirror_to_local(source, "original.png".into(), Some(metadata), None, local)
+        let mut hint = serde_json::to_value(&metadata).unwrap();
+        hint["seed"] = serde_json::from_str("18446744073709552000").unwrap();
+        let copied = mirror_to_local(source, "original.png".into(), Some(hint), None, local)
             .await
             .unwrap();
         assert_eq!(copied, "copied-2.png");
@@ -513,7 +577,7 @@ pub async fn mirror_gallery_print(
     state: tauri::State<'_, AppState>,
     source: MediaSaveTarget,
     filename: String,
-    metadata: Option<Box<mold_core::OutputMetadata>>,
+    metadata: Option<serde_json::Value>,
     timestamp: Option<u64>,
 ) -> Result<String, String> {
     if !valid_filename(&filename) {
@@ -530,7 +594,7 @@ pub async fn mirror_gallery_print(
 async fn mirror_to_local(
     source: MediaSaveTarget,
     filename: String,
-    metadata: Option<Box<mold_core::OutputMetadata>>,
+    metadata: Option<serde_json::Value>,
     timestamp: Option<u64>,
     local: LocalServerInfo,
 ) -> Result<String, String> {
@@ -548,6 +612,10 @@ async fn mirror_to_local(
         percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
     let path = format!("/api/gallery/source-media/{encoded}");
     let origin = offer(&client, &source, &path, true).await?;
+    let metadata = normalize_hint(
+        metadata,
+        origin.as_ref().and_then(|offer| offer.metadata.as_deref()),
+    )?;
     if let Some(origin) = &origin {
         same_output(origin, origin)?;
         if !origin.output_sha256.as_deref().is_some_and(valid_digest)
