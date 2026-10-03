@@ -1,4 +1,0 @@
-- **Consistent curated model names.** Manifest checkpoints use short, shared titles across apps, discovery, queues, and the CLI, while retaining their runnable IDs and upstream filenames.
-- **Native iOS retained inputs.** Use These Settings restores durable source images and paired masks, retains disclosed conditioning files across prompt edits and repeat submissions, and lets you remove them explicitly.
-- **Clearer iPhone and iPad queues.** Jobs show their prompt and actual source image separately from the rendering preview, with a readable width on larger screens.
-- **Curated model discovery.** Native iOS Discover searches manifest checkpoints by name and Hugging Face repository, shows provider logos, and installs the exact variant using the machine’s configured credentials.

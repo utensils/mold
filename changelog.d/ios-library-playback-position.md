@@ -1,1 +1,0 @@
-- **Smoother iPhone Library browsing.** Clips play automatically in the full-screen viewer and pause when you page away; closing the viewer returns to your place in the Library grid.

@@ -1,1 +1,0 @@
-- **Native macOS nightly builds.** Release packaging can now build and sign the MoldMesh resource bundle, allowing the nightly app to publish.
