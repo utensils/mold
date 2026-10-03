@@ -81,6 +81,7 @@ struct QueueEntryRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("queue-entry-" + entry.id)
         .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
             await queue.loadSourceThumbnail(for: entry, on: host.id)

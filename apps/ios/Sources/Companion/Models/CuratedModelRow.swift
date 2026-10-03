@@ -29,6 +29,7 @@ struct CuratedModelRow: View {
             action.frame(maxWidth: stacked ? .infinity : nil)
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("curated-model-" + model.name)
     }
 
