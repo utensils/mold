@@ -158,6 +158,8 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(curated.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Hugging Face"].firstMatch.exists)
         let search = app.searchFields.firstMatch
+        if !search.exists { app.navigationBars["Models"].buttons["Search"].tap() }
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap(); search.typeText("black-forest")
         XCTAssertTrue(curated.waitForExistence(timeout: 5))
         XCTAssertFalse(app.descendants(matching: .any)["curated-model-ltx-2.5-22b-distilled:bf16"].exists)

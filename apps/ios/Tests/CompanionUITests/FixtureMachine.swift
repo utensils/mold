@@ -115,6 +115,11 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func response(_ path: String) -> Data {
+        // A visible coastal illustration makes queue screenshots useful for
+        // visual acceptance, rather than a white one-pixel placeholder.
+        if path.hasSuffix("/input-thumbnail") {
+            return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAABE0lEQVR4nO3QPQ0CQRRF4fWDDxos0CIACxjAACpQQE+FA4yQUNBB2J2defPz7jvJqW9uvul8f9JMU/cHgwcQQAABBNDAAQQQQAABZNTrtv8NoL80JkwKQIs6JUYAqQMl6mQbAQQQQAABBBBADozyxgEKAJRilL0sAjTDVLgpBVQjgAACCCCABm56XE+r6v54dKBoTJlAcZiKgD5tjhfhDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YuoG5IVp2h52X8G0AARTEhBMSUAwJQFFZloBFJNpNVA0pkygOExFQBGYDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YnoDLYwrtRN2YTcAAAAASUVORK5CYII=")!
+        }
         // A valid tiny PNG lets previews decode and source selection exercise
         // real image import; no generation or external machine is involved.
         if (path.hasPrefix("/api/gallery/image/fixture-") && path.hasSuffix(".png"))
