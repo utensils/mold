@@ -12,6 +12,30 @@ final class ShellAccessibilityTests: XCTestCase {
     }
 
     @MainActor func testExtraSmall() throws { try audit(size: "UICTContentSizeCategoryXS") }
+    @MainActor func testPromptHistoryHitAreaAtExtraSmall() async throws {
+        acceptCompanionPermissions()
+        let machine = try FixtureMachine()
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXS"]
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.textFields["machine-name"].tap()
+        app.textFields["machine-name"].typeText("Hit Area Fixture")
+        app.textFields["machine-address"].tap()
+        app.textFields["machine-address"].typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let history = app.buttons["prompt-history"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        settle(history)
+        XCTAssertGreaterThanOrEqual(history.frame.height, 44, "Prompt History needs a 44-point touch target")
+        XCTAssertGreaterThanOrEqual(history.frame.width, 44)
+    }
     @MainActor func testDefaultLarge() throws { try audit(size: "UICTContentSizeCategoryL") }
     @MainActor func testAccessibilityXXXL() throws { try audit(size: "UICTContentSizeCategoryAccessibilityXXXL") }
 
@@ -303,6 +327,14 @@ final class ShellAccessibilityTests: XCTestCase {
                 // Name the element: "Contrast failed" alone says nothing in a CI log.
                 let element = issue.element.map { "\($0.elementType) '\($0.label)' at \($0.frame) in \(app.frame)" }
                     ?? "unnamed element (\(issue.detailedDescription))"
+                let hierarchy = XCTAttachment(string: app.debugDescription)
+                hierarchy.name = "Accessibility failure hierarchy: \(place)"
+                hierarchy.lifetime = .keepAlways
+                self.add(hierarchy)
+                let screenshot = XCTAttachment(screenshot: app.screenshot())
+                screenshot.name = "Accessibility failure: \(place)"
+                screenshot.lifetime = .keepAlways
+                self.add(screenshot)
                 XCTFail("\(place): \(issue.compactDescription) -- \(element) [\(issue.detailedDescription)]")
                 return true
             }

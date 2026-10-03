@@ -90,7 +90,11 @@ struct Composer: View {
             }
             Button {
                 historyHost = generate.target ?? hosts.preferredHost
-            } label: { Label("Prompt History", systemImage: "clock.arrow.circlepath") }
+            } label: {
+                Label("Prompt History", systemImage: "clock.arrow.circlepath")
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
                 .accessibilityIdentifier("prompt-history")
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
             ModelMenu()
