@@ -23,7 +23,7 @@ struct QueueHoldRow: View {
                 .foregroundStyle(.orange)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 6) {
-                Text(entry.model ?? "Unknown model")
+                Text(entry.modelHeadline)
                 Text(sentence)
                     .font(.callout)
                     .foregroundStyle(.secondary)

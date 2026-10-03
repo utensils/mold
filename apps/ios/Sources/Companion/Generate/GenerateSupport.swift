@@ -91,6 +91,8 @@ extension GenerateController {
             if let recipe, let model { draft = draft.adopting(recipe, isNewModel: false, for: model) }
         }
         machine = .pinned(entry.hostID)
+        let fence = retainedReuse.begin(draft)
+        Task { await retainedReuse.probe(entry, fence: fence, controller: self) }
     }
 }
 
@@ -98,6 +100,7 @@ extension GenerateController {
     /// More options' Reset: the recipe's own defaults back, the prompt and
     /// every picture kept -- a reset is not a way to lose work.
     func resetOptions() {
+        retainedReuse.clear()
         guard let recipe, let model else { return }
         var fresh = RenderDraft()
         fresh.prompt = draft.prompt

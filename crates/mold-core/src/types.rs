@@ -4001,10 +4001,9 @@ pub struct ModelInfoExtended {
     pub disk_usage_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_download_bytes: Option<u64>,
-    /// Human-readable title for catalog-installed models whose `name` is
-    /// an opaque `cv:<id>` / `hf:<repo>` identifier (additive; absent for
-    /// manifest models, whose `name` is already readable). Display only —
-    /// every API call still addresses the model by `name`.
+    /// Common presentation alias: curated models use their short manifest
+    /// title, catalog installs use their provider title. Additive and absent
+    /// on older servers/custom models. Every API call still uses `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Catalog classification for installed models. Absent for older servers

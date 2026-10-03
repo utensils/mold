@@ -458,7 +458,12 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
     }
 
     // Header
-    println!("{}", canonical.bold());
+    if let Some(manifest) = manifest {
+        println!("{}", manifest.display_name().bold());
+        println!("  {:<16} {}", "ID:".dimmed(), canonical);
+    } else {
+        println!("{}", canonical.bold());
+    }
     println!("{}", "─".repeat(60).dimmed());
 
     if let Some(m) = manifest {

@@ -83,6 +83,9 @@ struct QueueView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .frame(maxWidth: QueueLayout.readableWidth)
+        .frame(maxWidth: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     /// A drag in Edit mode, told to the machine as "after this row" -- the

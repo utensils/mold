@@ -39,7 +39,7 @@ struct QueueBatchRow: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(group.rows.first?.model ?? "Unknown model") · \(group.rows.count) renders")
+                    Text("\(group.rows.first?.modelHeadline ?? "Unknown model") · \(group.rows.count) renders")
                     Text(Self.caption(group.rows))
                         .font(.caption)
                         .foregroundStyle(.secondary)

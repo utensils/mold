@@ -50,6 +50,7 @@ extension GenerateController {
         guard blocker == nil, let host = target, let modelName else { return }
         let backend = hosts.backend(for: host)
         let copies = min(draft.batchSize, hosts.capabilities[host.id]?.maxBatchOutputs ?? draft.batchSize)
+        let retained = retainedReuse.snapshot()
         let snapshot = draft
         let recipe = recipe
         let maxIdentityPhotos = hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0
@@ -77,7 +78,15 @@ extension GenerateController {
                 let requests = RenderRequest.batch(
                     prepared, model: modelName, copies: max(1, copies),
                     randomBase: .random(in: 0 ... UInt64(UInt32.max)), maxIdentityPhotos: maxIdentityPhotos)
-                let admission = BatchAdmission(requests: requests)
+                var admission = BatchAdmission(requests: requests)
+                if let retained, let origin = self?.hosts.backend(for: retained.origin) {
+                    admission = try await RetainedSourceMedia.hydrated(
+                        admission, filename: retained.filename, members: retained.members,
+                        sameHost: retained.origin == host.id, origin: origin, target: backend)
+                } else if retained != nil {
+                    throw MoldClientError.unreachable("The machine that kept the source media isn't connected.")
+                }
+                try Task.checkCancellation()
                 let accepted = try await backend.submit(admission)
                 guard let self else { return }
                 let active = ActiveBatch(id: accepted.id, clientBatchId: admission.clientBatchId,
@@ -91,9 +100,13 @@ extension GenerateController {
                 self.activeBatch = active
                 await self.follow(accepted, active: active, backend: backend)
             } catch {
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 if followNow {
-                    self.run = .failed(error.failureSentence)
+                    let sentence: String?
+                    if case let .http(_, code, _)? = error as? MoldClientError {
+                        sentence = RetainedSourceMedia.refusalSentence(for: code)
+                    } else { sentence = nil }
+                    self.run = .failed(sentence ?? error.failureSentence)
                 } else {
                     self.hosts.report(host, doing: String(localized: "queue that render"), error)
                 }

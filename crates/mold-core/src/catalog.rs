@@ -347,7 +347,7 @@ pub fn build_model_catalog(
             },
             disk_usage_bytes,
             remaining_download_bytes: Some(remaining_download_bytes),
-            display_name: None,
+            display_name: Some(manifest.display_name()),
             kind: None,
             modality: None,
             nsfw: None,
@@ -614,6 +614,48 @@ fn sort_models_by_variant_quality(models: &mut [ModelInfoExtended]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn curated_catalog_publishes_short_stable_titles() {
+        let rows = super::build_model_catalog(&crate::Config::default(), None, false);
+        let row = rows.iter().find(|row| row.name == "flux-dev:q4").unwrap();
+        assert_eq!(row.display_name.as_deref(), Some("FLUX.1 Dev Q4"));
+        assert_eq!(row.human_name(), "FLUX.1 Dev Q4");
+        assert_eq!(row.name, "flux-dev:q4");
+        for (id, title) in [
+            ("flux2-dev:bf16", "FLUX.2 Dev BF16"),
+            (
+                "qwen-image-lightning:fp8",
+                "Qwen Image 2512 Lightning FP8 4-step",
+            ),
+            (
+                "qwen-image-lightning:fp8-8step",
+                "Qwen Image 2512 Lightning FP8 8-step",
+            ),
+            ("qwen-image-2.1:q8", "Qwen Image 2.1 Q8_0"),
+            (
+                "qwen-image-2.1-turbo:q8",
+                "Qwen Image 2.1 Q8_0 Turbo 6-step",
+            ),
+            ("ltx-2.5-22b-dev:bf16-conv", "LTX-2.5 22B Dev BF16 Conv VAE"),
+        ] {
+            assert_eq!(
+                crate::manifest::model_display_name(id).as_deref(),
+                Some(title),
+                "{id}"
+            );
+        }
+        assert!(crate::manifest::model_display_name("cv:1759168").is_none());
+        let mut seen = std::collections::HashMap::new();
+        for row in &rows {
+            if let Some(title) = &row.display_name {
+                assert!(!title.trim().is_empty(), "empty title for {}", row.name);
+                if let Some(previous) = seen.insert(title, &row.name) {
+                    panic!("duplicate title {title}: {previous}, {}", row.name);
+                }
+            }
+        }
+    }
+
     /// Every reviewed-compact H3 row must advertise exactly the envelope its
     /// own generation profile pins. The two are read by the same client in
     /// the same response, so a row that offers 345 frames beside a profile

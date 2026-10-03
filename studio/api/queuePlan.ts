@@ -19,6 +19,7 @@ export type QueueLaneKind = "device" | "host_utility" | (string & {});
 export interface QueueEntry {
   id: string;
   model: string;
+  model_display_name?: string | null;
   state: string;
   started_at_unix_ms: number;
   position: number;

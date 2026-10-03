@@ -7,6 +7,7 @@ public protocol MoldQueueBackend: Sendable {
     /// One job in full, settings included -- `GET /api/queue` cannot answer
     /// this (`routes.rs:6817-6828`).
     func queueJob(id: String) async throws -> QueueJobDetail
+    func queueInputThumbnail(id: String) async throws -> Data
     func cancelJob(id: String) async throws
     /// Cancels the row ONLY if it is held right now (`?only_held=true`).
     /// Returns `false` when the machine says it is no longer held -- a Retry
@@ -39,4 +40,10 @@ public protocol MoldQueueBackend: Sendable {
     /// Cancels the held source row, and ONLY after the destination accepted
     /// (`routes.rs:7584-7599`).
     func completeTransfer(_ authority: QueueAuthority) async throws
+}
+
+public extension MoldQueueBackend {
+    func queueInputThumbnail(id: String) async throws -> Data {
+        throw MoldClientError.malformedResponse
+    }
 }

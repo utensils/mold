@@ -162,6 +162,7 @@ private struct InstalledRow: View {
 
 /// "2.1 / 11.8 GB · 42 MB/s" with its bar and Cancel Download.
 struct DownloadRow: View {
+    @Environment(HostStore.self) private var hosts
     @Environment(\.dynamicTypeSize) private var size
     let row: DownloadProgress
     let rate: Double?
@@ -169,7 +170,7 @@ struct DownloadRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(verbatim: row.model).font(.body.monospaced())
+            Text(verbatim: hosts.models.values.lazy.flatMap { $0 }.first { $0.name == row.model }?.headline ?? row.model).font(.body)
             if let failed = row.failed {
                 Text(failed).foregroundStyle(.secondaryText)
             }

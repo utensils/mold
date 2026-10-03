@@ -58,6 +58,10 @@ Library settings show image storage against its limit and saved listing size,
 offer offline thumbnail saving, and
 can clear both pictures and saved listings after explaining the offline effect.
 
+### Reusing retained source media
+
+Use These Settings asks every known machine copy for the print's retained source media, including inputs that output metadata cannot describe. A retained source picture appears in the normal source well, where it can be inspected, replaced or removed. A paired retained mask enters the draft with its source picture, so aspect, crop and pad-repaint changes transform both together. Explicit attachments win. Other retained files are disclosed beside the composer and restored at admission: a single output on its original machine uses a one-use session; another machine or a batch relays the bounded file contents. Prompt, seed and size edits keep these disclosed files for repeated submissions; Remove retained sources, choosing a model/kind/recipe, Reset, or another reuse clears their authority. Removing the visible source image never restores it secretly. Unavailable media explains when it must be attached again.
+
 ## Building
 
 Everything goes through the Makefile. `make help` lists the targets, and inside
@@ -189,6 +193,29 @@ Live Activity identity uses the bundled Mold logo on the Lock Screen and in ever
 Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
+
+## Curated models and durable inputs
+
+Discover includes **Mold Models**, the machine’s curated manifest inventory,
+including models it has not downloaded. Search by model name, family or Hugging
+Face repository, or filter by Hugging Face/Civitai. Source marks accompany the
+provider’s name. Get installs the exact checkpoint using the machine’s
+credentials; gated models still ask for their licence. Friendly model titles
+are shared across surfaces, while runnable IDs and filenames stay compatible.
+
+**Use These Settings** asks the print’s machine for its retained inputs. Source
+images and paired repaint masks return together before fitting. Other supported
+conditioning files remain disclosed beside the composer, including across
+prompt edits and repeated renders; **Remove retained sources** clears them.
+The same-machine request uses a fresh one-use session; another machine or a
+multi-output batch receives bounded relayed bytes. Missing retained inputs are
+explained when the print recorded conditioning; an ordinary text-only print
+stays quiet.
+
+Queue rows show the prompt and the sealed source image, labeled **Source**,
+separately from a live **Rendering** preview. Durable images remain readable
+after a machine restart. Wide iPad windows keep queue content centered at a
+readable width; large accessibility text stacks the image and words.
 
 ### Unloading server models
 

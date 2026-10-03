@@ -43,6 +43,16 @@ fn remote_remaining_download_bytes(model: &mold_core::ModelInfoExtended) -> Opti
     )
 }
 
+/// Keep the actionable id visible alongside the common presentation alias.
+fn model_label(model: &mold_core::ModelInfoExtended) -> String {
+    let title = model.human_name();
+    if title == model.name {
+        title
+    } else {
+        format!("{title} ({})", model.name)
+    }
+}
+
 pub async fn run(json: bool) -> Result<()> {
     let ctx = CliContext::new(None);
     let default_model =
@@ -68,7 +78,7 @@ pub async fn run(json: bool) -> Result<()> {
             // Compute column widths across all models (account for ● and ★ indicators)
             let nw = col_width(
                 models.iter().map(|m| {
-                    m.name.len()
+                    model_label(m).len()
                         + if m.is_loaded { 2 } else { 0 }
                         + if m.name == default_model { 2 } else { 0 }
                 }),
@@ -105,10 +115,10 @@ pub async fn run(json: bool) -> Result<()> {
                     // Pad plain text first (ANSI codes break {:<N} width).
                     // Then colorize indicators after padding.
                     let plain_label = match (model.is_loaded, is_default) {
-                        (true, true) => format!("{} ● ★", model.name),
-                        (true, false) => format!("{} ●", model.name),
-                        (false, true) => format!("{} ★", model.name),
-                        (false, false) => model.name.clone(),
+                        (true, true) => format!("{} ● ★", model_label(model)),
+                        (true, false) => format!("{} ●", model_label(model)),
+                        (false, true) => format!("{} ★", model_label(model)),
+                        (false, false) => model_label(model),
                     };
                     let padded = format!("{:<nw$}", plain_label, nw = nw);
                     let name = if is_default {
@@ -185,7 +195,7 @@ pub async fn run(json: bool) -> Result<()> {
                         };
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
-                        m.name.bold(),
+                        model_label(m).bold(),
                         format_family_padded(&m.family, fw),
                         size_str,
                         fetch_col,
@@ -226,8 +236,8 @@ pub async fn run(json: bool) -> Result<()> {
             let nw = col_width(
                 downloaded
                     .iter()
-                    .map(|m| m.name.len() + if m.name == default_model { 2 } else { 0 })
-                    .chain(available.iter().map(|m| m.name.len())),
+                    .map(|m| model_label(m).len() + if m.name == default_model { 2 } else { 0 })
+                    .chain(available.iter().map(|m| model_label(m).len())),
                 4, // "NAME"
                 2,
             );
@@ -263,10 +273,11 @@ pub async fn run(json: bool) -> Result<()> {
                 for model in &downloaded {
                     let is_default = model.name == default_model;
                     let display_name = if is_default {
-                        let padded = format!("{:<nw$}", format!("{} ★", model.name), nw = nw);
+                        let padded =
+                            format!("{:<nw$}", format!("{} ★", model_label(model)), nw = nw);
                         padded.replace("★", &"★".yellow().bold().to_string())
                     } else {
-                        format!("{:<nw$}", model.name, nw = nw)
+                        format!("{:<nw$}", model_label(model), nw = nw)
                     };
                     let name = &model.name;
                     let mcfg = config.model_config(name);
@@ -341,7 +352,7 @@ pub async fn run(json: bool) -> Result<()> {
                     let fetch_col = format_fetch_size(remaining_bytes);
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
-                        m.name.bold(),
+                        model_label(m).bold(),
                         format_family_padded(&m.family, fw),
                         size_str,
                         fetch_col,
@@ -380,8 +391,17 @@ pub async fn run(json: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_fetch_size, remote_remaining_download_bytes};
+    use super::{format_fetch_size, model_label, remote_remaining_download_bytes};
     use mold_core::{ModelDefaults, ModelInfo, ModelInfoExtended};
+
+    #[test]
+    fn model_labels_keep_the_runnable_id_beside_the_curated_title() {
+        let mut row = remote_model("flux-dev:q4", None);
+        row.display_name = Some("FLUX.1 Dev Q4".into());
+        assert_eq!(model_label(&row), "FLUX.1 Dev Q4 (flux-dev:q4)");
+        row.display_name = None;
+        assert_eq!(model_label(&row), "flux-dev:q4");
+    }
 
     fn remote_model(name: &str, remaining_download_bytes: Option<u64>) -> ModelInfoExtended {
         ModelInfoExtended {

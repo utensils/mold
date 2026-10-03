@@ -141,10 +141,9 @@ export function useQueueInspection(
     const value = queueEntryDetailModel({
       entry: next.job,
       hostLabel: row.hostLabel,
-      modelLabel: modelDisplayNameForId(
-        next.job.model,
-        routing.installedModels.value,
-      ),
+      modelLabel:
+        next.job.model_display_name ??
+        modelDisplayNameForId(next.job.model, routing.installedModels.value),
       nowMs: Date.now(),
       metadata: next.job.metadata as QueueDetailMetadata | null,
       mine: local.value !== null,

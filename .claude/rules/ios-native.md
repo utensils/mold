@@ -64,4 +64,21 @@ Live Activity identity uses the bundled Mold logo on the Lock Screen and in ever
 
 Library source selection prefers the merged print copy on a currently reachable machine (`presented(onAnyOf:)`), preserving that copy's filename and host together.
 
+**Curated discovery and labels.** Native model headlines prefer the server's
+additive `display_name`, then legacy descriptions; IDs remain request identity.
+Discover searches the `/api/models` manifest inventory even without a live
+catalog. Provider tokens are `hf` and `civitai`; logos use the same authored marks
+as `ui/components/SourceGlyph.vue`. Curated Get always installs the exact model
+ID through `startDownload`, not an aggregate repository catalog ID.
+
+**Durable conditioning and queue inputs.** Reuse always probes retained media.
+Restore source and paired source-space mask atomically before fitting, respecting
+explicit attachments. Remaining private roles stay visibly disclosed until
+cleared or a model/kind/recipe/reset supersedes them. Every submit mints fresh
+same-host authority or relays bounded bytes through MoldClient's shared hydration
+helper. A removed visible source/mask cannot be rehydrated from hidden authority.
+Queue input thumbnails use the authenticated sealed-media route, never provenance
+filenames or denoise previews. Cache by host, instance and job, fence late replies
+against live row membership, and purge removed jobs/hosts.
+
 **Model unloading.** Installed Models exposes a Server Memory section with visible per-model Unload and Unload All Models. Residency uses `isLoaded` independently of downloaded metadata. All-model unload sends nil model and GPU to the selected host. Coordinate load/unload/delete with a per-host in-flight guard held through refresh, preserve installed files, and display server refusals. Offline controls are disabled. Per-machine Models in regular-width layouts hides inherited floating tab chrome and restores it on Back; direct sidebar Models remains unchanged. Installed-family headings use ordinary section rows with semantic headline fonts and VoiceOver header traits; supplementary headings failed populated iPad Dynamic Type prediction.

@@ -9,6 +9,13 @@ public extension HTTPBackend {
         try await get("/api/queue/\(escaped(id))")
     }
 
+    /// Private, bounded preview of this job's sealed source image.
+    func queueInputThumbnail(id: String) async throws -> Data {
+        let (stream, http) = try await relayBytes(request(queueInputThumbnailPath(id)))
+        try Self.validateQueueThumbnail(http)
+        return try await stream.collected(upTo: Self.queueThumbnailCeiling)
+    }
+
     /// Moves a QUEUED row. `position` is an index into the machine's
     /// `state = 'queued'` rows in dispatch order -- NOT the row's `position`
     /// field, which also counts running rows, and NOT its place on screen
@@ -58,4 +65,25 @@ struct QueueReorderPatch: Encodable {
 /// is a real empty list, not a different request.
 struct GenerationBatchStatusQuery: Encodable {
     let batchIds: [String]
+}
+
+// Streaming validation is separate so header refusal happens before a body
+// allocation, including when the host omits or lies about Content-Length.
+extension HTTPBackend {
+    static let queueThumbnailCeiling = 2 * 1_024 * 1_024
+
+    func queueInputThumbnailPath(_ id: String) -> String {
+        "/api/queue/\(escaped(id))/input-thumbnail"
+    }
+
+    static func validateQueueThumbnail(_ http: HTTPURLResponse) throws {
+        guard (200 ..< 300).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw MoldClientError.unauthorized }
+            throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)
+        }
+        guard http.expectedContentLength <= Int64(queueThumbnailCeiling) else {
+            throw ResponseCeiling.Exceeded(bytes: Int(clamping: http.expectedContentLength),
+                ceiling: queueThumbnailCeiling, what: "queue source thumbnail")
+        }
+    }
 }

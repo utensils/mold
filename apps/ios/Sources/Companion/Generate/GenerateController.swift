@@ -10,6 +10,7 @@ import MoldClient
 /// Stop: a press while a render runs queues another batch.
 @Observable
 final class GenerateController {
+    let retainedReuse = RetainedReuse()
     var draft = RenderDraft()
     /// Still picture, Short clip, 3-D object.
     var kind: PrintKind = .picture
@@ -104,6 +105,7 @@ final class GenerateController {
 
     func setKind(_ new: PrintKind) {
         guard new != kind || restoringChoice else { return }
+        retainedReuse.clear()
         if !restoringChoice, let modelName { lastModel[kind] = modelName }
         restoringChoice = false
         kind = new
@@ -112,6 +114,7 @@ final class GenerateController {
     }
 
     func choose(_ model: Model) {
+        retainedReuse.clear()
         restoringChoice = false
         let isNew = model.name != modelName
         modelName = model.name
@@ -121,6 +124,7 @@ final class GenerateController {
     }
 
     func chooseRecipe(_ id: String) {
+        retainedReuse.clear()
         guard let model else { return }
         recipeID = id
         if let recipe { draft = draft.adopting(recipe, isNewModel: false, for: model) }
@@ -146,6 +150,7 @@ final class GenerateController {
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
+        if retainedReuse.probing { return String(localized: "Restoring the print’s source media…") }
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }
         if hosts.upHosts.isEmpty { return String(localized: "No machine is answering. Check Machines to reconnect.") }
         if restoringChoice, model == nil {

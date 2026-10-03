@@ -1230,6 +1230,39 @@ impl QueueMediaStore {
         self.seal_inner(owner_id, job_id, Some(operation_fingerprint), None, media)
     }
 
+    /// Authenticate the entire stream while retaining only one bounded memory
+    /// record. Other inputs are hashed and discarded, never staged to disk.
+    pub(crate) fn read_source_image(
+        &self,
+        media_set: &MediaSetRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        let manifest = self.load(media_set)?;
+        let (index, entry) = manifest
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.role == "source_image" && entry.name == "scalar")
+            .ok_or(QueueMediaError::NotFound)?;
+        if entry.sink != QueueMediaSink::Memory || entry.size_bytes > max_bytes {
+            return Err(QueueMediaError::NotFound);
+        }
+        let index = u32::try_from(index).map_err(|_| QueueMediaError::NotFound)?;
+        let path = self
+            .locate_bundle(media_set)?
+            .ok_or(QueueMediaError::NotFound)?;
+        let mut decoded =
+            self.decode_v2_from_path(media_set, &path, None, true, Some((index, max_bytes)))?;
+        if decoded.manifest != manifest {
+            return Err(QueueMediaError::Authentication);
+        }
+        decoded
+            .memory
+            .remove(&index)
+            .map(SensitiveBytes::into_vec)
+            .ok_or(QueueMediaError::NotFound)
+    }
+
     /// Seal a V2 bundle with a bounded authenticated projection before the
     /// media stream. This is the only format eligible for deferred scheduling.
     pub fn seal_v2_with_operation_fingerprint(
@@ -1816,7 +1849,8 @@ impl QueueMediaStore {
             .join(format!("{}.partial", random_hex(16)?));
         ensure_private_dir(&partial)?;
         let mut staging = PlaintextStagingGuard::new(partial);
-        let decoded = self.decode_v2_from_path(media_set, path, Some(staging.path()), true)?;
+        let decoded =
+            self.decode_v2_from_path(media_set, path, Some(staging.path()), true, None)?;
         crate::dir_sync::sync_directory(staging.path())?;
         let partial = staging.path().to_path_buf();
         let ready = partial.with_extension("ready");
@@ -2548,7 +2582,7 @@ impl QueueMediaStore {
             if output.is_some() {
                 return Err(QueueMediaError::MixedSinkHydrationRequired);
             }
-            return self.decode_v2_from_reader(media_set, reader, output, false);
+            return self.decode_v2_from_reader(media_set, reader, output, false, None);
         }
         if &magic != MAGIC {
             return Err(QueueMediaError::Corrupt("unknown bundle format".into()));
@@ -2639,6 +2673,7 @@ impl QueueMediaStore {
         path: &Path,
         output: Option<&Path>,
         mixed: bool,
+        selected_index: Option<(u32, u64)>,
     ) -> Result<DecodedBundle, QueueMediaError> {
         let file = mold_core::secure_file::open_regular_file_no_follow(path)
             .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
@@ -2652,7 +2687,7 @@ impl QueueMediaStore {
                 QueueMediaProjectionFailure::Malformed
             }));
         }
-        self.decode_v2_from_reader(media_set, reader, output, mixed)
+        self.decode_v2_from_reader(media_set, reader, output, mixed, selected_index)
     }
 
     fn decode_v2_from_reader(
@@ -2661,6 +2696,7 @@ impl QueueMediaStore {
         mut reader: BufReader<File>,
         output: Option<&Path>,
         mixed: bool,
+        selected_index: Option<(u32, u64)>,
     ) -> Result<DecodedBundle, QueueMediaError> {
         let mut projection_nonce = [0_u8; PROJECTION_NONCE_BYTES];
         reader
@@ -2747,6 +2783,7 @@ impl QueueMediaStore {
                     &plaintext,
                     output,
                     mixed,
+                    selected_index,
                     &mut current,
                     &mut observations,
                     &mut memory,
@@ -3213,12 +3250,14 @@ struct V2ObservedFile {
     sink: QueueMediaSink,
     output: Option<File>,
     memory: Option<SensitiveBytes>,
+    memory_limit: Option<u64>,
 }
 
 fn begin_v2_observation(
     plaintext: &[u8],
     output_root: Option<&Path>,
     mixed: bool,
+    selected_index: Option<(u32, u64)>,
     current: &mut Option<V2ObservedFile>,
     observations: &mut Vec<DataObservation>,
     memory: &mut BTreeMap<u32, SensitiveBytes>,
@@ -3260,7 +3299,11 @@ fn begin_v2_observation(
         digest: Sha256::new(),
         sink,
         output,
-        memory: (mixed && sink == QueueMediaSink::Memory).then(|| SensitiveBytes(Vec::new())),
+        memory_limit: selected_index.map(|(_, limit)| limit),
+        memory: (mixed
+            && sink == QueueMediaSink::Memory
+            && selected_index.is_none_or(|(selected, _)| selected == index))
+        .then(|| SensitiveBytes(Vec::new())),
     });
     Ok(())
 }
@@ -3296,6 +3339,14 @@ fn consume_v2_data_record(
         output.write_all(bytes)?;
     }
     if let Some(memory) = &mut file.memory {
+        if file
+            .memory_limit
+            .is_some_and(|limit| file.size_bytes > limit)
+        {
+            return Err(QueueMediaError::Corrupt(
+                "selected media exceeds its bounded reader".into(),
+            ));
+        }
         memory.0.extend_from_slice(bytes);
     }
     Ok(())
@@ -5728,6 +5779,38 @@ mod tests {
         let reopened = QueueMediaStore::open(home.path()).unwrap();
         assert_eq!(reopened.key_disposition, KeyDisposition::Initialized);
         assert!(!dead.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_image_preview_never_stages_the_video_or_other_inputs() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let source = home.path().join("source-video.mp4");
+        fs::write(&source, vec![7_u8; CHUNK_BYTES * 3]).unwrap();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "job-preview",
+                &QueueMediaOperationFingerprint::sha256_v1(b"preview operation"),
+                &projection(),
+                vec![
+                    SealMedia::bytes("source_image", "scalar", b"actual-source-image".to_vec()),
+                    SealMedia::bytes("identity_image", "scalar", b"unrelated-face".to_vec()),
+                    SealMedia::path("source_video_path", "scalar", &source).unwrap(),
+                ],
+            )
+            .unwrap();
+        let before = fs::read_dir(&store.runtime_staging.root).unwrap().count();
+        assert_eq!(
+            store.read_source_image(&reference, 1024).unwrap(),
+            b"actual-source-image"
+        );
+        assert_eq!(
+            fs::read_dir(&store.runtime_staging.root).unwrap().count(),
+            before
+        );
+        assert!(store.read_source_image(&reference, 1).is_err());
     }
 
     #[cfg(unix)]

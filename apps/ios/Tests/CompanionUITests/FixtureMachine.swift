@@ -1,20 +1,27 @@
 import Foundation
 import Network
+import Synchronization
 
 /// A loopback-only machine for UI regression tests. It serves real generated
 /// profiles and cannot generate or download. Optional collection and model-memory mutations
 /// update only the fixture’s own in-memory state.
 final class FixtureMachine: @unchecked Sendable {
+    private let downloadedModels = Mutex<[String]>([])
+    var installedRequests: [String] { downloadedModels.withLock { $0 } }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
     private let gallery: Data
+    private let retainedMediaFixture: Bool
+    private let queueFixture: Bool
     private let collectionFixture: Bool
     private var collectionHidden = false
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, loadedModels: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false) throws {
+        self.retainedMediaFixture = retainedMediaFixture
+        self.queueFixture = queueFixture
         self.collectionFixture = collectionFixture
         modelMemoryFixture = loadedModels
         if loadedModels { residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"] }
@@ -30,13 +37,13 @@ final class FixtureMachine: @unchecked Sendable {
         models = try JSONSerialization.data(withJSONObject: names.map { name -> [String: Any] in
             let row = profiles.first { ($0["models"] as! [[String: Any]]).contains { $0["model"] as? String == name } }!
             return ["name": name, "family": name.hasPrefix("flux") ? "flux" : "ltx",
-                    "description": name, "downloaded": true, "generation_profile": row["profile"]!]
+                    "description": name, "downloaded": !(queueFixture && name.hasPrefix("flux")), "display_name": name.hasPrefix("flux") ? "FLUX.1 Dev Q4" : "LTX-2.5 Distilled BF16", "hf_repo": name.hasPrefix("flux") ? "black-forest-labs/FLUX.1-dev" : "Lightricks/LTX-2.5", "generation_profile": row["profile"]!]
         })
         gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
             ["filename": "fixture-\(index).\(mixedMedia ? ["png", "mp4", "glb"][index % 3] : "png")", "timestamp": 1_790_000_000 - index,
              "favorite": index < galleryFavorites,
              "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
-             "metadata": ["prompt": "Fixture \(index)"]] as [String: Any]
+             "metadata": retainedMediaFixture ? ["prompt": "Fixture \(index)", "model": "flux-dev:q4"] : ["prompt": "Fixture \(index)"]] as [String: Any]
         })
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -102,16 +109,19 @@ final class FixtureMachine: @unchecked Sendable {
             if patchCollection,
                let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let hidden = object["hidden"] as? Bool { collectionHidden = hidden }
+            let install = queueFixture && request.first == "POST" && path == "/api/downloads"
+            if install, let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
+               let model = object["model"] as? String { downloadedModels.withLock { $0.append(model) } }
             let unload = modelMemoryFixture && request.first == "DELETE" && path == "/api/models/unload"
             if unload {
                 let object = (try? JSONSerialization.jsonObject(with: Data(bodyText.utf8))) as? [String: Any] ?? [:]
                 if let name = object["model"] as? String { residentModels.remove(name) }
                 else { residentModels.removeAll() }
             }
-            let allowed = unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
-            let body = unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let allowed = install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let body = install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
-            let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/")
+            let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
                 ? "image/png" : "application/json"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
@@ -124,14 +134,23 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func response(_ path: String) -> Data {
+        // A visible coastal illustration makes queue screenshots useful for
+        // visual acceptance, rather than a white one-pixel placeholder.
+        if path.hasSuffix("/input-thumbnail") {
+            return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAABE0lEQVR4nO3QPQ0CQRRF4fWDDxos0CIACxjAACpQQE+FA4yQUNBB2J2defPz7jvJqW9uvul8f9JMU/cHgwcQQAABBNDAAQQQQAABZNTrtv8NoL80JkwKQIs6JUYAqQMl6mQbAQQQQAABBBBADozyxgEKAJRilL0sAjTDVLgpBVQjgAACCCCABm56XE+r6v54dKBoTJlAcZiKgD5tjhfhDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YuoG5IVp2h52X8G0AARTEhBMSUAwJQFFZloBFJNpNVA0pkygOExFQBGYDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YnoDLYwrtRN2YTcAAAAASUVORK5CYII=")!
+        }
         // A valid tiny PNG lets previews decode and source selection exercise
         // real image import; no generation or external machine is involved.
         if (path.hasPrefix("/api/gallery/image/fixture-") && path.hasSuffix(".png"))
-            || path.hasPrefix("/api/gallery/thumbnail/fixture-") {
+            || path.hasPrefix("/api/gallery/thumbnail/fixture-") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source")) {
             return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")!
         }
         let json: String
         switch path {
+        case "/api/gallery/source-media/fixture-0.png":
+            json = retainedMediaFixture
+                ? #"{"availability":"available","members":[{"member_id":"fixture-source","role":"source_image","display_name":"Original.png","size_bytes":68}]}"#
+                : #"{"availability":"unavailable_legacy"}"#
         case "/api/models":
             guard modelMemoryFixture else { return models }
             let rows = (try! JSONSerialization.jsonObject(with: models)) as! [[String: Any]]
@@ -144,7 +163,9 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/capabilities": json = collectionFixture
             ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#
             : #"{"max_batch_outputs":4}"#
-        case "/api/queue": json = #"{"entries":[]}"#
+        case "/api/queue": json = queueFixture
+            ? #"{"entries":[{"id":"fixture-video","state":"queued","model":"ltx-2.5-22b-distilled:bf16","model_display_name":"LTX-2.5 Distilled BF16","position":0,"durable":true,"metadata":{"prompt":"A coastal path at sunrise","model":"ltx-2.5-22b-distilled:bf16"}}]}"#
+            : #"{"entries":[]}"#
         case "/api/gallery": return gallery
         case "/api/gallery/collections":
             if collectionFixture {
