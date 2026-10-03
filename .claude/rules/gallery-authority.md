@@ -136,3 +136,15 @@ submission cache or a provenance filename. Sibling output retention is covered
 through queue cleanup, trash/restore, permanent deletion and startup reconciliation.
 Identical inputs across distinct jobs remain independently encrypted; per-output
 pins share the originating job's encrypted media where hard links are supported.
+
+Library mirrors transfer retained inputs through the authenticated, exact-output
+`GET`/`PUT /api/gallery/source-media/:filename/transfer` contract. The offer
+captures public output digest, recipe, archive identity and input slots together.
+The framed import streams bounded private staging, validates every member digest,
+pins before committing the destination archive binding, and acknowledges only
+after retention is durable. An equal retry repairs SQLite's projection; a changed
+output or existing different binding is refused. Imported siblings share an
+owner-local synthetic encrypted set, without reusing a generation job's authority.
+Native Mac and Tauri desktop copy completion includes this handoff, including
+cache, automatic mirrors and existing-file repair paths; capture source archive identity before output download, then verify source
+identity and destination output digest/recipe before attaching inputs.

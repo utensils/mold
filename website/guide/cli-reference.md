@@ -453,6 +453,12 @@ retained files can no longer be read, and `unavailable_auth` means the host
 wants its API key. `--output -` writes the bytes to stdout; with no
 `--output`, the member's own display name is used.
 
+Retained source media survives removal of its queue entry, trash and restart.
+It is released only after the last referencing library output is permanently
+removed. Native Mac **Save Locally** and **Sync All**, and desktop local saves
+and automatic mirrors, retain the source on the destination as well; if either machine cannot complete that transfer, the app
+reports an incomplete copy rather than claiming the sources were saved.
+
 `mold library show --preview` reuses the same inline renderer as `mold run
 --preview`; video entries prefer their animated preview and fall back to the
 thumbnail. An unreachable host or rejected gallery credential is an error;

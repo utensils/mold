@@ -477,6 +477,8 @@ by its opaque id. A print that predates retention, or whose conditioning was
 recorded only as text, answers `unavailable_legacy` — that is a fact about the
 print, not damage.
 
+Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again.
+
 ```bash
 mold library source-media mold-flux-dev-q4-1700000000000.png
 mold library source-media mold-flux-dev-q4-1700000000000.png --json

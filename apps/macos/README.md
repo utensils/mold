@@ -60,6 +60,14 @@ selector, and Advanced keeps source badges compact to leave room for values.
 
 ## Where the bytes go
 
+**Save Locally** and **Sync All** copy retained conditioning media with a print.
+The destination encrypts and binds those inputs to the exact copied output;
+the copy is complete only after that binding commits. Existing copies are
+checked and repaired without downloading unchanged output files again. An older
+machine that cannot transfer retained inputs explains that the copy is incomplete.
+Sibling copied outputs share one retained encrypted payload. Each surviving
+library output keeps its source independently of the original machine's output.
+
 A print lives on the machine that made it, and Quick Look, sharing, saving and
 dragging one to the Finder all need a real file here. They share one cache,
 keyed on `(machine, filename, media_version)` — the same `media_version` the

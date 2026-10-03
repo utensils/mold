@@ -348,3 +348,7 @@ Hosting requires an explicitly running authenticated `mold serve` and connector.
 Native macOS This Mac remains private; the GUI does not automatically open a
 tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
 are never replayed by the relay.
+
+### Retained source-media library transfers
+
+`GET /api/gallery/source-media/:filename/transfer` returns an exact output/archive identity, authoritative metadata, and bounded retained-member descriptors. `PUT` on the same route accepts `application/vnd.mold.retained-media-transfer`: a big-endian 32-bit JSON descriptor length, the descriptor, and ordered raw member bytes. Clients must verify output identity, member lengths/digests and the commit acknowledgment before reporting a complete local copy. Transfers preserve source roles and sinks without accepting filesystem paths. Available sources cannot silently fall back to an output-only copy on older servers.

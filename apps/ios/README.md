@@ -51,9 +51,10 @@ Reverse the sweep to shorten it, or hold near a grid edge to scroll further.
 Vertical swipes still scroll, and tapping selections keeps the viewport put.
 Status notices sit above the grid without covering date headings or prints.
 Its cached listing and images load before
-the machines respond. Opening a print keeps the grid's scroll position when
-you return; clips play automatically only while their page is selected in the
-viewer. Settings is available from Generate, Library and Machines;
+the machines respond. Closing a print restores the exact viewport, including
+partially visible tiles. Scrolling uses cached gallery projections and the viewer
+loads only nearby pages, so large libraries stay responsive. Clips play
+automatically only while their page is selected in the viewer. Settings is available from Generate, Library and Machines;
 Library settings show image storage against its limit and saved listing size,
 offer offline thumbnail saving, and
 can clear both pictures and saved listings after explaining the offline effect.
