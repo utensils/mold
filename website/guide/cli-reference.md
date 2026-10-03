@@ -455,7 +455,10 @@ wants its API key. `--output -` writes the bytes to stdout; with no
 
 Retained source media survives removal of its queue entry, trash and restart.
 It is released only after the last referencing library output is permanently
-removed. Native Mac **Save Locally** and **Sync All**, and desktop local saves
+removed. Newly completed jobs with identical retained input sets share encrypted
+media storage while keeping their original provenance. Different input sets,
+larger sets and existing historical outputs keep their current storage.
+Native Mac **Save Locally** and **Sync All**, and desktop local saves
 and automatic mirrors, retain the source on the destination as well; if either machine cannot complete that transfer, the app
 reports an incomplete copy rather than claiming the sources were saved.
 

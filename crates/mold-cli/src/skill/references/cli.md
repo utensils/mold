@@ -477,7 +477,7 @@ by its opaque id. A print that predates retention, or whose conditioning was
 recorded only as text, answers `unavailable_legacy` — that is a fact about the
 print, not damage.
 
-Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again.
+Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again. Newly completed jobs with identical retained input sets share encrypted media storage; provenance remains per-job. This does not merge different accompanying inputs or migrate historical outputs.
 
 ```bash
 mold library source-media mold-flux-dev-q4-1700000000000.png

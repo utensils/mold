@@ -4,3 +4,5 @@
 - Show authenticated retained source images in the native Mac, web, desktop and Tauri mobile queues, including jobs submitted from another client. Preserve separate source and rendering-preview labels.
 - Native Mac Save Locally and Sync All, and desktop local saves and automatic mirrors, retain a print's source media on the destination, repair older incomplete copies, and share retained payloads across copied sibling outputs.
 - Fixed native iOS Library lag in large galleries and preserved the exact viewport when closing a print; viewer paging now loads only nearby images.
+- Deduplicate matching retained input sets across newly completed jobs, preserving per-job provenance and retaining sources until the last dependent library output is deleted.
+- Preserve exact server metadata, including large seeds, in desktop remote-library copies.

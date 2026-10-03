@@ -134,8 +134,14 @@ render previews, bound response bytes, cancel obsolete requests, and fence resul
 by host, server instance and job identity. Never infer source bytes from a local
 submission cache or a provenance filename. Sibling output retention is covered
 through queue cleanup, trash/restore, permanent deletion and startup reconciliation.
-Identical inputs across distinct jobs remain independently encrypted; per-output
-pins share the originating job's encrypted media where hard links are supported.
+Active queue sets remain independently encrypted and job-bound. Future completed
+library handoffs canonicalize identical ordered visible-media contracts within
+the existing limits (64 entries, 512 MiB total and 64 MiB Memory entries). Per-job
+provenance and empty-presence markers stay in separate private sets. Publish all
+replacement pins in one authority commit before releasing old pins; retry and
+SQLite repair preserve that authority. Different accompanying inputs, roles,
+positions or sinks, larger sets and historical outputs keep their existing
+storage. This is whole-contract sharing, not arbitrary per-member deduplication.
 
 Library mirrors transfer retained inputs through the authenticated, exact-output
 `GET`/`PUT /api/gallery/source-media/:filename/transfer` contract. The offer

@@ -280,7 +280,9 @@ See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 the host's prints, including `mold library source-media` to recover the
 conditioning image a print was made from and `mold trash delete` to remove one
 permanently. Retained sources survive queue cleanup and remain available while
-any referencing library output exists, including in the trash. Native Mac and
+any referencing library output exists, including in the trash. Matching retained
+input sets from newly completed jobs share storage while keeping per-job
+provenance. Native Mac and
 desktop library copies also retain those sources on the destination machine.
 To install Mold's Agent Skill for supported coding agents,
 run:
