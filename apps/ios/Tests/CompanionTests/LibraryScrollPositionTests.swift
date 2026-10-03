@@ -1,3 +1,4 @@
+import Foundation
 import MoldClient
 import Testing
 
@@ -5,6 +6,49 @@ import Testing
 
 @MainActor
 struct LibraryScrollPositionTests {
+    @Test func viewerReturnRestoresViewportRatherThanOpenedTile() {
+        let viewport = LibraryViewport()
+        viewport.report(offset: 1234.5)
+        viewport.cover()
+        viewport.report(offset: 0) // navigation hides or rebuilds the grid
+        #expect(viewport.uncover() == 1234.5)
+        viewport.report(offset: 1567)
+        viewport.cover()
+        #expect(viewport.uncover() == 1567)
+    }
+
+    @Test func largeGalleryScrollingVisitsOnlyReportedTargetsAndDerivesOnce() throws {
+        let host = MoldHost(name: "Fixture", baseURL: URL(string: "http://localhost:7680")!)
+        let prints = try (0..<10_000).map { index in
+            try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+                "{\"filename\":\"\(index).png\",\"timestamp\":1790000000,\"metadata\":{\"prompt\":\"fixture\",\"seed\":1,\"model\":\"flux-dev:q4\"}}".utf8))
+        }
+        let entries = prints.map { LibraryEntry(host: host, print: $0) }
+        let cache = LibraryGridProjectionCache()
+        let query = LibraryQuery()
+        for _ in 0..<100 {
+            let projection = cache.project(entries: entries, revision: 1, scope: .all, query: query)
+            #expect(projection.firstVisible([entries[9999].id, entries[9000].id]) == entries[9000].id)
+        }
+        #expect(cache.derivations == 1)
+        #expect(cache.targetLookups == 200)
+        let projection = cache.project(entries: entries, revision: 1, scope: .all, query: query)
+        #expect(projection.pages(around: entries[9000].id).map(\.id) == entries[8998...9002].map(\.id))
+        #expect(!projection.shouldRecenter(selected: entries[9001].id, anchor: entries[9000].id))
+        #expect(projection.shouldRecenter(selected: entries[9002].id, anchor: entries[9000].id))
+        #expect(projection.shouldRecenter(selected: entries[9010].id, anchor: entries[9000].id))
+        #expect(projection.pages(around: entries[0].id).count == 3)
+        #expect(projection.pages(around: entries[9999].id).count == 3)
+        #expect(projection.step(1, from: entries[9000].id) == entries[9001].id)
+        #expect(projection.step(-1, from: entries[0].id) == nil)
+        #expect(projection.entry(entries[9000].id)?.hostID == host.id)
+        _ = cache.project(entries: entries, revision: 2, scope: .all, query: query)
+        #expect(cache.derivations == 2)
+        let refreshed = cache.project(entries: Array(entries.prefix(50)), revision: 3, scope: .all, query: query)
+        #expect(refreshed.entry(entries[9000].id) == nil)
+        #expect(refreshed.pages(around: entries[9000].id).isEmpty)
+    }
+
     @Test func leavingTheViewerDoesNotEraseTheLastVisiblePrint() {
         let host = MoldHost.ID()
         let first = PrintID(host: host, filename: "first.png")

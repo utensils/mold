@@ -11,7 +11,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
-    private let gallery: Data
+    private var gallery: Data
+    private let libraryMutations: Bool
     private let retainedMediaFixture: Bool
     private let queueFixture: Bool
     private let allRequests = Mutex<[String]>([])
@@ -26,7 +27,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false) throws {
+        self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
         self.queueFixture = queueFixture
         self.queueControls = queueControls
@@ -136,9 +138,24 @@ final class FixtureMachine: @unchecked Sendable {
                 if let name = object["model"] as? String { residentModels.remove(name) }
                 else { residentModels.removeAll() }
             }
-            let allowed = (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let libraryMutation = libraryMutations && request.first == "POST"
+                && ["/api/gallery/mutations", "/api/gallery/trash"].contains(path)
+            if libraryMutation,
+               let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
+               let filenames = object["filenames"] as? [String],
+               var rows = try? JSONSerialization.jsonObject(with: gallery) as? [[String: Any]] {
+                if path == "/api/gallery/trash" { rows.removeAll { filenames.contains($0["filename"] as? String ?? "") } }
+                else if let favorite = object["favorite"] as? Bool {
+                    for index in rows.indices where filenames.contains(rows[index]["filename"] as? String ?? "") {
+                        rows[index]["favorite"] = favorite
+                    }
+                }
+                gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
+            }
+            let allowed = libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
-            let body = install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let isTrashListing = libraryMutations && path == "/api/gallery" && String(request[1]).contains("view=trash")
+            let body = libraryMutation ? Data("{}".utf8) : isTrashListing ? Data("[]".utf8) : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
             let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
                 ? "image/png" : "application/json"
@@ -192,6 +209,7 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/status": json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/capabilities":
             if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }
+            if libraryMutations { return Data(#"{"max_batch_outputs":4,"gallery":{"organize":true,"bulk_mutations":true,"trash":{"enabled":true}}}"#.utf8) }
             json = collectionFixture
             ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#
             : #"{"max_batch_outputs":4}"#

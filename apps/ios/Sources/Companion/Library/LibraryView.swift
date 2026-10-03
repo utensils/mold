@@ -17,7 +17,9 @@ struct LibraryView: View {
     @State private var selection: Set<PrintID> = []
     @State private var showingCache = LibraryShowingCache()
     @State private var scrollPosition = LibraryScrollPosition()
-    @State private var returnToPrint: PrintID?
+    @State private var gridCache = LibraryGridProjectionCache()
+    @State private var viewport = LibraryViewport()
+    @State private var returnGeneration = 0
     @Namespace private var zoom
 
     /// Search opens with a query already in it; the Library tab opens empty.
@@ -38,6 +40,8 @@ struct LibraryView: View {
 
     var body: some View {
         let showing = showing()
+        let projection = gridCache.project(entries: showing.visible, revision: library.revision,
+                                           scope: scope, query: query)
         Group {
             if hosts.hosts.isEmpty {
                 EmptyState(title: String(localized: "No prints yet"), symbol: Destination.library.symbol,
@@ -48,7 +52,8 @@ struct LibraryView: View {
                 empty
             } else {
                 LibraryGrid(sections: showing.sections, tile: $tile, position: $scrollPosition,
-                            returnToPrint: returnToPrint, selecting: selecting,
+                            projection: projection,
+                            viewport: viewport, returnGeneration: returnGeneration, selecting: selecting,
                             selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible)
                     // A different shelf or search is a new scroll context.
                     // Clearing the bound target alone leaves the old offset.
@@ -78,10 +83,10 @@ struct LibraryView: View {
             }
         }
         .navigationDestination(for: PrintID.self) { id in
-            PrintViewer(start: id, entries: showing.visible, trashed: scope.isTrash)
+            PrintViewer(start: id, entries: showing.visible, trashed: scope.isTrash, projection: projection)
                 .navigationTransition(.zoom(sourceID: id, in: zoom))
-                .onAppear { returnToPrint = nil }
-                .onDisappear { returnToPrint = id }
+                .onAppear { viewport.cover() }
+                .onDisappear { returnGeneration += 1 }
         }
         .safeAreaInset(edge: .bottom) {
             if selecting { SelectionBar(scope: scope, selected: showing.selected) { selection = [] } }
