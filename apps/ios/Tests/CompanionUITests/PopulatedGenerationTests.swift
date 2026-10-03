@@ -214,6 +214,8 @@ final class PopulatedGenerationTests: XCTestCase {
     }
 
     @MainActor func testQueueDetailsControlsAndPromptHistory() async throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true, queueControls: true)
         let port = try await machine.start()
@@ -312,6 +314,8 @@ final class PopulatedGenerationTests: XCTestCase {
     }
 
     @MainActor func testCuratedDiscoveryAndQueuedSourceImage() async throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true)
         let port = try await machine.start()
@@ -342,6 +346,7 @@ final class PopulatedGenerationTests: XCTestCase {
             app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]
             app.launch()
             XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            reveal(app.descendants(matching: .any)["queue-entry-fixture-video"].firstMatch, in: app)
             XCTAssertTrue(app.images["queue-source-fixture-video"].waitForExistence(timeout: 10))
             XCTAssertTrue(app.staticTexts["A coastal path at sunrise"].exists)
             attach(app)
