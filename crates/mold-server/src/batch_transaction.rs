@@ -667,6 +667,102 @@ impl GalleryPublicationGate {
         )
     }
 
+    /// Replace only this original queue set, preserving other authored/derived
+    /// bindings. Publish all replacement pins before one authority commit.
+    #[cfg(unix)]
+    pub(crate) fn replace_retained_media_for_job(
+        &self,
+        output_dir: &Path,
+        job_id: &str,
+        original: &crate::queue_media_store::MediaSetRef,
+        replacements: &[crate::queue_media_store::MediaSetRef],
+        mut pin: impl FnMut(&crate::queue_media_store::MediaSetRef, &str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, Vec<GalleryMediaPin>)>> {
+        ensure!(
+            !replacements.is_empty(),
+            "canonical retained replacement is empty"
+        );
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical = bookkeeping.canonical_root();
+        let mut index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        let targets = index
+            .entries
+            .iter()
+            .filter(|(filename, entry)| {
+                !index.quarantined_names.contains(*filename)
+                    && entry.record.metadata.job_id.as_deref() == Some(job_id)
+            })
+            .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
+            .collect::<Vec<_>>();
+        ensure!(
+            !targets.is_empty(),
+            "no committed output belongs to canonicalized queue job"
+        );
+        let mut removed = Vec::new();
+        let mut changed = Vec::new();
+        for (filename, identity) in targets {
+            let entry = index
+                .entries
+                .get_mut(&filename)
+                .context("canonical retained target disappeared")?;
+            ensure!(
+                crate::gallery_authority::current_file_matches(canonical, entry)?,
+                "gallery output changed before canonical pinning"
+            );
+            let pin_id = gallery_media_pin_id(canonical, &identity)?;
+            let mut bindings = entry
+                .retained_media
+                .iter()
+                .filter(|binding| binding.media_set != *original)
+                .cloned()
+                .collect::<Vec<_>>();
+            let old = entry
+                .retained_media
+                .iter()
+                .filter(|binding| binding.media_set == *original)
+                .cloned()
+                .collect::<Vec<_>>();
+            for set in replacements {
+                pin(set, &pin_id)?;
+                let binding = GalleryMediaPin {
+                    media_set: set.clone(),
+                    pin_id: pin_id.clone(),
+                };
+                if !bindings.contains(&binding) {
+                    bindings.push(binding);
+                }
+            }
+            ensure!(
+                crate::gallery_authority::current_file_matches(canonical, entry)?,
+                "gallery output changed while canonical pins were published"
+            );
+            bindings.sort_by(|a, b| {
+                a.pin_id
+                    .cmp(&b.pin_id)
+                    .then_with(|| a.media_set.set_id.cmp(&b.media_set.set_id))
+            });
+            if bindings != entry.retained_media {
+                entry.retained_media = bindings;
+                changed.push(filename.clone());
+            }
+            removed.push((filename, old));
+        }
+        if !changed.is_empty() {
+            let generation = crate::gallery_authority::read_generation(canonical, &bookkeeping)?
+                .context("gallery authority generation missing")?;
+            let generation = crate::gallery_authority::commit_snapshot(
+                canonical,
+                &bookkeeping,
+                generation,
+                &mut index,
+                "canonicalize_retained_source_media",
+                changed,
+            )?;
+            self.install_committed_archive_index(canonical, generation, index);
+        }
+        Ok(removed)
+    }
+
     fn bind_retained_media(
         &self,
         output_dir: &Path,

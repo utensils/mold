@@ -141,11 +141,10 @@ fn authorize(
     }
 }
 #[cfg(unix)]
-fn contract(manifest: &MediaSetManifest) -> Vec<TransferMember> {
+fn full_contract(manifest: &MediaSetManifest) -> Vec<TransferMember> {
     manifest
         .entries
         .iter()
-        .filter(|entry| entry.size_bytes > 0 && permitted_role(&entry.role))
         .map(|entry| TransferMember {
             member_id: None,
             role: entry.role.clone(),
@@ -375,9 +374,7 @@ fn commit_transfer(
         crate::queue_media_store::QueueMediaError,
     >,
 ) -> Result<TransferResult, ApiError> {
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _serial = SERIAL
-        .lock()
+    let _serial = canonical_gallery_lock()
         .map_err(|_| ApiError::internal("transfer store lock unavailable"))?;
     let existing = offer_for(state, filename)?;
     if existing.archive_identity_sha256 != descriptor.archive_identity_sha256 {
@@ -414,14 +411,104 @@ fn commit_transfer(
         .queue_journal
         .queue_media_lifecycle()
         .ok_or_else(conflict)?;
-    let store = lifecycle.runtime_store().map_err(|_| conflict())?;
-    let encoded = serde_json::to_vec(&wanted).map_err(|_| invalid("invalid content contract"))?;
+    let canonical = canonical_set(&lifecycle, &wanted, None, || {
+        wanted
+            .iter()
+            .enumerate()
+            .map(|(index, member)| media(index, member))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    })
+    .map_err(|_| ApiError::internal("transfer canonical media unavailable"))?;
+    let set = &canonical.media_set;
+    let bound = state
+        .gallery_publication_gate
+        .bind_transferred_media_for_output(&output_dir, &identity, set, |pin_id| {
+            canonical.pin(pin_id)
+        });
+    // The canonical guard releases its transient active bundle after pin-first
+    // archive commit (or leaves only repairable orphan pins on failure).
+    bound.map_err(|_| conflict())?;
+    repair_projection(state, filename)?;
+    Ok(TransferResult {
+        archive_identity_sha256: descriptor.archive_identity_sha256.clone(),
+        member_count: wanted.len(),
+    })
+}
+
+/// Shared by imported copies and completed generation handoffs. Callers hold
+/// this lock through archive commit so a concurrent handoff can reuse its pins.
+#[cfg(unix)]
+pub(crate) fn canonical_gallery_lock() -> anyhow::Result<std::sync::MutexGuard<'static, ()>> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .map_err(|_| anyhow::anyhow!("canonical gallery media lock unavailable"))
+}
+
+#[cfg(unix)]
+pub(crate) struct CanonicalGallerySet {
+    pub(crate) media_set: crate::queue_media_store::MediaSetRef,
+    source_pin: Option<GalleryMediaPinRef>,
+    transient: bool,
+    store: std::sync::Arc<crate::queue_media_store::QueueMediaStore>,
+}
+#[cfg(unix)]
+impl CanonicalGallerySet {
+    #[cfg(test)]
+    pub(crate) fn abandon_transient_for_restart_test(&mut self) {
+        self.transient = false;
+    }
+    pub(crate) fn pin(&self, pin_id: &str) -> anyhow::Result<()> {
+        if let Some(source) = &self.source_pin {
+            self.store.pin_gallery_copy(source, pin_id)?;
+        } else {
+            self.store.pin_for_gallery_item(&self.media_set, pin_id)?;
+        }
+        Ok(())
+    }
+}
+#[cfg(unix)]
+impl Drop for CanonicalGallerySet {
+    fn drop(&mut self) {
+        if self.transient {
+            if let Err(error) = self.store.delete(&self.media_set) {
+                tracing::warn!(%error, "canonical gallery transient cleanup deferred to reconciliation");
+            }
+        }
+    }
+}
+#[cfg(unix)]
+fn canonical_set(
+    lifecycle: &crate::queue_media_lifecycle::QueueMediaLifecycle,
+    wanted: &[TransferMember],
+    private_job: Option<&str>,
+    materialize: impl FnOnce() -> anyhow::Result<Vec<crate::queue_media_store::SealMedia>>,
+) -> anyhow::Result<CanonicalGallerySet> {
+    let store = lifecycle.runtime_store()?;
+    let encoded = serde_json::to_vec(wanted)?;
     let fingerprint = crate::queue_media_store::QueueMediaOperationFingerprint::sha256_v1(&encoded);
-    let mut identity_digest = Sha256::new();
-    identity_digest.update(b"mold-gallery-import-v1\0");
-    identity_digest.update(lifecycle.owner_uuid().as_bytes());
-    identity_digest.update(&encoded);
-    let job = format!("gallery-import-{:x}", identity_digest.finalize());
+    let mut identity = Sha256::new();
+    identity.update(if private_job.is_some() {
+        b"mold-gallery-private-v1\0".as_slice()
+    } else {
+        b"mold-gallery-import-v1\0".as_slice()
+    });
+    identity.update(lifecycle.owner_uuid().as_bytes());
+    if let Some(job) = private_job {
+        identity.update((job.len() as u64).to_be_bytes());
+        identity.update(job.as_bytes());
+    }
+    identity.update(&encoded);
+    let job = format!(
+        "gallery-{}-{:x}",
+        if private_job.is_some() {
+            "private"
+        } else {
+            "import"
+        },
+        identity.finalize()
+    );
     let mut candidates = store
         .inspect_gallery_pins()
         .pins
@@ -431,56 +518,109 @@ fn commit_transfer(
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| a.pin_id.cmp(&b.pin_id));
-    let mut reused: Option<GalleryMediaPinRef> = None;
-    if let Some(candidate) = candidates.into_iter().next() {
-        let manifest = store
-            .load_from_gallery_pin(&candidate)
-            .map_err(|_| conflict())?;
-        if contract(&manifest) != wanted {
-            return Err(conflict());
-        }
-        reused = Some(candidate);
+    if let Some(pin) = candidates.into_iter().next() {
+        anyhow::ensure!(
+            full_contract(&store.load_from_gallery_pin(&pin)?) == wanted,
+            "canonical retained media contract changed"
+        );
+        return Ok(CanonicalGallerySet {
+            media_set: pin.media_set.clone(),
+            source_pin: Some(pin),
+            transient: false,
+            store,
+        });
     }
-    let newly_sealed = reused.is_none();
-    let set = if let Some(pin) = &reused {
-        pin.media_set.clone()
-    } else {
-        let payloads = wanted
+    let set = lifecycle.seal_v2(&job, &fingerprint, &Default::default(), materialize()?)?;
+    Ok(CanonicalGallerySet {
+        media_set: set,
+        source_pin: None,
+        transient: true,
+        store,
+    })
+}
+
+/// Keep every private provenance/presence entry, but outside the shared media
+/// contract: changing a filename must not duplicate the actual source pixels.
+/// This never changes the original active queue set or its job-bound authority.
+#[cfg(unix)]
+pub(crate) fn canonicalize_queued_media_for_gallery(
+    lifecycle: &crate::queue_media_lifecycle::QueueMediaLifecycle,
+    original: &crate::queue_media_store::MediaSetRef,
+) -> anyhow::Result<Option<Vec<CanonicalGallerySet>>> {
+    let store = lifecycle.runtime_store()?;
+    let manifest = store.load(original)?;
+    let mut total = 0_u64;
+    let mut memory = 0_u64;
+    for entry in &manifest.entries {
+        total = total.saturating_add(entry.size_bytes);
+        if entry.sink == QueueMediaSink::Memory {
+            memory = memory.saturating_add(entry.size_bytes);
+        }
+    }
+    // Larger legacy sets keep their original retention path. Canonicalization
+    // is an optimization, never a new admission limit or a reason to lose data.
+    if manifest.entries.len() > MAX_MEMBERS || total > MAX_BYTES || memory > 64 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let all = full_contract(&manifest);
+    let shared = |member: &TransferMember| member.size_bytes > 0 && permitted_role(&member.role);
+    if !all.iter().any(shared) {
+        return Ok(None);
+    }
+    let mut groups = Vec::new();
+    let mut decrypted = None;
+    for private in [false, true] {
+        let indices = all
             .iter()
             .enumerate()
-            .map(|(index, member)| media(index, member))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| invalid("transfer input unavailable"))?;
-        lifecycle
-            .seal_v2(&job, &fingerprint, &Default::default(), payloads)
-            .map_err(|_| ApiError::internal("transfer encryption failed"))?
-    };
-    let bound = state
-        .gallery_publication_gate
-        .bind_transferred_media_for_output(&output_dir, &identity, &set, |pin_id| {
-            if let Some(source) = &reused {
-                store
-                    .pin_gallery_copy(source, pin_id)
-                    .map(|_| ())
-                    .map_err(Into::into)
-            } else {
-                store
-                    .pin_for_gallery_item(&set, pin_id)
-                    .map(|_| ())
-                    .map_err(Into::into)
-            }
-        });
-    // Failed binding leaves at most an orphan pin, never archive authority
-    // pointing at nonexistent bytes. Startup already reconciles orphan pins.
-    if newly_sealed {
-        let _ = lifecycle.delete_unpublished(&set);
+            .filter(|(_, member)| shared(member) != private)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            continue;
+        }
+        let wanted = indices
+            .iter()
+            .map(|index| all[*index].clone())
+            .collect::<Vec<_>>();
+        groups.push(canonical_set(
+            lifecycle,
+            &wanted,
+            private.then_some(original.job_id.as_str()),
+            || {
+                if decrypted.is_none() {
+                    decrypted = Some(store.decrypt_mixed(original)?);
+                }
+                let decrypted = decrypted.as_mut().expect("initialized canonical media");
+                indices
+                    .iter()
+                    .map(|index| {
+                        let member = &all[*index];
+                        let payload = &mut decrypted.media[*index].payload;
+                        let mut media = match payload {
+                            crate::queue_media_store::DecryptedQueueMediaPayload::Bytes(bytes) => {
+                                crate::queue_media_store::SealMedia::bytes(
+                                    &member.role,
+                                    &member.position,
+                                    std::mem::take(bytes),
+                                )
+                            }
+                            crate::queue_media_store::DecryptedQueueMediaPayload::PrivatePath(
+                                path,
+                            ) => crate::queue_media_store::SealMedia::path(
+                                &member.role,
+                                &member.position,
+                                path.as_path(),
+                            )?,
+                        };
+                        media.sink = member.sink;
+                        Ok(media)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            },
+        )?);
     }
-    bound.map_err(|_| conflict())?;
-    repair_projection(state, filename)?;
-    Ok(TransferResult {
-        archive_identity_sha256: descriptor.archive_identity_sha256.clone(),
-        member_count: wanted.len(),
-    })
+    Ok(Some(groups))
 }
 
 #[cfg(unix)]
