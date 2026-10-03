@@ -113,7 +113,8 @@ schedule one real system notification after twenty seconds without rendering.
 `NotificationTapTests` exercises background and cold-launch taps. Release and
 TestFlight builds exclude the fixture.
 
-The Live Activity uses a translucent card with a 48 pt preview, a compact status
+The Live Activity uses ActivityKit’s default background material so the card and
+its semantic text adapt together to light/dark Lock Screen appearances. It has a 48 pt preview, a compact status
 and prompt, a full-width progress row, and a machine/queue footer. At large text
 sizes it drops secondary content before clipping the status or Stop control.
 Debug builds accept `--live-activity-fixture running` (also `waiting`, `finished`,

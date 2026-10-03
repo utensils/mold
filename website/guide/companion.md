@@ -151,3 +151,5 @@ Generate Options shows aspect-ratio icons in their actual proportions. With a so
 Hold a Library tile to preview it and open its actions. Source-image selection also remains usable after a long press. The notification icon uses the same Mold logo in light and dark appearances; the system controls the notification card background.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
+
+Live Activity cards use ActivityKit’s default material so the background and text follow the Lock Screen appearance together, including the stale “Open Mold Studio to refresh” state.

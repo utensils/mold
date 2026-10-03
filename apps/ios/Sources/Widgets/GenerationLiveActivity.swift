@@ -9,7 +9,9 @@ struct GenerationLiveActivity: Widget {
         ActivityConfiguration(for: GenerationActivityAttributes.self) { context in
             LockScreenActivity(context: context)
                 .padding(ActivityCardLayout.inset)
-                .activityBackgroundTint(Color(uiColor: .systemBackground).opacity(0.88))
+                // Let ActivityKit resolve the material alongside its text.
+                // UIKit's systemBackground can disagree with the Lock Screen.
+                .activityBackgroundTint(nil)
                 .widgetURL(link(context))
         } dynamicIsland: { context in
             DynamicIsland {

@@ -1,0 +1,1 @@
+- Fixed pale Live Activity cards with white text by restoring ActivityKit’s adaptive system material, including stale render cards.

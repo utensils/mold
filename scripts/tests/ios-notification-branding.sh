@@ -6,6 +6,12 @@ if grep -E 'UIImage|checkmark|wand.and.sparkles|exclamationmark.triangle.fill' "
 python3 - <<'CHECK'
 from pathlib import Path
 source = Path("apps/ios/Sources/Widgets/GenerationLiveActivity.swift").read_text()
+# ActivityKit owns the Lock Screen material and its foreground environment.
+# A separately resolved UIKit background can be light while text is white.
+assert '.activityBackgroundTint(nil)' in source, 'Live Activities must use the system background material'
+for path in Path("apps/ios/Sources/Widgets").glob('*.swift'):
+    widget = path.read_text()
+    assert 'preferredColorScheme' not in widget and '.environment(\\.colorScheme' not in widget, 'Do not force widget appearance'
 leading = source.split("} compactLeading: {", 1)[1].split("} compactTrailing:", 1)[0]
 assert "ActivityBrandIcon()" in leading
 minimal = source.split("} minimal: {", 1)[1].split(".widgetURL", 1)[0]
