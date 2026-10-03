@@ -34,7 +34,7 @@ struct QueueRow: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.model ?? "Unknown model")
+                Text(entry.modelHeadline)
                 Text(caption ?? entry.waitDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)

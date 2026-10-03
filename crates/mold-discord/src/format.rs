@@ -297,19 +297,26 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
 
         let mut lines = vec![header];
         for m in members {
-            if m.info.is_loaded {
-                lines.push(format!(
-                    "**{}** — `{:.1}GB` [loaded]",
-                    m.info.name, m.info.size_gb
-                ));
-            } else if m.downloaded {
-                lines.push(format!(
-                    "**{}** — `{:.1}GB` [ready]",
-                    m.info.name, m.info.size_gb
-                ));
+            let title = m.human_name();
+            let emphasized = m.info.is_loaded || m.downloaded;
+            let headline = if emphasized {
+                format!("**{title}**")
             } else {
-                lines.push(format!("{} — `{:.1}GB`", m.info.name, m.info.size_gb));
-            }
+                title.clone()
+            };
+            let label = if title == m.info.name {
+                headline
+            } else {
+                format!("{headline} · `{}`", m.info.name)
+            };
+            let state = if m.info.is_loaded {
+                " [loaded]"
+            } else if m.downloaded {
+                " [ready]"
+            } else {
+                ""
+            };
+            lines.push(format!("{label} — `{:.1}GB`{state}", m.info.size_gb));
         }
         sections.push(lines.join("\n"));
     }
@@ -1391,7 +1398,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
-                display_name: None,
+                display_name: Some("FLUX.1 Schnell Q8".into()),
                 kind: None,
                 modality: None,
                 nsfw: None,
@@ -1487,7 +1494,9 @@ mod tests {
         let embed = format_model_list(&models);
         // FLUX section: loaded model is bold, undownloaded is plain
         assert!(embed.description.contains("**FLUX**"));
-        assert!(embed.description.contains("**flux-schnell:q8**"));
+        assert!(embed
+            .description
+            .contains("**FLUX.1 Schnell Q8** · `flux-schnell:q8`"));
         assert!(embed.description.contains("flux-dev:q4"));
         assert!(!embed.description.contains("**flux-dev:q4**"));
         // Wuerstchen section, variant name visible
@@ -1495,6 +1504,13 @@ mod tests {
         assert!(!embed.description.contains("(alpha)"));
         assert!(embed.description.contains("wuerstchen-v2:fp16"));
         assert!(!embed.description.contains("**wuerstchen-v2:fp16**"));
+        let mut provider = models[0].clone();
+        provider.info.name = "cv:1759168".into();
+        provider.display_name = Some("Juggernaut XL - Ragnarok".into());
+        let provider_embed = format_model_list(&[provider]);
+        assert!(provider_embed
+            .description
+            .contains("**Juggernaut XL - Ragnarok** · `cv:1759168`"));
     }
 
     #[test]

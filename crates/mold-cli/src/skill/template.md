@@ -55,7 +55,10 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   changing its attached child identity.
 - For model selection and current capabilities, use `mold list`, `mold info
 <model>`, or the selected server's `/api/models` data. These live surfaces are
-  authoritative; this skill intentionally does not duplicate changing model
+  authoritative. `display_name` is a presentation alias; use the stable `name`
+  in requests, commands, and saved settings. Curated aliases come from the
+  manifest title and retain task/version/precision; never rename weight files.
+  This skill intentionally does not duplicate changing model
   IDs, defaults, dimensions, frame grids, or runtime availability.
 - For ordinary CLI, queue, server, library, and remote-host workflows, read
   [`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md).

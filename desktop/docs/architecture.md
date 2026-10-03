@@ -540,3 +540,5 @@ pub async fn get_connection(state: tauri::State<'_, AppState>) -> Result<Connect
 - `scripts/windows.ps1` — the Windows peer of the `desktop-*` commands
 - `crates/mold-server/src/lib.rs` — embedding entry point (`run_server`)
 - `studio/lib/generationCapabilities.ts` — the shared capability matrix (`web/src/lib/generateCapabilities.ts` is a thin re-export)
+
+Curated model labels follow `/api/models[].display_name`; the raw `name` remains the install/request identity. Catalog discovery searches both the title and Hugging Face repository.

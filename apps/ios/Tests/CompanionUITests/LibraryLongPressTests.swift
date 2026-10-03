@@ -24,6 +24,29 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(print.isHittable)
     }
 
+    @MainActor func testRetainedSourceReuseAppearsInWellAndCanBeRemoved() async throws {
+        continueAfterFailure = false
+        let app = try await populatedLibrary(retainedMediaFixture: true)
+        let print = fixturePrint(in: app)
+        XCTAssertTrue(print.waitForExistence(timeout: 10))
+        print.press(forDuration: 1)
+        app.buttons["Use These Settings"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let source = app.buttons["Start from"].firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 10), "The private retained source must appear even without an output metadata source marker")
+        let form = app.scrollViews["phone-generate-form"]
+        for _ in 0..<6 where !source.isHittable && form.exists { form.swipeUp() }
+        XCTAssertTrue(source.isHittable)
+        XCTAssertFalse(app.buttons["Start from, empty"].firstMatch.exists)
+        attach(app, name: "Retained source restored into ordinary well")
+        source.tap()
+        let remove = app.buttons["Remove"].firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        XCTAssertTrue(app.buttons["Start from, empty"].firstMatch.waitForExistence(timeout: 5))
+        attach(app, name: "Retained source explicitly removed")
+    }
+
     @MainActor func testSourceLibraryLongPressAndSelectionRemainUsable() async throws {
         continueAfterFailure = false
         let app = try await populatedLibrary(offlineCopy: true)
@@ -72,7 +95,7 @@ final class LibraryLongPressTests: XCTestCase {
         attach(app, name: "iPad library after drag preview")
     }
 
-    @MainActor private func populatedLibrary(offlineCopy: Bool = false) async throws -> XCUIApplication {
+    @MainActor private func populatedLibrary(offlineCopy: Bool = false, retainedMediaFixture: Bool = false) async throws -> XCUIApplication {
         if offlineCopy {
             let earlier = try FixtureMachine(galleryPrints: 6, collectionFixture: true)
             let port = try await earlier.start()
@@ -85,7 +108,7 @@ final class LibraryLongPressTests: XCTestCase {
             earlier.stop()
             app.terminate()
         }
-        let machine = try FixtureMachine(galleryPrints: 6, collectionFixture: true)
+        let machine = try FixtureMachine(galleryPrints: 6, collectionFixture: true, retainedMediaFixture: retainedMediaFixture)
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)

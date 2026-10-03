@@ -34,6 +34,7 @@ final class CatalogStore {
 
     func setText(_ text: String, on id: MoldHost.ID) { change(id) { $0.text = text.isEmpty ? nil : text } }
     func setFamily(_ family: String?, on id: MoldHost.ID) { change(id) { $0.family = family } }
+    func setSource(_ source: String?, on id: MoldHost.ID) { change(id) { $0.source = source } }
     func setSort(_ sort: String?, on id: MoldHost.ID) { change(id) { $0.sort = sort } }
 
     private func change(_ id: MoldHost.ID, _ edit: (inout CatalogQuery) -> Void) {
@@ -42,7 +43,7 @@ final class CatalogStore {
         edit(&state.query)
         state.query.page = nil
         byHost[id] = state
-        if state.query != before { search(on: id, debounce: true) }
+        if state.query != before, hosts.capabilities[id]?.canBrowseCatalog != false { search(on: id, debounce: true) }
     }
 
     func search(on id: MoldHost.ID, debounce: Bool) {

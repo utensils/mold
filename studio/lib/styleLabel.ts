@@ -1,4 +1,8 @@
-import { modelDisplayName, type DisplayableModel } from "./modelDisplay";
+import {
+  isCatalogModelId,
+  modelDisplayName,
+  type DisplayableModel,
+} from "./modelDisplay";
 import { familyLabel } from "./modelFamily";
 
 /** One friendly style name across web and native pickers; IDs remain wire values. */
@@ -7,6 +11,10 @@ export function styleDisplayName(
 ): string {
   const display = modelDisplayName(model);
   const description = model.description?.trim();
+  // Curated titles come from the manifest authority. Catalog descriptions
+  // keep their existing provider presentation rather than being rewritten.
+  if (!isCatalogModelId(model.name) && model.display_name?.trim())
+    return display;
   return (
     (description && description !== model.name ? description : null) ??
     (display !== model.name ? display : familyLabel(model.family))

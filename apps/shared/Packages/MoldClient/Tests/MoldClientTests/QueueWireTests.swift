@@ -133,3 +133,9 @@ private func row(_ id: String, in listing: QueueListing) throws -> QueueEntry {
 @Test func anUnknownTagIsStillIgnored() {
     #expect(MoldEvent(name: "event", data: #"{"type":"something_new_in_0_30"}"#) == nil)
 }
+
+@Test func queueFriendlyNameAndPromptAreAdditive() throws {
+    let row = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"j","state":"queued","model":"flux-dev:q8","model_display_name":"FLUX.1 Dev · Q8","metadata":{"prompt":"A lighthouse"}}"#.utf8))
+    #expect(row.modelHeadline == "FLUX.1 Dev · Q8")
+    #expect(row.metadata?.prompt == "A lighthouse")
+}

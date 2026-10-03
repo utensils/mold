@@ -61,6 +61,7 @@ public extension Model {
     /// scraped, say -- falls to the same two tails the server derives from
     /// the name itself, rather than showing nothing.
     var headline: String {
+        if let displayName, !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return displayName }
         guard let range = description.range(of: " — ") else {
             if let displayName, !displayName.isEmpty { return displayName }
             if description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

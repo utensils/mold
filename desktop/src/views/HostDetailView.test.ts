@@ -192,6 +192,7 @@ async function mountView(
   path = `/hosts/${REMOTE_ID}`,
   entries: ModelEntry[] = [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
   deviceFixture?: DeviceFixture,
+  loadedModels: string[] = ["flux-dev:q8"],
 ) {
   router = createRouter({
     history: createMemoryHistory(),
@@ -228,7 +229,7 @@ async function mountView(
     queueDepth: 2,
     queueCapacity: 8,
     version: "0.17.0",
-    modelsLoaded: ["flux-dev:q8"],
+    modelsLoaded: loadedModels,
     gpuInfo: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24_000, vram_used_mb: 6_000 },
     gpuWorkers: [
       {
@@ -1295,15 +1296,12 @@ describe("HostDetailView layout", () => {
   });
 
   it("uses the installed model title for an opaque loaded-model id", async () => {
-    const wrapper = await mountView();
-    useHostModelsStore().byHost[REMOTE_ID]!.entries = [
-      {
-        ...model("cv:1759168", "sdxl"),
-        display_name: "Juggernaut XL - Ragnarok",
-      },
-    ];
-    useHostsStore().telemetry[REMOTE_ID]!.modelsLoaded = ["cv:1759168"];
-    await flushPromises();
+    const provider = {
+      ...model("cv:1759168", "sdxl"),
+      display_name: "Juggernaut XL - Ragnarok",
+    };
+    installApi({ models_loaded: [provider.name] }, [], [provider]);
+    const wrapper = await mountView(undefined, [provider], undefined, [provider.name]);
 
     expect(wrapper.get("[data-test='loaded-model-name']").text()).toBe("Juggernaut XL - Ragnarok");
     expect(wrapper.text()).not.toContain("cv:1759168");

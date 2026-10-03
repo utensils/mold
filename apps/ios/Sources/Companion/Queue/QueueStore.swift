@@ -16,6 +16,44 @@ final class QueueStore {
     private(set) var progress: [String: JobProgress] = [:]
     /// A one-line result a person should see ("Sent to hal9000."), in place.
     var summary: String?
+    private var sourcePrompts: [String: String] = [:]
+    private var sourceThumbnails: [String: Data] = [:]
+    @ObservationIgnored private var thumbnailAttempts: Set<String> = []
+
+    private func thumbnailKey(_ entry: QueueEntry, _ id: MoldHost.ID) -> String {
+        "\(id)|\(hosts.instanceID(of: id) ?? "unknown")|\(entry.id)"
+    }
+
+    func prompt(for entry: QueueEntry, on id: MoldHost.ID) -> String? {
+        entry.metadata?.prompt ?? sourcePrompts[thumbnailKey(entry, id)]
+    }
+
+    func sourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID) -> Data? {
+        sourceThumbnails[thumbnailKey(entry, id)]
+    }
+
+    func loadSourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID) async {
+        let key = thumbnailKey(entry, id)
+        guard let host = hosts.host(id), hosts.isUp(host), thumbnailAttempts.insert(key).inserted else { return }
+        let client = hosts.backend(for: host)
+        if let detail = try? await client.queueJob(id: entry.id), canStorePreview(entry, on: id, key: key) {
+            sourcePrompts[key] = detail.job.metadata?.prompt
+        }
+        do {
+            let bytes = try await client.queueInputThumbnail(id: entry.id)
+            guard !Task.isCancelled else { thumbnailAttempts.remove(key); return }
+            guard canStorePreview(entry, on: id, key: key), bytes.count <= 2 * 1024 * 1024 else { thumbnailAttempts.remove(key); return }
+            sourceThumbnails[key] = bytes
+        } catch is CancellationError {
+            thumbnailAttempts.remove(key)
+        } catch {
+            // Older hosts and jobs without a source image simply have no preview.
+            if let issue = error as? MoldClientError, case .http(status: 404, code: _, message: _) = issue {
+                return
+            }
+            thumbnailAttempts.remove(key)
+        }
+    }
 
     @ObservationIgnored let hosts: HostStore
     @ObservationIgnored private var pending: [MoldHost.ID: Task<Void, Never>] = [:]
@@ -40,6 +78,7 @@ final class QueueStore {
         for id in Set(listings.keys).subtracting(hosts.hosts.map(\.id)) {
             listings[id] = nil; children[id] = nil; gate[id] = nil
         }
+        pruneSourcePreviews()
     }
 
     func poll(_ id: MoldHost.ID) async {
@@ -48,6 +87,7 @@ final class QueueStore {
         do {
             let entries = try await client.queue().merged.filter(\.state.isLive)
             listings[id] = entries
+            pruneSourcePreviews()
             let batches = Array(Set(entries.compactMap(\.batchId))).sorted()
             if !batches.isEmpty, let listing = try? await client.batchStatuses(batchIds: batches) {
                 children[id] = Dictionary(uniqueKeysWithValues: listing.batches.map { ($0.id, $0.children) })
@@ -61,6 +101,20 @@ final class QueueStore {
             listings[id] = nil
             hosts.report(host, doing: String(localized: "list its queue"), error)
         }
+    }
+
+    private func canStorePreview(_ entry: QueueEntry, on id: MoldHost.ID, key: String) -> Bool {
+        !Task.isCancelled && hosts.host(id) != nil && key == thumbnailKey(entry, id)
+            && listings[id]?.contains(where: { $0.id == entry.id }) == true
+    }
+
+    private func pruneSourcePreviews() {
+        let retained = Set(hosts.hosts.flatMap { host in
+            (listings[host.id] ?? []).map { thumbnailKey($0, host.id) }
+        })
+        sourceThumbnails = sourceThumbnails.filter { retained.contains($0.key) }
+        sourcePrompts = sourcePrompts.filter { retained.contains($0.key) }
+        thumbnailAttempts.formIntersection(retained)
     }
 
     /// Coalesced: a burst of job events is one re-read.

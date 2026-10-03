@@ -1,109 +1,90 @@
 import MoldClient
 import SwiftUI
 
-/// Discover: the machine's catalog, searchable, with Family and Sort
-/// filters it advertises. Each row offers Get, says Installed, or opens the
-/// source page for one this machine cannot run.
+/// Search curated runnable checkpoints alongside the machine's live provider
+/// catalog. Manifest rows remain available on hosts without catalog support.
 struct DiscoverModels: View {
     @Environment(HostStore.self) private var hosts
     @Environment(CatalogStore.self) private var catalog
-    @Environment(ModelStore.self) private var models
     let host: MoldHost
     @State private var text = ""
 
+    private var state: CatalogStore.State { catalog.state(on: host.id) }
+    private var capabilities: Capabilities? { hosts.capabilities[host.id] }
+
     var body: some View {
-        let state = catalog.state(on: host.id)
-        let capabilities = hosts.capabilities[host.id]
-        Group {
+        List {
+            FailureBanner().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+            curated
+            community
+        }
+        .refreshable {
+            await hosts.refresh(host)
+            if capabilities?.canBrowseCatalog != false { catalog.search(on: host.id, debounce: false) }
+        }
+        .searchable(text: $text, prompt: Text("Search models"))
+        .onChange(of: text) { catalog.setText(text, on: host.id) }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { filters }
+        }
+        .task(id: host.id) {
+            await hosts.refresh(host)
+            if capabilities?.canBrowseCatalog != false { catalog.start(on: host.id) }
+            text = state.query.text ?? ""
+        }
+    }
+
+    private var curated: some View {
+        Section("Mold Models") {
+            let matches = (hosts.models[host.id] ?? []).filter { $0.matchesDiscovery(state.query) }
+            ForEach(matches) { model in CuratedModelRow(model: model, host: host) }
+            if hosts.models[host.id] == nil {
+                Text("The machine’s model list is unavailable. Pull to refresh.").foregroundStyle(.secondaryText)
+            } else if matches.isEmpty {
+                Text("No Mold models match these filters.").foregroundStyle(.secondaryText)
+            }
+        }
+    }
+
+    private var community: some View {
+        Section("Community Models") {
             if capabilities?.canBrowseCatalog == false {
-                EmptyState(title: String(localized: "No catalog here"), symbol: "magnifyingglass",
-                           message: String(localized: "\(host.name) doesn't offer model discovery. Update it to browse and fetch models from here."))
+                Text("This machine does not offer community model discovery.").foregroundStyle(.secondaryText)
             } else {
-                List {
-                    FailureBanner().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-                    ForEach(state.listing?.providerErrors ?? [], id: \.source) { problem in
-                        Text("\(problem.source): \(problem.message)").foregroundStyle(.secondaryText)
-                    }
-                    ForEach(state.entries) { entry in
-                        DiscoverRow(entry: entry, host: host)
-                            .task { if entry.id == state.entries.last?.id { await catalog.more(on: host.id) } }
-                    }
-                    if state.isSearching {
-                        ProgressView().frame(maxWidth: .infinity)
-                    } else if state.listing != nil, state.entries.isEmpty {
-                        Text("Nothing matches. Try other words, or another family.").foregroundStyle(.secondaryText)
-                    }
+                ForEach(state.listing?.providerErrors ?? [], id: \.source) { problem in
+                    Text("\(problem.source): \(problem.message)").foregroundStyle(.secondaryText)
                 }
-                .searchable(text: $text, prompt: Text("Search models"))
-                .onChange(of: text) { catalog.setText(text, on: host.id) }
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Picker("Family", selection: Binding(get: { state.query.family }, set: { catalog.setFamily($0, on: host.id) })) {
-                                Text("All Families").tag(String?.none)
-                                ForEach(capabilities?.catalogFamilies ?? [], id: \.self) { Text($0).tag(String?.some($0)) }
-                            }
-                            if let sorts = capabilities?.catalogSortOptions, !sorts.isEmpty {
-                                Picker("Sort By", selection: Binding(get: { state.query.sort }, set: { catalog.setSort($0, on: host.id) })) {
-                                    ForEach(sorts, id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
-                                }
-                            }
-                        } label: {
-                            Label("Filter", systemImage: "line.3.horizontal.decrease")
-                        }
-                    }
+                ForEach(state.entries) { entry in
+                    DiscoverRow(entry: entry, host: host)
+                        .task { if entry.id == state.entries.last?.id { await catalog.more(on: host.id) } }
+                }
+                if state.isSearching {
+                    ProgressView().frame(maxWidth: .infinity)
+                } else if state.listing != nil, state.entries.isEmpty {
+                    Text("Nothing matches. Try other words, or another family.").foregroundStyle(.secondaryText)
                 }
             }
         }
-        .task(id: host.id) { catalog.start(on: host.id); text = catalog.state(on: host.id).query.text ?? "" }
     }
-}
 
-private struct DiscoverRow: View {
-    @Environment(ModelStore.self) private var models
-    @Environment(HostStore.self) private var hosts
-    @Environment(\.dynamicTypeSize) private var size
-    let entry: CatalogEntry
-    let host: MoldHost
-
-    var body: some View {
-        let stacked = RowAxis.for(size) == .vertical
-        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-                             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
-        layout {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.name)
-                if let author = entry.author { Text("by \(author)").font(.callout).foregroundStyle(.secondaryText) }
-                Text(verbatim: detail).font(.caption.monospaced()).foregroundStyle(.secondaryText)
+    private var filters: some View {
+        Menu {
+            Picker("Source", selection: Binding(get: { state.query.source }, set: { catalog.setSource($0, on: host.id) })) {
+                Text("All Sources").tag(String?.none)
+                Text("Hugging Face").tag(String?.some("hf"))
+                Text("Civitai").tag(String?.some("civitai"))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            action.frame(maxWidth: stacked ? .infinity : nil)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private var detail: String {
-        var parts = [entry.family]
-        if let bytes = entry.sizeBytes { parts.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) }
-        parts.append(String(localized: "\(entry.downloadCount.formatted(.number.notation(.compactName))) downloads"))
-        return parts.joined(separator: " · ")
-    }
-
-    @ViewBuilder private var action: some View {
-        if let (job, row) = models.progress(for: entry.id, on: host.id) {
-            VStack(alignment: .trailing, spacing: 4) {
-                if let fraction = row.fraction { ProgressView(value: fraction).frame(minWidth: 80) }
-                Button("Cancel Download", role: .destructive) { Task { await models.cancel(job: job, on: host.id) } }
-                    .buttonStyle(.bordered)
+            Picker("Family", selection: Binding(get: { state.query.family }, set: { catalog.setFamily($0, on: host.id) })) {
+                Text("All Families").tag(String?.none)
+                ForEach(capabilities?.catalogFamilies ?? [], id: \.self) { Text($0).tag(String?.some($0)) }
             }
-        } else if entry.installed {
-            Text("Installed").foregroundStyle(.secondaryText)
-        } else if entry.supported {
-            Button("Get") { Task { await models.install(entry.id, on: host.id) } }
-                .buttonStyle(.bordered)
-                .accessibilityLabel(String(localized: "Get \(entry.name)"))
-        } else if let page = entry.pageUrl.flatMap(URL.init(string:)) {
-            Link("Open Page", destination: page).buttonStyle(.bordered)
+            if let sorts = capabilities?.catalogSortOptions, !sorts.isEmpty {
+                Picker("Sort By", selection: Binding(get: { state.query.sort }, set: { catalog.setSort($0, on: host.id) })) {
+                    ForEach(sorts, id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+                }
+            }
+        } label: {
+            Label("Filter", systemImage: "line.3.horizontal.decrease")
         }
     }
 }

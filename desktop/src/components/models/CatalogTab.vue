@@ -171,7 +171,7 @@ function manifestCatalogEntry(model: ModelEntry): CatalogEntry {
     id: model.name,
     source: "hf",
     source_id: model.hf_repo || null,
-    name: model.name,
+    name: modelDisplayName(model),
     family: model.family,
     kind: "checkpoint",
     nsfw: false,
@@ -237,7 +237,13 @@ const manifestEntries = computed<CatalogEntry[]>(() => {
   return models.all
     .filter((model) => !model.downloaded && isGenerationModel(model))
     .filter((model) => !installed.has(model.name))
-    .filter((model) => !q || model.name.toLowerCase().includes(q))
+    .filter(
+      (model) =>
+        !q ||
+        [model.name, modelDisplayName(model), model.hf_repo, model.description, model.family].some(
+          (value) => value?.toLowerCase().includes(q),
+        ),
+    )
     .filter((model) => matchesCatalogFamily(model.family, family.value))
     .map(manifestCatalogEntry);
 });

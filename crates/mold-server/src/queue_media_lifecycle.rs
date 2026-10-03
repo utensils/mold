@@ -415,6 +415,18 @@ impl QueueMediaLifecycle {
             .load_from_gallery_pin(&GalleryMediaPinRef::new(media_set, pin_id)?)
     }
 
+    /// Returns only the scalar conditioning source image, never provenance or paths.
+    pub(crate) fn input_image_bytes(
+        &self,
+        media_set: MediaSetRef,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        if media_set.owner_id != self.owner_uuid {
+            return Err(QueueMediaError::NotFound);
+        }
+        self.runtime_store()?
+            .read_source_image(&media_set, 64 * 1024 * 1024)
+    }
+
     pub(crate) fn gallery_member_bytes(
         &self,
         media_set: MediaSetRef,
@@ -1022,6 +1034,49 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read(target_bundle).unwrap(), before);
+    }
+
+    #[test]
+    fn input_image_survives_store_reopen_and_never_uses_provenance() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let set = QueueMediaStore::open(home.path())
+            .unwrap()
+            .store
+            .seal_v2_with_operation_fingerprint(
+                &owner,
+                "thumbnail-job",
+                &QueueMediaOperationFingerprint::sha256_v1(b"thumbnail fixture"),
+                &crate::queue_media_store::QueueMediaProjection {
+                    source_image: true,
+                    ..Default::default()
+                },
+                vec![
+                    SealMedia::bytes("source_image_name", "scalar", b"private.png".to_vec()),
+                    SealMedia::bytes("source_image", "scalar", b"actual-input-bytes".to_vec()),
+                ],
+            )
+            .unwrap();
+        generation_queue::insert_with_media(
+            db.as_ref().as_ref().unwrap(),
+            &queue_row(&owner, "thumbnail-job", &set.set_id),
+            &obligation(&owner, &set.set_id),
+        )
+        .unwrap();
+        let lifecycle = install_and_reconcile(home.path(), db, &journal);
+        assert_eq!(
+            lifecycle.input_image_bytes(set.clone()).unwrap(),
+            b"actual-input-bytes"
+        );
+        let mut wrong_owner = set;
+        wrong_owner.owner_id = "other-owner".into();
+        assert!(lifecycle.input_image_bytes(wrong_owner).is_err());
     }
 
     #[test]

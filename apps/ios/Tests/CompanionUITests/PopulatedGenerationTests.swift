@@ -98,6 +98,75 @@ final class PopulatedGenerationTests: XCTestCase {
         app.buttons["Done"].firstMatch.tap()
     }
 
+    @MainActor func testCuratedDiscoveryAndQueuedSourceImage() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap(); name.typeText("Media Fixture")
+        let address = app.textFields["machine-address"]
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let row = app.descendants(matching: .any)["queue-entry-fixture-video"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["A coastal path at sunrise"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.images["queue-source-fixture-video"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["LTX-2.5 Distilled BF16"].exists)
+        XCTAssertLessThanOrEqual(row.frame.width, 860)
+        attach(app)
+        for category in ["UICTContentSizeCategoryXS", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            app.terminate()
+            app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            XCTAssertTrue(app.images["queue-source-fixture-video"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.staticTexts["A coastal path at sunrise"].exists)
+            attach(app)
+        }
+        app.terminate()
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        if app.buttons["ToggleSideBar"].exists || app.buttons["Models"].exists {
+            XCTAssertTrue(app.navigateToDestination("Models", shortcut: "4"))
+            app.buttons["models-pane"].tap()
+            app.buttons["Discover"].firstMatch.tap()
+        } else {
+            XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+            let card = app.descendants(matching: .any).matching(NSPredicate(format:
+                "identifier BEGINSWITH 'machine-card-' AND label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 5))
+            card.tap()
+            app.buttons["Models"].firstMatch.tap()
+            app.buttons["models-pane"].tap()
+            app.buttons["Discover"].firstMatch.tap()
+        }
+        let curated = app.descendants(matching: .any)["curated-model-flux-dev:q4"].firstMatch
+        XCTAssertTrue(curated.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Hugging Face"].firstMatch.exists)
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("black-forest")
+        XCTAssertTrue(curated.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["curated-model-ltx-2.5-22b-distilled:bf16"].exists)
+        if app.buttons["Cancel"].firstMatch.isHittable { app.buttons["Cancel"].firstMatch.tap() }
+        let get = app.buttons["Get FLUX.1 Dev Q4"]
+        XCTAssertTrue(get.waitForExistence(timeout: 5))
+        for _ in 0..<5 where !get.isHittable { app.swipeUp() }
+        get.tap()
+        for _ in 0..<50 where machine.installedRequests.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertEqual(machine.installedRequests, ["flux-dev:q4"], "Curated Get must target one exact manifest checkpoint")
+        attach(app)
+    }
+
     @MainActor private func awaitRotationLayout() throws {
         // UIKit's orientation animation is not included in XCTest's app-idle wait.
         RunLoop.current.run(until: Date().addingTimeInterval(1))

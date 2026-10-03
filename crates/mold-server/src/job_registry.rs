@@ -77,6 +77,9 @@ pub(crate) fn assign_positions(entries: &mut [JobEntry], offset: usize) {
 pub struct JobEntry {
     pub id: String,
     pub model: String,
+    /// Curated manifest title; the stable model id remains the request value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_display_name: Option<String>,
     pub state: JobLifecycle,
     pub started_at_unix_ms: u64,
     pub position: usize,
@@ -848,6 +851,7 @@ impl JobRegistry {
             (e.id == id).then(|| JobEntry {
                 id: e.id.clone(),
                 model: e.model.clone(),
+                model_display_name: mold_core::manifest::model_display_name(&e.model),
                 state: e.state,
                 started_at_unix_ms: e.started_at_unix_ms,
                 position: i,
@@ -981,6 +985,7 @@ impl JobRegistry {
             .map(|(i, e)| JobEntry {
                 id: e.id.clone(),
                 model: e.model.clone(),
+                model_display_name: mold_core::manifest::model_display_name(&e.model),
                 state: e.state,
                 started_at_unix_ms: e.started_at_unix_ms,
                 position: i,
@@ -1167,6 +1172,7 @@ mod tests {
             .map(|id| JobEntry {
                 id: id.to_string(),
                 model: "m".to_string(),
+                model_display_name: None,
                 state: if id.starts_with("held") {
                     JobLifecycle::Held
                 } else {
@@ -1702,10 +1708,12 @@ mod tests {
         // (clients shouldn't see `"gpu": null` and infer GPU 0). The state
         // tag is lowercase to match the rest of the SSE/JSON style.
         let reg = JobRegistry::new();
-        reg.register("a", "flux-dev:fp16");
+        reg.register("a", "flux-dev:q4");
         let snap = reg.snapshot();
         let json = serde_json::to_string(&snap.entries[0]).unwrap();
         assert!(json.contains(r#""state":"queued""#), "got: {json}");
+        assert!(json.contains(r#""model_display_name":"FLUX.1 Dev Q4""#));
+        assert!(json.contains(r#""model":"flux-dev:q4""#));
         assert!(
             !json.contains("gpu"),
             "queued row leaked a gpu field: {json}"

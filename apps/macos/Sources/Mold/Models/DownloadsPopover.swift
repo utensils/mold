@@ -42,7 +42,7 @@ struct DownloadsPopover: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(row.model).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(models.model(named: row.model, on: host.id)?.headline ?? row.model).font(.callout.weight(.medium)).lineLimit(1)
                     if let tradeOff = models.model(named: row.model, on: host.id)?.tradeOff {
                         Text(tradeOff).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }

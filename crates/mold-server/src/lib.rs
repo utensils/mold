@@ -72,6 +72,7 @@ pub mod model_cache;
 pub mod model_manager;
 mod paint_dependencies;
 pub mod queue;
+mod queue_input_thumbnail;
 pub mod queue_journal;
 pub mod queue_media;
 mod queue_media_admission;

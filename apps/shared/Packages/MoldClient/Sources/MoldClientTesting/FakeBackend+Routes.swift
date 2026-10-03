@@ -112,6 +112,7 @@ extension FakeBackend {
     // MARK: MoldQueueBackend
 
     public func queue() async throws -> QueueListing { try await respond("queue()", []) }
+    public func queueInputThumbnail(id: String) async throws -> Data { try await respond("queueInputThumbnail(id:)", [id]) }
     public func queueJob(id: String) async throws -> QueueJobDetail { try await respond("queueJob(id:)", [id]) }
     public func cancelJob(id: String) async throws { let _: Void = try await respond("cancelJob(id:)", [id]) }
     public func cancelHeldJob(id: String) async throws -> Bool { try await respond("cancelHeldJob(id:)", [id]) }

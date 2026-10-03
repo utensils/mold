@@ -63,3 +63,20 @@ Live Activity identity uses the bundled Mold logo on the Lock Screen and in ever
 **Library previews and notification icons.** UIKit hosts context-menu and drag previews outside the grid environment; explicitly inject ThumbnailLoader into both preview roots. Exercise populated long-press menus and source-library selection on Simulator. The AppIcon catalog supplies the same authored image for Any and Dark appearances to preserve notification logo colors; Notification Center card backgrounds remain system controlled.
 
 Library source selection prefers the merged print copy on a currently reachable machine (`presented(onAnyOf:)`), preserving that copy's filename and host together.
+
+**Curated discovery and labels.** Native model headlines prefer the server's
+additive `display_name`, then legacy descriptions; IDs remain request identity.
+Discover searches the `/api/models` manifest inventory even without a live
+catalog. Provider tokens are `hf` and `civitai`; logos use the same authored marks
+as `ui/components/SourceGlyph.vue`. Curated Get always installs the exact model
+ID through `startDownload`, not an aggregate repository catalog ID.
+
+**Durable conditioning and queue inputs.** Reuse always probes retained media.
+Restore source and paired source-space mask atomically before fitting, respecting
+explicit attachments. Remaining private roles stay visibly disclosed until
+cleared or a model/kind/recipe/reset supersedes them. Every submit mints fresh
+same-host authority or relays bounded bytes through MoldClient's shared hydration
+helper. A removed visible source/mask cannot be rehydrated from hidden authority.
+Queue input thumbnails use the authenticated sealed-media route, never provenance
+filenames or denoise previews. Cache by host, instance and job, fence late replies
+against live row membership, and purge removed jobs/hosts.

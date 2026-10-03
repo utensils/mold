@@ -44,61 +44,20 @@ struct RetainedMediaHydration: Sendable {
     /// behind it.
     func hydrate(_ requests: [GenerateRequest], on target: MoldHost.ID,
                  backend: any MoldBackend) async throws -> Outcome {
-        guard let first = requests.first else { return .nothingToDo }
-        let wanted = RetainedSourceMedia.members(authority.members, forHydrating: first)
-        guard !wanted.isEmpty else { return .nothingToDo }
-        guard target == authority.origin, requests.count == 1 else {
-            return .requests(try await relay(wanted, into: requests))
-        }
-        do {
-            return .session(try await mint(wanted, for: first, on: backend))
-        } catch let error as MoldClientError {
-            guard case let .http(_, code, _) = error,
-                  let refusal = code.flatMap(RetainedSourceMedia.Refusal.init(rawValue:)),
-                  refusal.isWorthOneMoreAttempt
-            else { throw error }
-            // The handle expired, or the print was re-published between the
-            // probe and now. Both describe the HANDLE, not the archive, so
-            // one more mint is the whole repair.
-            if let handle = try? await mint(wanted, for: first, on: backend) {
-                return .session(handle)
-            }
-            // Still not: the bytes are on this very machine, so carry them
-            // rather than refuse a render it can obviously make.
-            return .requests(try await relay(wanted, into: requests))
-        }
-    }
-
-    private func mint(
-        _ members: [RetainedSourceMedia.Member], for request: GenerateRequest,
-        on backend: any MoldBackend
-    ) async throws -> String {
-        try await backend.retainedMediaReuseSession(
-            for: authority.filename, members: members.map(\.memberId), target: request
-        ).sessionHandle
-    }
-
-    /// Downloads each member ONCE from the print's origin and inlines it into
-    /// every sibling -- four copies of one render condition on the same
-    /// picture, and fetching it four times would be the same bytes four times.
-    private func relay(
-        _ members: [RetainedSourceMedia.Member], into requests: [GenerateRequest]
-    ) async throws -> [GenerateRequest] {
-        // Asked from the sizes the INVENTORY already reported, so nothing is
-        // downloaded for a relay that could never be sent.
-        if let refusal = RetainedSourceMedia.relayRefusal(
-            members, copies: requests.count) { throw refusal }
+        guard let first = requests.first,
+              !RetainedSourceMedia.members(authority.members, forHydrating: first).isEmpty
+        else { return .nothingToDo }
         guard let origin = hosts.backend(for: authority.origin) else {
-            throw MoldClientError.unreachable(
-                "The machine that made this print isn't connected.")
+            throw MoldClientError.unreachable("The machine that made this print isn't connected.")
         }
-        var fetched: [(member: RetainedSourceMedia.Member, bytes: Data)] = []
-        for member in members {
-            fetched.append((member, try await origin.retainedSourceMediaBytes(
-                for: authority.filename, member: member.memberId)))
-        }
-        return try requests.map { try RetainedSourceMedia.relayed(fetched, into: $0) }
+        let hydrated = try await RetainedSourceMedia.hydrated(
+            BatchAdmission(requests: requests), filename: authority.filename,
+            members: authority.members, sameHost: target == authority.origin,
+            origin: origin, target: backend)
+        if let handle = hydrated.retainedMediaSession { return .session(handle) }
+        return hydrated.requests == requests ? .nothingToDo : .requests(hydrated.requests)
     }
+
 }
 
 /// The one line the submit path calls, so nothing about retained media has to

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import MoldClientTesting
 
 @testable import MoldClient
 
@@ -13,6 +14,57 @@ import Testing
 /// **Fails today**: none of this exists -- the app never asks a host what it
 /// kept, so Use These Settings restores a recipe with no picture in it.
 struct RetainedSourceMediaTests {
+    @Test func hydrationLeavesExplicitSourceUntouched() async throws {
+        var request = GenerateRequest(prompt: "test", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
+        request.sourceImage = "chosen"
+        let admission = BatchAdmission(requests: [request])
+        let backend = MoldClientTesting.FakeBackend()
+        let member = RetainedSourceMedia.Member(memberId: "m", role: "source_image", displayName: "source", sizeBytes: 1)
+        let result = try await RetainedSourceMedia.hydrated(admission, filename: "print.png", members: [member], sameHost: true, origin: backend, target: backend)
+        #expect(result.requests.first?.sourceImage == "chosen")
+        #expect(backend.calls.isEmpty)
+    }
+
+
+    @Test func hydrationRelaysOnceForBatchAndKeepsIdempotencyID() async throws {
+        let request = GenerateRequest(prompt: "test", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
+        let admission = BatchAdmission(clientBatchId: "stable", requests: [request, request])
+        let backend = FakeBackend()
+        backend.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        let member = RetainedSourceMedia.Member(memberId: "m", role: "source_image", displayName: "source", sizeBytes: 3)
+        let result = try await RetainedSourceMedia.hydrated(admission, filename: "print.png", members: [member], sameHost: true, origin: backend, target: backend)
+        #expect(result.clientBatchId == "stable")
+        #expect(result.requests.allSatisfy { $0.sourceImage == "AQID" })
+        #expect(backend.count("retainedSourceMediaBytes(for:member:)") == 1)
+        #expect(backend.count("retainedMediaReuseSession(for:members:target:)") == 0)
+    }
+
+    @Test func hydrationMintsSessionOnlyOnOriginForExactRequest() async throws {
+        let request = GenerateRequest(prompt: "test", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
+        let admission = BatchAdmission(clientBatchId: "stable", requests: [request])
+        let backend = FakeBackend()
+        let session = try MoldJSON.decoder.decode(RetainedSourceMedia.ReuseSession.self, from: Data(
+            #"{"instance_id":"host","expires_at":100,"request_sha256":"digest","session_handle":"one-use"}"#.utf8))
+        backend.stub("retainedMediaReuseSession(for:members:target:)", returning: session)
+        let member = RetainedSourceMedia.Member(memberId: "m", role: "source_image", displayName: "source", sizeBytes: 3)
+        let result = try await RetainedSourceMedia.hydrated(admission, filename: "print.png", members: [member], sameHost: true, origin: backend, target: backend)
+        #expect(result.retainedMediaSession == "one-use")
+        #expect(result.clientBatchId == "stable")
+        #expect(result.requests == [request])
+        #expect(backend.count("retainedSourceMediaBytes(for:member:)") == 0)
+    }
+
+    @Test func crossHostHydrationReadsOriginAndNeverMintsTargetSession() async throws {
+        let request = GenerateRequest(prompt: "test", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
+        let origin = FakeBackend(), target = FakeBackend()
+        origin.stub("retainedSourceMediaBytes(for:member:)", returning: Data([9]))
+        let member = RetainedSourceMedia.Member(memberId: "m", role: "source_image", displayName: "source", sizeBytes: 1)
+        let result = try await RetainedSourceMedia.hydrated(BatchAdmission(requests: [request]), filename: "print.png", members: [member], sameHost: false, origin: origin, target: target)
+        #expect(result.retainedMediaSession == nil)
+        #expect(result.requests.first?.sourceImage == "CQ==")
+        #expect(origin.count("retainedSourceMediaBytes(for:member:)") == 1)
+        #expect(target.calls.isEmpty)
+    }
 
     private func captured(_ key: String) throws -> RetainedSourceMedia.Inventory {
         struct Capture: Decodable {

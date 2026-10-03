@@ -348,6 +348,7 @@ use crate::queue::clean_error_message;
         export_held_queue_job,
         complete_held_queue_transfer,
         get_queue_job_preview,
+        crate::queue_input_thumbnail::get,
         patch_queue_job,
         cancel_queue_job,
         retry_queue_job,
@@ -921,6 +922,10 @@ pub fn create_router(state: AppState) -> Router {
             post(crate::queue_retention::sweep_settled_batches),
         )
         .route("/api/queue/:id/preview", get(get_queue_job_preview))
+        .route(
+            "/api/queue/:id/input-thumbnail",
+            get(crate::queue_input_thumbnail::get),
+        )
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/licenses", get(list_licenses_endpoint))
@@ -7311,6 +7316,7 @@ fn job_entry_from_durable_projection(
     let error = row.held_reason.clone();
     crate::job_registry::JobEntry {
         id: row.id,
+        model_display_name: mold_core::manifest::model_display_name(&row.model),
         model: row.model,
         state,
         started_at_unix_ms: row.created_at_ms.max(0) as u64,

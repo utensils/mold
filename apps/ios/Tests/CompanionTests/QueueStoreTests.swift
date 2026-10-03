@@ -38,6 +38,41 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func sourceThumbnailUsesTheQueuedJobsPrivateRoute() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let entry = try #require(queue.listings[id]?.first)
+        let bytes = Data([1, 2, 3])
+        fake.stub("queueInputThumbnail(id:)", returning: bytes)
+        await queue.loadSourceThumbnail(for: entry, on: id)
+        #expect(queue.sourceThumbnail(for: entry, on: id) == bytes)
+    }
+
+    @Test func sourcePreviewDisappearsWhenItsJobLeavesTheQueue() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let entry = try #require(queue.listings[id]?.first)
+        fake.stub("queueInputThumbnail(id:)", returning: Data([1, 2, 3]))
+        await queue.loadSourceThumbnail(for: entry, on: id)
+        #expect(queue.sourceThumbnail(for: entry, on: id) != nil)
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
+        await queue.poll(id)
+        #expect(queue.sourceThumbnail(for: entry, on: id) == nil)
+    }
+
+    @Test func anInflightSourcePreviewCannotRestoreACompletedRow() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let entry = try #require(queue.listings[id]?.first)
+        fake.stub("queueInputThumbnail(id:)") { _ in
+            fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
+            await queue.poll(id)
+            return Data([1, 2, 3])
+        }
+        await queue.loadSourceThumbnail(for: entry, on: id)
+        #expect(queue.sourceThumbnail(for: entry, on: id) == nil)
+    }
+
     @Test func emptyQueuesMustHaveAnsweredBeforeTheyAreCalledEmpty() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         let host = hosts.hosts[0]

@@ -131,6 +131,11 @@ and `ffprobe` on `PATH` before the server advertises that feature.
 - **Organization:** title, favorite, tag, collect, restore, and manage prints
   across the desktop and web apps.
 
+Curated models use the same short manifest title throughout the apps and
+`mold list`, such as **FLUX.1 Dev Q4**. The runnable ID (`flux-dev:q4`)
+remains available for commands, saved settings, and API requests. Model files
+keep their original names; third-party models keep their provider titles.
+
 Model weights keep their own licenses. See each model page for terms and
 current platform support.
 

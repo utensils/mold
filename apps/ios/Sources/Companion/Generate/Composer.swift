@@ -87,6 +87,16 @@ struct Composer: View {
             }
             ModelMenu()
             PictureWells()
+            if let notice = generate.retainedReuse.notice {
+                Label(notice, systemImage: "photo.on.rectangle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondaryText)
+                if generate.retainedReuse.authority != nil {
+                    Button("Remove retained sources", systemImage: "xmark.circle") {
+                        generate.retainedReuse.clear()
+                    }
+                }
+            }
             if let blocker = generate.blocker, !generate.run.isBusy {
                 Label(blocker, systemImage: "exclamationmark.circle")
                     .font(.subheadline)

@@ -1376,8 +1376,7 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
 
 /// `/api/models` rows for installed catalog checkpoints must carry the
 /// sidecar's human-readable title as an additive `display_name`, so UIs
-/// can stop rendering opaque `cv:<id>` slugs. Manifest rows stay
-/// untouched — no `display_name` key at all.
+/// can stop rendering opaque `cv:<id>` slugs. Curated rows use their manifest title.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn list_models_carries_display_name_for_catalog_rows() {
@@ -1437,10 +1436,9 @@ async fn list_models_carries_display_name_for_catalog_rows() {
         .iter()
         .find(|m| m["name"].as_str().is_some_and(|n| !n.starts_with("cv:")))
         .expect("manifest rows present");
-    assert!(
-        manifest_row.get("display_name").is_none(),
-        "manifest rows must not grow a display_name key"
-    );
+    let id = manifest_row["name"].as_str().unwrap();
+    let manifest = mold_core::manifest::find_manifest(id).unwrap();
+    assert_eq!(manifest_row["display_name"], manifest.display_name());
 }
 
 #[tokio::test]

@@ -28,7 +28,7 @@ private struct QueueBatchLabel: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Batch of \(rows.count)")
             if let model = rows.first?.model {
-                Text(verbatim: model).font(.caption.monospaced()).foregroundStyle(.secondaryText)
+                Text(verbatim: rows.first?.modelHeadline ?? model).font(.caption).foregroundStyle(.secondaryText)
             }
             Text(summary).font(.caption).foregroundStyle(.secondaryText)
         }
@@ -50,6 +50,7 @@ private struct QueueBatchLabel: View {
 /// A job: its model, where it stands in words, the preview while it runs,
 /// and -- when held -- the paragraph and the named buttons that answer it.
 struct QueueEntryRow: View {
+    @Environment(HostStore.self) private var hosts
     @Environment(QueueStore.self) private var queue
     @Environment(\.dynamicTypeSize) private var size
     @ScaledMetric(relativeTo: .body) private var thumb = 52
@@ -62,9 +63,13 @@ struct QueueEntryRow: View {
             ? AnyLayout(HStackLayout(alignment: .top, spacing: 12))
             : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
         layout {
+            inputPreview
             if entry.state == .running { preview }
             VStack(alignment: .leading, spacing: 4) {
                 title
+                if let prompt = queue.prompt(for: entry, on: host.id), !prompt.isEmpty {
+                    Text(prompt).font(.callout).lineLimit(size.isAccessibilitySize ? nil : 3)
+                }
                 if let hold = queue.hold(for: entry, on: host.id) {
                     QueueHeldActions(entry: entry, hold: hold, host: host)
                 } else if entry.state == .running {
@@ -75,7 +80,11 @@ struct QueueEntryRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 8)
+        .accessibilityIdentifier("queue-entry-" + entry.id)
+        .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
+            await queue.loadSourceThumbnail(for: entry, on: host.id)
+        }
         .swipeActions(edge: .trailing) {
             if queue.canCancel(entry, on: host.id) {
                 Button(role: .destructive) { Task { await queue.cancel(entry, on: host.id) } } label: {
@@ -101,8 +110,8 @@ struct QueueEntryRow: View {
                 // a11y: the paragraph below says it is held, in words.
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).accessibilityHidden(true)
             }
-            Text(verbatim: entry.model ?? String(localized: "Unknown model"))
-                .font(.body.monospaced())
+            Text(verbatim: entry.modelHeadline)
+                .font(.headline)
         }
     }
 
@@ -127,18 +136,34 @@ struct QueueEntryRow: View {
         }
     }
 
-    @ViewBuilder private var preview: some View {
-        let image = queue.progress[entry.id]?.previewData.flatMap(UIImage.init(data:))
-        Group {
-            if let image {
+    @ViewBuilder private var inputPreview: some View {
+        if let data = queue.sourceThumbnail(for: entry, on: host.id), let image = UIImage(data: data) {
+            VStack(alignment: .leading, spacing: 4) {
                 Image(uiImage: image).resizable().scaledToFill()
-            } else {
-                Rectangle().fill(.quaternary)
+                    .frame(width: thumb, height: thumb)
+                    .clipShape(.rect(cornerRadius: 7))
+                    .accessibilityLabel("Source image for this render")
+                    .accessibilityIdentifier("queue-source-" + entry.id)
+                Text("Source").font(.caption).foregroundStyle(.secondaryText)
             }
         }
-        .frame(width: thumb, height: thumb)
-        .clipShape(.rect(cornerRadius: 5))
-        .accessibilityHidden(true) // a11y: the sentence beside it says what it shows.
+    }
+
+    @ViewBuilder private var preview: some View {
+        let image = queue.progress[entry.id]?.previewData.flatMap(UIImage.init(data:))
+        VStack(alignment: .leading, spacing: 4) {
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFill()
+                } else {
+                    Rectangle().fill(.quaternary)
+                }
+            }
+            .frame(width: thumb, height: thumb)
+            .clipShape(.rect(cornerRadius: 5))
+            .accessibilityHidden(true) // a11y: the sentence beside it says what it shows.
+            Text("Rendering").font(.caption).foregroundStyle(.secondaryText)
+        }
     }
 
     /// The Mac row menu's items, in its order; Cancel last, behind a divider.

@@ -284,6 +284,43 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
+    /// Short presentation alias for every curated checkpoint. The manifest's
+    /// authored title retains version/task/precision, while the trade-off
+    /// remains in `description`. Never use this label as a request or file id.
+    pub fn display_name(&self) -> String {
+        let title = self
+            .description
+            .split_once(" — ")
+            .map_or(self.description.as_str(), |(title, _)| title)
+            .trim();
+        let title = title
+            .split_once(" + Viggle")
+            .map_or(title, |(title, _)| title);
+        let title = title
+            .split_once(" transformer (")
+            .map_or(title, |(title, _)| title);
+        let mut title = title
+            .replace("Flux.2", "FLUX.2")
+            .replace("[dev]", "Dev")
+            .replace(" dev ", " Dev ")
+            .replace(" distilled ", " Distilled ")
+            .replace("Qwen-Image-", "Qwen Image ")
+            .replace("Qwen-Image", "Qwen Image")
+            .replace(" GGUF", "");
+        if self.name.starts_with("qwen-image-2.1-turbo:") {
+            title.push_str(" Turbo 6-step");
+        }
+        if self.name.ends_with(":bf16-conv") {
+            title.push_str(" Conv VAE");
+        }
+        if self.name == "qwen-image-lightning:fp8" {
+            title.push_str(" 4-step");
+        } else if self.name == "qwen-image-lightning:fp8-8step" {
+            title.push_str(" 8-step");
+        }
+        title
+    }
+
     /// Size of the model-specific files in bytes.
     pub fn model_size_bytes(&self) -> u64 {
         self.files
@@ -4750,6 +4787,12 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
         defaults,
         hidden: false,
     }]
+}
+
+/// Presentation alias for a curated model id (including accepted input aliases).
+/// Third-party ids have no curated label and keep their provider title.
+pub fn model_display_name(name: &str) -> Option<String> {
+    find_manifest(name).map(ModelManifest::display_name)
 }
 
 /// Resolve a user-provided model name to its canonical `name:tag` form.

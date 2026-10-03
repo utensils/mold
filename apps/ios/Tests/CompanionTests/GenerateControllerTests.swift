@@ -61,6 +61,110 @@ struct GenerateControllerTests {
         return (generate, fake)
     }
 
+    @Test func reuseAlwaysProbesAndShowsRetainedSourceInWell() async throws {
+        let (generate, fake) = try await setUp()
+        let member = RetainedSourceMedia.Member(memberId: "m", role: "source_image", displayName: "original.png", sizeBytes: 3)
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [member]))
+        fake.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
+        generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+        #expect(generate.retainedReuse.probing)
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(fake.count("retainedSourceMedia(for:)") == 1)
+        #expect(generate.draft.media.sourceImage == "AQID")
+        #expect(generate.draft.media.sourceImageOriginal == "AQID")
+        #expect(generate.draft.media.sourceImageName == "original.png")
+    }
+
+    @Test func retainedSourcesSurviveRepeatedSubmissionsAndPromptEditsUntilRemoved() async throws {
+        let (generate, fake) = try await setUp()
+        let source = RetainedSourceMedia.Member(memberId: "source", role: "source_image", displayName: "Original.png", sizeBytes: 3)
+        let mask = RetainedSourceMedia.Member(memberId: "audio", role: "audio_file", displayName: "Audio.wav", sizeBytes: 3)
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [source, mask]))
+        fake.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
+        generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
+        generate.draft.prompt = "another composition"
+        generate.draft.seed = 123
+        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
+        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
+        generate.draft.media.sourceImage = nil
+        #expect(generate.retainedReuse.snapshot()?.members.contains { $0.role == "source_image" } == false)
+        generate.retainedReuse.clear()
+        #expect(generate.retainedReuse.snapshot() == nil)
+        #expect(generate.retainedReuse.notice == nil)
+    }
+
+    @Test func retainedMaskFitsWithItsSourceForChangedAspectAndPadRepaint() async throws {
+        let (generate, fake) = try await setUp()
+        let context = try #require(CGContext(data: nil, width: 128, height: 64, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 128, height: 64))
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 64, y: 0, width: 8, height: 64))
+        let image = try #require(context.makeImage())
+        let png = try #require(SourceFitRender.encodePNG(image))
+        let members = ["source_image", "mask_image"].map {
+            RetainedSourceMedia.Member(memberId: $0, role: $0, displayName: $0 + ".png", sizeBytes: png.count)
+        }
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: members))
+        fake.stub("retainedSourceMediaBytes(for:member:)", returning: png)
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
+        generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.draft.media.maskImage == png.base64EncodedString())
+        #expect(generate.retainedReuse.snapshot() == nil, "Restored source and mask are ordinary draft media, never hidden hydration")
+        for policy in [SourceFit.default, .padRepaint] {
+            var draft = generate.draft
+            draft.width = 64; draft.height = 64
+            draft.media.sourceFit = policy
+            let prepared = try await draft.fittingSource(recipe: generate.recipe)
+            let transform = SourceFitTransform.resolve(source: (128, 64), target: (64, 64), policy: policy)
+            let expected = try #require(await SourceFitRender.mask(existing: png, transform: transform, sourceSpace: true))
+            #expect(prepared.media.maskImage == expected.base64EncodedString())
+            #expect(prepared.media.maskImage != png.base64EncodedString())
+            let encodedSource = try #require(prepared.media.sourceImage)
+            let fitted = try #require(Data(base64Encoded: encodedSource))
+            #expect(PictureImport.pixelSize(of: fitted)?.width == 64)
+            #expect(PictureImport.pixelSize(of: fitted)?.height == 64)
+        }
+    }
+
+    @Test func retainedPairHonorsExplicitSourceAndMaskOverrides() async throws {
+        for hasSource in [false, true] {
+            let (generate, fake) = try await setUp()
+            generate.draft.media.maskImage = "user-mask"
+            if hasSource { generate.draft.media.sourceImage = "user-source" }
+            let members = ["source_image", "mask_image"].map {
+                RetainedSourceMedia.Member(memberId: $0, role: $0, displayName: $0 + ".png", sizeBytes: 3)
+            }
+            fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: members))
+            fake.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+            let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+                #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
+            generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+            try await waitUntil { !generate.retainedReuse.probing }
+            #expect(generate.draft.media.maskImage == "user-mask")
+            #expect(generate.draft.media.sourceImage == (hasSource ? "user-source" : "AQID"))
+            #expect(generate.retainedReuse.snapshot() == nil)
+            #expect(fake.count("retainedSourceMediaBytes(for:member:)") == (hasSource ? 0 : 1))
+        }
+    }
+
+    @Test func explicitModelChoiceInvalidatesPendingRetainedProbe() async throws {
+        let (generate, _) = try await setUp()
+        let fence = generate.retainedReuse.begin(generate.draft)
+        generate.choose(try model())
+        #expect(!generate.retainedReuse.isCurrent(fence, draft: generate.draft))
+        #expect(!generate.retainedReuse.probing)
+    }
+
     @Test func offlineInventoryIsNotAnInstructionToInstall() async throws {
         let (generate, _) = try await setUp()
         generate.hosts.setReachability(.down("Offline"), for: generate.hosts.hosts[0].id)

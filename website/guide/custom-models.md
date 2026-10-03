@@ -3,6 +3,15 @@
 mold works best when models come from the built-in manifest, but you can also
 point it at manual weight paths or set per-model defaults in `config.toml`.
 
+## Model names
+
+Curated manifest models have a short title shared by every app and `mold list`,
+for example **FLUX.1 Dev Q4**. `/api/models[].display_name` supplies that title;
+`name` remains the runnable ID (`flux-dev:q4`). Use the ID in commands, config,
+and API requests. Files retain their upstream names, and catalog installs keep
+their provider titles. Discover searches curated titles as well as IDs and
+Hugging Face repositories.
+
 ## Manual Model Entries
 
 The `[models]` table lets you define or override model paths and defaults:

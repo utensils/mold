@@ -1242,6 +1242,7 @@ mod tests {
         for path in [
             "/api/status",
             "/api/status/",
+            "/api/queue/private-job/input-thumbnail",
             "/api/shutdown",
             "/secrets.json",
             "/.env",

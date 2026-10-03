@@ -115,3 +115,21 @@ private func loadModels() throws -> [Model] {
     // A model whose whole name looks like a variant keeps at least one word.
     #expect(titled("Q4 — x") == "Q4")
 }
+
+@Test func serverDisplayNameWinsOverLegacyDescription() throws {
+    let model = try MoldJSON.decoder.decode(Model.self, from: Data(#"{"name":"flux-dev:q4","family":"flux","description":"Legacy verbose title — old tradeoff","display_name":"FLUX.1 Dev Q4"}"#.utf8))
+    #expect(model.headline == "FLUX.1 Dev Q4")
+    #expect(model.name == "flux-dev:q4")
+    #expect(model.tradeOff == "old tradeoff")
+}
+
+@Test func curatedDiscoverySearchesRepositoryAndAllWords() throws {
+    let model = try MoldJSON.decoder.decode(Model.self, from: Data(#"{"name":"flux-dev:q4","family":"flux","description":"FLUX.1 Dev Q4 — compact","hf_repo":"black-forest-labs/FLUX.1-dev","downloaded":false}"#.utf8))
+    let query = CatalogQuery(text: "forest dev", source: "hf")
+    #expect(query.queryString.contains("source=hf"))
+    #expect(!query.queryString.contains("huggingface"))
+    #expect(model.matchesDiscovery(query))
+    #expect(!model.matchesDiscovery(CatalogQuery(text: "wan")))
+    #expect(!model.matchesDiscovery(CatalogQuery(source: "civitai")))
+    #expect(!model.matchesDiscovery(CatalogQuery(family: "wan")))
+}

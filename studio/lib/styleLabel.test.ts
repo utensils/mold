@@ -9,6 +9,16 @@ import { styleDisplayName, styleLabel } from "./styleLabel";
  */
 
 describe("styleDisplayName", () => {
+  it("uses the curated server title instead of its long trade-off description", () => {
+    expect(
+      styleDisplayName({
+        name: "flux-dev:q4",
+        family: "flux",
+        display_name: "FLUX.1 Dev Q4",
+        description: "FLUX.1 Dev Q4 — smaller/faster, good quality",
+      }),
+    ).toBe("FLUX.1 Dev Q4");
+  });
   it("prefers a catalog description, which is the model's real name", () => {
     expect(
       styleDisplayName({

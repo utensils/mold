@@ -527,6 +527,7 @@ describe("CatalogTab media filter under pagination", () => {
         default_width: 768,
         default_height: 512,
         description: "Small LTX-Video",
+        display_name: "LTX Video 0.9.8 Distilled 2B BF16",
         downloaded: false,
         remaining_download_bytes: 16_200_000_000,
       },
@@ -551,9 +552,13 @@ describe("CatalogTab media filter under pagination", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("ltx-video-0.9.8-2b-distilled:bf16");
+    expect(wrapper.text()).toContain("LTX Video 0.9.8 Distilled 2B BF16");
     expect(wrapper.text()).toContain("SIZE 4.2 GB · FETCH 16.2 GB");
     expect(wrapper.text()).not.toContain("253.8 GB");
+    await wrapper.setProps({ query: "LTX Video 0.9.8 Distilled" });
+    expect(wrapper.text()).toContain("LTX Video 0.9.8 Distilled 2B BF16");
+    await wrapper.setProps({ query: "Lightricks" });
+    expect(wrapper.text()).toContain("LTX Video 0.9.8 Distilled 2B BF16");
   });
 
   it("auto-fetches follow-up pages until the Video filter has content", async () => {
