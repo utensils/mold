@@ -50,6 +50,15 @@ final class LibraryGridProjection {
         return entries[max(0, index - 2)..<min(entries.count, index + 3)]
     }
 
+    /// A refreshed snapshot can remove the old anchor or reorder the selected
+    /// print outside its window. Repair before rendering, not one frame later.
+    func anchor(for selected: PrintID, preferred: PrintID) -> PrintID {
+        guard let index = positions[selected], let center = positions[preferred],
+              index >= max(0, center - 2), index <= min(entries.count - 1, center + 2)
+        else { return selected }
+        return preferred
+    }
+
     func shouldRecenter(selected: PrintID, anchor: PrintID) -> Bool {
         guard selected != anchor, let index = positions[selected], let center = positions[anchor] else { return false }
         return index <= max(0, center - 2) || index >= min(entries.count - 1, center + 2)

@@ -8,7 +8,7 @@ final class LibraryViewerTests: XCTestCase {
 
     @MainActor func testClosingViewerKeepsLibraryScrollPlace() async throws {
         continueAfterFailure = false
-        let machine = try FixtureMachine(galleryPrints: 300, galleryFavorites: 30, libraryMutations: true)
+        let machine = try FixtureMachine(galleryPrints: 300, galleryFavorites: 30, libraryMutations: true, removePrintOnFavorite: "fixture-50.png")
         let port = try await machine.start()
 
         let app = XCUIApplication()
@@ -70,14 +70,20 @@ final class LibraryViewerTests: XCTestCase {
         for _ in 0..<20 where !print.isHittable { grid.swipeUp(velocity: .slow) }
         XCTAssertTrue(print.isHittable)
         print.tap()
+        app.swipeLeft(velocity: .slow)
+        XCTAssertTrue(app.descendants(matching: .any)["viewer-print-fixture-51.png"].firstMatch.isHittable)
         let favorite = app.buttons["Favourite"].firstMatch
         XCTAssertTrue(favorite.waitForExistence(timeout: 5))
         favorite.tap()
         XCTAssertTrue(app.buttons["Unfavourite"].firstMatch.waitForExistence(timeout: 5))
+        // The fixture removes anchor50 during this refresh while selected51
+        // survives. Its page must remain visible, not become a blank window.
+        XCTAssertTrue(app.descendants(matching: .any)["viewer-print-fixture-51.png"].firstMatch.isHittable)
         app.buttons["Delete"].firstMatch.tap()
         XCTAssertTrue(app.navigationBars["All Prints"].waitForExistence(timeout: 5),
                       "removing the current print must dismiss its viewer")
         XCTAssertFalse(print.exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 51,'")).firstMatch.exists)
         XCTAssertTrue(machine.requestLog().contains("POST /api/gallery/mutations"))
         XCTAssertTrue(machine.requestLog().contains("POST /api/gallery/trash"))
 

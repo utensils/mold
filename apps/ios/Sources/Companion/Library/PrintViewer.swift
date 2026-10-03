@@ -25,10 +25,11 @@ struct PrintViewer: View {
 
     var body: some View {
         let entry = projection.entry(current ?? start)
+        let anchor = projection.anchor(for: current ?? start, preferred: pageAnchor ?? start)
         let visibleChrome = UIDevice.current.userInterfaceIdiom == .phone
             || Self.showsChrome(for: entry?.print.kind, requested: chrome)
         return TabView(selection: Binding(get: { current ?? start }, set: { select($0) })) {
-            ForEach(projection.pages(around: pageAnchor ?? start)) { page in
+            ForEach(projection.pages(around: anchor)) { page in
                 Group {
                     if page.print.kind == .clip || page.print.kind == .mesh {
                         // AVKit and the mesh viewer own their gestures.
@@ -47,7 +48,7 @@ struct PrintViewer: View {
         // UIPageViewController retains numeric page indices. Keep its window
         // stable during ordinary swipes and recreate it only at a boundary;
         // changing the leading item every swipe otherwise skips prints.
-        .id(pageAnchor ?? start)
+        .id(anchor)
         .tabViewStyle(.page(indexDisplayMode: .never))
         .background(.black)
         .ignoresSafeArea(edges: visibleChrome ? [] : .all)
@@ -79,7 +80,9 @@ struct PrintViewer: View {
         }
         .onChange(of: ObjectIdentifier(projection)) { _, _ in
             // The print on screen went away (deleted, moved): back to the grid.
-            if let now = current ?? Optional(start), projection.entry(now) == nil { dismiss() }
+            let now = current ?? start
+            guard projection.entry(now) != nil else { dismiss(); return }
+            pageAnchor = projection.anchor(for: now, preferred: pageAnchor ?? start)
         }
         .keyboardShortcut(for: projection, current: Binding(get: { current }, set: { if let id = $0 { select(id) } }), start: start, close: { dismiss() })
         // Handoff: the same print, continued in Mold Studio on the Mac.

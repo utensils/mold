@@ -47,6 +47,19 @@ struct LibraryScrollPositionTests {
         let refreshed = cache.project(entries: Array(entries.prefix(50)), revision: 3, scope: .all, query: query)
         #expect(refreshed.entry(entries[9000].id) == nil)
         #expect(refreshed.pages(around: entries[9000].id).isEmpty)
+
+        let selected = entries[9001].id
+        let removedAnchor = cache.project(entries: entries.filter { $0.id != entries[9000].id },
+                                          revision: 4, scope: .all, query: query)
+        let repaired = removedAnchor.anchor(for: selected, preferred: entries[9000].id)
+        #expect(repaired == selected)
+        #expect(removedAnchor.pages(around: repaired).contains { $0.id == selected })
+        let reordered = cache.project(entries: [entries[9001]] + entries.filter { $0.id != selected },
+                                      revision: 5, scope: .all, query: query)
+        let moved = reordered.anchor(for: selected, preferred: entries[9000].id)
+        #expect(moved == selected)
+        #expect(reordered.pages(around: moved).contains { $0.id == selected })
+        #expect(reordered.step(1, from: selected) == entries[0].id)
     }
 
     @Test func leavingTheViewerDoesNotEraseTheLastVisiblePrint() {

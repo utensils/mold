@@ -13,6 +13,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let models: Data
     private var gallery: Data
     private let libraryMutations: Bool
+    private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
     private let queueFixture: Bool
     private let allRequests = Mutex<[String]>([])
@@ -27,7 +28,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+        self.removePrintOnFavorite = removePrintOnFavorite
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
         self.queueFixture = queueFixture
@@ -149,6 +151,9 @@ final class FixtureMachine: @unchecked Sendable {
                     for index in rows.indices where filenames.contains(rows[index]["filename"] as? String ?? "") {
                         rows[index]["favorite"] = favorite
                     }
+                }
+                if path == "/api/gallery/mutations", let removePrintOnFavorite {
+                    rows.removeAll { $0["filename"] as? String == removePrintOnFavorite }
                 }
                 gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
             }
