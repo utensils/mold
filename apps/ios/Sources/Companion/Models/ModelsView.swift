@@ -16,6 +16,7 @@ struct ModelsView: View {
         }
     }
 
+    @Environment(\.horizontalSizeClass) private var width
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
     @Environment(AppRouter.self) private var router
@@ -37,6 +38,7 @@ struct ModelsView: View {
                 }
             }
         }
+        .toolbarVisibility(fixedHost != nil && width == .regular ? .hidden : .automatic, for: .tabBar)
         .sheet(item: Binding(get: { models.pendingLicense }, set: { models.pendingLicense = $0 })) { pending in
             LicenceSheet(pending: pending)
         }

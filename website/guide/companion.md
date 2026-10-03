@@ -172,3 +172,7 @@ image keeps your choice. Unavailable retained files are explained inline.
 The Queue shows the prompt and actual **Source** image separately from the live
 **Rendering** preview, including when the source belongs to a durable job that
 survived a machine restart. On iPad, jobs stay within a readable centered column.
+
+### Server model memory
+
+In Machines → Models → Installed, use Unload beside a resident model or Unload All Models for the selected server. Downloads remain installed. Offline and pending-operation controls are disabled, and server refusals remain visible.

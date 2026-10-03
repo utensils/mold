@@ -17,6 +17,7 @@ struct InstalledModels: View {
                 Text(summary).foregroundStyle(.secondaryText)
                     .task { try? await Task.sleep(for: .seconds(8)); models.summary = nil }
             }
+            loadedModels
             let fetching = (models.active[host.id] ?? [:]).sorted { $0.value.model < $1.value.model }
             if !fetching.isEmpty {
                 Section {
@@ -29,14 +30,18 @@ struct InstalledModels: View {
             }
             ForEach(models.installed(on: host.id), id: \.family) { group in
                 Section {
+                    SectionHeader(group.family).font(.headline).listRowSeparator(.hidden)
                     ForEach(group.models) { model in
                         InstalledRow(model: model)
-                            .swipeActions { Button("Delete", systemImage: "trash", role: .destructive) { deleting = model } }
+                            .swipeActions {
+                                Button("Delete", systemImage: "trash", role: .destructive) { deleting = model }
+                                    .disabled(!canChangeModels)
+                            }
                             .contextMenu { menu(model) }
                     }
-                } header: { SectionHeader(group.family) }
+                }
             }
-            if models.installed(on: host.id).isEmpty, fetching.isEmpty {
+            if models.installed(on: host.id).isEmpty, models.loaded(on: host.id).isEmpty, fetching.isEmpty {
                 Text(models.emptyInventoryMessage(on: host))
                     .foregroundStyle(.secondaryText)
             }
@@ -52,27 +57,78 @@ struct InstalledModels: View {
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                if let model = deleting { Task { await models.delete(model, on: host.id) } }
+                if canChangeModels, let model = deleting { Task { await models.delete(model, on: host.id) } }
             }
+            .disabled(!canChangeModels)
         } message: {
             Text("Files another installed model still uses are kept.")
         }
         .sheet(item: $inspecting) { ComponentsSheet(model: $0, host: host) }
     }
 
+    private var canChangeModels: Bool {
+        hosts.reachability(of: host).isUp && !models.changing.contains(host.id)
+    }
+
+    private var loadedModels: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    Task { await models.unloadAll(on: host.id) }
+                } label: {
+                    HStack {
+                        Image(systemName: "eject")
+                        Text("Unload All Models").fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .tint(.primary)
+                .accessibilityIdentifier("unload-all-models")
+                Text("Unloads models from \(host.name)’s memory. Downloaded files are kept.")
+                    .font(.caption).foregroundStyle(.secondaryText)
+            }
+            ForEach(models.loaded(on: host.id)) { model in
+                VStack(alignment: .leading, spacing: 6) {
+                    InstalledRow(model: model)
+                    Button {
+                        Task { await models.unload(model, on: host.id) }
+                    } label: {
+                        Label("Unload", systemImage: "eject").frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.primary)
+                    .accessibilityLabel("Unload \(model.headline)")
+                    .accessibilityIdentifier("unload-model-\(model.name)")
+                }
+            }
+            if models.changing.contains(host.id) {
+                ProgressView("Updating server models…")
+            }
+        } header: {
+            Text("Server Memory").font(.headline).foregroundStyle(.primary).accessibilityAddTraits(.isHeader)
+        }
+        .disabled(!canChangeModels)
+    }
+
     /// The Mac's model menu, in its order; Delete last.
     @ViewBuilder private func menu(_ model: Model) -> some View {
         if model.isLoaded == true {
             Button("Unload", systemImage: "eject") { Task { await models.unload(model, on: host.id) } }
+                .disabled(!canChangeModels)
         } else {
             Button("Load", systemImage: "memorychip") { Task { await models.load(model, on: host.id) } }
+                .disabled(!canChangeModels)
         }
         if case .needsRepair = model.installState {
             Button("Repair", systemImage: "wrench.and.screwdriver") { Task { await models.install(model.name, on: host.id) } }
+                .disabled(!canChangeModels)
         }
         Button("Components", systemImage: "shippingbox") { inspecting = model }
         Divider()
         Button("Delete…", systemImage: "trash", role: .destructive) { deleting = model }
+            .disabled(!canChangeModels)
     }
 }
 

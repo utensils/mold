@@ -80,3 +80,5 @@ helper. A removed visible source/mask cannot be rehydrated from hidden authority
 Queue input thumbnails use the authenticated sealed-media route, never provenance
 filenames or denoise previews. Cache by host, instance and job, fence late replies
 against live row membership, and purge removed jobs/hosts.
+
+**Model unloading.** Installed Models exposes a Server Memory section with visible per-model Unload and Unload All Models. Residency uses `isLoaded` independently of downloaded metadata. All-model unload sends nil model and GPU to the selected host. Coordinate load/unload/delete with a per-host in-flight guard held through refresh, preserve installed files, and display server refusals. Offline controls are disabled. Per-machine Models in regular-width layouts hides inherited floating tab chrome and restores it on Back; direct sidebar Models remains unchanged. Installed-family headings use ordinary section rows with semantic headline fonts and VoiceOver header traits; supplementary headings failed populated iPad Dynamic Type prediction.

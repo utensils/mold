@@ -213,3 +213,30 @@ showing the running state after the deadline and sleep/wake cycles. Stale-state
 visual acceptance remains unverified; existing content-model tests cover its
 refresh title, progress suppression, and retained Stop control. No fixture or
 production stale-date changes were made for this check.
+
+## Visible server model unloading (2026-10-02)
+
+Machines → Models → Installed now exposes per-model Unload and Unload All Models
+under Server Memory. The regression uses an opt-in loopback fixture with two
+resident, downloaded models: unload one, unload the remaining models, and verify
+the installed model ID remains reachable. It never contacts a live inference
+server or submits a generation. The fixture restores residency for the audit.
+
+Local iOS 26.5 iPhone 17 Pro and iPad Pro 11-inch (M5) Simulator checks cover
+XS, Large and AX5 in light and dark. Every case exercises the visible controls,
+44-point targets, retained inventory, and contrast, Dynamic Type, clipping,
+descriptions, traits and element detection. Contrast exclusions are restricted
+to List content obscured by bottom system glass; bar controls remain audited.
+
+UAT required a full-width wrapping Unload All Models title. On iPad, per-machine
+Models now hides inherited floating tab chrome and restores it on Back. A named
+installed-family heading failed Dynamic Type prediction even with an explicit
+text style; ordinary heading rows within the family cards pass without adding
+a Dynamic Type or clipping exception. Family headings retain VoiceOver header
+traits, and model rows retain their existing context menus and swipe actions.
+
+The native unit suite passes 140 tests, including selected-host nil/nil unload,
+named unload, inventory refresh, server refusal, older residency metadata,
+same-host serialization and independent-host concurrency. Native lint, routing
+contracts and independent source/visual peer review pass. Simulator evidence
+remains separate from physical-device or live-GPU-server acceptance.

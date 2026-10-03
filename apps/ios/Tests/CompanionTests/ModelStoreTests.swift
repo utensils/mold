@@ -96,6 +96,69 @@ struct ModelStoreTests {
         #expect(models.finished[id]?.first?.error == "disk full")
     }
 
+    @Test func loadedInventoryIncludesResidentModelsWithoutDownloadMetadata() async throws {
+        let (models, _, hosts, _) = try await setUp()
+        let resident = try QueueStoreTests.decode(Model.self,
+            #"{"name":"flux-dev:q4","family":"flux","description":"Resident","is_loaded":true}"#)
+        hosts.setModels([resident], for: hosts.hosts[0].id)
+        #expect(models.loaded(on: hosts.hosts[0].id).map(\.name) == [resident.name])
+    }
+
+    @Test func unloadAllTargetsOnlyTheSelectedServerAndRefreshesItsInventory() async throws {
+        let (models, _, hosts, fake) = try await setUp()
+        fake.stub("unloadModel(model:gpu:)") { arguments in
+            #expect((arguments[0] as? String?) == .some(nil))
+            #expect((arguments[1] as? Int?) == .some(nil))
+            return ()
+        }
+        let before = fake.count("models()")
+        await models.unloadAll(on: hosts.hosts[0].id)
+        #expect(fake.count("unloadModel(model:gpu:)") == 1)
+        #expect(fake.count("models()") == before + 1)
+        #expect(models.changing.isEmpty)
+    }
+
+    @Test func unloadRefusalIsVisibleAndClearsInFlightState() async throws {
+        let (models, _, hosts, fake) = try await setUp()
+        fake.stub("unloadModel(model:gpu:)") { _ in throw MoldClientError.unreachable("Server is busy") }
+        await models.unloadAll(on: hosts.hosts[0].id)
+        #expect(hosts.failures.contains { $0.doing.contains("unload") })
+        #expect(models.changing.isEmpty)
+    }
+
+    @Test func anUnloadBlocksConflictingChangesOnThatServerOnly() async throws {
+        let (models, _, hosts, fake) = try await setUp()
+        let gate = AsyncStream<Void>.makeStream()
+        fake.stub("unloadModel(model:gpu:)") { _ in
+            for await _ in gate.stream { break }
+            return ()
+        }
+        let id = hosts.hosts[0].id
+        let resident = try QueueStoreTests.decode(Model.self,
+            #"{"name":"flux-dev:q4","family":"flux","description":"Resident","is_loaded":true}"#)
+        let first = Task { await models.unload(resident, on: id) }
+        try await waitUntil { fake.count("unloadModel(model:gpu:)") == 1 }
+        #expect(models.changing.contains(id))
+        await models.unloadAll(on: id)
+        await models.load(resident, on: id)
+        await models.delete(resident, on: id)
+        #expect(fake.count("unloadModel(model:gpu:)") == 1)
+        #expect(fake.count("loadModel(_:gpu:)") == 0)
+        #expect(fake.count("deleteModel(_:)") == 0)
+        let call = try #require(fake.calls.last { $0.route == "unloadModel(model:gpu:)" })
+        #expect((call.arguments[0] as? String?) == .some(resident.name))
+        #expect((call.arguments[1] as? Int?) == .some(nil))
+        try hosts.add(name: "Other", address: "10.0.0.5", apiKey: nil, makeDefault: false)
+        let other = try #require(hosts.hosts.first { $0.id != id })
+        let second = Task { await models.unloadAll(on: other.id) }
+        try await waitUntil { fake.count("unloadModel(model:gpu:)") == 2 }
+        #expect(models.changing.contains(other.id))
+        gate.continuation.finish()
+        await first.value
+        await second.value
+        #expect(models.changing.isEmpty)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())

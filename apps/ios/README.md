@@ -216,3 +216,7 @@ Queue rows show the prompt and the sealed source image, labeled **Source**,
 separately from a live **Rendering** preview. Durable images remain readable
 after a machine restart. Wide iPad windows keep queue content centered at a
 readable width; large accessibility text stacks the image and words.
+
+### Unloading server models
+
+Open Machines → Models → Installed. Server Memory lists loaded models with visible Unload controls. Unload All Models releases every resident model on the selected server while retaining downloaded files. Controls are unavailable offline or while another model operation is pending; server refusals appear in the failure banner.

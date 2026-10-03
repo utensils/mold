@@ -18,6 +18,7 @@ final class ModelStore {
     private(set) var active: [MoldHost.ID: [String: DownloadProgress]] = [:]
     private(set) var finished: [MoldHost.ID: [DownloadJob]] = [:]
     private(set) var licences: [MoldHost.ID: [ThirdPartyLicense]] = [:]
+    private(set) var changing: Set<MoldHost.ID> = []
     var pendingLicense: PendingLicense?
     /// One line after a delete: "Removed … and freed 6.8 GB."
     var summary: String?
@@ -54,6 +55,12 @@ final class ModelStore {
         return Dictionary(grouping: rows, by: \.family)
             .map { ($0.key, $0.value.sorted { $0.headline.localizedStandardCompare($1.headline) == .orderedAscending }) }
             .sorted { $0.family < $1.family }
+    }
+
+    /// Residency is independent of downloaded metadata (including older servers).
+    func loaded(on host: MoldHost.ID) -> [Model] {
+        (hosts.models[host] ?? []).filter { $0.isLoaded == true }
+            .sorted { $0.headline.localizedStandardCompare($1.headline) == .orderedAscending }
     }
 
     /// No answer is not an empty inventory. Say what can actually be known.
@@ -230,6 +237,10 @@ final class ModelStore {
         await act(id, String(localized: "unload \(model.headline)")) { try await $0.unloadModel(model: model.name, gpu: nil) }
     }
 
+    func unloadAll(on id: MoldHost.ID) async {
+        await act(id, String(localized: "unload all models")) { try await $0.unloadModel(model: nil, gpu: nil) }
+    }
+
     func delete(_ model: Model, on id: MoldHost.ID) async {
         await act(id, String(localized: "delete \(model.headline)")) { client in
             let removal = try await client.deleteModel(model.name)
@@ -246,7 +257,9 @@ final class ModelStore {
     }
 
     private func act(_ id: MoldHost.ID, _ verb: String, _ body: (any MoldBackend) async throws -> Void) async {
-        guard let host = hosts.host(id) else { return }
+        guard let host = hosts.host(id), !changing.contains(id) else { return }
+        changing.insert(id)
+        defer { changing.remove(id) }
         do {
             try await body(hosts.backend(for: host))
             hosts.clearFailures(for: id, doing: verb)
