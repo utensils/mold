@@ -1,3 +1,5 @@
+pub mod mirror;
+
 use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},

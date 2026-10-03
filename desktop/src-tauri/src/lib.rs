@@ -202,6 +202,7 @@ pub fn run() {
             gallery::fetch_gallery_media,
             gallery::import_source_image,
             gallery::save_output_bytes,
+            gallery::mirror::mirror_gallery_print,
             gallery::save_media_bytes,
             gallery::save_gallery_media,
             gallery::media_save_directory,
