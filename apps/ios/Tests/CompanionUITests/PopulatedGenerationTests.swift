@@ -8,6 +8,112 @@ final class PopulatedGenerationTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testVisibleModelUnloadingKeepsInstalledFiles() async throws {
+        try await modelMemory(size: "UICTContentSizeCategoryL")
+    }
+
+    @MainActor func testModelMemoryExtraSmall() async throws {
+        try await modelMemory(size: "UICTContentSizeCategoryXS")
+    }
+
+    @MainActor func testModelMemoryAccessibilityXXXL() async throws {
+        try await modelMemory(size: "UICTContentSizeCategoryAccessibilityXXXL")
+    }
+
+    @MainActor private func modelMemory(size: String) async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(loadedModels: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", size]
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.textFields["machine-name"].tap()
+        app.textFields["machine-name"].typeText("Unload Fixture")
+        app.textFields["machine-address"].tap()
+        app.textFields["machine-address"].typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        let row = app.buttons.matching(NSPredicate(format:
+            "identifier BEGINSWITH 'machine-card-' AND label MATCHES %@",
+            ".*127\\.0\\.0\\.1:\(port)([^0-9].*|$)")).firstMatch
+        for _ in 0..<15 where !row.exists || !row.isHittable { app.swipeUp() }
+        guard row.waitForExistence(timeout: 10) else { XCTFail(app.debugDescription); return }
+        row.tap()
+        let modelsLink = app.descendants(matching: .any)["machine-models"].firstMatch
+        guard modelsLink.waitForExistence(timeout: 5) else { XCTFail(app.debugDescription); return }
+        for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
+        modelsLink.tap()
+        let pane = app.buttons["models-pane"]
+        if pane.waitForExistence(timeout: 5) {
+            pane.tap()
+            app.buttons["Installed"].firstMatch.tap()
+        }
+        let one = app.buttons["unload-model-flux-dev:q4"]
+        guard one.waitForExistence(timeout: 10) else { XCTFail(app.debugDescription); return }
+        revealMemoryControl(one, in: app)
+        XCTAssertGreaterThanOrEqual(one.frame.height, 44)
+        one.tap()
+        XCTAssertTrue(one.waitForNonExistence(timeout: 10))
+        let remaining = app.buttons["unload-model-ltx-2.5-22b-distilled:bf16"]
+        XCTAssertTrue(remaining.exists)
+        let unloadAll = app.buttons["unload-all-models"]
+        revealMemoryControl(unloadAll, in: app)
+        XCTAssertGreaterThanOrEqual(unloadAll.frame.height, 44)
+        unloadAll.tap()
+        XCTAssertTrue(remaining.waitForNonExistence(timeout: 10))
+        let retained = app.staticTexts["flux-dev:q4"].firstMatch
+        revealMemoryControl(retained, in: app)
+        XCTAssertTrue(retained.exists, "Unloading must retain installed inventory")
+        await machine.restoreResidentModels()
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(modelsLink.waitForExistence(timeout: 5))
+        for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
+        modelsLink.tap()
+        guard one.waitForExistence(timeout: 10) else { XCTFail(app.debugDescription); return }
+        revealMemoryControl(one, in: app)
+        revealMemoryControl(unloadAll, in: app)
+        // Contrast samples settled pixels before Dynamic Type temporarily resizes the hierarchy.
+        try app.performAccessibilityAudit(for: .contrast) { issue in
+            guard let element = issue.element else { return false }
+            // Scroll content under the system glass is covered by the existing
+            // shell audit exemption. Never exempt controls that belong to it.
+            let bar = app.tabBars.firstMatch
+            let belongsToBar = bar.exists && ((element.elementType == .tabBar && element.frame == bar.frame)
+                || bar.descendants(matching: element.elementType)
+                    .matching(NSPredicate(format: "label == %@", element.label))
+                    .allElementsBoundByIndex.contains { $0.frame == element.frame })
+            let isListContent = app.collectionViews.allElementsBoundByIndex.contains { list in
+                list.descendants(matching: element.elementType)
+                    .matching(NSPredicate(format: "label == %@", element.label))
+                    .allElementsBoundByIndex.contains { $0.frame == element.frame }
+            }
+            var edge = app.frame.maxY
+            if bar.exists { edge = min(edge, bar.frame.minY) }
+            let dimming = app.images["AdditionalDimmingOverlay"].firstMatch
+            if dimming.exists { edge = min(edge, dimming.frame.minY) }
+            if isListContent, !belongsToBar, element.frame.maxY > edge { return true }
+            XCTFail("Model memory at \(size): \(issue.compactDescription), \(element.label) at \(element.frame)")
+            return true
+        }
+        try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription, .trait, .elementDetection])
+        attach(app)
+    }
+
+    @MainActor private func revealMemoryControl(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<12 {
+            let top = app.navigationBars.firstMatch.frame.maxY
+            let bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
+            if element.exists, element.isHittable, element.frame.minY >= top, element.frame.maxY <= bottom { return }
+            if element.exists, element.frame.minY < top { app.swipeDown() }
+            else { app.swipeUp() }
+        }
+        XCTFail("Model memory control must be fully reachable: \(element)")
+    }
+
     @MainActor func testOptionsAndModelSearchWithAnInstalledModel() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine()

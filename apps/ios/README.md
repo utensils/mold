@@ -189,3 +189,7 @@ Live Activity identity uses the bundled Mold logo on the Lock Screen and in ever
 Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
+
+### Unloading server models
+
+Open Machines → Models → Installed. Server Memory lists loaded models with visible Unload controls. Unload All Models releases every resident model on the selected server while retaining downloaded files. Controls are unavailable offline or while another model operation is pending; server refusals appear in the failure banner.

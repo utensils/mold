@@ -63,3 +63,5 @@ Live Activity identity uses the bundled Mold logo on the Lock Screen and in ever
 **Library previews and notification icons.** UIKit hosts context-menu and drag previews outside the grid environment; explicitly inject ThumbnailLoader into both preview roots. Exercise populated long-press menus and source-library selection on Simulator. The AppIcon catalog supplies the same authored image for Any and Dark appearances to preserve notification logo colors; Notification Center card backgrounds remain system controlled.
 
 Library source selection prefers the merged print copy on a currently reachable machine (`presented(onAnyOf:)`), preserving that copy's filename and host together.
+
+**Model unloading.** Installed Models exposes a Server Memory section with visible per-model Unload and Unload All Models. Residency uses `isLoaded` independently of downloaded metadata. All-model unload sends nil model and GPU to the selected host. Coordinate load/unload/delete with a per-host in-flight guard held through refresh, preserve installed files, and display server refusals. Offline controls are disabled.
