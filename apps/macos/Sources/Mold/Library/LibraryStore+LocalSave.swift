@@ -199,12 +199,29 @@ private func collisionName(for target: MirrorTarget, file: URL) throws -> String
                              marker: "\(target.hostID.uuidString.lowercased())-\(hash)")
 }
 
+private func repairCachedSources(_ target: MirrorTarget, to destination: any MoldBackend,
+                                 as filename: String) async -> MirrorResult {
+    do {
+        try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+            from: target.source, to: destination, as: filename)
+        return MirrorResult(filename: filename, alreadyLocal: true, error: nil)
+    } catch {
+        return MirrorResult(filename: nil, alreadyLocal: false, error: error.localizedDescription)
+    }
+}
+
 private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     as requestedName: String, occupied: Bool,
                     knownPrints: [String: GalleryPrint],
                     pending: PendingSyncOrganization?) async -> MirrorResult {
     do {
         try checkSyncStagingSpace(for: target.print)
+        let sourceIdentity: String?
+        do { sourceIdentity = try await target.source.retainedMediaTransferOffer(for: target.print.filename).archiveIdentitySha256 }
+        catch let error as MoldClientError {
+            guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
+            sourceIdentity = nil
+        }
         let file = try await target.source.mediaFile(target.print.filename, trashed: false)
         defer { try? FileManager.default.removeItem(at: file) }
         if occupied {
@@ -217,6 +234,8 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             }
             try? FileManager.default.removeItem(at: existing)
             if equal {
+                try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity)
                 return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil)
             }
         }
@@ -227,6 +246,8 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 ? try filesEqual(file, existing) : false
             try? FileManager.default.removeItem(at: existing)
             if equal {
+                try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity)
                 return MirrorResult(filename: filename, alreadyLocal: true, error: nil)
             }
         }
@@ -237,6 +258,8 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         do {
             let imported = try await destination.importPrint(item, as: filename)
             if imported != filename { await pending?.mark(sourceKey, filename: imported) }
+            try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+                from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity)
             return MirrorResult(filename: imported, alreadyLocal: false, error: nil)
         } catch {
             // The server may have committed the file before the response was
@@ -455,7 +478,7 @@ extension LibraryStore {
             }
         }
 
-        var work: [(Int, MirrorTarget, String, Bool)] = []
+        var work: [(Int, MirrorTarget, String, Bool, String?)] = []
         var claimedOriginals: Set<String> = []
         for (index, target) in targets.enumerated() {
             if Task.isCancelled || localSaveStopRequested { break }
@@ -478,12 +501,10 @@ extension LibraryStore {
                let cached = syncedCopies[sourceKey],
                let existing = localByName[cached.destinationFilename],
                cached.matches(source: target.print, local: existing) {
-                alreadyLocal += 1
-                completed += 1
-                record(target, as: existing.filename, organize: false)
+                work.append((index, target, requestedName, true, existing.filename))
                 continue
             }
-            work.append((index, target, requestedName, localByName[requestedName] != nil))
+            work.append((index, target, requestedName, localByName[requestedName] != nil, nil))
         }
 
         // Large clips can briefly occupy download and upload staging space.
@@ -499,9 +520,10 @@ extension LibraryStore {
             }
             let lanes = largeTransfer || free < 5 * 1_024 * 1_024 * 1_024 ? 1 : 3
             for _ in 0..<min(lanes, work.count) {
-                let (index, target, filename, occupied) = work[next]
+                let (index, target, filename, occupied, cached) = work[next]
                 next += 1
                 group.addTask {
+                    if let cached { return (index, await repairCachedSources(target, to: destination, as: cached)) }
                     return (index, await mirror(target, to: destination,
                                                 as: filename, occupied: occupied,
                                                 knownPrints: localByName,
@@ -525,9 +547,10 @@ extension LibraryStore {
                     localSaveProgress = "Saving \(completed.formatted()) of \(targets.count.formatted())…"
                 }
                 if next < work.count && !Task.isCancelled && !localSaveStopRequested {
-                    let (index, target, filename, occupied) = work[next]
+                    let (index, target, filename, occupied, cached) = work[next]
                     next += 1
                     group.addTask {
+                        if let cached { return (index, await repairCachedSources(target, to: destination, as: cached)) }
                         return (index, await mirror(target, to: destination,
                                                     as: filename, occupied: occupied,
                                                     knownPrints: localByName,

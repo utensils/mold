@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MoldClient
 @testable import Mold
 
@@ -6,6 +7,29 @@ import MoldClient
 // Same rules as every other route on this fake: unplanted THROWS, so a store
 // that reaches for an inventory a test did not plant fails the test.
 extension FakeBackend {
+    func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
+        try record("retainedMediaTransferOffer")
+        if let offer = retainedTransferOffers[filename] { return offer }
+        if noRetainedMedia {
+            let metadata = prints.first(where: { $0.filename == filename })?.metadata
+                ?? zip(importedNames, importedItems).first(where: { $0.0 == filename })?.1.originalMetadata
+            let bytes = zip(importedNames, importedMedia).first(where: { $0.0 == filename })?.1
+                ?? mediaAnswers[filename] ?? mediaAnswer ?? Data()
+            return RetainedSourceMedia.TransferOffer(archiveIdentitySha256: String(repeating: "a", count: 64), members: [],
+                outputSha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+                outputSizeBytes: bytes.count, metadata: metadata)
+        }
+        throw notPlanted()
+    }
+
+    func importRetainedMedia(_ transfer: RetainedSourceMedia.Transfer, for filename: String) async throws {
+        try record("importRetainedMedia")
+        let offer = try await retainedMediaTransferOffer(for: filename)
+        retainedTransfers.append((filename, transfer))
+        retainedTransferOffers[filename] = RetainedSourceMedia.TransferOffer(
+            archiveIdentitySha256: transfer.archiveIdentitySha256, members: transfer.members,
+            outputSha256: offer.outputSha256, outputSizeBytes: offer.outputSizeBytes, metadata: offer.metadata)
+    }
 
     func retainedSourceMedia(for filename: String) async throws
         -> RetainedSourceMedia.Inventory {

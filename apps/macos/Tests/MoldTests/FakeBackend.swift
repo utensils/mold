@@ -86,6 +86,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Answered per FILENAME, the same "absent is unplanted" rule as
     /// `componentRows`. A store that probes a print nobody planted throws.
     nonisolated(unsafe) var retainedInventories: [String: RetainedSourceMedia.Inventory] = [:]
+    nonisolated(unsafe) var retainedTransferOffers: [String: RetainedSourceMedia.TransferOffer] = [:]
+    nonisolated(unsafe) var retainedTransfers: [(String, RetainedSourceMedia.Transfer)] = []
+    let noRetainedMedia: Bool
     /// Every filename an inventory was asked for, in call order -- which is
     /// how a test pins that EVERY known copy of a print was probed.
     nonisolated(unsafe) var retainedInventoryRequests: [String] = []
@@ -207,7 +210,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func callCount(_ route: String) -> Int { callsLock.withLock { recorded.filter { $0 == route }.count } }
 
-    init(host: MoldHost) { self.host = host }
+    init(host: MoldHost, noRetainedMedia: Bool = false) {
+        self.host = host
+        self.noRetainedMedia = noRetainedMedia
+    }
 
     /// Not `private`: `FakeBackend+Models.swift` (M5 S1b's routes, split out
     /// to keep this file from growing further) calls both from a different
