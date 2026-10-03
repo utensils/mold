@@ -15,6 +15,7 @@ const effectMocks = vi.hoisted(() => ({
   evictMedia: vi.fn(),
   fetchGalleryMediaBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   saveOutputBytes: vi.fn().mockResolvedValue("saved.png"),
+  mirrorGalleryPrint: vi.fn().mockResolvedValue("saved.png"),
 }));
 const queueApi = vi.hoisted(() => ({ retryQueueJobRecoveringAmbiguity: vi.fn() }));
 vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
@@ -34,7 +35,10 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   evictMedia: effectMocks.evictMedia,
 }));
 vi.mock("../lib/ipc", () => ({
-  ipc: { saveOutputBytes: effectMocks.saveOutputBytes },
+  ipc: {
+    saveOutputBytes: effectMocks.saveOutputBytes,
+    mirrorGalleryPrint: effectMocks.mirrorGalleryPrint,
+  },
 }));
 const durableApi = vi.hoisted(() => ({
   admit: vi.fn(),
@@ -236,6 +240,7 @@ describe("submitBatch connection cap", () => {
     effectMocks.streamableMediaUrl.mockClear();
     effectMocks.fetchGalleryMediaBytes.mockClear();
     effectMocks.saveOutputBytes.mockClear();
+    effectMocks.mirrorGalleryPrint.mockClear();
     // Each POST parks open until the test resolves it, so we can observe how
     // many held streams the batch opens at once.
     mockSse.mockImplementation((_url, opts) => {
@@ -1172,15 +1177,11 @@ describe("submitBatch connection cap", () => {
     await flushPromises();
     expect(durableApi.reconcile).toHaveBeenCalledTimes(2);
     expect(effectMocks.notifyGenerated).toHaveBeenCalledTimes(1);
-    expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledTimes(1);
-    expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledWith(
-      "/api/gallery/image/finished.png",
+    expect(effectMocks.fetchGalleryMediaBytes).not.toHaveBeenCalled();
+    expect(effectMocks.mirrorGalleryPrint).toHaveBeenCalledTimes(1);
+    expect(effectMocks.mirrorGalleryPrint).toHaveBeenCalledWith(
       { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-    );
-    expect(effectMocks.saveOutputBytes).toHaveBeenCalledTimes(1);
-    expect(effectMocks.saveOutputBytes).toHaveBeenCalledWith(
       "finished.png",
-      expect.any(String),
       originMetadata,
       1,
     );

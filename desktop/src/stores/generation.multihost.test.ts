@@ -88,6 +88,7 @@ vi.mock("../lib/ipc", () => ({
   inTauri: () => true,
   ipc: {
     saveOutputBytes: (...a: unknown[]) => saveOutputBytes(...a),
+    mirrorGalleryPrint: vi.fn().mockResolvedValue("saved.png"),
     localGalleryList: (...a: unknown[]) => localGalleryList(...a),
   },
 }));

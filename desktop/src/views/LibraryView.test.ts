@@ -8,7 +8,7 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryDelete: vi.fn().mockResolvedValue(undefined),
   localGalleryList: vi.fn(),
 }));
-const nativeSave = vi.hoisted(() => ({ enabled: false, save: vi.fn() }));
+const nativeSave = vi.hoisted(() => ({ enabled: false, save: vi.fn(), mirror: vi.fn() }));
 const retainedInventoryMock = vi.hoisted(() => vi.fn());
 vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@studio/api/gallerySourceMedia")>();
@@ -61,6 +61,7 @@ vi.mock("../lib/ipc", () => ({
     localGalleryList,
     revealOutputFile: vi.fn(),
     saveOutputBytes: nativeSave.save,
+    mirrorGalleryPrint: nativeSave.mirror,
   },
 }));
 
@@ -186,6 +187,7 @@ async function mountView(
 beforeEach(() => {
   nativeSave.enabled = false;
   nativeSave.save.mockReset();
+  nativeSave.mirror.mockReset();
   clearSessionScrollForTests();
   vi.clearAllMocks();
   localStorage.clear();
@@ -1434,6 +1436,28 @@ describe("scope counts and Escape in a text field", () => {
 });
 
 describe("Library bulk local saving", () => {
+  it("repairs retained sources using the remote physical copy of an already local print", async () => {
+    const remote = { ...prints[0]!, filename: "repair.png" };
+    const { wrapper, gallery } = await mountView(remote, (store) => {
+      store.buckets.local!.items = [remote];
+    });
+    nativeSave.enabled = true;
+    nativeSave.mirror.mockResolvedValue("repair.png");
+    vi.spyOn(gallery, "refreshHost").mockResolvedValue(undefined);
+    window.dispatchEvent(new Event("mold:library-select-all"));
+    await flushPromises();
+    await wrapper.get("[data-test='bulk-save-locally']").trigger("click");
+    await flushPromises();
+    expect(nativeSave.mirror).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: expect.stringContaining("plato") }),
+      remote.filename,
+      remote.metadata,
+      remote.timestamp,
+    );
+    expect(nativeSave.save).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("skips local prints, retains source metadata, and continues after failure", async () => {
     const remote = { ...prints[0]!, filename: "remote.png" };
     const { wrapper, gallery } = await mountView(remote, (store) => {
@@ -1442,7 +1466,7 @@ describe("Library bulk local saving", () => {
     nativeSave.enabled = true;
     const refresh = vi.spyOn(gallery, "refreshHost").mockResolvedValue(undefined);
     apiFetchTo.mockImplementation(async () => new Response(new Blob(["original"])));
-    nativeSave.save
+    nativeSave.mirror
       .mockRejectedValueOnce(new Error("disk full"))
       .mockResolvedValueOnce("saved.mp4");
     window.dispatchEvent(new Event("mold:library-select-all"));
@@ -1450,13 +1474,13 @@ describe("Library bulk local saving", () => {
     expect(wrapper.find("[data-test='bulk-save-locally']").exists()).toBe(true);
     await wrapper.get("[data-test='bulk-save-locally']").trigger("click");
     await flushPromises();
-    expect(nativeSave.save).toHaveBeenCalledTimes(2);
-    expect(nativeSave.save.mock.calls.map((args) => args[0]).sort()).toEqual([
+    expect(nativeSave.mirror).toHaveBeenCalledTimes(2);
+    expect(nativeSave.mirror.mock.calls.map((args) => args[1]).sort()).toEqual([
       "remote.png",
       "second.mp4",
     ]);
-    expect(nativeSave.save.mock.calls[0]![2]).toEqual(remote.metadata);
-    expect(nativeSave.save.mock.calls[0]![3]).toBe(remote.timestamp);
+    expect(nativeSave.mirror.mock.calls[0]![2]).toEqual(remote.metadata);
+    expect(nativeSave.mirror.mock.calls[0]![3]).toBe(remote.timestamp);
     expect(refresh).toHaveBeenCalledWith("local");
     expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeUndefined();
     wrapper.unmount();
