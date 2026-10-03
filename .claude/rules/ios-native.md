@@ -82,3 +82,11 @@ filenames or denoise previews. Cache by host, instance and job, fence late repli
 against live row membership, and purge removed jobs/hosts.
 
 **Model unloading.** Installed Models exposes a Server Memory section with visible per-model Unload and Unload All Models. Residency uses `isLoaded` independently of downloaded metadata. All-model unload sends nil model and GPU to the selected host. Coordinate load/unload/delete with a per-host in-flight guard held through refresh, preserve installed files, and display server refusals. Offline controls are disabled. Per-machine Models in regular-width layouts hides inherited floating tab chrome and restores it on Back; direct sidebar Models remains unchanged. Installed-family headings use ordinary section rows with semantic headline fonts and VoiceOver header traits; supplementary headings failed populated iPad Dynamic Type prediction.
+
+Queue rows resolve headlines from the current host model catalog before the
+additive queue label. A details sheet derives action state from the current
+listing and loads full metadata separately. Per-job mutations revalidate state,
+retry identity and reachability and stay guarded through refresh; cancelling
+rows are read-only. Prompt History is machine-scoped server search, with fenced
+requests and prompt-only recall. Search during Clear must reload the latest
+query; reconnecting reloads without requiring a query edit.

@@ -18,14 +18,14 @@ own. It is the Mac app's little sibling: it has the same destinations, words,
 symbols and behaviour, rearranged for a hand. It installs beside the Tauri iPhone
 app (`com.utensils.mold`) and does not replace it.
 
-| | |
-| --- | --- |
-| Product name | Mold Studio Companion |
-| Home Screen label (`CFBundleDisplayName`) | Mold Studio |
-| Bundle ID | `io.utensils.mold.companion` (`.widgets`, `.share` extensions) |
-| URL scheme | `moldstudio://` — never `mold://`, which the Tauri app owns |
-| Minimum OS | iOS / iPadOS 26.0 |
-| Devices | iPhone and iPad; the iPad uses a sidebar and allows multiple windows |
+|                                           |                                                                      |
+| ----------------------------------------- | -------------------------------------------------------------------- |
+| Product name                              | Mold Studio Companion                                                |
+| Home Screen label (`CFBundleDisplayName`) | Mold Studio                                                          |
+| Bundle ID                                 | `io.utensils.mold.companion` (`.widgets`, `.share` extensions)       |
+| URL scheme                                | `moldstudio://` — never `mold://`, which the Tauri app owns          |
+| Minimum OS                                | iOS / iPadOS 26.0                                                    |
+| Devices                                   | iPhone and iPad; the iPad uses a sidebar and allows multiple windows |
 
 ## 2. Principles
 
@@ -63,33 +63,33 @@ app (`com.utensils.mold`) and does not replace it.
 The native Mac app's vocabulary governs. `docs/design/README.md`'s web lexicon
 ("My images", "Styles") does **not** apply to this app.
 
-| Say | Never say |
-| --- | --- |
-| Generate | Make, Create, Submit, Render |
-| Library · Prints · All Prints | My images, Images, Gallery |
-| Favourites | Favorites (the Mac spelling governs) |
-| Collections | Albums |
-| Recently Deleted · Put Back · Delete Immediately | Trash (in the UI), Restore, Purge |
-| Queue · Waiting · Being made · Held · Finished | queued, active, blocked, done |
-| Models · Installed · Discover · Get · Pull | Styles, checkpoints |
-| Machines · Default · Nearby · Add a Machine… | Hosts, servers |
-| Pair a Phone… (on the Mac) · Scan a Pairing Code (here) | QR login |
-| Shape (aspect and size) · Steps · Batch · Length | Resolution, frames |
-| Expand · Suggest other ways | Enhance, AI rewrite |
-| Use These Settings | Remix, Reuse |
-| Start from (source picture) · image 1, image 2 (references) | img2img, init image |
+| Say                                                         | Never say                            |
+| ----------------------------------------------------------- | ------------------------------------ |
+| Generate                                                    | Make, Create, Submit, Render         |
+| Library · Prints · All Prints                               | My images, Images, Gallery           |
+| Favourites                                                  | Favorites (the Mac spelling governs) |
+| Collections                                                 | Albums                               |
+| Recently Deleted · Put Back · Delete Immediately            | Trash (in the UI), Restore, Purge    |
+| Queue · Waiting · Being made · Held · Finished              | queued, active, blocked, done        |
+| Models · Installed · Discover · Get · Pull                  | Styles, checkpoints                  |
+| Machines · Default · Nearby · Add a Machine…                | Hosts, servers                       |
+| Pair a Phone… (on the Mac) · Scan a Pairing Code (here)     | QR login                             |
+| Shape (aspect and size) · Steps · Batch · Length            | Resolution, frames                   |
+| Expand · Suggest other ways                                 | Enhance, AI rewrite                  |
+| Use These Settings                                          | Remix, Reuse                         |
+| Start from (source picture) · image 1, image 2 (references) | img2img, init image                  |
 
 ## 4. Information architecture
 
 ### iPhone: `TabView` + `.tabViewStyle(.sidebarAdaptable)`
 
-| Tab | Symbol | Notes |
-| --- | --- | --- |
-| Generate | `wand.and.sparkles` | |
-| Library | `square.grid.2x2` | The shelf is visible above the grid |
-| Queue | `list.bullet` | Badge = running + held count; no badge at 0 |
-| Machines | `desktopcomputer` | Holds Models, and the Settings gear |
-| Search | `Tab(role: .search)` | Library search; the separate glass button |
+| Tab      | Symbol               | Notes                                       |
+| -------- | -------------------- | ------------------------------------------- |
+| Generate | `wand.and.sparkles`  |                                             |
+| Library  | `square.grid.2x2`    | The shelf is visible above the grid         |
+| Queue    | `list.bullet`        | Badge = running + held count; no badge at 0 |
+| Machines | `desktopcomputer`    | Holds Models, and the Settings gear         |
+| Search   | `Tab(role: .search)` | Library search; the separate glass button   |
 
 - **Models is not an iPhone tab.** On the Mac, "the machine picked here is the
   one the Models pane shows", so Models already belongs to a machine. The
@@ -128,13 +128,14 @@ words beside its name, never by colour alone.
 - iPad windows keep independent state.
 - Deep links:
 
-  | Link | Opens |
-  | --- | --- |
-  | `moldstudio://print/<host>/<filename>` | Viewer |
-  | `moldstudio://queue/<job>` | Queue, scrolled to that row |
-  | `moldstudio://generate?inbox=<id>` | Generate, with the shared photo |
+  | Link                                   | Opens                           |
+  | -------------------------------------- | ------------------------------- |
+  | `moldstudio://print/<host>/<filename>` | Viewer                          |
+  | `moldstudio://queue/<job>`             | Queue, scrolled to that row     |
+  | `moldstudio://generate?inbox=<id>`     | Generate, with the shared photo |
 
   They are used by widgets, notifications, the Live Activity and App Intents.
+
 - Handoff (`NSUserActivity`) continues a viewed print on the Mac and back.
 
 ## 5. Screens
@@ -330,11 +331,12 @@ tile menu in the same order, with Delete last after a divider.
 A `List` with one section per machine; the section header carries its status dot
 and name.
 
-- **Being made:** 52 pt scaled live-preview thumbnail, the sentence, a progress
-  bar and a mono ETA.
+- **Cards:** the source thumbnail, short curated model title, prompt excerpt,
+  and state. Rendering uses a compact progress bar. Tap a card for full model
+  identity, source image, settings, detailed progress and controls.
 - **Batch:** a parent row ("Batch of 4 · 2 finished") with a `DisclosureGroup`
   of its children.
-- **Waiting:** a placeholder thumbnail with the position in mono.
+- **Waiting:** its actual source image when present, and its queue position.
 - **Held:** a warning glyph, then the machine's sentence in full, e.g. "Needs
   FLUX.2 [klein] on workstation before it can start." Bordered buttons follow:
   **Pull**, **Retry** and **Move to…**. Pull shows the licence first if the model
@@ -453,14 +455,14 @@ stays on the Mac.
 One activity per running batch. It starts on iPhone only when activities are
 enabled.
 
-| Presentation | Content |
-| --- | --- |
-| Compact leading | `wand.and.sparkles`, tinted with the accent colour |
-| Compact trailing | Progress ring |
-| Minimal | Progress ring |
-| Expanded | Leading: 44 pt preview thumbnail (App Group file). Trailing: `Text(timerInterval:)` ETA, in mono. Centre: the sentence. Bottom: the prompt (2 lines), a linear bar, "denoise 18/28 · workstation" in mono, and a Stop button (`LiveActivityIntent`). |
-| Lock Screen | Translucent system-tinted card: 48 pt preview beside an app/status/prompt stack and a 44 pt circular Stop control. Full-width progress bar with separate step/ETA labels; proportional machine text and waiting count share the footer. `ViewThatFits` drops secondary content at large text sizes; 128 pt content plus 16 pt padding fits the system's 160 pt limit. |
-| Finished | Final thumbnail, "Finished on workstation" and View; dismissed after 15 minutes |
+| Presentation     | Content                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Compact leading  | `wand.and.sparkles`, tinted with the accent colour                                                                                                                                                                                                                                                                                                                    |
+| Compact trailing | Progress ring                                                                                                                                                                                                                                                                                                                                                         |
+| Minimal          | Progress ring                                                                                                                                                                                                                                                                                                                                                         |
+| Expanded         | Leading: 44 pt preview thumbnail (App Group file). Trailing: `Text(timerInterval:)` ETA, in mono. Centre: the sentence. Bottom: the prompt (2 lines), a linear bar, "denoise 18/28 · workstation" in mono, and a Stop button (`LiveActivityIntent`).                                                                                                                  |
+| Lock Screen      | Translucent system-tinted card: 48 pt preview beside an app/status/prompt stack and a 44 pt circular Stop control. Full-width progress bar with separate step/ETA labels; proportional machine text and waiting count share the footer. `ViewThatFits` drops secondary content at large text sizes; 128 pt content plus 16 pt padding fits the system's 160 pt limit. |
+| Finished         | Final thumbnail, "Finished on workstation" and View; dismissed after 15 minutes                                                                                                                                                                                                                                                                                       |
 
 **Honesty rule: the server has no push.**
 
@@ -472,14 +474,14 @@ enabled.
 
 ### 5.8 Widgets
 
-| Family | Content |
-| --- | --- |
-| systemSmall | Latest print, full-bleed, with its title on a glass plate |
-| systemMedium | The 4 most recent prints |
-| systemLarge | A 3×3 grid under a "Recent Prints" header |
-| accessoryRectangular | "2 being made · 1 held" |
-| accessoryCircular | Progress of the current render |
-| accessoryInline | "Mold: 3 waiting" |
+| Family               | Content                                                   |
+| -------------------- | --------------------------------------------------------- |
+| systemSmall          | Latest print, full-bleed, with its title on a glass plate |
+| systemMedium         | The 4 most recent prints                                  |
+| systemLarge          | A 3×3 grid under a "Recent Prints" header                 |
+| accessoryRectangular | "2 being made · 1 held"                                   |
+| accessoryCircular    | Progress of the current render                            |
+| accessoryInline      | "Mold: 3 waiting"                                         |
 
 - Configured with an App Intent: All Machines or a named machine, and All
   Prints, Favourites or a collection.
@@ -500,11 +502,11 @@ foreground, Generate shows a **From Share** card with the same three choices.
 
 ### 5.10 Notifications
 
-| Kind | Text | Actions |
-| --- | --- | --- |
-| Finished | "Finished — a lighthouse at dusk", with a thumbnail attachment | View, Favourite |
-| Held | "Held — needs FLUX.2 [klein] on workstation" | Pull and Retry, View |
-| Failed | "Failed — workstation ran out of video memory" | View |
+| Kind     | Text                                                           | Actions              |
+| -------- | -------------------------------------------------------------- | -------------------- |
+| Finished | "Finished — a lighthouse at dusk", with a thumbnail attachment | View, Favourite      |
+| Held     | "Held — needs FLUX.2 [klein] on workstation"                   | Pull and Retry, View |
+| Failed   | "Failed — workstation ran out of video memory"                 | View                 |
 
 - Notifications are threaded per machine.
 - They are not presented while the app is in the foreground; the inline banner
@@ -581,53 +583,53 @@ foreground, Generate shows a **From Share** card with the same three choices.
 
 ### Layout per size
 
-| Screen | xSmall | Large (default) | xxxLarge | AX5 |
-| --- | --- | --- | --- | --- |
-| Generate | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
-| Library | 5 columns | 3 columns | 3 columns, larger headers | 1–2 columns; headers wrap; machine badges hidden on tiles (still spoken, and shown in Info) |
-| Viewer | Icon bar | Icon bar | Icon bar | Icon bar with the Large Content Viewer; Info opens straight to `.large` |
-| Queue | Thumbnail beside text | same | same | Thumbnail above text; held-row buttons stacked full width; ETA on its own line |
-| Machine card | Dense | Dense | Figures wrap | Every label/value pair stacks; gauge full width; address wraps |
-| Models row | One line | Size trails | Size trails | Name, then sentence, then size, stacked; Get full width |
-| Live Activity / widgets | System-capped | | | `ViewThatFits` drops secondary content first |
+| Screen                  | xSmall                     | Large (default)                  | xxxLarge                                             | AX5                                                                                                                             |
+| ----------------------- | -------------------------- | -------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Generate                | One chip row; large canvas | Chips wrap to two rows if needed | Chips are icon + short label; prompt shows 1…4 lines | One **Options** button; the estimate sits above a full-width Generate; the model id moves into the menu; the Model button wraps |
+| Library                 | 5 columns                  | 3 columns                        | 3 columns, larger headers                            | 1–2 columns; headers wrap; machine badges hidden on tiles (still spoken, and shown in Info)                                     |
+| Viewer                  | Icon bar                   | Icon bar                         | Icon bar                                             | Icon bar with the Large Content Viewer; Info opens straight to `.large`                                                         |
+| Queue                   | Thumbnail beside text      | same                             | same                                                 | Thumbnail above text; held-row buttons stacked full width; ETA on its own line                                                  |
+| Machine card            | Dense                      | Dense                            | Figures wrap                                         | Every label/value pair stacks; gauge full width; address wraps                                                                  |
+| Models row              | One line                   | Size trails                      | Size trails                                          | Name, then sentence, then size, stacked; Get full width                                                                         |
+| Live Activity / widgets | System-capped              |                                  |                                                      | `ViewThatFits` drops secondary content first                                                                                    |
 
 ## 7. Microcopy
 
-| State | Copy |
-| --- | --- |
-| No machine | **No machines yet** — Mold makes pictures on a computer you own. Add one to begin. |
-| Generate, no machine | **Add a machine to start generating** [Add a Machine…] |
-| Machine not answering | Not answering since 14:02 — it may be asleep or off the network. |
-| Machine wants a key | This machine is there but wants an API key. [Add Key…] |
-| Checking | Checking… |
-| Held, missing model | Needs FLUX.2 [klein] on workstation before it can start. [Pull] [Retry] |
-| Held, other | *The machine's own sentence.* [Try Again] |
-| Gated pull | Qwen Image 2.1 is under the Qwen Research licence. [Accept and Download] |
-| Generate refused | workstation couldn't start this: out of video memory. Try a smaller shape or fewer in the batch. [✕] |
-| Pairing expired | This pairing code has expired. Make a new one from Pair a Phone… on your Mac. |
-| Wrong machine | This code belongs to a different machine than the one that answered at that address. |
-| Address silent | Nothing answered at 10.0.0.4:7680. |
-| Duplicate | workstation already answers at this address. |
-| Library empty | **No prints yet** — What you generate on any machine appears here. |
-| Search empty | Nothing here matches what you're looking for. |
-| Recently Deleted empty | **Nothing deleted** — Prints you delete stay here for 30 days. |
-| Queue empty | **Nothing waiting** — Renders you start appear here. |
-| Mesh can't draw | This 3-D object can't be drawn here — showing its poster instead. |
-| Source gone | workstation no longer has the source picture for this print. |
-| Parked well | Reference image (not used by this model) |
-| Live Activity stale | Open Mold Studio to refresh. |
-| Share staged | Waiting in Mold Studio. Open the app to use it. |
+| State                  | Copy                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| No machine             | **No machines yet** — Mold makes pictures on a computer you own. Add one to begin.                   |
+| Generate, no machine   | **Add a machine to start generating** [Add a Machine…]                                               |
+| Machine not answering  | Not answering since 14:02 — it may be asleep or off the network.                                     |
+| Machine wants a key    | This machine is there but wants an API key. [Add Key…]                                               |
+| Checking               | Checking…                                                                                            |
+| Held, missing model    | Needs FLUX.2 [klein] on workstation before it can start. [Pull] [Retry]                              |
+| Held, other            | _The machine's own sentence._ [Try Again]                                                            |
+| Gated pull             | Qwen Image 2.1 is under the Qwen Research licence. [Accept and Download]                             |
+| Generate refused       | workstation couldn't start this: out of video memory. Try a smaller shape or fewer in the batch. [✕] |
+| Pairing expired        | This pairing code has expired. Make a new one from Pair a Phone… on your Mac.                        |
+| Wrong machine          | This code belongs to a different machine than the one that answered at that address.                 |
+| Address silent         | Nothing answered at 10.0.0.4:7680.                                                                   |
+| Duplicate              | workstation already answers at this address.                                                         |
+| Library empty          | **No prints yet** — What you generate on any machine appears here.                                   |
+| Search empty           | Nothing here matches what you're looking for.                                                        |
+| Recently Deleted empty | **Nothing deleted** — Prints you delete stay here for 30 days.                                       |
+| Queue empty            | **Nothing waiting** — Renders you start appear here.                                                 |
+| Mesh can't draw        | This 3-D object can't be drawn here — showing its poster instead.                                    |
+| Source gone            | workstation no longer has the source picture for this print.                                         |
+| Parked well            | Reference image (not used by this model)                                                             |
+| Live Activity stale    | Open Mold Studio to refresh.                                                                         |
+| Share staged           | Waiting in Mold Studio. Open the app to use it.                                                      |
 
 ## 8. Interaction details
 
 **Haptics** (`.sensoryFeedback`)
 
-| Event | Feedback |
-| --- | --- |
-| A render finishes while the app is in the foreground | `.success` |
-| Generate is accepted | `.impact(weight: .light)` |
-| A job is held or fails | `.warning` |
-| Stepper changes and tile-size pinch snaps | `.selection` |
+| Event                                                | Feedback                  |
+| ---------------------------------------------------- | ------------------------- |
+| A render finishes while the app is in the foreground | `.success`                |
+| Generate is accepted                                 | `.impact(weight: .light)` |
+| A job is held or fails                               | `.warning`                |
+| Stepper changes and tile-size pinch snaps            | `.selection`              |
 
 There is no haptic on scroll.
 
@@ -636,10 +638,10 @@ and destructive items come last, after a divider.
 
 **Swipe actions**
 
-| Where | Actions |
-| --- | --- |
-| Queue | Cancel; Pause / Resume |
-| Models | Delete |
+| Where                      | Actions                      |
+| -------------------------- | ---------------------------- |
+| Queue                      | Cancel; Pause / Resume       |
+| Models                     | Delete                       |
 | Recently Deleted list mode | Put Back; Delete Immediately |
 
 **Pull to refresh** in Library, Queue, Machines and Models does a full reconcile,
@@ -656,41 +658,56 @@ not a delta.
 **Keyboard shortcuts** (iPad, or iPhone with a hardware keyboard), shown in the ⌘
 overlay:
 
-| Keys | Action |
-| --- | --- |
-| ⌘1–⌘5 | Generate · Library · Queue · Models · Machines |
-| ⌘↩ | Generate |
-| ⌘E | Expand |
-| ⌘F | Search |
-| ⌘R | Refresh |
-| ⌘, | Settings |
-| ⌥⌘I | Info |
-| ⌥⌘F | Favourite |
-| ⌘⌫ | Delete / Cancel Job |
-| ⌘Z | Undo |
-| ← → | Previous / next print |
-| Esc | Close the viewer |
-| ⌘+ / ⌘− | Tile size |
+| Keys    | Action                                         |
+| ------- | ---------------------------------------------- |
+| ⌘1–⌘5   | Generate · Library · Queue · Models · Machines |
+| ⌘↩      | Generate                                       |
+| ⌘E      | Expand                                         |
+| ⌘F      | Search                                         |
+| ⌘R      | Refresh                                        |
+| ⌘,      | Settings                                       |
+| ⌥⌘I     | Info                                           |
+| ⌥⌘F     | Favourite                                      |
+| ⌘⌫      | Delete / Cancel Job                            |
+| ⌘Z      | Undo                                           |
+| ← →     | Previous / next print                          |
+| Esc     | Close the viewer                               |
+| ⌘+ / ⌘− | Tile size                                      |
 
 ## 9. Mockup frames
 
-| # | Frame | Size / appearance |
-| --- | --- | --- |
-| 1 | Generate: idle with a result | Large, light |
-| 2 | Generate: running (denoise preview, sentence) | Large, dark |
-| 3 | Generate: keyboard up, source + image 1 / image 2 | Large, light |
-| 4 | Generate: collapsed Options, stacked Generate | AX5, light |
-| 5 | Generate | xSmall, dark |
-| 6 | More options: medium detent | Large, light |
-| 7 | Library: day sections, title menu open | Large, light |
-| 8 | Library: 2 columns, `is:video` token | AX3, dark |
-| 9 | Viewer with the Info sheet at 35% | Large, dark |
-| 10 | Queue: batch parent/children, plus a held row | Large, light |
-| 11 | Queue: held row with stacked buttons | AX5, light |
-| 12 | Machines: offline card, Nearby | Large, dark |
-| 13 | Add a Machine: scanner and live address check | Large, light |
-| 14 | Models: Discover download, plus the licence sheet | Large, light |
-| 15 | iPad landscape: sidebar and Library | Large, dark |
-| 16 | Live Activity, Dynamic Island, widgets | Light and dark |
+| #   | Frame                                             | Size / appearance |
+| --- | ------------------------------------------------- | ----------------- |
+| 1   | Generate: idle with a result                      | Large, light      |
+| 2   | Generate: running (denoise preview, sentence)     | Large, dark       |
+| 3   | Generate: keyboard up, source + image 1 / image 2 | Large, light      |
+| 4   | Generate: collapsed Options, stacked Generate     | AX5, light        |
+| 5   | Generate                                          | xSmall, dark      |
+| 6   | More options: medium detent                       | Large, light      |
+| 7   | Library: day sections, title menu open            | Large, light      |
+| 8   | Library: 2 columns, `is:video` token              | AX3, dark         |
+| 9   | Viewer with the Info sheet at 35%                 | Large, dark       |
+| 10  | Queue: batch parent/children, plus a held row     | Large, light      |
+| 11  | Queue: held row with stacked buttons              | AX5, light        |
+| 12  | Machines: offline card, Nearby                    | Large, dark       |
+| 13  | Add a Machine: scanner and live address check     | Large, light      |
+| 14  | Models: Discover download, plus the licence sheet | Large, light      |
+| 15  | iPad landscape: sidebar and Library               | Large, dark       |
+| 16  | Live Activity, Dynamic Island, widgets            | Light and dark    |
 
 Offline Generate and Queue explain unavailable data and direct the person to Machines. A saved draft waits for its model profile rather than adopting the first responding machine's defaults; explicit kind/model choice cancels that restoration. Exports fail as one selection if a source machine has been removed, preserving each file's media kind.
+
+### Queue details and prompt history
+
+Queue cards show the source image, a short curated model title, prompt excerpt,
+and current state. Tap a card for the full model ID, generation settings,
+source, progress, and job controls. Pause applies only to waiting jobs; Resume
+applies to paused jobs. Retry is offered only for a retryable held job with its
+original batch identity. Cancelling jobs are read-only, and controls wait for
+an in-flight change to finish.
+
+Prompt History is available directly in Generate. Choose a machine and search
+its saved prompts; selecting one changes only the prompt, preserving the model,
+settings, and attached media. Loading, offline, unavailable history, and failed
+requests have distinct messages. Clear asks for confirmation and removes that
+machine's entire history, including prompts hidden by search.

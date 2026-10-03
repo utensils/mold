@@ -220,3 +220,18 @@ readable width; large accessibility text stacks the image and words.
 ### Unloading server models
 
 Open Machines → Models → Installed. Server Memory lists loaded models with visible Unload controls. Unload All Models releases every resident model on the selected server while retaining downloaded files. Controls are unavailable offline or while another model operation is pending; server refusals appear in the failure banner.
+
+### Queue details and prompt history
+
+Queue cards show the source image, a short curated model title, prompt excerpt,
+and current state. Tap a card for the full model ID, generation settings,
+source, progress, and job controls. Pause applies only to waiting jobs; Resume
+applies to paused jobs. Retry is offered only for a retryable held job with its
+original batch identity. Cancelling jobs are read-only, and controls wait for
+an in-flight change to finish.
+
+Prompt History is available directly in Generate. Choose a machine and search
+its saved prompts; selecting one changes only the prompt, preserving the model,
+settings, and attached media. Loading, offline, unavailable history, and failed
+requests have distinct messages. Clear asks for confirmation and removes that
+machine's entire history, including prompts hidden by search.

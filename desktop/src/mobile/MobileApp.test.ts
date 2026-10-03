@@ -7530,11 +7530,13 @@ describe("MobileApp queue rows", () => {
     const running = cards[0]!;
     expect(running.get("[role='progressbar']").attributes("aria-valuenow")).toBe("50");
     expect(running.get("[data-test='mobile-generation-job-meta']").text()).toBe("Studio");
-    // A machine's own row has no latent preview to show.
+    // Retained source previews are available even for another client's work.
     expect(running.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
 
     const queued = cards[1]!;
-    expect(queued.get("[data-test='mobile-generation-job-position']").text()).toBe("2");
+    expect(queued.get(".queue-source-thumbnail img").attributes("alt")).toBe(
+      "Source image for this render",
+    );
     expect(wrapper.find(".live-activity-row").exists()).toBe(false);
   });
 });

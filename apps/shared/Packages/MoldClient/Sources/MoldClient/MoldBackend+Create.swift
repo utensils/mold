@@ -12,6 +12,7 @@ public protocol MoldCreateBackend: Sendable {
     func remix(_ request: RemixRequest) async throws -> RemixResponse
     /// Newest first. What somebody typed, not what was made.
     func history(limit: Int) async throws -> HistoryListing
+    func history(limit: Int, query: String) async throws -> HistoryListing
     /// `nil` clears everything; otherwise trims to the most recent N. There
     /// is no per-row delete -- a `HistoryEntry` carries no id to name one.
     func clearHistory(keeping keep: Int?) async throws
@@ -25,4 +26,14 @@ public extension MoldBackend {
     /// default: an existential call can't see a default argument, and every
     /// conformance (including the fake) gets this for free.
     func clearHistory() async throws { try await clearHistory(keeping: nil) }
+}
+
+public extension MoldCreateBackend {
+    /// Compatibility for custom backends; HTTPBackend searches the server.
+    func history(limit: Int, query: String) async throws -> HistoryListing {
+        let listing = try await history(limit: query.isEmpty ? limit : 500)
+        return HistoryListing(entries: Array(listing.entries.filter {
+            query.isEmpty || $0.prompt.localizedCaseInsensitiveContains(query)
+        }.prefix(limit)))
+    }
 }

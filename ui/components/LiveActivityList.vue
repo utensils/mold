@@ -9,6 +9,7 @@ import { resolveSwipeAxis, type SwipePhase } from "@studio/lib/swipeAction";
 const props = withDefaults(
   defineProps<{
     rows: FleetActiveWork[];
+    modelLabel?: (row: FleetActiveWork) => string;
     compact?: boolean;
     interactive?: boolean;
     swipeActions?: boolean;
@@ -82,12 +83,12 @@ function select(row: FleetActiveWork): void {
 }
 
 function title(row: FleetActiveWork): string {
+  const model = props.modelLabel?.(row) ?? row.model;
   if (row.kind === "download")
-    return row.model ? `Pulling ${row.model}` : "Model download";
-  if (row.kind === "sequence")
-    return row.model ? `${row.model} sequence` : "Sequence";
-  if (row.kind === "generation") return row.model ?? "Generation";
-  return row.model ?? row.kind.replaceAll("_", " ");
+    return model ? `Pulling ${model}` : "Model download";
+  if (row.kind === "sequence") return model ? `${model} sequence` : "Sequence";
+  if (row.kind === "generation") return model ?? "Generation";
+  return model ?? row.kind.replaceAll("_", " ");
 }
 
 function progress(row: FleetActiveWork): number | null {

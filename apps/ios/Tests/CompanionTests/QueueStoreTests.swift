@@ -38,6 +38,71 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func cancellingAndOfflineRowsOfferNoMutations() async throws {
+        let (queue, hosts, _) = try await Self.setUp(capabilities: #"{"queue":{"can_pause_job":true,"can_cancel_running":true}}"#)
+        let host = hosts.hosts[0]
+        let cancelling = try Self.decode(QueueEntry.self, #"{"id":"c","state":"cancelling"}"#)
+        #expect(!queue.canCancel(cancelling, on: host.id))
+        let entry = try #require(queue.listings[host.id]?.first { $0.id == "q1" })
+        hosts.setReachability(.down("Offline"), for: host.id)
+        #expect(!queue.canCancel(entry, on: host.id))
+        #expect(!queue.canPause(entry, on: host.id))
+    }
+
+    @Test func everyQueueStateHasOnlyItsValidControls() async throws {
+        let (queue, hosts, fake) = try await Self.setUp(capabilities: #"{"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#)
+        let id = hosts.hosts[0].id
+        for state in ["queued", "paused", "running", "held", "cancelling", "complete", "failed", "cancelled", "unknown"] {
+            let listing = try Self.decode(QueueListing.self, "{\"entries\":[{\"id\":\"s\",\"state\":\"\(state)\",\"batch_id\":\"b\",\"client_batch_id\":\"cb\",\"retryable\":true}]}")
+            fake.stub("queue()", returning: listing); await queue.poll(id)
+            let row = listing.entries[0]
+            #expect(queue.canCancel(row, on: id) == ["queued", "paused", "running", "held"].contains(state))
+            #expect(queue.canPause(row, on: id) == ["queued", "paused"].contains(state))
+            #expect(queue.canRetry(row, on: id) == (state == "held"))
+        }
+    }
+
+    @Test func retryRequiresAuthorityAndExplicitRefusalsWin() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        for json in [#"{"entries":[{"id":"h","state":"held","retryable":true}]}"#,
+                     #"{"entries":[{"id":"h","state":"held","batch_id":"b","client_batch_id":"cb","retryable":false}]}"#] {
+            let listing = try Self.decode(QueueListing.self, json)
+            fake.stub("queue()", returning: listing); await queue.poll(id)
+            #expect(!queue.canRetry(listing.entries[0], on: id))
+            await queue.retry(listing.entries[0], on: id)
+        }
+        #expect(fake.count("retryJob(_:)" ) == 0)
+    }
+
+    @Test func oneItemMutationRemainsGuardedThroughItsRefresh() async throws {
+        let (queue, hosts, fake) = try await Self.setUp(capabilities: #"{"queue":{"can_pause_job":true}}"#)
+        let id = hosts.hosts[0].id
+        let row = try #require(queue.listings[id]?.first { $0.id == "q1" })
+        fake.stub("pauseJob(id:)") { _ in
+            await MainActor.run {
+                #expect(queue.isActing(row, on: id))
+                #expect(!queue.canPause(row, on: id))
+            }
+            await queue.setPaused(true, row, on: id)
+            return ()
+        }
+        await queue.setPaused(true, row, on: id)
+        #expect(fake.count("pauseJob(id:)") == 1)
+        #expect(!queue.isActing(row, on: id))
+    }
+
+    @Test func retryDoesNotUseAChangedBatchIdentity() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let original = try Self.decode(QueueListing.self, #"{"entries":[{"id":"h","state":"held","batch_id":"old","client_batch_id":"client","retryable":true}]}"#)
+        fake.stub("queue()", returning: original); await queue.poll(id)
+        let changed = try Self.decode(QueueListing.self, #"{"entries":[{"id":"h","state":"held","batch_id":"new","client_batch_id":"client","retryable":true}]}"#)
+        fake.stub("queue()", returning: changed); await queue.poll(id)
+        await queue.retry(original.entries[0], on: id)
+        #expect(fake.count("retryJob(_:)" ) == 0)
+    }
+
     @Test func sourceThumbnailUsesTheQueuedJobsPrivateRoute() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         let id = hosts.hosts[0].id

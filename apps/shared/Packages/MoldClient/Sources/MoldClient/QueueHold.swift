@@ -30,7 +30,7 @@ public enum QueueHold: Hashable, Sendable {
         {
             return .missingModel(model, sentence: sentence)
         }
-        let retryable = child?.retryable ?? entry.retryable ?? true
+        let retryable = child?.retryable != false && entry.retryable != false
         return .prose(sentence, retryable: retryable)
     }
 }

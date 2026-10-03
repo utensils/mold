@@ -1301,27 +1301,29 @@ mod tests {
         let mut metadata =
             mold_core::OutputMetadata::from_generate_request(&request, 7, None, "test");
         metadata.job_id = Some("gallery-job".into());
-        let record = mold_db::GenerationRecord::from_save(
-            gallery.path(),
-            "mesh.glb",
-            mold_core::OutputFormat::Glb,
-            metadata,
-            mold_db::RecordSource::Server,
-            1,
-        );
         let gate = crate::batch_transaction::GalleryPublicationGate::default();
-        let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
-            gallery.path(),
-            "publication",
-            0,
-            serde_json::json!({"kind": "derived-media-test"}),
-            record,
-        )
-        .unwrap();
-        std::fs::write(publication.staging_path(), b"mesh bytes").unwrap();
-        publication.seal_staged_file().unwrap();
-        publication.mark_prepared().unwrap();
-        publication.commit(&gate, db.clone()).await.unwrap();
+        for filename in ["mesh.glb", "sibling.glb"] {
+            let record = mold_db::GenerationRecord::from_save(
+                gallery.path(),
+                filename,
+                mold_core::OutputFormat::Glb,
+                metadata.clone(),
+                mold_db::RecordSource::Server,
+                1,
+            );
+            let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
+                gallery.path(),
+                filename,
+                0,
+                serde_json::json!({"kind": "derived-media-test"}),
+                record,
+            )
+            .unwrap();
+            std::fs::write(publication.staging_path(), b"mesh bytes").unwrap();
+            publication.seal_staged_file().unwrap();
+            publication.mark_prepared().unwrap();
+            publication.commit(&gate, db.clone()).await.unwrap();
+        }
         lifecycle
             .handoff_to_gallery("gallery-job", gallery.path(), &gate)
             .unwrap();
@@ -1374,10 +1376,86 @@ mod tests {
                 CleanupOutcome::Deleted
             );
         }
+        // Queue ownership is gone. Trash must preserve source ownership,
+        // and deleting one sibling must not release the other's source.
+        let metadata_db = db.as_ref().as_ref().unwrap();
+        crate::gallery_trash::trash_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            metadata_db,
+            &gate,
+            1,
+        )
+        .unwrap();
+        for pin in &pins {
+            assert!(lifecycle
+                .gallery_member_bytes(pin.media_set.clone(), pin.pin_id.clone(), 0,)
+                .is_ok());
+        }
+        crate::gallery_trash::restore_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            metadata_db,
+            &gate,
+            0,
+        )
+        .unwrap();
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            Some(metadata_db),
+            &gate,
+            Some(&lifecycle),
+        )
+        .unwrap();
         for pin in pins {
             assert!(lifecycle
                 .gallery_member_bytes(pin.media_set, pin.pin_id, 0)
-                .is_ok());
+                .is_err());
+        }
+        let restarted = QueueMediaLifecycle::new(db.clone(), home.path().to_path_buf(), owner);
+        assert!(
+            reconcile_claimed_owner(&journal, &restarted)
+                .unwrap()
+                .durable_media_ready
+        );
+        let restarted_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        restarted
+            .reconcile_gallery_pins(gallery.path(), &restarted_gate)
+            .unwrap();
+        let (_, surviving) = restarted_gate
+            .retained_media_for_item(gallery.path(), "sibling.glb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(surviving.len(), 2);
+        for pin in &surviving {
+            let manifest = restarted
+                .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                .unwrap();
+            let expected = if manifest.entries[0].role == "source_image" {
+                vec![9]
+            } else {
+                vec![1, 2, 3]
+            };
+            assert_eq!(
+                restarted
+                    .gallery_member_bytes(pin.media_set.clone(), pin.pin_id.clone(), 0)
+                    .unwrap(),
+                expected
+            );
+        }
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "sibling.glb",
+            Some(metadata_db),
+            &restarted_gate,
+            Some(&restarted),
+        )
+        .unwrap();
+        for pin in surviving {
+            assert!(restarted
+                .gallery_member_bytes(pin.media_set, pin.pin_id, 0)
+                .is_err());
         }
     }
 

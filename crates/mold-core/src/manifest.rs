@@ -288,6 +288,24 @@ impl ModelManifest {
     /// authored title retains version/task/precision, while the trade-off
     /// remains in `description`. Never use this label as a request or file id.
     pub fn display_name(&self) -> String {
+        if self.family == crate::minimax_h3::FAMILY {
+            use crate::minimax_h3::{Layout, Task};
+            let task = match crate::minimax_h3::task_for_model(&self.name) {
+                Some(Task::Fl2va) => "FL2VA",
+                Some(Task::Ref2va) => "Ref2VA",
+                None => return self.name.clone(),
+            };
+            let variant = crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .find(|tier| tier.model == self.name)
+                .map(|tier| tier.display_label)
+                .unwrap_or_else(|| match crate::minimax_h3::layout_for_model(&self.name) {
+                    Some(Layout::OfficialBf16) => "BF16",
+                    Some(Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "NVFP4",
+                    _ => "",
+                });
+            return format!("MiniMax H3 {task} {variant}").trim().to_string();
+        }
         let title = self
             .description
             .split_once(" — ")
@@ -9885,6 +9903,24 @@ mod tests {
         // Flux.2 models
         assert!(find_manifest("flux2-klein:bf16").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn h3_queue_titles_share_short_curated_names() {
+        assert_eq!(
+            model_display_name(crate::minimax_h3::FL2VA_COMFY).as_deref(),
+            Some("MiniMax H3 FL2VA")
+        );
+        assert_eq!(
+            model_display_name(crate::minimax_h3::REF2VA_COMFY).as_deref(),
+            Some("MiniMax H3 Ref2VA")
+        );
+        for tier in crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let title = model_display_name(tier.model).unwrap();
+            assert!(title.contains(tier.display_label), "{title}");
+            assert!(!title.contains("downloadable"), "{title}");
+        }
+        assert_eq!(model_display_name("hf:someone/custom-title"), None);
     }
 
     #[test]

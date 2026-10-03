@@ -349,3 +349,7 @@ Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
 in anonymous route proofs. Plain HTTP still requires a trusted network.
+
+Native iOS queue cards use concise curated model names and open full job details
+on tap, with state-aware per-job controls. Generate exposes searchable per-machine
+Prompt History with prompt-only recall.

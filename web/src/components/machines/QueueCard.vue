@@ -8,6 +8,8 @@
  * transport and reloads after each emitted action.
  */
 import { computed } from "vue";
+import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
+import type { ApiTarget } from "@studio/api/client";
 import CardSurface from "@ui/components/CardSurface.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -29,6 +31,8 @@ import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 const props = withDefaults(
   defineProps<{
     entries: QueueEntry[];
+    target?: ApiTarget | null;
+    instanceId?: string | null;
     plan?: QueuePlan | null;
     models?: ModelInfoExtended[];
     /** Exact schedulable CUDA ordinals advertised by this host. */
@@ -200,6 +204,12 @@ function queuedIndexOf(id: string): number {
           class="qc__row"
           data-test="queue-row"
         >
+          <QueueSourceThumbnail
+            :target="target"
+            :instance-id="instanceId"
+            :job-id="entry.id"
+            :online="!dimmed"
+          />
           <BadgePill
             :tone="entry.state === 'running' ? 'accent' : 'neutral'"
             outline

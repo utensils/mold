@@ -8,6 +8,7 @@
  * recently. The per-GPU lane view lives in host detail.
  */
 import { computed } from "vue";
+import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
@@ -23,6 +24,10 @@ import {
   resolveQueueWait,
   type QueueStatusIndex,
 } from "@studio/lib/queuePosition";
+import {
+  modelDisplayNameForId,
+  type DisplayableModel,
+} from "@studio/lib/modelDisplay";
 import type { Job } from "../../composables/useGenerateStream";
 import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
@@ -30,6 +35,14 @@ import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 const props = withDefaults(
   defineProps<{
     jobs: Job[];
+    modelsForHost?: (hostId: string) => readonly DisplayableModel[];
+    sourceHosts?: Array<{
+      id: string;
+      url: string;
+      apiKey?: string | null;
+      status: string;
+      instanceId?: string | null;
+    }>;
     /** Queue shows every waiting/error row; the Create strip stays compact. */
     expanded?: boolean;
     /** Server-owned work discovered after a reload or in another client. */
@@ -41,6 +54,18 @@ const props = withDefaults(
   { shared: () => [], queueStatus: null, expanded: false },
 );
 
+function sharedModelLabel(row: FleetActiveWork): string {
+  return row.model
+    ? modelDisplayNameForId(row.model, props.modelsForHost?.(row.hostId) ?? [])
+    : "Generation";
+}
+function sourceHost(id: string) {
+  return props.sourceHosts?.find((host) => host.id === id);
+}
+function sourceTarget(id: string) {
+  const host = sourceHost(id);
+  return host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null;
+}
 /** "Next up" / "#2 in line", or "Waiting for memory" when the scheduler really
  * did park the job. Resolved in the shared studio layer so web, desktop, and
  * iPhone describe the same waiting row the same way; a server that lists
@@ -230,8 +255,15 @@ const active = computed(
 
     <template v-for="row in activeRows" :key="row.key">
       <div v-if="row.kind === 'shared'" class="activity__shared">
+        <QueueSourceThumbnail
+          :target="sourceTarget(row.shared.hostId)"
+          :job-id="row.shared.id"
+          :instance-id="row.shared.instanceId"
+          :online="!row.shared.stale"
+        />
         <LiveActivityList
           :rows="[row.shared]"
+          :model-label="sharedModelLabel"
           interactive
           @select="emit('shared-open', $event)"
         />
@@ -243,7 +275,7 @@ const active = computed(
           "
           type="button"
           class="activity__row-action"
-          :aria-label="`Details for ${row.shared.model ?? 'job'} on ${row.shared.hostLabel}`"
+          :aria-label="`Details for ${sharedModelLabel(row.shared)} on ${row.shared.hostLabel}`"
           :data-test="`activity-details-${row.shared.key}`"
           @click="
             emit(
@@ -267,7 +299,18 @@ const active = computed(
           :data-test="`activity-running-${row.print.id}`"
           @click="emit('open', row.print)"
         >
-          <span class="activity__thumb ms-shimmer" aria-hidden="true" />
+          <QueueSourceThumbnail
+            :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
+            :job-id="row.print.serverId ?? ''"
+            :instance-id="
+              sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
+            "
+            :online="
+              sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.status === 'ready'
+            "
+          >
+            <span class="activity__thumb ms-shimmer" aria-hidden="true" />
+          </QueueSourceThumbnail>
           <span class="activity__body">
             <span class="activity__prompt">
               <span
@@ -330,6 +373,16 @@ const active = computed(
       </div>
 
       <div v-else class="activity__queued">
+        <QueueSourceThumbnail
+          :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
+          :job-id="row.print.serverId ?? ''"
+          :instance-id="
+            sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
+          "
+          :online="
+            sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.status === 'ready'
+          "
+        />
         <div class="activity__pill">
           <button
             type="button"
@@ -434,7 +487,7 @@ const active = computed(
   gap: 8px;
   min-width: 0;
 }
-.activity__shared > :first-child {
+.activity__shared :deep(.live-activity-list) {
   flex: 1;
   min-width: 0;
 }

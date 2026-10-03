@@ -16,6 +16,7 @@ final class QueueStore {
     private(set) var progress: [String: JobProgress] = [:]
     /// A one-line result a person should see ("Sent to hal9000."), in place.
     var summary: String?
+    private(set) var acting: Set<String> = []
     private var sourcePrompts: [String: String] = [:]
     private var sourceThumbnails: [String: Data] = [:]
     @ObservationIgnored private var thumbnailAttempts: Set<String> = []
@@ -183,29 +184,71 @@ final class QueueStore {
 
     /// Whether this row can be cancelled at all: a job already rendering on a
     /// machine that cannot stop at a safe point has nothing to press.
+    func current(_ entry: QueueEntry, on id: MoldHost.ID) -> QueueEntry? {
+        listings[id]?.first { $0.id == entry.id }
+    }
+
+    func headline(for entry: QueueEntry, on id: MoldHost.ID) -> String {
+        hosts.models[id]?.first { $0.name == entry.model }?.headline ?? entry.modelHeadline
+    }
+
+    func isActing(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        acting.contains("\(id)|\(entry.id)")
+    }
+
+    private func actionable(_ entry: QueueEntry, on id: MoldHost.ID) -> QueueEntry? {
+        guard let host = hosts.host(id), hosts.isUp(host), !isActing(entry, on: id) else { return nil }
+        return current(entry, on: id)
+    }
+
     func canCancel(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
-        guard entry.state == .running else { return entry.state.isLive }
-        return hosts.capabilities[id]?.canCancelRunningJob == true
+        guard let row = actionable(entry, on: id) else { return false }
+        switch row.state {
+        case .queued, .paused, .held: return true
+        case .running: return hosts.capabilities[id]?.canCancelRunningJob == true
+        default: return false
+        }
     }
 
     func canPause(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
-        hosts.capabilities[id]?.canPauseOneJob == true && (entry.state == .queued || entry.state == .paused)
+        guard let row = actionable(entry, on: id) else { return false }
+        return hosts.capabilities[id]?.canPauseOneJob == true && (row.state == .queued || row.state == .paused)
     }
 
-    func canReorder(on id: MoldHost.ID) -> Bool { hosts.capabilities[id]?.canReorderQueue == true }
+    func canRetry(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        guard let row = actionable(entry, on: id), row.state == .held,
+              row.retryable != false, let instance = hosts.instanceID(of: id),
+              row.authority(instanceId: instance) != nil else { return false }
+        if case .prose(_, retryable: false) = hold(for: row, on: id) { return false }
+        return true
+    }
+
+    func canTransfer(_ entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        guard let row = actionable(entry, on: id), row.state == .held,
+              let instance = hosts.instanceID(of: id) else { return false }
+        return row.authority(instanceId: instance) != nil
+    }
+
+    func canReorder(on id: MoldHost.ID) -> Bool {
+        guard let host = hosts.host(id), hosts.isUp(host) else { return false }
+        return hosts.capabilities[id]?.canReorderQueue == true
+    }
 
     // MARK: - Acting
 
     func cancel(_ entry: QueueEntry, on id: MoldHost.ID) async {
-        await act(id, String(localized: "cancel that job")) { client in
-            if entry.state == .held { _ = try await client.cancelHeldJob(id: entry.id) } else {
+        guard canCancel(entry, on: id), let row = current(entry, on: id), row.state == entry.state else { return }
+        await actOn(row, on: id, String(localized: "cancel that job")) { client in
+            if row.state == .held { _ = try await client.cancelHeldJob(id: entry.id) } else {
                 try await client.cancelJob(id: entry.id)
             }
         }
     }
 
     func setPaused(_ paused: Bool, _ entry: QueueEntry, on id: MoldHost.ID) async {
-        await act(id, paused ? String(localized: "pause that job") : String(localized: "resume that job")) { client in
+        guard canPause(entry, on: id), let row = current(entry, on: id),
+              row.state == (paused ? .queued : .paused) else { return }
+        await actOn(row, on: id, paused ? String(localized: "pause that job") : String(localized: "resume that job")) { client in
             if paused { try await client.pauseJob(id: entry.id) } else { try await client.resumeJob(id: entry.id) }
         }
     }
@@ -239,8 +282,10 @@ final class QueueStore {
     }
 
     func retry(_ entry: QueueEntry, on id: MoldHost.ID) async {
-        guard let instance = hosts.instanceID(of: id), let authority = entry.authority(instanceId: instance) else { return }
-        await act(id, String(localized: "try that job again")) { try await $0.retryJob(authority) }
+        guard canRetry(entry, on: id), let row = current(entry, on: id),
+              row.batchId == entry.batchId, row.clientBatchId == entry.clientBatchId,
+              let instance = hosts.instanceID(of: id), let authority = row.authority(instanceId: instance) else { return }
+        await actOn(row, on: id, String(localized: "try that job again")) { try await $0.retryJob(authority) }
     }
 
     func setQueuePaused(_ paused: Bool, on ids: [MoldHost.ID]) async {
@@ -264,6 +309,14 @@ final class QueueStore {
                 }
             }
         }
+    }
+
+    private func actOn(_ entry: QueueEntry, on id: MoldHost.ID, _ verb: String,
+                       _ body: (any MoldBackend) async throws -> Void) async {
+        let key = "\(id)|\(entry.id)"
+        guard acting.insert(key).inserted else { return }
+        defer { acting.remove(key) }
+        await act(id, verb, body)
     }
 
     private func act(_ id: MoldHost.ID, _ verb: String, _ body: (any MoldBackend) async throws -> Void) async {

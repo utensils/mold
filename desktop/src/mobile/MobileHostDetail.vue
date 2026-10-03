@@ -1320,6 +1320,9 @@ onBeforeUnmount(() => {
               @act="onQueueRowAction(entry, $event)"
             >
               <MobileGenerationQueueCard
+                :source-target="target"
+                :source-job-id="entry.id"
+                :source-instance-id="host.instanceId"
                 :title="entry.metadata?.prompt?.trim() || modelLabel(entry.model)"
                 :subtitle="
                   entry.metadata?.prompt?.trim()

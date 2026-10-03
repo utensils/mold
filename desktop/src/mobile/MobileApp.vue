@@ -2896,6 +2896,13 @@ const activityRows = computed<ActivityRow[]>(() =>
 const queueControlHostIds = ref(new Set<string>());
 const pausedQueueJobIds = ref(new Set<string>());
 
+function retainedQueueSource(hostId: string) {
+  const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
+  return host ? mobileHostTarget(host) : null;
+}
+function retainedQueueInstance(hostId: string) {
+  return connectedHosts.value.find((candidate) => candidate.id === hostId)?.instanceId ?? null;
+}
 function activityRowHostId(row: ActivityRow): string {
   return row.print.hostId ?? selectedHostId.value;
 }
@@ -13854,6 +13861,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     @act="onMobileQueueRowAction(entry.local, $event)"
                   >
                     <MobileGenerationQueueCard
+                      :source-target="retainedQueueSource(activityRowHostId(entry.local))"
+                      :source-job-id="activityRowJobId(entry.local)"
+                      :source-instance-id="retainedQueueInstance(activityRowHostId(entry.local))"
                       :title="queuePrintTitle(entry.local.print)"
                       :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
                       :status="activityRowStatus(entry.local)"
@@ -13883,6 +13893,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     @act="setFleetJobPaused(entry.shared, !fleetQueueResumeNeeded(entry.shared))"
                   >
                     <MobileGenerationQueueCard
+                      :source-target="retainedQueueSource(entry.shared.hostId)"
+                      :source-job-id="entry.shared.id"
+                      :source-instance-id="retainedQueueInstance(entry.shared.hostId)"
                       :row-test-id="`fleet-job-${entry.shared.key}`"
                       :title="sharedQueueTitle(entry.shared)"
                       subtitle=""

@@ -14,14 +14,22 @@ final class FixtureMachine: @unchecked Sendable {
     private let gallery: Data
     private let retainedMediaFixture: Bool
     private let queueFixture: Bool
+    private let allRequests = Mutex<[String]>([])
+    func requestLog() -> [String] { allRequests.withLock { $0 } }
+    private let queueRequests = Mutex<[String]>([])
+    func queueActionRequests() -> [String] { queueRequests.withLock { $0 } }
+    private let queueControls: Bool
+    private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
+    private var clearedHistory = false
     private let collectionFixture: Bool
     private var collectionHidden = false
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false) throws {
         self.retainedMediaFixture = retainedMediaFixture
         self.queueFixture = queueFixture
+        self.queueControls = queueControls
         self.collectionFixture = collectionFixture
         modelMemoryFixture = loadedModels
         if loadedModels { residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"] }
@@ -104,11 +112,21 @@ final class FixtureMachine: @unchecked Sendable {
             }
             let request = headers[0].split(separator: " ")
             let path = request.count > 1 ? String(request[1]).components(separatedBy: "?")[0] : ""
+            allRequests.withLock { $0.append(String(request.first ?? "") + " " + path) }
             let patchCollection = collectionFixture && request.first == "PATCH"
                 && path == "/api/gallery/collections/fixture-collection"
             if patchCollection,
                let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let hidden = object["hidden"] as? Bool { collectionHidden = hidden }
+            if queueControls, path == "/api/history", request.first == "DELETE" { clearedHistory = true }
+            if queueControls, request.first == "POST", path.hasPrefix("/api/queue/") {
+                queueRequests.withLock { $0.append(path) }
+                let parts = path.split(separator: "/")
+                if parts.count == 4 {
+                    let job = String(parts[2]); let action = parts[3]
+                    if jobStates[job] != nil { jobStates[job] = action == "pause" ? "paused" : "queued" }
+                }
+            }
             let install = queueFixture && request.first == "POST" && path == "/api/downloads"
             if install, let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let model = object["model"] as? String { downloadedModels.withLock { $0.append(model) } }
@@ -118,8 +136,9 @@ final class FixtureMachine: @unchecked Sendable {
                 if let name = object["model"] as? String { residentModels.remove(name) }
                 else { residentModels.removeAll() }
             }
-            let allowed = install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
-            let body = install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let allowed = (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
+            let body = install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
             let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
                 ? "image/png" : "application/json"
@@ -129,11 +148,22 @@ final class FixtureMachine: @unchecked Sendable {
         }
     }
 
+    private func queueRow(_ id: String) -> [String: Any] {
+        ["id": id, "state": jobStates[id] ?? "queued", "model": "ltx-2.5-22b-distilled:bf16",
+         "model_display_name": "A legacy verbose title that must not appear",
+         "position": id == "fixture-video" ? 0 : 1, "durable": true,
+         "batch_id": id, "client_batch_id": "client-" + id, "retryable": true,
+         "explicitly_paused": true,
+         "held_reason": "Temporary machine pressure",
+         "metadata": ["prompt": id == "fixture-video" ? "A coastal path at sunrise" : "A quiet mountain lake",
+                      "model": "ltx-2.5-22b-distilled:bf16", "seed": 42, "steps": 8, "width": 768, "height": 512, "frames": 49, "fps": 24]]
+    }
+
     private func collection() -> Data {
         Data(#"{"id":"fixture-collection","name":"UAT Drafts","slug":"uat-drafts","count":1,"hidden":\#(collectionHidden)}"#.utf8)
     }
 
-    private func response(_ path: String) -> Data {
+    private func response(_ path: String, historyQuery: String? = nil) -> Data {
         // A visible coastal illustration makes queue screenshots useful for
         // visual acceptance, rather than a white one-pixel placeholder.
         if path.hasSuffix("/input-thumbnail") {
@@ -159,11 +189,15 @@ final class FixtureMachine: @unchecked Sendable {
                 row["is_loaded"] = residentModels.contains(row["name"] as! String)
                 return row
             })
-        case "/api/status": json = #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
-        case "/api/capabilities": json = collectionFixture
+        case "/api/status": json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
+        case "/api/capabilities":
+            if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }
+            json = collectionFixture
             ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#
             : #"{"max_batch_outputs":4}"#
-        case "/api/queue": json = queueFixture
+        case "/api/queue":
+            if queueControls { return try! JSONSerialization.data(withJSONObject: ["entries": [queueRow("fixture-video"), queueRow("fixture-held")]]) }
+            json = queueFixture
             ? #"{"entries":[{"id":"fixture-video","state":"queued","model":"ltx-2.5-22b-distilled:bf16","model_display_name":"LTX-2.5 Distilled BF16","position":0,"durable":true,"metadata":{"prompt":"A coastal path at sunrise","model":"ltx-2.5-22b-distilled:bf16"}}]}"#
             : #"{"entries":[]}"#
         case "/api/gallery": return gallery
@@ -173,7 +207,13 @@ final class FixtureMachine: @unchecked Sendable {
             }
             json = "[]"
         case "/api/gallery/tags": json = "[]"
-        case "/api/history": json = #"{"entries":[]}"#
+        case "/api/queue/fixture-video", "/api/queue/fixture-held":
+            return try! JSONSerialization.data(withJSONObject: ["job": queueRow(path.hasSuffix("fixture-held") ? "fixture-held" : "fixture-video")])
+        case "/api/history":
+            if queueControls, !clearedHistory, historyQuery?.isEmpty != false || "A lighthouse in winter".localizedCaseInsensitiveContains(historyQuery ?? "") {
+                return try! JSONSerialization.data(withJSONObject: ["entries": [["prompt": "A lighthouse in winter", "model": "flux-dev:q4", "used_at": 1791017129000]]])
+            }
+            json = #"{"entries":[]}"#
         default: json = "{}"
         }
         return Data(json.utf8)

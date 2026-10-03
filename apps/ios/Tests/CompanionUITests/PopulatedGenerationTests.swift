@@ -213,6 +213,104 @@ final class PopulatedGenerationTests: XCTestCase {
         app.buttons["Done"].firstMatch.tap()
     }
 
+    @MainActor func testQueueDetailsControlsAndPromptHistory() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true)
+        let port = try await machine.start()
+        let fixtureName = "Queue History Fixture \(port)"
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText(fixtureName)
+        let address = app.textFields["machine-address"]
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let open = app.buttons["queue-open-fixture-video"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["A legacy verbose title that must not appear"].exists)
+        open.tap()
+        XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ltx-2.5-22b-distilled:bf16"].exists)
+        let inspector = app.descendants(matching: .any)["queue-detail"].firstMatch
+        let seed = inspector.staticTexts["Seed"].firstMatch
+        revealInspector(seed, in: inspector, app: app)
+        XCTAssertTrue(seed.exists)
+        let pause = inspector.buttons["Pause"].firstMatch
+        revealInspector(pause, in: inspector, app: app); pause.tap()
+        guard inspector.buttons["Resume"].firstMatch.waitForExistence(timeout: 5) else {
+            XCTFail("Pause did not settle. Fixture mutations: \(machine.queueActionRequests()). \(inspector.debugDescription)"); return
+        }
+        inspector.buttons["Resume"].firstMatch.tap()
+        XCTAssertTrue(inspector.buttons["Pause"].firstMatch.waitForExistence(timeout: 5))
+        attach(app)
+        app.buttons["Done"].firstMatch.tap()
+        app.buttons["queue-open-fixture-held"].tap()
+        XCTAssertTrue(inspector.buttons["Retry"].firstMatch.waitForExistence(timeout: 5))
+        inspector.buttons["Retry"].firstMatch.tap()
+        XCTAssertTrue(inspector.buttons["Pause"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let history = app.buttons["prompt-history"]
+        reveal(history, in: app); history.tap()
+        XCTAssertTrue(app.navigationBars["Prompt History"].waitForExistence(timeout: 5))
+        app.buttons["history-machine"].tap()
+        app.buttons[fixtureName].firstMatch.tap()
+        let prompt = app.buttons.matching(NSPredicate(format: "label CONTAINS 'A lighthouse in winter'")).firstMatch
+        guard prompt.waitForExistence(timeout: 10) else {
+            let sheet = app.debugDescription
+            app.buttons["Done"].firstMatch.tap()
+            _ = app.navigateToDestination("Machines", shortcut: "5")
+            XCTFail("Fixture requests: \(machine.requestLog()). Sheet: \(sheet). Machines: \(app.debugDescription)")
+            return
+        }
+        var search = app.searchFields.firstMatch
+        if !search.exists { app.buttons["Search"].firstMatch.tap(); search = app.searchFields.firstMatch }
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("winter")
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        attach(app)
+        prompt.tap()
+        let field = app.textFields["generation-prompt"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "A lighthouse in winter")
+        for category in ["UICTContentSizeCategoryXS", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            app.terminate(); app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]; app.launch()
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            let row = app.buttons["queue-open-fixture-video"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+            attach(app)
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+            let history = app.buttons["prompt-history"]; reveal(history, in: app); history.tap()
+            app.buttons["history-machine"].tap(); app.buttons[fixtureName].firstMatch.tap()
+            XCTAssertTrue(prompt.waitForExistence(timeout: 10)); attach(app)
+            app.buttons["Done"].firstMatch.tap()
+        }
+        reveal(app.buttons["prompt-history"], in: app); app.buttons["prompt-history"].tap()
+        app.buttons["history-machine"].tap(); app.buttons[fixtureName].firstMatch.tap()
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        app.buttons["Clear"].firstMatch.tap()
+        app.buttons["Clear All Prompts"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["No prompts yet on this machine."].waitForExistence(timeout: 10))
+    }
+
+    @MainActor private func revealInspector(_ element: XCUIElement, in inspector: XCUIElement, app: XCUIApplication) {
+        for _ in 0..<12 {
+            let top = app.navigationBars["Job Details"].frame.maxY + 12
+            let bottom = inspector.frame.maxY - 20
+            if element.exists, element.isHittable, element.frame.midY >= top, element.frame.midY <= bottom { return }
+            if element.exists, element.frame.midY < top { inspector.swipeDown() }
+            else { inspector.swipeUp() }
+        }
+    }
+
     @MainActor func testCuratedDiscoveryAndQueuedSourceImage() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true)

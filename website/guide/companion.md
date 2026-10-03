@@ -176,3 +176,23 @@ survived a machine restart. On iPad, jobs stay within a readable centered column
 ### Server model memory
 
 In Machines → Models → Installed, use Unload beside a resident model or Unload All Models for the selected server. Downloads remain installed. Offline and pending-operation controls are disabled, and server refusals remain visible.
+
+### Queue details and prompt history
+
+Queue cards show the source image, a short curated model title, prompt excerpt,
+and current state. Tap a card for the full model ID, generation settings,
+source, progress, and job controls. Pause applies only to waiting jobs; Resume
+applies to paused jobs. Retry is offered only for a retryable held job with its
+original batch identity. Cancelling jobs are read-only, and controls wait for
+an in-flight change to finish.
+
+Prompt History is available directly in Generate. Choose a machine and search
+its saved prompts; selecting one changes only the prompt, preserving the model,
+settings, and attached media. Loading, offline, unavailable history, and failed
+requests have distinct messages. Clear asks for confirmation and removes that
+machine's entire history, including prompts hidden by search.
+
+Retained queue sources are also visible in the native Mac, web, desktop and Tauri
+mobile queues, regardless of the submitting device. Library outputs retain their
+source media after queue cleanup; trash preserves those references, and deleting
+one output permanently does not remove sources still used by another output.

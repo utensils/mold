@@ -133,6 +133,8 @@ async function act(action: "cancel" | "retry", id: string) {
             {{ section.label }} <span>{{ section.count }}</span>
           </h2>
           <ActivityStrip
+            :source-hosts="routing.hosts.value"
+            :models-for-host="routing.modelsForHost"
             expanded
             :jobs="section.local"
             :shared="section.shared"

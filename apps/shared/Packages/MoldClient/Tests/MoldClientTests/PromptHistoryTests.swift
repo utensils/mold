@@ -31,3 +31,19 @@ private func live() throws -> HistoryListing {
     let probe = try live().entries[0]
     #expect(probe.usedAtDate.timeIntervalSince1970 == 1_789_614_459_994.0 / 1000)
 }
+
+@Test func historySearchEscapesPromptTextAndPreservesHostPrefix() {
+    let backend = HTTPBackend(host: MoldHost(name: "box", baseURL: URL(string: "http://box/mold")!, apiKey: "key"))
+    let request = backend.request(backend.historyPath(limit: 50, query: "sea & sky + #1"))
+    let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+    #expect(query?.first { $0.name == "query" }?.value == "sea & sky + #1")
+    #expect(request.url?.path == "/mold/api/history")
+}
+
+@Test func queuedMetadataHasFullInspectorSettingsWithoutAnOutputFile() throws {
+    let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"coast","model":"ltx","seed":42,"frames":49,"fps":24,"source_image_name":"source.png"}"#.utf8))
+    let rows = PrintDetails.groups(for: metadata).flatMap(\.rows)
+    #expect(rows.contains { $0.label == "Seed" && $0.value == "42" })
+    #expect(rows.contains { $0.label == "Frames" && $0.value == "49" })
+    #expect(rows.contains { $0.value.contains("source.png") })
+}

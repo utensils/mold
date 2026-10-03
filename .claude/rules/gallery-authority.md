@@ -127,3 +127,12 @@ is the only path that attaches retained authority (`composer.set` invalidates
 it). A same-host reuse session is one-time, short-lived, and bound to the exact
 target request — on a keyless host to one stable anonymous subject; cross-host
 reuse remains a client download-and-upload relay.
+
+Queue source previews on every GUI surface read the owning host's authenticated
+`/api/queue/:id/input-thumbnail` route. Keep source thumbnails distinct from live
+render previews, bound response bytes, cancel obsolete requests, and fence results
+by host, server instance and job identity. Never infer source bytes from a local
+submission cache or a provenance filename. Sibling output retention is covered
+through queue cleanup, trash/restore, permanent deletion and startup reconciliation.
+Identical inputs across distinct jobs remain independently encrypted; per-output
+pins share the originating job's encrypted media where hard links are supported.

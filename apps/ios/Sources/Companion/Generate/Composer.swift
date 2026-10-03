@@ -15,6 +15,8 @@ struct Composer: View {
     var inline = false
     var inlineAction = false
     @FocusState private var editing: Bool
+    @Environment(HostStore.self) private var hosts
+    @State private var historyHost: MoldHost?
 
     var body: some View {
         Group {
@@ -48,6 +50,7 @@ struct Composer: View {
                 Button("Done") { editing = false }
             }
         }
+        .sheet(item: $historyHost) { host in PromptHistorySheet(host: host, hosts: hosts) }
     }
 
     private var content: some View {
@@ -85,6 +88,11 @@ struct Composer: View {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
             }
+            Button {
+                historyHost = generate.target ?? hosts.preferredHost
+            } label: { Label("Prompt History", systemImage: "clock.arrow.circlepath") }
+                .accessibilityIdentifier("prompt-history")
+                .disabled(generate.target == nil && hosts.preferredHost == nil)
             ModelMenu()
             PictureWells()
             if let notice = generate.retainedReuse.notice {
