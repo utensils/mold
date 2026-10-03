@@ -2464,12 +2464,14 @@ button:disabled {
 
 /* A leading square: the picture as it is being made, or the place in line of
    a row that has no pixels yet. */
-.mobile-generation-job--leading {
+.mobile-generation-job--leading,
+.mobile-generation-job:has(> .queue-source-thumbnail) {
   grid-template-columns: auto minmax(0, 1fr) minmax(64px, 30%);
   align-items: start;
 }
 
-.mobile-generation-job--leading.mobile-generation-job--detailed-status {
+.mobile-generation-job--leading.mobile-generation-job--detailed-status,
+.mobile-generation-job--detailed-status:has(> .queue-source-thumbnail) {
   grid-template-columns: auto minmax(0, 1fr);
 }
 

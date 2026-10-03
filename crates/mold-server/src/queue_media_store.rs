@@ -4770,6 +4770,48 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sibling_gallery_outputs_share_one_encrypted_payload() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let first = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"first-output"))
+            .unwrap();
+        let second = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"second-output"))
+            .unwrap();
+        let first_metadata = fs::metadata(store.gallery_pin_path(&first)).unwrap();
+        let second_metadata = fs::metadata(store.gallery_pin_path(&second)).unwrap();
+        assert_eq!(
+            (first_metadata.dev(), first_metadata.ino()),
+            (second_metadata.dev(), second_metadata.ino())
+        );
+        assert_eq!(
+            first_metadata.nlink(),
+            3,
+            "queue and both outputs share one encrypted inode"
+        );
+
+        store.delete(&reference).unwrap();
+        store.release_gallery_pin(&first).unwrap();
+        assert_eq!(
+            fs::metadata(store.gallery_pin_path(&second))
+                .unwrap()
+                .nlink(),
+            1
+        );
+        assert_eq!(
+            store.load_from_gallery_pin(&second).unwrap().entries.len(),
+            2
+        );
+        store.release_gallery_pin(&second).unwrap();
+        assert!(!store.gallery_pin_path(&second).exists());
+    }
+
     #[test]
     fn gallery_pin_inventory_returns_only_structurally_safe_exact_refs() {
         let home = tempfile::tempdir().unwrap();
