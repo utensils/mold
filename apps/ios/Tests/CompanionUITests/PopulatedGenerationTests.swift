@@ -146,7 +146,11 @@ final class PopulatedGenerationTests: XCTestCase {
                 "identifier BEGINSWITH 'machine-card-' AND label CONTAINS %@", "127.0.0.1:\(port)")).firstMatch
             XCTAssertTrue(card.waitForExistence(timeout: 5))
             card.tap()
-            app.buttons["Models"].firstMatch.tap()
+            XCTAssertTrue(app.navigationBars["Media Fixture"].waitForExistence(timeout: 5))
+            let modelsLink = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Models'")).firstMatch
+            XCTAssertTrue(modelsLink.waitForExistence(timeout: 5))
+            for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
+            modelsLink.tap()
             app.buttons["models-pane"].tap()
             app.buttons["Discover"].firstMatch.tap()
         }
