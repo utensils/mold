@@ -2,7 +2,7 @@ import Foundation
 import Network
 
 /// A loopback-only machine for UI regression tests. It serves real generated
-/// profiles and cannot generate or download. Optional collection mutations
+/// profiles and cannot generate or download. Optional collection and model-memory mutations
 /// update only the fixture’s own in-memory state.
 final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
@@ -11,9 +11,13 @@ final class FixtureMachine: @unchecked Sendable {
     private let gallery: Data
     private let collectionFixture: Bool
     private var collectionHidden = false
+    private let modelMemoryFixture: Bool
+    private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false) throws {
+    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, loadedModels: Bool = false) throws {
         self.collectionFixture = collectionFixture
+        modelMemoryFixture = loadedModels
+        if loadedModels { residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"] }
         var root = URL(fileURLWithPath: #filePath)
         while root.pathComponents.count > 1,
               !FileManager.default.fileExists(atPath: root.appending(path: "docs/generated").path) {
@@ -64,6 +68,15 @@ final class FixtureMachine: @unchecked Sendable {
 
     func stop() { listener.cancel() }
 
+    func restoreResidentModels() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"]
+                continuation.resume()
+            }
+        }
+    }
+
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
             guard let self else { connection.cancel(); return }
@@ -89,8 +102,14 @@ final class FixtureMachine: @unchecked Sendable {
             if patchCollection,
                let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let hidden = object["hidden"] as? Bool { collectionHidden = hidden }
-            let allowed = request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
-            let body = patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let unload = modelMemoryFixture && request.first == "DELETE" && path == "/api/models/unload"
+            if unload {
+                let object = (try? JSONSerialization.jsonObject(with: Data(bodyText.utf8))) as? [String: Any] ?? [:]
+                if let name = object["model"] as? String { residentModels.remove(name) }
+                else { residentModels.removeAll() }
+            }
+            let allowed = unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let body = unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
             let status = allowed ? "200 OK" : "405 Method Not Allowed"
             let contentType = path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/")
                 ? "image/png" : "application/json"
@@ -113,7 +132,14 @@ final class FixtureMachine: @unchecked Sendable {
         }
         let json: String
         switch path {
-        case "/api/models": return models
+        case "/api/models":
+            guard modelMemoryFixture else { return models }
+            let rows = (try! JSONSerialization.jsonObject(with: models)) as! [[String: Any]]
+            return try! JSONSerialization.data(withJSONObject: rows.map { row in
+                var row = row
+                row["is_loaded"] = residentModels.contains(row["name"] as! String)
+                return row
+            })
         case "/api/status": json = #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/capabilities": json = collectionFixture
             ? #"{"max_batch_outputs":4,"gallery":{"organize":true}}"#

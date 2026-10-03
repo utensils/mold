@@ -153,3 +153,7 @@ Hold a Library tile to preview it and open its actions. Source-image selection a
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
 
 Live Activity cards use ActivityKit’s default material so the background and text follow the Lock Screen appearance together, including the stale “Open Mold Studio to refresh” state.
+
+### Server model memory
+
+In Machines → Models → Installed, use Unload beside a resident model or Unload All Models for the selected server. Downloads remain installed. Offline and pending-operation controls are disabled, and server refusals remain visible.

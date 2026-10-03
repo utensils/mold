@@ -24,6 +24,7 @@ struct MachineDetailView: View {
                             if let count = hosts.installed[id] { Text("\(count) installed") }
                         }
                     }
+                    .accessibilityIdentifier("machine-models")
                     NavigationLink(value: QueueRoute(host: id)) { Text("Queue") }
                 }
                 Section {
