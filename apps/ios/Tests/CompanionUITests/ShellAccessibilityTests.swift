@@ -139,6 +139,9 @@ final class ShellAccessibilityTests: XCTestCase {
     /// outside the scroll view. Coverage is mandatory, not an exemption: a
     /// control that cannot be brought fully into view fails this test.
     @MainActor private func auditComposer(_ app: XCUIApplication, size: String) throws {
+        // The first-run Add a Machine action also belongs to bottom chrome.
+        // It has no generation composer; the outer screen audit covers it.
+        if app.staticTexts["Add a machine to start generating"].exists { return }
         let composer = app.scrollViews["phone-generate-form"].exists
             ? app.scrollViews["phone-generate-form"]
             : app.descendants(matching: .any)["bottom-chrome"].firstMatch
