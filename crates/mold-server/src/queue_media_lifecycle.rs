@@ -74,7 +74,7 @@ impl QueueMediaLifecycle {
         }
     }
 
-    fn db(&self) -> Result<&MetadataDb, AdapterError> {
+    pub(crate) fn db(&self) -> Result<&MetadataDb, AdapterError> {
         self.db.as_ref().as_ref().ok_or_else(|| {
             AdapterError::new(
                 AdapterFailureKind::Database,
@@ -253,7 +253,7 @@ impl QueueMediaLifecycle {
         ))
     }
 
-    fn runtime_store(&self) -> Result<Arc<QueueMediaStore>, QueueMediaError> {
+    pub(crate) fn runtime_store(&self) -> Result<Arc<QueueMediaStore>, QueueMediaError> {
         let store = self
             .store
             .lock()
