@@ -198,3 +198,18 @@ The iPad sweep also exposed source selection fetching an offline merged lead.
 The picker now prefers a reachable copy; the source regression deliberately
 pairs a saved offline copy and a live copy before selection. iPad drag and
 context-menu interactions pass, including opening the viewer afterward.
+
+## Live Activity material correction (2026-10-02)
+
+A physical-device report showed the stale Live Activity with a pale custom
+background and white text. Removing its explicit UIKit background tint restores
+ActivityKit's system material, which resolves background and semantic text
+appearance together. The change applies outside the content-state branches.
+
+Independent UAT on a fresh iOS 26.5 iPhone 17 Pro Simulator confirmed readable
+running cards on the Lock Screen in light and dark appearances. The original
+five-second stale fixture retained its launch arguments, but the Simulator kept
+showing the running state after the deadline and sleep/wake cycles. Stale-state
+visual acceptance remains unverified; existing content-model tests cover its
+refresh title, progress suppression, and retained Stop control. No fixture or
+production stale-date changes were made for this check.

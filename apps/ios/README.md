@@ -89,7 +89,12 @@ and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
 and result bundles remain under `build/UITestResults/`, uploaded even on failure.
 CI splits all test classes into app and Library groups, each in light and dark,
-while unit/shared-package tests run independently. `make uitest` locally still
+while unit/shared-package tests run independently. App UI, shared code, UI tests,
+build inputs, and unknown paths require the full audit matrix. Widget Swift,
+inert docs, and named static routing/branding contracts can skip app audits;
+the always-on lint/unit lane still builds Widgets. Widget changes need their
+own Lock Screen/Dynamic Island UAT in light and dark, since app audits never
+render those surfaces. Dispatch and unavailable Git diffs default to full audits. `make uitest` locally still
 runs the full target in both appearances; `UITEST_CLASSES` and
 `UITEST_APPEARANCES` select a focused run. Run
 `bash scripts/tests/ios-uitest-runner.sh` and

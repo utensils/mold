@@ -17,6 +17,7 @@ on:
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
       - "scripts/tests/ios-uitest-retry.py"
+      - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -30,6 +31,7 @@ on:
       - ".github/workflows/testflight-ios-native.yml"
       - "scripts/tests/ios-uitest-runner.sh"
       - "scripts/tests/ios-uitest-retry.py"
+      - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
@@ -45,6 +47,29 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Classify native iOS audit scope
+    runs-on: ubuntu-latest
+    outputs:
+      audit: ${{ steps.scope.outputs.audit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify audit routing contracts
+        run: |
+          python3 scripts/tests/ios-native-ci-scope.py
+          bash scripts/tests/ci-routing-contract.sh
+      - name: Select relevant app UI audits
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 apps/ios/scripts/ci-audit-scope.py \
+            --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
   check:
     name: Lint and unit tests
     runs-on: macos-26
@@ -82,6 +107,10 @@ jobs:
         run: make test
 
   audit:
+    needs: changes
+    if: >-
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
     name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
     runs-on: macos-26
     timeout-minutes: 60
