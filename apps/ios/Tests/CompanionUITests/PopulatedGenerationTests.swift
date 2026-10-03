@@ -46,11 +46,15 @@ final class PopulatedGenerationTests: XCTestCase {
         let modelsLink = app.descendants(matching: .any)["machine-models"].firstMatch
         guard modelsLink.waitForExistence(timeout: 5) else { XCTFail(app.debugDescription); return }
         for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
+        let hadTabBar = app.tabBars.firstMatch.exists
         modelsLink.tap()
         let pane = app.buttons["models-pane"]
         if pane.waitForExistence(timeout: 5) {
             pane.tap()
             app.buttons["Installed"].firstMatch.tap()
+        }
+        if app.frame.width > 600 {
+            XCTAssertFalse(app.tabBars.firstMatch.exists, "Per-machine Models must hide iPad floating tab chrome")
         }
         let one = app.buttons["unload-model-flux-dev:q4"]
         guard one.waitForExistence(timeout: 10) else { XCTFail(app.debugDescription); return }
@@ -70,6 +74,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(retained.exists, "Unloading must retain installed inventory")
         await machine.restoreResidentModels()
         app.navigationBars.buttons.firstMatch.tap()
+        if hadTabBar { XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 5), "Back must restore tab chrome") }
         XCTAssertTrue(modelsLink.waitForExistence(timeout: 5))
         for _ in 0..<5 where !modelsLink.isHittable { app.swipeUp() }
         modelsLink.tap()
@@ -99,7 +104,11 @@ final class PopulatedGenerationTests: XCTestCase {
             XCTFail("Model memory at \(size): \(issue.compactDescription), \(element.label) at \(element.frame)")
             return true
         }
-        try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription, .trait, .elementDetection])
+        try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription, .trait, .elementDetection]) { issue in
+            let element = issue.element.map { "\($0.elementType) \($0.label) at \($0.frame)" } ?? "unnamed element"
+            XCTFail("Model memory at \(size): \(issue.compactDescription), \(element) [\(issue.detailedDescription)]")
+            return true
+        }
         attach(app)
     }
 

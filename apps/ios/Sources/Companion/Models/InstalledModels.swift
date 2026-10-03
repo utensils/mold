@@ -30,6 +30,7 @@ struct InstalledModels: View {
             }
             ForEach(models.installed(on: host.id), id: \.family) { group in
                 Section {
+                    SectionHeader(group.family).font(.headline).listRowSeparator(.hidden)
                     ForEach(group.models) { model in
                         InstalledRow(model: model)
                             .swipeActions {
@@ -38,7 +39,7 @@ struct InstalledModels: View {
                             }
                             .contextMenu { menu(model) }
                     }
-                } header: { SectionHeader(group.family) }
+                }
             }
             if models.installed(on: host.id).isEmpty, models.loaded(on: host.id).isEmpty, fetching.isEmpty {
                 Text(models.emptyInventoryMessage(on: host))
@@ -106,7 +107,7 @@ struct InstalledModels: View {
                 ProgressView("Updating server models…")
             }
         } header: {
-            Text("Server Memory").foregroundStyle(.primary).accessibilityAddTraits(.isHeader)
+            Text("Server Memory").font(.headline).foregroundStyle(.primary).accessibilityAddTraits(.isHeader)
         }
         .disabled(!canChangeModels)
     }
