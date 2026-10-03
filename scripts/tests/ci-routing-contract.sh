@@ -883,7 +883,15 @@ suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
 assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
 assert len(suites) == 2 and set(re.findall(r'          - name: (\w+)', native)) == {'app', 'library'}
 assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests']
-check, audit = native.split('  audit:', 1)
+check, audit = native.split('\n  audit:\n', 1)
+assert 'needs: changes' in audit
+assert "always() && !cancelled() &&" in audit
+assert "needs.changes.result != 'success' || needs.changes.outputs.audit != 'false'" in audit
+assert 'audit: ${{ steps.scope.outputs.audit }}' in native
+assert 'python3 scripts/tests/ios-native-ci-scope.py' in native
+assert 'python3 apps/ios/scripts/ci-audit-scope.py' in native
+assert 'github.event.pull_request.base.sha || github.event.before' in native
+assert 'github.event.pull_request.head.sha || github.sha' in native
 assert 'make packages-test' in check and 'make test' in check
 assert 'make uitest' not in check and 'needs: check' not in audit
 assert "github.event.workflow_run.event == 'push'" in testflight

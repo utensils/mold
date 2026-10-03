@@ -89,7 +89,12 @@ and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
 and result bundles remain under `build/UITestResults/`, uploaded even on failure.
 CI splits all test classes into app and Library groups, each in light and dark,
-while unit/shared-package tests run independently. `make uitest` locally still
+while unit/shared-package tests run independently. App UI, shared code, UI tests,
+build inputs, and unknown paths require the full audit matrix. Widget Swift,
+inert docs, and named static routing/branding contracts can skip app audits;
+the always-on lint/unit lane still builds Widgets. Widget changes need their
+own Lock Screen/Dynamic Island UAT in light and dark, since app audits never
+render those surfaces. Dispatch and unavailable Git diffs default to full audits. `make uitest` locally still
 runs the full target in both appearances; `UITEST_CLASSES` and
 `UITEST_APPEARANCES` select a focused run. Run
 `bash scripts/tests/ios-uitest-runner.sh` and
@@ -113,7 +118,8 @@ schedule one real system notification after twenty seconds without rendering.
 `NotificationTapTests` exercises background and cold-launch taps. Release and
 TestFlight builds exclude the fixture.
 
-The Live Activity uses a translucent card with a 48 pt preview, a compact status
+The Live Activity uses ActivityKit’s default background material so the card and
+its semantic text adapt together to light/dark Lock Screen appearances. It has a 48 pt preview, a compact status
 and prompt, a full-width progress row, and a machine/queue footer. At large text
 sizes it drops secondary content before clipping the status or Stop control.
 Debug builds accept `--live-activity-fixture running` (also `waiting`, `finished`,
