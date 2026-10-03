@@ -136,7 +136,7 @@ submission cache or a provenance filename. Sibling output retention is covered
 through queue cleanup, trash/restore, permanent deletion and startup reconciliation.
 Active queue sets remain independently encrypted and job-bound. Future completed
 library handoffs canonicalize identical ordered visible-media contracts within
-the existing limits (64 entries, 512 MiB total and 64 MiB Memory entries). Per-job
+the existing limits (64 entries, 512 MiB total and 64 MiB aggregate Memory payloads). Per-job
 provenance and empty-presence markers stay in separate private sets. Publish all
 replacement pins in one authority commit before releasing old pins; retry and
 SQLite repair preserve that authority. Different accompanying inputs, roles,
