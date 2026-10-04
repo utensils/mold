@@ -105,7 +105,7 @@ struct QueueSourceLayoutTests {
 
     /// The fixture is white. A dark native row cannot contain a tall white run
     /// until its transparent loading reservation becomes the actual image.
-    private func hasSourcePixels(in view: NSView) -> Bool {
+    func hasSourcePixels(in view: NSView) -> Bool {
         view.layoutSubtreeIfNeeded()
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
         view.cacheDisplay(in: view.bounds, to: bitmap)

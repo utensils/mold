@@ -435,7 +435,8 @@ a second full listing.
 Queue ▸ Show Queue opens the queue from any pane. Queue actions keep the
 selected job and its machine together. Source thumbnails reserve their image and
 caption space while loading so row captions remain visible; jobs without retained
-source media return to compact text rows. Empty Queue names each eligible
+source media return to compact text rows. Batch disclosure keeps its controls separate
+from job actions, and expanded children remain individually selectable. Empty Queue names each eligible
 machine in a fleet. File ▸ New Image and View destinations also reopen the
 main window when Settings is the remaining window.
 

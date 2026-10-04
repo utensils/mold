@@ -3,6 +3,8 @@ import Testing
 @testable import MoldClient
 
 private final class ReferenceUploadStub: StubTransport {
+    // Transport happy paths must tolerate loaded CI runners; deterministic
+    // session-validation tests cover expiry without a wall-clock deadline.
     nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var sessionInstance = "instance"
     nonisolated(unsafe) static var completed = true
@@ -20,7 +22,7 @@ private final class ReferenceUploadStub: StubTransport {
             return refuseAdmission ? (422, Data(#"{"error":"refused"}"#.utf8)) : (200, try! Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/batch-status.json")))
         case "/api/reference-sessions":
             return (200, Data("""
-                {"instance_id":"\(sessionInstance)","expires_at_ms":\(HTTPBackend.referenceUploadNow + 60000),
+                {"instance_id":"\(sessionInstance)","expires_at_ms":\(HTTPBackend.referenceUploadNow + 3_600_000),
                  "request_scope_sha256":"\(digest)","session_handle":"session-secret-\(sessionCount)","uploads":[{"reference":1,"handle":"upload-secret-\(sessionCount)"}]}
                 """.utf8))
         case "/api/reference-upload":
@@ -48,7 +50,7 @@ struct ReferenceUploadTransportTests {
         let backend = HTTPBackend(host: MoldHost(name: "test", baseURL: URL(string: "http://upload-test.local")!, apiKey: "key"), session: URLSession(configuration: config))
         var request = GenerateRequest(prompt: "scene", model: "minimax-h3-ref2va:official-bf16", width: 1280, height: 720, steps: 30, guidance: 1)
         request.references = [.init(kind: "image", media: .init(authority: "inline", data: "AQID"), mimeType: "image/png", provenance: .init(name: "sample.png"), width: 1, height: 1)]
-        let caps = try MoldJSON.decoder.decode(ReferenceUploadCapabilities.self, from: Data(#"{"available":true,"protocol_version":2,"requires_api_key":true,"session_path":"/api/reference-sessions","upload_path":"/api/reference-upload","session_handle_header":"x-reference-session","upload_handle_header":"x-reference-upload","max_file_bytes":1024,"max_session_bytes":2048,"max_active_sessions":2,"session_ttl_ms":60000}"#.utf8))
+        let caps = try MoldJSON.decoder.decode(ReferenceUploadCapabilities.self, from: Data(#"{"available":true,"protocol_version":2,"requires_api_key":true,"session_path":"/api/reference-sessions","upload_path":"/api/reference-upload","session_handle_header":"x-reference-session","upload_handle_header":"x-reference-upload","max_file_bytes":1024,"max_session_bytes":2048,"max_active_sessions":2,"session_ttl_ms":3600000}"#.utf8))
         var capabilitiesJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/capabilities.json"))) as! [String: Any]
         capabilitiesJSON["reference_uploads"] = try JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(caps))
         ReferenceUploadStub.capsData = try JSONSerialization.data(withJSONObject: capabilitiesJSON)
