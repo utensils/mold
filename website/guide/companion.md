@@ -76,6 +76,10 @@ keeps its original filename and file type.
   way they do on the Mac, across every machine that holds a copy. On iPhone,
   tap the navigation title to change shelves; it stays readable as you scroll.
   Status notices reserve space above the grid so dates and prints stay visible.
+  The offline notice shows a compact machine count; tap it for scrollable
+  details with every full machine name, including at large text sizes.
+  Decorative machine badges fit their tiles; full names remain in accessibility
+  labels and Info.
   **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
   Tap **Select**, then tap tiles or sweep sideways across them. Starting on
   a selected tile deselects the range; reverse to shorten it, or hold near

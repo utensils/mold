@@ -85,6 +85,7 @@ struct MachinesView: View {
                 }
                 .padding(.vertical, 8)
             }
+            .accessibilityIdentifier("machines-fleet")
         }
     }
 

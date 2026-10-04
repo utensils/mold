@@ -34,6 +34,7 @@ struct MachineDetailView: View {
                     Button("Remove…", role: .destructive) { confirmRemove = true }
                 }
             }
+            .accessibilityIdentifier("machine-details")
             .navigationTitle(host.name)
             .refreshable { await reload(host) }
             .task { await reload(host) }

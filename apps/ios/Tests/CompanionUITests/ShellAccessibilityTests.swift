@@ -93,12 +93,24 @@ final class ShellAccessibilityTests: XCTestCase {
         // from contrast, as behind a sheet.
         let showSidebar = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
         if showSidebar.waitForExistence(timeout: 2), showSidebar.isHittable {
-            showSidebar.tap()
-            let row = app.descendants(matching: .any)["Favourites"].firstMatch
-            XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
-            Self.settle(row)
-            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
-            XCTAssertTrue(sidebar.exists, app.debugDescription)
+            let sidebar = try openSidebar(in: app)
+            Self.settle(sidebar)
+            XCTAssertTrue(revealSidebarRow("Shelves", sidebar: sidebar, app: app))
+            // Tab sections and their rows are lazy. A shelf is not proof
+            // that the sidebar opened, and an off-screen shelf is not missing.
+            if !revealSidebarRow("Favourites", sidebar: sidebar, app: app) {
+                XCTAssertTrue(revealSidebarRow("Shelves", sidebar: sidebar, app: app))
+                sidebar.cells.matching(NSPredicate(format: "label == 'Shelves'")).firstMatch.tap()
+            }
+            for label in ["Favourites", "Recently Deleted"] {
+                XCTAssertTrue(revealSidebarRow(label, sidebar: sidebar, app: app),
+                              "The full \(label) sidebar row must be reachable at \(size)")
+                let row = sidebar.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
+                let pixels = XCTAttachment(screenshot: app.screenshot())
+                pixels.name = "Sidebar \(label) at \(size)"; pixels.lifetime = .keepAlways; add(pixels)
+                try check(app, "Sidebar \(label) at \(size)", within: row)
+                XCTAssertTrue(sidebarViewport(sidebar, app: app).contains(row.frame))
+            }
             try check(app, "Sidebar at \(size)", within: sidebar)
             let hide = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
             if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
@@ -108,15 +120,13 @@ final class ShellAccessibilityTests: XCTestCase {
         // text-size cycling when Settings is presented over it. Audit the
         // identical Form through its native sidebar page on iPad instead.
         // Sheet presentation/dismissal has separate interaction coverage.
-        let settingsInSidebar = app.buttons["ToggleSideBar"].exists
+        let settingsInSidebar = showSidebar.exists
         if settingsInSidebar {
             app.terminate()
             app.launch()
-            let favourites = app.descendants(matching: .any)["Favourites"].firstMatch
-            if !favourites.exists || !favourites.isHittable { app.buttons["ToggleSideBar"].tap() }
-            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
-            let settings = sidebar.descendants(matching: .any).matching(NSPredicate(format: "label == 'Settings'")).firstMatch
-            XCTAssertTrue(settings.waitForExistence(timeout: 5))
+            let sidebar = try openSidebar(in: app)
+            XCTAssertTrue(revealSidebarRow("Settings", sidebar: sidebar, app: app))
+            let settings = sidebar.cells.matching(NSPredicate(format: "label == 'Settings'")).firstMatch
             settings.tap()
             XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         } else {
@@ -157,6 +167,61 @@ final class ShellAccessibilityTests: XCTestCase {
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 3) { Self.settle(field) }
         try check(app, "Search at \(size)")
+    }
+
+    /// The sidebar's native Show/Hide state survives launches. Its lazy
+    /// collection must be located independently of whichever rows are realized.
+    @MainActor private func openSidebar(in app: XCUIApplication) throws -> XCUIElement {
+        let hide = app.buttons.matching(NSPredicate(format: "label == 'Hide Sidebar'")).firstMatch
+        if !hide.exists {
+            let show = app.buttons.matching(NSPredicate(format: "label == 'Show Sidebar' OR (identifier == 'ToggleSideBar' AND label == 'Toggle sidebar')")).firstMatch
+            XCTAssertTrue(show.waitForExistence(timeout: 5))
+            show.tap()
+        }
+        XCTAssertTrue(hide.waitForExistence(timeout: 5), "The sidebar must be open before locating its collection")
+        let owner = app.collectionViews.allElementsBoundByIndex.first { collection in
+            collection.exists && collection.frame.width < app.frame.width
+                && collection.frame.contains(CGPoint(x: hide.frame.midX, y: hide.frame.midY))
+        }
+        return try XCTUnwrap(owner, "The opened sidebar must have its own native collection: \(app.debugDescription)")
+    }
+
+    @MainActor private func sidebarViewport(_ sidebar: XCUIElement, app: XCUIApplication) -> CGRect {
+        let hide = app.buttons.matching(NSPredicate(format: "label == 'Hide Sidebar'")).firstMatch
+        let top = max(sidebar.frame.minY, hide.frame.maxY)
+        return CGRect(x: sidebar.frame.minX, y: top, width: sidebar.frame.width,
+                      height: max(0, sidebar.frame.maxY - top))
+    }
+
+    @MainActor private func revealSidebarRow(_ label: String, sidebar: XCUIElement,
+                                            app: XCUIApplication) -> Bool {
+        let row = sidebar.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        func fullyVisible() -> Bool {
+            row.exists && sidebarViewport(sidebar, app: app).contains(row.frame) && row.isHittable
+        }
+        func pan(_ direction: CGFloat) -> Bool {
+            Self.settle(sidebar)
+            let viewport = sidebarViewport(sidebar, app: app)
+            let before = sidebar.cells.allElementsBoundByIndex.map { "\($0.label):\($0.frame)" }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.midY - direction * viewport.height * 0.2))
+            let end = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.midY + direction * viewport.height * 0.2))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            Self.settle(sidebar)
+            return before != sidebar.cells.allElementsBoundByIndex.map { "\($0.label):\($0.frame)" }
+        }
+        if fullyVisible() { return true }
+        // An absent lazy row gives no direction. Restore the real list top
+        // before scanning down, including after a missing/collapsed shelf.
+        for _ in 0..<8 {
+            if fullyVisible() { return true }
+            if !pan(1) { break }
+        }
+        for _ in 0..<8 {
+            if fullyVisible() { return true }
+            if !pan(-1) { break }
+        }
+        return fullyVisible()
     }
 
     /// Audit every exported composer label/control while fully inside the
@@ -260,6 +325,10 @@ final class ShellAccessibilityTests: XCTestCase {
     @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
                                   within container: XCUIElement? = nil, lazyForm: Bool = false,
                                   contrastOnly: Bool = false) throws {
+        if let container {
+            _ = try XCTUnwrap(container.exists && !container.frame.isEmpty ? container : nil,
+                              "A scoped audit requires its actual visible container: \(place)")
+        }
         do {
             try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly)
         } catch where Self.isTimeout(error) {
@@ -397,7 +466,9 @@ final class ShellAccessibilityTests: XCTestCase {
 
 
     @MainActor private func isDescendant(_ element: XCUIElement, of container: XCUIElement) -> Bool {
-        container.descendants(matching: element.elementType)
+        if element.elementType == container.elementType, element.label == container.label,
+           element.frame == container.frame { return true }
+        return container.descendants(matching: element.elementType)
             .matching(NSPredicate(format: "label == %@", element.label))
             .allElementsBoundByIndex
             .contains { $0.frame == element.frame }
