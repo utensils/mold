@@ -69,11 +69,15 @@ final class ModelStore {
     /// `byHost` is "not yet asked", not "asked and got nothing".
     func hasLoaded(on host: MoldHost.ID) -> Bool { byHost[host] != nil }
 
-    /// Only things a person would pick to make a picture: no prompt-expansion
-    /// LLMs, no upscalers, no ControlNets -- and no mesh families, which this
-    /// app cannot yet draw (`Model.isPictureMaker`).
+    /// Picture and clip generators, plus recipes that advertise named mesh views.
+    /// Prompt-expansion models, upscalers and ControlNets have their own controls.
     func generators(on host: MoldHost.ID) -> [Model] {
-        (byHost[host] ?? []).filter(\.isPictureMaker)
+        (byHost[host] ?? []).filter { model in
+            model.isPictureMaker || model.generationProfile?.recipes.contains {
+                $0.resolvingReferenceCapabilities(family: model.family, model: model.name)
+                    .capabilities.mesh?.namedViews?.mode.isVisible == true
+            } == true
+        }
     }
 
     /// Installed and complete, which is what can run right now.

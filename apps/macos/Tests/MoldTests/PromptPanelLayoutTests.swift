@@ -18,6 +18,7 @@ struct PromptPanelLayoutTests {
             destination: .constant(.generate), submit: {}, cancel: {}, stopAll: {},
             maxBatch: 1, chainLimits: nil, maxHeight: height)
             .environment(controller)
+            .environment(ReuseStore(hosts: hosts))
             .environment(ExpandStore())
             .environment(PromptHistoryStore(hosts: hosts))
             .frame(width: 760, height: height)

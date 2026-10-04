@@ -43,6 +43,28 @@ import Testing
         #expect(draft.media.editImages.isEmpty)
     }
 
+    @Test func retainedStillAuthorityExemptsOnlyMissingRequiredBytes() throws {
+        var document = try JSONSerialization.jsonObject(with: RepoFixtures.fixture("recipe-qwen21.json")) as! [String: Any]
+        var recipes = document["recipes"] as! [[String: Any]]
+        var caps = recipes[0]["capabilities"] as! [String: Any]
+        caps["reference_images"] = ["mode": "adjustable", "required": true, "max_count": 1,
+            "primary_is_target": true, "source_relation": "replaces", "max_pixels_single": 100]
+        recipes[0]["capabilities"] = caps; document["recipes"] = recipes
+        let profile = try MoldJSON.decoder.decode(GenerationProfileSet.self, from: JSONSerialization.data(withJSONObject: document))
+        let recipe = try #require(profile.defaultRecipe)
+        var draft = RenderDraft().adopting(recipe, isNewModel: true)
+        draft.prompt = "Edit this"
+        #expect(draft.refusal(for: recipe) != nil)
+        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) == nil)
+        #expect(draft.refusal(for: recipe, retainedFields: [.sourceImage]) != nil)
+        draft.media.editImages = ["bad bytes"]
+        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
+        draft.media.editImages = [png(11, 10)]
+        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
+        draft.media.editImages = [png(5, 5), png(5, 5)]
+        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
+    }
+
     private func png(_ width: Int, _ height: Int) -> String {
         let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),

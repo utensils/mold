@@ -142,8 +142,8 @@ public extension RenderDraft {
     }
 
     /// Whether this draft can be submitted against the recipe, and why not.
-    public func refusal(for recipe: GenerationRecipe) -> String? {
-        if let error = stillReferenceRefusal(for: recipe) { return error }
+    public func refusal(for recipe: GenerationRecipe, retainedFields: Set<RetainedSourceMedia.Field> = []) -> String? {
+        if let error = stillReferenceRefusal(for: recipe, retainedFields: retainedFields) { return error }
         if let error = BoundaryFramePolicy.refusal(draft: self, capabilities: recipe.capabilities) { return error }
         if let error = media.generationReferenceError(capabilities: recipe.capabilities) { return error }
         if recipe.capabilities.promptRequirement == .required,

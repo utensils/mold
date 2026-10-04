@@ -220,6 +220,10 @@ canvas?: ReferenceCanvasRule | null,
  */
 formats?: Array<ImageInputFormat>, };
 
+export type GenerationReferencesProfile = { mode: ControlMode, required: boolean, kinds: Array<string>, max_count: number, max_images: number, max_videos: number, max_audios: number, min_duration_ms: number, max_duration_ms: number, max_video_duration_ms: number, max_audio_duration_ms: number, max_inline_bytes: number, requires_visual: boolean, };
+
+export type BoundaryFramesProfile = { mode: ControlMode, first_required: boolean, last_required: boolean, min_frames: number, wire: string, };
+
 export type TransparencyCapabilitiesProfile = {
 /**
  * `Adjustable` where the recipe renders a transparent background on

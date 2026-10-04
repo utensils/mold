@@ -175,7 +175,7 @@ final class GenerateController {
         guard model != nil else { return String(localized: "Install a model that makes this under Models.") }
         guard target != nil else { return String(localized: "No machine that has this model is answering.") }
         // The draft's own refusal (MoldClient), the Mac's words exactly.
-        if let recipe, let refusal = draft.refusal(for: recipe) { return refusal }
+        if let recipe, let refusal = draft.refusal(for: recipe, retainedFields: retainedReferenceFields) { return refusal }
         return nil
     }
 }

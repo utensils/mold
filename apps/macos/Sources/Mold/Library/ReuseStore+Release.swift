@@ -27,6 +27,12 @@ extension ReuseStore {
     }
 
     /// Descriptor-only rows need the retained archive that grants their bytes.
+    func availableFields(for draft: RenderDraft, request: GenerateRequest) -> Set<RetainedSourceMedia.Field> {
+        guard let authority = pending(for: draft) else { return [] }
+        return Set(RetainedSourceMedia.members(authority.members, forHydrating: request)
+            .compactMap { RetainedSourceMedia.fieldForRole[$0.role] })
+    }
+
     func referenceRefusal(for draft: RenderDraft) -> String? {
         guard draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
               pending(for: draft) == nil else { return nil }

@@ -81,11 +81,17 @@ struct MediaWell: View {
     }
 
     private func choose() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = allowedTypes
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = Self.chooseFiles(types: allowedTypes).first else { return }
         load(url)
+    }
+
+    /// One file-panel door for non-picture media, including typed references.
+    static func chooseFiles(types: [UTType], multiple: Bool = false) -> [URL] {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = types
+        panel.allowsMultipleSelection = multiple
+        guard panel.runModal() == .OK else { return [] }
+        return panel.urls
     }
 
     /// mold takes every byte field as base64 on the wire, so the encode

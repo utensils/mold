@@ -26,11 +26,10 @@ extension GenerationReferencesGroup {
 
     func choose(kind: String, replacing: Int? = nil, role: GenerationImageReferenceRole? = nil) {
         let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = kind == "video" ? [.movie] : kind == "audio" ? [.audio] : [.image]
-        panel.allowsMultipleSelection = replacing == nil && role == nil
-        guard panel.runModal() == .OK else { return }
-        let urls = panel.urls
+        guard ["video", "audio"].contains(kind) else { return }
+        let urls = MediaWell.chooseFiles(types: kind == "video" ? [.movie] : [.audio],
+                                        multiple: replacing == nil && role == nil)
+        guard !urls.isEmpty else { return }
         let expected = replacing.flatMap { draft.media.generationReferences.indices.contains($0)
             ? draft.media.generationReferences[$0] : nil }
         importing = true

@@ -217,3 +217,15 @@ extension GenerateController {
         if !everything { followNext() }
     }
 }
+
+// Only verified, vacant retained roles can satisfy a required-input check.
+extension GenerateController {
+    var retainedReferenceFields: Set<RetainedSourceMedia.Field> {
+        guard !retainedReuse.probing, let authority = retainedReuse.snapshot(), let modelName else { return [] }
+        let request = RenderRequest.one(draft, model: modelName,
+            maxIdentityPhotos: target.flatMap { hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0)
+        return Set(RetainedSourceMedia.members(authority.members, forHydrating: request).compactMap {
+            RetainedSourceMedia.fieldForRole[$0.role]
+        })
+    }
+}

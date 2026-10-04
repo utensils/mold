@@ -1,13 +1,12 @@
 import Foundation
 import MoldClient
-import MoldClientTesting
 import Testing
 @testable import Mold
 
 @MainActor
 struct ReferenceReuseGuardTests {
     @Test func descriptorsCannotSubmitWithoutRetainedAuthority() {
-        let backend = FakeBackend()
+        let backend = FakeBackend(host: MoldHost(name: "Fixture", baseURL: URL(string: "http://fixture")!))
         let store = ReuseStore(hosts: HostStore(hosts: []) { _ in backend })
         var draft = RenderDraft()
         draft.media.generationReferences = [GenerationReference(

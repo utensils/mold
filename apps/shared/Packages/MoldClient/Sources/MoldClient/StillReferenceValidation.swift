@@ -6,8 +6,8 @@ public extension ReferenceImagesCapability {
     }
 
     /// The same single/multiple pixel budget admission applies to each image.
-    func stillRefusal(images: [String]) -> String? {
-        if required && images.isEmpty { return "Attach the picture to edit first." }
+    func stillRefusal(images: [String], retainedImagesAvailable: Bool = false) -> String? {
+        if required && images.isEmpty && !retainedImagesAvailable { return "Attach the picture to edit first." }
         if let maxCount, images.count > maxCount { return "This model accepts at most \(maxCount) reference pictures." }
         let limit = images.count > 1 ? maxPixelsMulti : maxPixelsSingle
         for (index, image) in images.enumerated() {
@@ -23,10 +23,10 @@ public extension ReferenceImagesCapability {
 }
 
 public extension RenderDraft {
-    func stillReferenceRefusal(for recipe: GenerationRecipe, family: String? = nil, model: String? = nil) -> String? {
+    func stillReferenceRefusal(for recipe: GenerationRecipe, family: String? = nil, model: String? = nil, retainedFields: Set<RetainedSourceMedia.Field> = []) -> String? {
         guard let capability = recipe.capabilities.referenceImages(family: family, model: model) else { return nil }
         // On an exclusive recipe a staged strip may be parked for this request.
         guard capability.required || media.requestConditioning.carriesReferences else { return nil }
-        return capability.stillRefusal(images: media.editImages)
+        return capability.stillRefusal(images: media.editImages, retainedImagesAvailable: retainedFields.contains(.editImages))
     }
 }
