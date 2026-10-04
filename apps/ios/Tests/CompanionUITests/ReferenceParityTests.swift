@@ -42,11 +42,16 @@ final class ReferenceParityTests: XCTestCase {
         }
         XCTAssertTrue(earlier.exists, app.debugDescription)
         earlier.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let reference = app.buttons["Order reference 1"]
-        reveal(reference, app: app)
+        let references = app.scrollViews["generation-references"]
+        reveal(references, app: app)
         try app.performAccessibilityAudit(for: .contrast) { issue in
             guard let element = issue.element else { return false }
             let bar = app.tabBars.firstMatch
+            let navigation = app.navigationBars.firstMatch
+            let form = app.scrollViews["phone-generate-form"]
+            let isFormContent = form.exists && form.descendants(matching: element.elementType)
+                .matching(NSPredicate(format: "label == %@", element.label)).allElementsBoundByIndex.contains { $0.frame == element.frame }
+            if navigation.exists, isFormContent, element.frame.maxY <= navigation.frame.maxY { return true }
             // Only form content scrolled beneath the system glass, never its controls.
             if bar.exists, element.frame.minY >= bar.frame.minY,
                !bar.descendants(matching: element.elementType).matching(NSPredicate(format: "label == %@", element.label))
@@ -143,13 +148,27 @@ final class ReferenceParityTests: XCTestCase {
     @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication) {
         for _ in 0..<10 {
             let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : app.frame.minY
-            let bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
-            if element.exists, element.isHittable, element.frame.minY >= top, element.frame.maxY <= bottom { return }
+            var bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
+            let submit = app.buttons["submit-generation"]
+            if element.identifier != "submit-generation", submit.exists { bottom = min(bottom, submit.frame.minY) }
+            if element.exists, (element.elementType == .scrollView || element.isHittable), element.frame.minY >= top, element.frame.maxY <= bottom { return }
             if element.exists, element.frame.minX >= app.frame.maxX {
                 app.scrollViews["generation-references"].swipeLeft()
             } else if element.exists, element.frame.maxX <= app.frame.minX {
                 app.scrollViews["generation-references"].swipeRight()
-            } else if element.exists, element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
+            } else {
+                let form = app.scrollViews["phone-generate-form"]
+                if form.exists {
+                    // The center can fall inside the multiline prompt and scroll
+                    // that text field. Drag the form's observed padding instead.
+                    let delta = element.exists
+                        ? (element.frame.minY < top ? top - element.frame.minY + 8 : bottom - element.frame.maxY - 8)
+                        : -200
+                    let start = form.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5))
+                    let end = start.withOffset(CGVector(dx: 0, dy: max(-250, min(250, delta))))
+                    start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+                } else if element.exists, element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
+            }
         }
     }
 }

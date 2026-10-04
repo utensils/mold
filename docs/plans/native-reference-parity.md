@@ -39,9 +39,13 @@ All routes must preserve unsupported drafts through parking, restore reusable me
 
 The repository's admission functions are the executable authority: `generation_profile::reference_images_for_recipe`, `minimax_h3::validate_references`, `validation::validate_keyframes`, and Hunyuan named-view validation. Upstream research confirms distinct MiniMax reference and boundary-frame tasks: [official MiniMax-H3 repository](https://github.com/MiniMax-AI/MiniMax-H3) and [official announcement](https://www.minimax.io/news/minimax-h3-open-source). Named Hunyuan views follow the [Tencent Hunyuan3D-2 repository](https://github.com/Tencent-Hunyuan/Hunyuan3D-2). No inference algorithm was changed.
 
-## Verification so far
+## Verification evidence
 
-Independent plan review approved the revised matrix before implementation. Shared Swift baseline: 1,136 passing tests; implementation: 1,158 passing tests. Rust core: 1,921 passing tests including generation-profile capability/hash coverage. Generated authority refresh/check and formatting passed. Native iOS unit/store suite: 163 tests in 30 suites passed. Local native UAT and independent final review are in progress; exact-head CI and merge evidence will be appended after completion.
+Independent subagents reviewed the plan before implementation and the final production diff; valid findings were fixed. Shared Swift: 1,168 tests in 76 suites passed, including import probing, upload lifecycle, retained-reference editing refusal, placement redaction, parking, and pixel budgets. Rust core: 1,921 tests passed including capability/hash coverage. Generated authority refresh/check and formatting passed. Native iOS: 163 unit/store tests in 30 suites passed. Native macOS: 895 tests in 125 suites passed. Both native architecture lints, documentation build, frontend tests/build/format, CI routing and fixture payload guards passed.
+
+Actual macOS UAT used native controls and captured requests for two reordered MiniMax images; replacement and ordering of PCM audio and silent H.264 video; refusal of keyless soundtrack-bearing video; MiniMax first/last frames with updated length; Wan incomplete/complete endpoint pairs; all four Hunyuan named-view controls; and ten Qwen references in a narrow window. The latter verified scrolling to the tenth reference and canvas behavior after removal. iPhone native UAT verified two MiniMax Library imports, reorder, outgoing typed references, and populated-control accessibility at normal and largest accessibility text sizes. It also exercised Hunyuan, Wan, MiniMax boundary and Qwen edit controls. Remaining appearance/device matrix results, exact final-head CI, and merge status are recorded in [PR #1802](https://github.com/utensils/mold/pull/1802).
+
+UAT used disposable fixture hosts and isolated native state; requests were captured without running GPU inference. This establishes native authoring, transport and media-ingress behavior, without claiming physical-device or model output quality qualification.
 
 ## Media decoder parity evidence
 
