@@ -10,10 +10,7 @@ struct PictureWells: View {
         let caps = generate.recipe?.capabilities
         let references = caps?.referenceImages(family: generate.model?.family, model: generate.modelName)
         let mode = SourceImageMode(references: references)
-        let readsSource = caps?.readsSourceImage == true && mode.showsSourceWell
-            && caps?.mesh?.namedViews?.mode.isVisible != true
-            && caps?.generationReferences?.mode.isVisible != true
-            && caps.map { BoundaryFramePolicy.resolve(capabilities: $0) } == nil
+        let readsSource = Self.showsSourceWell(capabilities: caps, mode: mode)
         VStack(alignment: .leading, spacing: 8) {
             if readsSource || references != nil {
                 ScrollView(.horizontal) {
@@ -39,6 +36,13 @@ struct PictureWells: View {
                     range: weight.min ... weight.max, step: weight.step)
             }
         }
+    }
+
+    static func showsSourceWell(capabilities: RecipeCapabilities?, mode: SourceImageMode) -> Bool {
+        return capabilities?.readsSourceImage == true && mode.showsSourceWell
+            && capabilities?.mesh?.namedViews?.mode.isVisible != true
+            && capabilities?.generationReferences?.mode.isVisible != true
+            && capabilities.flatMap { BoundaryFramePolicy.resolve(capabilities: $0) } == nil
     }
 
     @ViewBuilder private func referenceWells(_ capability: ReferenceImagesCapability, mode: SourceImageMode) -> some View {

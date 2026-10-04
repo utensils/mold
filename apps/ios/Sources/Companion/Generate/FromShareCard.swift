@@ -31,10 +31,8 @@ struct FromShareCard: View {
     private func card(_ item: ShareInbox.Item) -> some View {
         let caps = generate.recipe?.capabilities
         let references = caps?.referenceImages(family: generate.model?.family, model: generate.modelName)
-        let canStart = caps?.readsSourceImage == true && SourceImageMode(references: references).showsSourceWell
-            && caps?.mesh?.namedViews?.mode.isVisible != true
-            && caps?.generationReferences?.mode.isVisible != true
-            && caps.map { BoundaryFramePolicy.resolve(capabilities: $0) } == nil
+        let canStart = PictureWells.showsSourceWell(capabilities: caps,
+            mode: SourceImageMode(references: references))
         let typed = caps?.generationReferences
         let canType = typed?.mode.isVisible == true && typed?.kinds.contains("image") == true
         let canRefer = references?.hasRoom(for: generate.draft.media.editImages.count) == true
