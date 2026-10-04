@@ -92,6 +92,24 @@ final class LibraryLongPressTests: XCTestCase {
         let details = try XCTUnwrap(candidate.waitForExistence(timeout: 5) ? candidate : nil, "The details sheet must own its native List: \(app.debugDescription)")
         let heading = app.navigationBars["Saved Prints"]
         let title = try XCTUnwrap(heading.waitForExistence(timeout: 5) ? heading : nil, "The details heading must be presented: \(app.debugDescription)")
+        // The native List and navigation bar are siblings. Select their
+        // innermost actual common owner, not the dimmed Library behind it.
+        let owners = app.otherElements.containing(.collectionView, identifier: "offline-library-details")
+            .containing(.navigationBar, identifier: "Saved Prints").allElementsBoundByIndex
+        let owner = try XCTUnwrap(owners.last, "The presented sheet must own its List and navigation bar: \(app.debugDescription)")
+        XCTAssertFalse(owner.frame.isEmpty)
+        let explanation = details.staticTexts["These machines aren't answering. You can keep browsing this device's saved prints."].firstMatch
+        let section = details.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Unavailable Machines")).firstMatch
+        for (text, label) in [(explanation, "explanation"), (section, "section heading")] {
+            try revealDetailsText(text, details: details, title: title, app: app)
+            try auditContrast(text, app: app, stage: stage + " details " + label)
+            try auditAccessibility(text, app: app, stage: stage + " details " + label,
+                                   types: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription])
+        }
+        attach(app, name: stage + " Full details sheet before accessibility audit")
+        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: .contrast)
+        try auditAccessibility(owner, app: app, stage: stage + " details sheet",
+                               types: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription])
         XCTAssertEqual(Set(identities).count, names.count, "Duplicate names must keep distinct host identities")
         for (index, name) in names.enumerated() {
             let text = details.staticTexts["offline-library-host-" + identities[index]].firstMatch
@@ -149,10 +167,19 @@ final class LibraryLongPressTests: XCTestCase {
     @discardableResult @MainActor private func revealPrint(_ tile: XCUIElement, app: XCUIApplication) throws -> CGRect {
         let viewport = libraryViewport(app)
         XCTAssertGreaterThanOrEqual(viewport.height, 44)
+        let baseline = tile.frame
+        // AX can export a fraction of an image beyond the fixed native grid.
+        // Vertical scrolling can expose its entire grid intersection, but
+        // cannot move that horizontal interval onto the screen.
+        let reachable = baseline.intersection(CGRect(x: viewport.minX, y: baseline.minY,
+                                                    width: viewport.width, height: baseline.height))
         func fullyExposed() -> Bool {
-            if tile.frame.height <= viewport.height { return viewport.contains(tile.frame) }
+            if tile.frame.height <= viewport.height, tile.frame.width <= viewport.width,
+               tile.frame.minX >= viewport.minX, tile.frame.maxX <= viewport.maxX {
+                return viewport.contains(tile.frame)
+            }
             let visible = viewport.intersection(tile.frame)
-            return visible.height >= viewport.height && visible.width >= tile.frame.width
+            return visible.height >= min(tile.frame.height, viewport.height) && visible.width >= reachable.width
         }
         for _ in 0..<8 where !fullyExposed() {
             let delta = tile.frame.midY - viewport.midY
@@ -164,9 +191,13 @@ final class LibraryLongPressTests: XCTestCase {
                 .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: viewport.midY - direction * distance / 2)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
             settle(tile)
+            XCTAssertEqual(tile.frame.minX, baseline.minX, "A vertical reveal must preserve the measured horizontal image interval")
+            XCTAssertEqual(tile.frame.maxX, baseline.maxX)
         }
         let visible = viewport.intersection(tile.frame)
-        XCTAssertTrue(fullyExposed(), "Retained print \(tile.frame) must expose its full available image area in \(viewport)")
+        let geometry = XCTAttachment(string: "Baseline \(baseline); reachable horizontal interval \(reachable.minX)...\(reachable.maxX); final \(tile.frame); viewport \(viewport); visible \(visible)")
+        geometry.name = "Retained photo maximum exposure geometry"; geometry.lifetime = .keepAlways; add(geometry)
+        XCTAssertTrue(fullyExposed(), "Retained print \(tile.frame) must expose its full available image area in \(viewport), baseline \(baseline), reachable \(reachable)")
         XCTAssertGreaterThanOrEqual(visible.width, 44)
         XCTAssertGreaterThanOrEqual(visible.height, 44)
         XCTAssertTrue(tile.isHittable)
@@ -233,7 +264,14 @@ final class LibraryLongPressTests: XCTestCase {
     }
 
     @MainActor private func auditContrast(_ scope: XCUIElement, app: XCUIApplication, stage: String) throws {
-        try app.performAccessibilityAudit(for: .contrast) { issue in
+        try auditAccessibility(scope, app: app, stage: stage, types: .contrast)
+    }
+
+    @MainActor private func auditAccessibility(_ scope: XCUIElement, app: XCUIApplication, stage: String,
+                                              types: XCUIAccessibilityAuditType) throws {
+        _ = try XCTUnwrap(scope.exists && !scope.frame.isEmpty ? scope : nil,
+                          "An owning-region audit requires its actual visible native element")
+        try app.performAccessibilityAudit(for: types) { issue in
             guard let element = issue.element else { return false }
             let belongs = element.elementType == scope.elementType && element.label == scope.label && element.frame == scope.frame
                 || scope.descendants(matching: element.elementType)
@@ -241,11 +279,35 @@ final class LibraryLongPressTests: XCTestCase {
                     .contains { $0.frame == element.frame }
             guard belongs else { return true }
             let hierarchy = XCTAttachment(string: app.debugDescription)
-            hierarchy.name = stage + " Select contrast failure hierarchy"; hierarchy.lifetime = .keepAlways; self.add(hierarchy)
-            self.attach(app, name: stage + " Select contrast failure")
+            hierarchy.name = stage + " Accessibility failure hierarchy"; hierarchy.lifetime = .keepAlways; self.add(hierarchy)
+            self.attach(app, name: stage + " Accessibility failure")
             XCTFail("\(stage): \(issue.compactDescription), \(element.label) at \(element.frame). \(issue.detailedDescription)")
             return true
         }
+    }
+
+    @MainActor private func revealDetailsText(_ text: XCUIElement, details: XCUIElement,
+                                            title: XCUIElement, app: XCUIApplication) throws {
+        let frame = details.frame.intersection(app.frame)
+        let top = max(frame.minY, title.frame.maxY)
+        let viewport = CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, frame.maxY - top))
+        for _ in 0..<12 {
+            if text.exists, viewport.contains(text.frame) { break }
+            if !text.exists { details.swipeDown(); continue }
+            XCTAssertLessThanOrEqual(text.frame.height, viewport.height, "Sheet text must fit at the requested text size")
+            let delta = text.frame.midY - viewport.midY
+            let distance = min(abs(delta), viewport.height * 0.4)
+            let direction: CGFloat = delta > 0 ? 1 : -1
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = viewport.minX + viewport.width * 0.03
+            origin.withOffset(CGVector(dx: x, dy: viewport.midY + direction * distance / 2))
+                .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: viewport.midY - direction * distance / 2)),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+            settle(text)
+        }
+        _ = try XCTUnwrap(text.exists ? text : nil, "Every sheet explanation and section heading must be reachable: \(app.debugDescription)")
+        settle(text)
+        XCTAssertTrue(viewport.contains(text.frame), "The complete sheet text \(text.label), \(text.frame), must fit \(viewport)")
     }
 
     @MainActor func testLibraryLongPressOpensMenuAndRemainsUsable() async throws {
@@ -269,11 +331,20 @@ final class LibraryLongPressTests: XCTestCase {
     @MainActor func testRetainedSourceReuseAppearsInWellAndCanBeRemoved() async throws {
         continueAfterFailure = false
         let app = try await populatedLibrary(retainedMediaFixture: true)
+        // Start a new scene before the Library handoff, rather than relying
+        // on a Generate view retained by an earlier test's navigation.
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         let print = fixturePrint(in: app)
         XCTAssertTrue(print.waitForExistence(timeout: 10))
         print.press(forDuration: 1)
         app.buttons["Use These Settings"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
+        let restoredPrompt = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Fixture 0"), object: prompt)
+        XCTAssertEqual(XCTWaiter.wait(for: [restoredPrompt], timeout: 5), .completed,
+                       "The Library handoff must restore its prompt before probing private reference media: \(app.debugDescription)")
         let source = app.buttons["Start from"].firstMatch
         XCTAssertTrue(source.waitForExistence(timeout: 10), "The private retained source must appear even without an output metadata source marker")
         let form = app.scrollViews["phone-generate-form"]

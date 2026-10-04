@@ -61,7 +61,7 @@ can clear both pictures and saved listings after explaining the offline effect.
 
 ### Reusing retained source media
 
-Use These Settings asks every known machine copy for the print's retained source media, including inputs that output metadata cannot describe. A retained source picture appears in the normal source well, where it can be inspected, replaced or removed. A paired retained mask enters the draft with its source picture, so aspect, crop and pad-repaint changes transform both together. Explicit attachments win. Other retained files are disclosed beside the composer and restored at admission: a single output on its original machine uses a one-use session; another machine or a batch relays the bounded file contents. Prompt, seed and size edits keep these disclosed files for repeated submissions; Remove retained sources, choosing a model/kind/recipe, Reset, or another reuse clears their authority. Removing the visible source image never restores it secretly. Unavailable media explains when it must be attached again.
+Use These Settings consumes a pending Library handoff when Generate first appears as well as when it is already open, then clears the handoff so returning to Generate preserves later edits. It asks every known machine copy for the print's retained source media, including inputs that output metadata cannot describe. A retained source picture appears in the normal source well, where it can be inspected, replaced or removed. A paired retained mask enters the draft with its source picture, so aspect, crop and pad-repaint changes transform both together. Explicit attachments win. Other retained files are disclosed beside the composer and restored at admission: a single output on its original machine uses a one-use session; another machine or a batch relays the bounded file contents. Prompt, seed and size edits keep these disclosed files for repeated submissions; Remove retained sources, choosing a model/kind/recipe, Reset, or another reuse clears their authority. Removing the visible source image never restores it secretly. Unavailable media explains when it must be attached again.
 
 ## Building
 
@@ -93,7 +93,7 @@ in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSO
 and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
 and result bundles remain under `build/UITestResults/`, uploaded even on failure.
-CI splits all test classes into app, references and Library groups, each in light and dark,
+CI splits all test classes into app, references, Library and Library interaction groups, each in light and dark,
 while unit/shared-package tests run independently. App UI, shared code, UI tests,
 build inputs, and unknown paths require the full audit matrix. Widget Swift,
 inert docs, and named static routing/branding contracts can skip app audits;
@@ -193,7 +193,7 @@ are never replayed by the relay.
 
 Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.
 
-Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app, references and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
+Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app, references, Library and Library interaction audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
 

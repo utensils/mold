@@ -124,7 +124,9 @@ jobs:
           - name: references
             classes: ReferenceParityTests
           - name: library
-            classes: HiddenCollectionTests LibraryCollectionPickerTests LibraryLongPressTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
+            classes: HiddenCollectionTests LibraryCollectionPickerTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
+          - name: library_interactions
+            classes: LibraryLongPressTests
     defaults:
       run:
         working-directory: apps/ios

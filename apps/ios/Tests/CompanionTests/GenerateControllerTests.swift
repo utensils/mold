@@ -2,7 +2,9 @@ import CoreGraphics
 import Foundation
 import MoldClient
 import MoldClientTesting
+import SwiftUI
 import Testing
+import UIKit
 
 @testable import MoldCompanion
 
@@ -59,6 +61,54 @@ struct GenerateControllerTests {
         generate.settleChoice()
         generate.draft.prompt = "a lighthouse at dusk"
         return (generate, fake)
+    }
+
+    @Test func pendingLibraryReuseIsConsumedOnFirstMountAndChangesWithoutReplay() async throws {
+        let (generate, fake) = try await setUp()
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy, members: []))
+        func entry(_ name: String) throws -> LibraryEntry {
+            let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+                #"{"filename":"\#(name).png","metadata":{"model":"flux-dev:q4","prompt":"\#(name)"},"timestamp":1790000000,"format":"png"}"#.utf8))
+            return LibraryEntry(host: generate.hosts.hosts[0], print: print)
+        }
+        let router = AppRouter()
+        router.reuse(try entry("first"))
+        let scene = try #require(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let library = LibraryStore(hosts: generate.hosts)
+        var appearances = 0
+        func mount() {
+            window.rootViewController = UIHostingController(rootView: NavigationStack {
+                GenerateView().onAppear { appearances += 1 }
+            }.environment(generate).environment(generate.hosts).environment(router).environment(library))
+            window.makeKeyAndVisible()
+        }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKey()
+        }
+        mount()
+        try await waitUntil { router.pendingReuse == nil }
+        #expect(generate.draft.prompt == "first")
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(fake.count("retainedSourceMedia(for:)") == 1)
+
+        router.reuse(try entry("second"))
+        try await waitUntil { router.pendingReuse == nil }
+        #expect(generate.draft.prompt == "second")
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(fake.count("retainedSourceMedia(for:)") == 2)
+
+        generate.draft.prompt = "edited after reuse"
+        window.rootViewController = UIViewController()
+        mount()
+        // A rendered remount must keep the edit, rather than replay a consumed handoff.
+        try await waitUntil { appearances == 2 }
+        #expect(router.pendingReuse == nil)
+        #expect(generate.draft.prompt == "edited after reuse")
+        #expect(fake.count("retainedSourceMedia(for:)") == 2)
     }
 
     @Test func reuseAlwaysProbesAndShowsRetainedSourceInWell() async throws {
