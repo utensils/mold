@@ -115,7 +115,7 @@ final class LibraryStore {
         cacheEpoch += 1
         for task in pending.values { task.cancel() }
         pending.removeAll()
-        for task in writes.values { await task.value }
+        await waitForSnapshotWrites()
         writes.removeAll()
         snapshots.purge()
         etags.removeAll()
@@ -126,6 +126,13 @@ final class LibraryStore {
             collections[host.id] = nil
         }
         rebuild()
+    }
+
+    /// Await the writes already queued when this barrier starts. Capturing
+    /// their tasks keeps later listings from changing what completion means.
+    func waitForSnapshotWrites() async {
+        let pendingWrites = Array(writes.values)
+        for task in pendingWrites { await task.value }
     }
 
     private func fetch(_ host: MoldHost) async {

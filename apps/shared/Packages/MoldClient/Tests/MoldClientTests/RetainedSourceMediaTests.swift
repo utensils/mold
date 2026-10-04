@@ -203,7 +203,7 @@ struct RetainedSourceMediaTests {
     @Test func neverAsksForARoleThisBuildCannotPlace() {
         // `references` included: this app models no H3 reference descriptors,
         // so there is nothing for retained reference bytes to attach to.
-        let offered = [member("references", "a"), member("hdr_exr_dir", "b")]
+        let offered = [member("future_role", "a"), member("hdr_exr_dir", "b")]
         #expect(RetainedSourceMedia.members(offered, forHydrating: emptyRequest).isEmpty)
     }
 
@@ -246,9 +246,9 @@ struct RetainedSourceMediaTests {
     }
 
     @Test func aRoleThisBuildCannotPlaceRefusesRatherThanBeingDroppedQuietly() {
-        #expect(throws: RetainedSourceMedia.RelayFailure.unsupportedRole("references")) {
+        #expect(throws: RetainedSourceMedia.RelayFailure.unsupportedRole("future_role")) {
             try RetainedSourceMedia.relayed(
-                [(member("references", "a"), Data([1]))], into: emptyRequest)
+                [(member("future_role", "a"), Data([1]))], into: emptyRequest)
         }
     }
 

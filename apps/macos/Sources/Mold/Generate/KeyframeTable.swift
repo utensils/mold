@@ -130,7 +130,6 @@ extension KeyframeTable {
     /// A requested frame, clamped strictly below `frames` -- never a value
     /// the server would refuse (`validation.rs:1705-1711`).
     static func snappedFrame(_ requested: Int, temporal: TemporalProfile, frames: Int) -> Int {
-        let ceiling = Swift.max(frames - 1, 0)
-        return Swift.min(Swift.max(temporal.snap(requested), 0), ceiling)
+        BoundaryFramePolicy.snapIndex(requested, temporal: temporal, frames: frames)
     }
 }

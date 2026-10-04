@@ -25,12 +25,17 @@ public enum RenderRequest {
     public static func one(
         _ draft: RenderDraft, model: String, maxIdentityPhotos: Int = 0
     ) -> GenerateRequest {
+        var draft = draft
+        if let capabilities = draft.media.adoptedReferenceCapabilities {
+            BoundaryFramePolicy.apply(to: &draft, capabilities: capabilities)
+        }
         var request = GenerateRequest(
             prompt: draft.prompt, model: model, width: draft.width, height: draft.height,
             steps: draft.steps, guidance: draft.guidance, batchSize: 1,
             negativePrompt: draft.negativePrompt.isEmpty ? nil : draft.negativePrompt,
             seed: draft.locksSeed ? draft.seed : nil
         )
+        request.references = draft.media.generationReferences.isEmpty ? nil : draft.media.generationReferences
         request.frames = draft.frames
         request.fps = draft.fps
         request.pipeline = draft.pipeline
@@ -80,6 +85,12 @@ public enum RenderRequest {
         applyAdvanced(draft, to: &request)
         applySourceFit(draft, to: &request, carriesSource: carriesSource)
         applyClip(draft, to: &request)
+        if !draft.media.generationReferences.isEmpty {
+            request.sourceImage = nil; request.sourceImageName = nil
+            request.editImages = nil; request.referenceWeight = nil
+            request.maskImage = nil; request.sourceFit = nil
+            request.keyframes = nil
+        }
 
         let trimmedTitle = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
         request.title = trimmedTitle.isEmpty ? nil : trimmedTitle

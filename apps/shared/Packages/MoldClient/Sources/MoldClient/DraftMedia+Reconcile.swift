@@ -19,10 +19,15 @@ public extension DraftMedia {
     mutating func reconcile(
         for capabilities: RecipeCapabilities, family: String? = nil, model: String? = nil
     ) {
+        BoundaryFramePolicy.reconcile(media: &self, capabilities: capabilities)
+        adoptedReferenceCapabilities = capabilities
+        reconcileGenerationReferences(capabilities: capabilities)
         // Keyframes and an extend continuation reconcile FIRST: both can
         // park or restore the source image below, and an extend also pins
         // the request's video-only reading (`RenderDraft+Audio.swift`).
-        reconcileKeyframes(supported: capabilities.acceptsKeyframes)
+        if BoundaryFramePolicy.resolve(capabilities: capabilities) == nil {
+            reconcileKeyframes(supported: capabilities.acceptsKeyframes)
+        }
         reconcileExtend(supported: capabilities.supportsExtend == true)
         reconcileAudioFile(supported: capabilities.acceptsSourceAudio)
         reconcileSourceVideo(supported: capabilities.acceptsSourceVideo)
@@ -68,9 +73,11 @@ public extension DraftMedia {
         // no source path. An extend is a third claimant, and the strongest
         // one -- it pins the continuation's first frames from the source
         // clip's own tail (`validation.rs:1845-1849`).
-        let takenByReferences = !editImages.isEmpty && sourceMode.replacesSourceImage
+        let typedExclusive = capabilities.generationReferences?.mode.isVisible == true || capabilities.mesh?.namedViews?.mode.isVisible == true
+        let takenByReferences = (!editImages.isEmpty && sourceMode.replacesSourceImage) || typedExclusive
         reconcileSourceImage(
             supported: capabilities.readsSourceImage && !takenByReferences && extendVideo == nil
+                && BoundaryFramePolicy.resolve(capabilities: capabilities) != "wan-pair"
         )
 
         // The mask needs BOTH the recipe's own permission and a surviving

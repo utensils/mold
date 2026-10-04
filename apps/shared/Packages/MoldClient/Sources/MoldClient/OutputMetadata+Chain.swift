@@ -37,6 +37,32 @@ public struct ReferenceProvenance: Codable, Hashable, Sendable {
     public let mimeType: String?
     public let width: Int?
     public let height: Int?
+    public var frameCount: Int? = nil
+    public var durationMs: Int? = nil
+    public var fps: Double? = nil
+    public var hasAudio: Bool? = nil
+    public var audioDurationMs: Int? = nil
+    public var audioSampleCount: Int? = nil
+    public var audioSampleRate: Int? = nil
+    public var audioChannels: Int? = nil
+    public var sampleRate: Int? = nil
+    public var channels: Int? = nil
+    public var sampleCount: Int? = nil
+    public var crop: GenerationReferenceCrop? = nil
+    public var imageRole: GenerationImageReferenceRole? = nil
+
+    public var generationReference: GenerationReference? {
+        guard let kind, let mimeType else { return nil }
+        var ref = GenerationReference(kind: imageRole == nil ? kind : "named_image",
+            media: .init(authority: "descriptor"), mimeType: mimeType,
+            provenance: .init(name: name, sha256: sha256, crop: crop), width: width, height: height, role: imageRole)
+        ref.frameCount = frameCount; ref.durationMs = durationMs; ref.fps = fps
+        ref.hasAudio = hasAudio; ref.audioDurationMs = audioDurationMs
+        ref.audioSampleCount = audioSampleCount; ref.audioSampleRate = audioSampleRate
+        ref.audioChannels = audioChannels; ref.sampleRate = sampleRate
+        ref.channels = channels; ref.sampleCount = sampleCount
+        return ref
+    }
 }
 
 /// One pinned still, byte-free (`types.rs:3284-3287`).

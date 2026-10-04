@@ -881,8 +881,14 @@ for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*
     classes.extend(re.findall(r'\bclass\s+(\w+)\s*:\s*XCTestCase', path.read_text()))
 suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
 assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
-assert len(suites) == 2 and set(re.findall(r'          - name: (\w+)', native)) == {'app', 'library'}
-assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests']
+suite_names = re.findall(r'          - name: (\w+)', native)
+assert len(suites) == 4 and len(suite_names) == 4
+assert dict(zip(suite_names, (suite.split() for suite in suites))) == {
+    'app': ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests'],
+    'references': ['ReferenceParityTests'],
+    'library': ['HiddenCollectionTests', 'LibraryCollectionPickerTests', 'LibrarySelectionTests', 'LibraryViewerTests', 'NotificationTapTests'],
+    'library_interactions': ['LibraryLongPressTests'],
+}, 'audit suite grouping drifted'
 check, audit = native.split('\n  audit:\n', 1)
 assert 'needs: changes' in audit
 assert "always() && !cancelled() &&" in audit

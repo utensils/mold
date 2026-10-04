@@ -55,6 +55,9 @@ struct GenerateInspector: View {
     /// floating in the middle of it.
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if let recipe, GenerationReferencesGroup.isShown(recipe.capabilities) {
+                GenerationReferencesGroup(recipe: recipe, draft: $draft)
+            }
             if let recipe, let stack = recipe.capabilities.loraStack, let model, let host {
                 InspectorSection("Adapters", isExpanded: $showsAdapters) {
                     AdaptersGroup(modelName: model.name, host: host, maxCount: stack.maxCount, draft: $draft)

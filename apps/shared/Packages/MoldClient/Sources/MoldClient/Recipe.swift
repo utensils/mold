@@ -46,6 +46,9 @@ public struct RecipeCapabilities: Codable, Hashable, Sendable {
     public let negativePrompt: FeatureControl?
     public let output: OutputCapabilities?
     public let referenceImages: ReferenceImagesCapability?
+    public var generationReferences: GenerationReferencesCapability? = nil
+    public var boundaryFrames: BoundaryFramesCapability? = nil
+    public var mesh: RecipeMeshCapability? = nil
     /// Absent is deliberately NOT a `true` nobody wrote: it means an older
     /// host, and the caller falls back to its own legacy predicate.
     public let supportsStrength: Bool?

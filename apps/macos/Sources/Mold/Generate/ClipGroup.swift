@@ -70,7 +70,8 @@ struct ClipGroup: View {
 
 extension ClipGroup {
     static func isShown(capabilities: RecipeCapabilities) -> Bool {
-        capabilities.supportsAudio == true
+        BoundaryFramePolicy.resolve(capabilities: capabilities) != nil
+            || capabilities.supportsAudio == true
             || capabilities.acceptsKeyframes
             || capabilities.supportsExtend == true
             || capabilities.acceptsSourceAudio

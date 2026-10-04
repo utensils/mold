@@ -26,6 +26,22 @@ extension ReuseStore {
         return authority
     }
 
+    /// Descriptor-only rows need the retained archive that grants their bytes.
+    func availableFields(for draft: RenderDraft, request: GenerateRequest) -> Set<RetainedSourceMedia.Field> {
+        guard let authority = pending(for: draft) else { return [] }
+        return Set(RetainedSourceMedia.members(authority.members, forHydrating: request)
+            .compactMap { RetainedSourceMedia.fieldForRole[$0.role] })
+    }
+
+    func referenceRefusal(for draft: RenderDraft) -> String? {
+        let references = draft.media.generationReferences
+        guard references.contains(where: { $0.media.authority == "descriptor" }) else { return nil }
+        if RetainedReferenceGuard.canHydrate(references: references,
+            original: restored?.media.generationReferences ?? [],
+            members: pending(for: draft)?.members ?? []) { return nil }
+        return "The retained references are unavailable. Replace or remove them before generating."
+    }
+
     /// The authority, CONSUMED. A handle is good for one admission and a
     /// relay's bytes are carried by the request that took them, so the submit
     /// that takes this is the last one to have it -- which is also what makes

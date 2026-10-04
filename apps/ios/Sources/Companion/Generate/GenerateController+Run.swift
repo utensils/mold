@@ -49,7 +49,7 @@ extension GenerateController {
     func generate() {
         guard blocker == nil, let host = target, let modelName else { return }
         let backend = hosts.backend(for: host)
-        let copies = min(draft.batchSize, hosts.capabilities[host.id]?.maxBatchOutputs ?? draft.batchSize)
+        let copies = min(draft.batchSize, referenceBatchLimit)
         let retained = retainedReuse.snapshot()
         let snapshot = draft
         let recipe = recipe
@@ -215,5 +215,17 @@ extension GenerateController {
             Task { try? await hosts.backend(for: host).cancelBatch(id: batch.id) }
         }
         if !everything { followNext() }
+    }
+}
+
+// Only verified, vacant retained roles can satisfy a required-input check.
+extension GenerateController {
+    var retainedReferenceFields: Set<RetainedSourceMedia.Field> {
+        guard !retainedReuse.probing, let authority = retainedReuse.snapshot(), let modelName else { return [] }
+        let request = RenderRequest.one(draft, model: modelName,
+            maxIdentityPhotos: target.flatMap { hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0)
+        return Set(RetainedSourceMedia.members(authority.members, forHydrating: request).compactMap {
+            RetainedSourceMedia.fieldForRole[$0.role]
+        })
     }
 }

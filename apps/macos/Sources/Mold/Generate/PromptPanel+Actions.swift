@@ -69,8 +69,12 @@ extension PromptPanel {
     /// computed for the caption under the slider and then only discovered
     /// after the press, as a failure on the canvas.
     private var submitRefusal: String? {
+        if let refusal = reuse.referenceRefusal(for: draft) { return refusal }
         guard let recipe else { return nil }
-        if let refusal = draft.refusal(for: recipe) { return refusal }
+        let retainedFields = model.map {
+            reuse.availableFields(for: draft, request: RenderRequest.one(draft, model: $0.name))
+        } ?? []
+        if let refusal = draft.refusal(for: recipe, retainedFields: retainedFields) { return refusal }
         return ClipRouting.resolve(recipe: recipe, model: model, draft: draft,
                                    limits: chainLimits)?.refusal
     }

@@ -61,3 +61,9 @@ private let wan = try! MoldJSON.decoder.decode(TemporalProfile.self, from: Data(
     #expect(try MoldJSON.decoder.decode(SourceImageCapability.self,
                                         from: Data("\"brand_new\"".utf8)) == .unknown)
 }
+
+@Test func keyframeIndicesUseZeroBasedGridWithoutClipLengthMinimum() {
+    #expect(BoundaryFramePolicy.snapIndex(0, temporal: wan, frames: 121) == 0)
+    #expect(BoundaryFramePolicy.snapIndex(5, temporal: wan, frames: 121) == 4)
+    #expect(BoundaryFramePolicy.snapIndex(999, temporal: wan, frames: 121) == 120)
+}

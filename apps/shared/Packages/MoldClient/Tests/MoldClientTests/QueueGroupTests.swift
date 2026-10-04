@@ -83,3 +83,19 @@ private func child(
     let groups = QueueGroup.build(entries, children: children)
     #expect(groups[0].rows.map(\.id) == ["r1", "r2"])
 }
+
+@Test func selectedExpandedChildrenResolveWithoutGivingTheHeaderAJob() {
+    let groups = QueueGroup.build([
+        entry("solo"), entry("only", batchId: "single"),
+        entry("first", batchId: "pair", batchIndex: 0),
+        entry("second", batchId: "pair", batchIndex: 1),
+    ], children: [:])
+    #expect(QueueGroup.selectedEntry("first", in: groups)?.id == "first")
+    #expect(QueueGroup.selectedEntry("second", in: groups)?.id == "second")
+    #expect(QueueGroup.selectedEntry("pair", in: groups) == nil)
+    #expect(QueueGroup.selectedEntry("solo", in: groups)?.id == "solo")
+    #expect(QueueGroup.selectedEntry("single", in: groups)?.id == "only")
+    #expect(QueueGroup.selectedEntry("only", in: groups) == nil)
+    #expect(QueueGroup.selectedEntry("removed", in: groups) == nil)
+    #expect(QueueGroup.selectedEntry("first", in: []) == nil)
+}

@@ -128,15 +128,20 @@ struct GeneratePane: View {
     var recipe: GenerationRecipe? {
         if let recipeID = controller.recipeID,
            let recipe = selectedModel?.generationProfile?.recipe(named: recipeID) {
-            return recipe
+            return recipe.resolvingReferenceCapabilities(family: selectedModel?.family, model: selectedModel?.name)
         }
-        return selectedModel?.defaultRecipe
+        return selectedModel?.defaultRecipe?.resolvingReferenceCapabilities(
+            family: selectedModel?.family, model: selectedModel?.name)
     }
 
     /// What this machine will admit in one batch. Absent means an older host,
     /// which is one at a time.
     private var maxBatch: Int {
-        host.flatMap { hosts.capabilities(of: $0)?.maxBatchOutputs } ?? 1
+        guard let host, let model = selectedModel else { return 1 }
+        let caps = hosts.capabilities(of: host)
+        return ReferenceUploadPolicy.batchLimit(
+            requests: [RenderRequest.one(controller.draft, model: model.name)], apiKey: host.apiKey,
+            capabilities: caps?.referenceUploads, batchLimit: caps?.maxBatchOutputs ?? 1)
     }
 
     private var subtitle: String {

@@ -3,15 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mold_core::generation_profile::{
-    resolution_qualification_record, AdapterControlProfile, AspectGroup, ControlMode,
-    FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
-    GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, ImageInputFormat,
-    IntegerControl, MeshCapabilitiesProfile, MeshInputProfile, MeshMattingControlProfile,
-    MeshWorkflowMode, NamedViewsProfile, OffBucketPolicy, OutputCapabilitiesProfile,
-    ProfileProvenance, PromptCapabilitiesProfile, PromptRequirement, ProvenanceKind,
-    RecipeSelector, ReferenceCanvasRule, ReferenceImagesProfile, ReferenceSourceRelation,
-    ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
-    TransparencyCapabilitiesProfile, WanRecipeCapabilitiesProfile,
+    resolution_qualification_record, AdapterControlProfile, AspectGroup, BoundaryFramesProfile,
+    ControlMode, FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
+    GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile,
+    GenerationReferencesProfile, ImageInputFormat, IntegerControl, MeshCapabilitiesProfile,
+    MeshInputProfile, MeshMattingControlProfile, MeshWorkflowMode, NamedViewsProfile,
+    OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance, PromptCapabilitiesProfile,
+    PromptRequirement, ProvenanceKind, RecipeSelector, ReferenceCanvasRule, ReferenceImagesProfile,
+    ReferenceSourceRelation, ResolutionDomain, ResolutionPreset, ResolutionProfile,
+    TemporalProfile, TransparencyCapabilitiesProfile, WanRecipeCapabilitiesProfile,
 };
 use mold_core::manifest::known_manifests;
 use mold_core::{
@@ -134,6 +134,8 @@ fn render_typescript_contract() -> String {
     declaration!(ReferenceCanvasRule);
     declaration!(ImageInputFormat);
     declaration!(ReferenceImagesProfile);
+    declaration!(GenerationReferencesProfile);
+    declaration!(BoundaryFramesProfile);
     declaration!(TransparencyCapabilitiesProfile);
     declaration!(Scheduler);
     declaration!(GenerationCapabilitiesProfile);

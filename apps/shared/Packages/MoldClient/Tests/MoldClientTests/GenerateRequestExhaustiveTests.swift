@@ -30,6 +30,7 @@ import Testing
         request.sourceImageName = "s.png"
         request.strength = 0.6
         request.editImages = ["REF"]
+        request.references = [GenerationReference(kind: "image", media: .init(authority: "inline", data: "YQ=="), mimeType: "image/png", width: 64, height: 64)]
         request.referenceWeight = 0.8
         request.maskImage = "MASK"
         request.loras = [LoraChoice(path: "/x.safetensors", scale: 0.8, name: "X")]

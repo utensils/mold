@@ -220,6 +220,10 @@ canvas?: ReferenceCanvasRule | null,
  */
 formats?: Array<ImageInputFormat>, };
 
+export type GenerationReferencesProfile = { mode: ControlMode, required: boolean, kinds: Array<string>, max_count: number, max_images: number, max_videos: number, max_audios: number, min_duration_ms: number, max_duration_ms: number, max_video_duration_ms: number, max_audio_duration_ms: number, max_inline_bytes: number, requires_visual: boolean, };
+
+export type BoundaryFramesProfile = { mode: ControlMode, first_required: boolean, last_required: boolean, min_frames: number, wire: string, };
+
 export type TransparencyCapabilitiesProfile = {
 /**
  * `Adjustable` where the recipe renders a transparent background on
@@ -285,7 +289,7 @@ supports_strength: boolean,
  * name predicate, never to a `Hidden` nobody wrote. Every recipe this
  * build emits carries `Some`.
  */
-reference_images?: ReferenceImagesProfile | null,
+reference_images?: ReferenceImagesProfile | null, generation_references?: GenerationReferencesProfile | null, boundary_frames?: BoundaryFramesProfile | null,
 /**
  * The transparent-background contract, or `None` on an OLDER SERVER
  * (clients hide the toggle). Every recipe this build emits carries

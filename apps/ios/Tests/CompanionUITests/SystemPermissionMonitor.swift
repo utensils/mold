@@ -25,27 +25,77 @@ extension XCTestCase {
                 app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
                 app.launch()
                 XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-                app.chooseLibraryShelf("All Prints")
+                if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
                 XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
                 let card = app.descendants(matching: .any).matching(NSPredicate(format:
                     "identifier BEGINSWITH 'machine-card-' AND label MATCHES %@",
                     ".*127\\.0\\.0\\.1:\(port)([^0-9].*|$)")).firstMatch
-                if card.waitForExistence(timeout: 5) {
-                    for _ in 0..<8 where !card.isHittable { app.swipeUp() }
-                    XCTAssertTrue(card.isHittable)
+                if app.staticTexts["No machines yet"].exists { return }
+                let fleet = app.scrollViews["machines-fleet"]
+                XCTAssertTrue(fleet.waitForExistence(timeout: 5), "Fixture cleanup must own the Machines viewport")
+                if XCTestCase.revealFixtureControl(card, in: fleet, app: app) {
                     card.tap()
-                    let remove = app.buttons["Remove…"].firstMatch
-                    for _ in 0..<8 where !remove.isHittable { app.swipeUp() }
-                    XCTAssertTrue(remove.isHittable)
+                    let detail = app.collectionViews["machine-details"]
+                    XCTAssertTrue(detail.waitForExistence(timeout: 5))
+                    let remove = detail.buttons["Remove…"].firstMatch
+                    XCTAssertTrue(XCTestCase.revealFixtureControl(remove, in: detail, app: app), "The exact fixture's Remove action must be reachable")
                     remove.tap()
                     let confirm = app.buttons["Remove"].firstMatch
                     XCTAssertTrue(confirm.waitForExistence(timeout: 5))
                     confirm.tap()
                     XCTAssertTrue(card.waitForNonExistence(timeout: 5), "Fixture pairing must not survive teardown")
+                } else {
+                    // The test can fail before Add succeeds. Absence is only
+                    // accepted after searching the actual fleet in both directions.
+                    XCTAssertFalse(card.exists)
                 }
             }
         }
     }
+
+    @MainActor private static func revealFixtureControl(_ target: XCUIElement, in owner: XCUIElement,
+                                                 app: XCUIApplication) -> Bool {
+        guard owner.exists else { XCTFail("Fixture cleanup scroll owner is missing"); return false }
+        func visibleSignature() -> String {
+            owner.descendants(matching: .any).allElementsBoundByIndex
+                .filter { !$0.identifier.isEmpty && owner.frame.intersects($0.frame) }
+                .map { "\($0.identifier):\($0.frame)" }.sorted().joined(separator: "|")
+        }
+        func visibleTarget() -> Bool {
+            target.exists && target.isHittable && owner.frame.intersects(target.frame)
+        }
+        func pan(down: Bool) {
+            let box = owner.frame.intersection(app.frame)
+            let top = max(box.minY, app.navigationBars.firstMatch.frame.maxY)
+            let bottom = app.tabBars.firstMatch.exists ? min(box.maxY, app.tabBars.firstMatch.frame.minY) : box.maxY
+            let height = max(0, bottom - top)
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = box.minX + box.width * 0.03
+            let center = (top + bottom) / 2
+            let direction: CGFloat = down ? 1 : -1
+            origin.withOffset(CGVector(dx: x, dy: center - direction * height * 0.2))
+                .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: center + direction * height * 0.2)),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        if visibleTarget() { return true }
+        // Restore the top before searching lazy content down to its boundary.
+        for _ in 0..<12 {
+            let before = visibleSignature(); pan(down: true)
+            if visibleTarget() { return true }
+            if visibleSignature() == before { break }
+        }
+        for _ in 0..<12 {
+            let before = visibleSignature(); pan(down: false)
+            if visibleTarget() { return true }
+            if visibleSignature() == before { return false }
+        }
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Fixture cleanup search exhausted"; hierarchy.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Fixture cleanup search exhausted") { $0.add(hierarchy) }
+        XCTFail("Fixture cleanup could not reach a scroll boundary while searching for \(target.identifier)")
+        return false
+    }
+
 }
 
 extension XCUIApplication {

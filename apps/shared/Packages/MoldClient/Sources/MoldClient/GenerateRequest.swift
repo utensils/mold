@@ -36,6 +36,7 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// Base64, in order. Never sent empty -- an empty array and an absent
     /// field mean different things to the host.
     public var editImages: [String]?
+    public var references: [GenerationReference]?
     public var referenceWeight: Double?
     /// Base64 PNG, opaque grayscale. Sent only when `sourceImage` is also set
     /// -- `validation.rs:3101-3107` refuses a mask with no source.

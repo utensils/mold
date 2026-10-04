@@ -39,6 +39,7 @@ public extension RenderDraft {
         profile: GenerationProfileSet? = nil, modelSupportsAudio: Bool? = nil
     ) -> RenderDraft {
         var draft = self
+        let capabilities = recipe.capabilities.resolvingLegacyReferences(model: model)
         if isNewModel {
             draft.width = recipe.defaults.width
             draft.height = recipe.defaults.height
@@ -82,7 +83,7 @@ public extension RenderDraft {
         // Conditioning the recipe cannot currently take is PARKED rather than
         // dropped, so it comes back if the next model can read it again
         // (`DraftMedia+Reconcile.swift`; decision 4 in the M4 design).
-        draft.media.reconcile(for: recipe.capabilities, family: family, model: model)
+        draft.media.reconcile(for: capabilities, family: family, model: model)
 
         // The sampler controls take the same rescue: a solver, a flow shift or
         // an STG scale the new recipe does not advertise is PARKED, so
@@ -135,12 +136,16 @@ public extension RenderDraft {
         }
         // Last, over every size written above: while the canvas is still the
         // model's, a `last-reference` recipe takes its shape from the strip.
+        BoundaryFramePolicy.apply(to: &draft, capabilities: capabilities)
         draft.followLastReference(recipe: recipe)
         return draft
     }
 
     /// Whether this draft can be submitted against the recipe, and why not.
-    public func refusal(for recipe: GenerationRecipe) -> String? {
+    public func refusal(for recipe: GenerationRecipe, retainedFields: Set<RetainedSourceMedia.Field> = []) -> String? {
+        if let error = stillReferenceRefusal(for: recipe, retainedFields: retainedFields) { return error }
+        if let error = BoundaryFramePolicy.refusal(draft: self, capabilities: recipe.capabilities) { return error }
+        if let error = media.generationReferenceError(capabilities: recipe.capabilities) { return error }
         if recipe.capabilities.promptRequirement == .required,
            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Describe what you want first."

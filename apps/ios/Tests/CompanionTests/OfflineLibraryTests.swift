@@ -209,10 +209,10 @@ struct OfflineLibraryTests {
         let snapshots = LibrarySnapshots(directory: temp("snapshots"))
         let library = LibraryStore(hosts: hosts, snapshots: snapshots)
         await library.reload()
+        #expect(library.pool.map(\.print.filename) == ["new.png"])
+        #expect(fake.count("gallery(etag:)") == 1)
+        await library.waitForSnapshotWrites()
         let id = hosts.hosts[0].id
-        // The write runs on a utility task. Loaded CI simulators can defer
-        // it beyond a second; wait for completion, with a bounded deadline.
-        for _ in 0..<100 where snapshots.load(id) == nil { try await Task.sleep(for: .milliseconds(100)) }
         #expect(snapshots.load(id)?.prints.map(\.filename) == ["new.png"])
         #expect(snapshots.load(id)?.etag == "e2")
         #expect(library.offlineHosts.isEmpty)
