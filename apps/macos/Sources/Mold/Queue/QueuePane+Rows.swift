@@ -34,7 +34,7 @@ extension QueuePane {
     ) -> some View {
         if group.isExpandable {
             QueueBatchRow(
-                group: group,
+                group: group, sourceHost: host,
                 actions: QueueRowActions.group(group.rows, on: hosts.capabilities[host.id]),
                 childActions: { QueueRowActions.resolve($0, on: hosts.capabilities[host.id]) },
                 rowAct: { action, entry in act(action, on: entry, host: host) },
@@ -47,7 +47,7 @@ extension QueuePane {
             let entry = group.rows[0]
             if entry.state == .held, let hold = queue.hold(for: entry, on: host.id) {
                 QueueHoldRow(
-                    entry: entry, hold: hold,
+                    entry: entry, hold: hold, sourceHost: host,
                     pullThenRetry: { model in pullThenRetry(model, entry: entry, host: host) },
                     tryAgain: { act(.retry, on: entry, host: host) },
                     moveToDestinations: transfers.transferDestinations(from: host.id),
@@ -58,7 +58,7 @@ extension QueuePane {
                 QueueRow(
                     entry: entry,
                     actions: QueueRowActions.resolve(entry, on: hosts.capabilities[host.id]),
-                    isReorderable: reorderable,
+                    sourceHost: host, isReorderable: reorderable,
                     canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
                     canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
                     moveUp: { move(entry.id, .up, host: host, entries: entries) },

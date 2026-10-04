@@ -213,7 +213,144 @@ final class PopulatedGenerationTests: XCTestCase {
         app.buttons["Done"].firstMatch.tap()
     }
 
+    @MainActor func testQueueDetailsControlsAndPromptHistory() async throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true)
+        let port = try await machine.start()
+        let fixtureName = "Queue History Fixture \(port)"
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText(fixtureName)
+        let address = app.textFields["machine-address"]
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let open = app.buttons["queue-open-fixture-video"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["A legacy verbose title that must not appear"].exists)
+        open.tap()
+        XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+        let inspector = app.descendants(matching: .any)["queue-detail"].firstMatch
+        XCTAssertTrue(inspector.waitForExistence(timeout: 5))
+        let modelID = inspector.staticTexts["ltx-2.5-22b-distilled:bf16"].firstMatch
+        guard revealInspector(modelID, in: inspector, app: app) else { return }
+        XCTAssertTrue(modelID.exists)
+        let seed = inspector.staticTexts["Seed"].firstMatch
+        guard revealInspector(seed, in: inspector, app: app) else { return }
+        XCTAssertTrue(seed.exists)
+        let pause = inspector.buttons["Pause"].firstMatch
+        guard revealInspector(pause, in: inspector, app: app, towardTopWhenMissing: true) else { return }
+        pause.tap()
+        let resume = inspector.buttons["Resume"].firstMatch
+        guard revealInspector(resume, in: inspector, app: app, towardTopWhenMissing: true) else { return }
+        XCTAssertTrue(machine.queueActionRequests().contains("/api/queue/fixture-video/pause"),
+                      "The fixture must receive the pause POST")
+        resume.tap()
+        guard revealInspector(pause, in: inspector, app: app, towardTopWhenMissing: true) else { return }
+        XCTAssertTrue(machine.queueActionRequests().contains("/api/queue/fixture-video/resume"))
+        attach(app)
+        app.buttons["Done"].firstMatch.tap()
+        app.buttons["queue-open-fixture-held"].tap()
+        XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+        let retry = inspector.buttons["Retry"].firstMatch
+        guard revealInspector(retry, in: inspector, app: app) else { return }
+        retry.tap()
+        guard revealInspector(pause, in: inspector, app: app) else { return }
+        XCTAssertTrue(machine.queueActionRequests().contains("/api/queue/fixture-held/retry"))
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let history = app.buttons["prompt-history"]
+        reveal(history, in: app); history.tap()
+        XCTAssertTrue(app.navigationBars["Prompt History"].waitForExistence(timeout: 5))
+        app.buttons["history-machine"].tap()
+        app.buttons[fixtureName].firstMatch.tap()
+        let prompt = app.buttons.matching(NSPredicate(format: "label CONTAINS 'A lighthouse in winter'")).firstMatch
+        guard prompt.waitForExistence(timeout: 10) else {
+            let sheet = app.debugDescription
+            app.buttons["Done"].firstMatch.tap()
+            _ = app.navigateToDestination("Machines", shortcut: "5")
+            XCTFail("Fixture requests: \(machine.requestLog()). Sheet: \(sheet). Machines: \(app.debugDescription)")
+            return
+        }
+        var search = app.searchFields.firstMatch
+        if !search.exists { app.buttons["Search"].firstMatch.tap(); search = app.searchFields.firstMatch }
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("winter")
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        attach(app)
+        prompt.tap()
+        let field = app.textFields["generation-prompt"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "A lighthouse in winter")
+        for category in ["UICTContentSizeCategoryXS", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            app.terminate(); app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]; app.launch()
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            let row = app.buttons["queue-open-fixture-video"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+            attach(app)
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+            let history = app.buttons["prompt-history"]; reveal(history, in: app); history.tap()
+            app.buttons["history-machine"].tap(); app.buttons[fixtureName].firstMatch.tap()
+            XCTAssertTrue(prompt.waitForExistence(timeout: 10)); attach(app)
+            app.buttons["Done"].firstMatch.tap()
+        }
+        reveal(app.buttons["prompt-history"], in: app); app.buttons["prompt-history"].tap()
+        app.buttons["history-machine"].tap(); app.buttons[fixtureName].firstMatch.tap()
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        app.buttons["Clear"].firstMatch.tap()
+        app.buttons["Clear All Prompts"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["No prompts yet on this machine."].waitForExistence(timeout: 10))
+    }
+
+    /// Scroll only inside the sheet's visible list. Full swipes overshoot a
+    /// short action row and oscillate between positions on the taller iPad.
+    @MainActor private func revealInspector(_ element: XCUIElement, in inspector: XCUIElement,
+                                           app: XCUIApplication, towardTopWhenMissing: Bool = false) -> Bool {
+        for _ in 0..<20 {
+            let frame = inspector.frame.intersection(app.frame)
+            var top = max(app.navigationBars["Job Details"].frame.maxY, frame.minY) + 12
+            var bottom = frame.maxY - 20
+            for overlay in app.images.matching(identifier: "AdditionalDimmingOverlay").allElementsBoundByIndex {
+                let covered = overlay.frame.intersection(frame)
+                guard !covered.isNull, !covered.isEmpty else { continue }
+                if covered.midY < frame.midY { top = max(top, covered.maxY + 12) }
+                else { bottom = min(bottom, covered.minY - 12) }
+            }
+            guard bottom > top + 44 else {
+                XCTFail("Inspector needs a usable viewport: \(frame), safe bounds \(top)...\(bottom)")
+                return false
+            }
+            let exists = element.exists
+            let target = exists ? element.frame : .zero
+            if exists, element.isHittable, target.midY >= top, target.midY <= bottom { return true }
+            let down = exists ? target.midY < top : towardTopWhenMissing
+            let height = bottom - top
+            let distance = min(height * 0.25, max(44, exists ? abs(target.midY - (top + bottom) / 2) : height * 0.25))
+            let center = (top + bottom) / 2
+            let x = frame.minX + frame.width * 0.9
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: x, dy: center + (down ? -distance / 2 : distance / 2)))
+            let end = origin.withOffset(CGVector(dx: x, dy: center + (down ? distance / 2 : -distance / 2)))
+            start.press(forDuration: 0.1, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTFail("Inspector control must be hittable within its visible bounds: \(element). \(inspector.debugDescription)")
+        return false
+    }
+
     @MainActor func testCuratedDiscoveryAndQueuedSourceImage() async throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
         continueAfterFailure = false
         let machine = try FixtureMachine(queueFixture: true)
         let port = try await machine.start()
@@ -244,6 +381,7 @@ final class PopulatedGenerationTests: XCTestCase {
             app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]
             app.launch()
             XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            reveal(app.descendants(matching: .any)["queue-entry-fixture-video"].firstMatch, in: app)
             XCTAssertTrue(app.images["queue-source-fixture-video"].waitForExistence(timeout: 10))
             XCTAssertTrue(app.staticTexts["A coastal path at sunrise"].exists)
             attach(app)

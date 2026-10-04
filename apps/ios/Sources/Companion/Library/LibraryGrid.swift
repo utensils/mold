@@ -9,7 +9,9 @@ struct LibraryGrid: View {
     let sections: [LibrarySection]
     @Binding var tile: TileSize
     @Binding var position: LibraryScrollPosition
-    let returnToPrint: PrintID?
+    let projection: LibraryGridProjection
+    let viewport: LibraryViewport
+    let returnGeneration: Int
     let selecting: Bool
     @Binding var selection: Set<PrintID>
     let trashed: Bool
@@ -26,12 +28,13 @@ struct LibraryGrid: View {
     @State private var pinchStart: TileSize?
     /// `anchor` as the pinch began: the print to bring back into place.
     @State private var pinchAnchor: PrintID?
+    @State private var nativePosition = ScrollPosition()
     @State private var frames: [PrintID: CGRect] = [:]
     @State private var dragSelection: LibraryDragSelection?
 
     var body: some View {
         let minimum = tile.basePoints * scale
-        let showsHost = Set(visible.flatMap(\.hostNames)).count > 1
+        let showsHost = projection.showsHost
         ScrollViewReader { reader in
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum, maximum: minimum * 2), spacing: 3)],
@@ -42,9 +45,11 @@ struct LibraryGrid: View {
                                 cell(entry, points: minimum * 1.25, showsHost: showsHost)
                                     .id(entry.id)
                                     .background {
-                                        GeometryReader { geometry in
-                                            Color.clear.preference(key: LibraryTileFrames.self,
+                                        if selecting {
+                                            GeometryReader { geometry in
+                                                Color.clear.preference(key: LibraryTileFrames.self,
                                                                    value: [entry.id: geometry.frame(in: .global)])
+                                            }
                                         }
                                     }
                             }
@@ -69,14 +74,24 @@ struct LibraryGrid: View {
             }
             // Visibility is an observation, not a request to re-anchor every redraw.
             .onScrollTargetVisibilityChange(idType: PrintID.self, threshold: 0.1) { ids in
-                position.report(visible.first { ids.contains($0.id) }?.id)
+                let first = projection.firstVisible(ids)
+                if first != position.id { position.report(first) }
             }
-            .onPreferenceChange(LibraryTileFrames.self) { frames = $0 }
+            .scrollPosition($nativePosition)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offset in
+                viewport.report(offset: offset)
+            }
+            .onPreferenceChange(LibraryTileFrames.self) { if selecting { frames = $0 } }
             .gesture(LibrarySelectionRecognizer(enabled: selecting,
                                                 canStart: { hit($0) != nil },
                                                 changed: sweep,
                                                 ended: { dragSelection = nil }))
-            .onChange(of: selecting) { _, _ in dragSelection = nil }
+            .onChange(of: selecting) { _, enabled in
+                dragSelection = nil
+                if !enabled { frames = [:] }
+            }
             .onDisappear { dragSelection = nil }
             .gesture(PinchRecognizer(changed: { pinched($0, reader: reader) }, ended: { pinchStart = nil; pinchAnchor = nil }))
             .sensoryFeedback(.selection, trigger: tile)
@@ -86,19 +101,14 @@ struct LibraryGrid: View {
                 }
             }
             .accessibilityRotor("Favourites") {
-                ForEach(visible.filter(\.print.isFavorite)) { entry in
+                ForEach(projection.favorites) { entry in
                     AccessibilityRotorEntry(Text(entry.spokenName), id: entry.id)
                 }
             }
-            .onChange(of: returnToPrint) { _, id in
-                guard let id else { return }
-                // The navigation transition can recreate the grid at an earlier
-                // offset even while its scroll binding still holds a valid print.
-                // Ask the live scroll view to reveal the tile once the viewer ends.
-                Task { @MainActor in
-                    reader.scrollTo(id, anchor: .top)
-                    position.report(id)
-                }
+            .onChange(of: returnGeneration) { _, _ in
+                // Restore the viewport itself, never move the opened tile to
+                // the top: it may have been at the bottom of the screen.
+                nativePosition.scrollTo(y: viewport.uncover())
             }
         }
     }
@@ -116,6 +126,7 @@ struct LibraryGrid: View {
             NavigationLink(value: entry.id) { tileView }
                 .buttonStyle(.plain)
                 .overlay { tile.badges }
+                .simultaneousGesture(TapGesture().onEnded { viewport.cover() })
                 // iPad: drag the print itself out -- to Files, Photos, another
                 // app, or a picture well -- fetched only when dropped.
                 .draggable(DraggedPrint(entry, backend: hosts.backend(for: entry.hostID))) {
@@ -154,7 +165,7 @@ struct LibraryGrid: View {
     }
 
     private func hit(_ point: CGPoint) -> PrintID? {
-        visible.first { frames[$0.id]?.contains(point) == true }?.id
+        frames.first { $0.value.contains(point) }?.key
     }
 
     private func sweep(_ point: CGPoint, start: CGPoint) {

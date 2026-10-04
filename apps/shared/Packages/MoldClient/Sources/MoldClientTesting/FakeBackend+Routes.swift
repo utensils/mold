@@ -41,6 +41,7 @@ extension FakeBackend {
 
     public func expand(_ request: ExpandRequest) async throws -> ExpandResponse { try await respond("expand(_:)", [request]) }
     public func remix(_ request: RemixRequest) async throws -> RemixResponse { try await respond("remix(_:)", [request]) }
+    public func history(limit: Int, query: String) async throws -> HistoryListing { try await respond("history(limit:query:)", [limit, query]) }
     public func history(limit: Int) async throws -> HistoryListing { try await respond("history(limit:)", [limit]) }
     public func clearHistory(keeping keep: Int?) async throws { let _: Void = try await respond("clearHistory(keeping:)", [keep]) }
     public func loras(compatibleWith model: String) async throws -> [LoraInfo] { try await respond("loras(compatibleWith:)", [model]) }

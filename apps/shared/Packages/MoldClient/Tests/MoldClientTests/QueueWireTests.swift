@@ -45,7 +45,7 @@ private func row(_ id: String, in listing: QueueListing) throws -> QueueEntry {
 @Test func aHostThatCannotTellThemApartSaysThePlainerThing() throws {
     let entry = try row("p-restart", in: try mixed())
     #expect(entry.explicitlyPaused == nil)
-    #expect(entry.waitDescription == "Paused after restart")
+    #expect(entry.waitDescription == "Paused")
 }
 
 @Test func aRunningRowNamesItsGpuAndAQueuedOneNamesNoLane() throws {
@@ -138,4 +138,15 @@ private func row(_ id: String, in listing: QueueListing) throws -> QueueEntry {
     let row = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"j","state":"queued","model":"flux-dev:q8","model_display_name":"FLUX.1 Dev · Q8","metadata":{"prompt":"A lighthouse"}}"#.utf8))
     #expect(row.modelHeadline == "FLUX.1 Dev · Q8")
     #expect(row.metadata?.prompt == "A lighthouse")
+}
+
+@Test func explicitRestartPauseIsNamedOnlyWhenTheHostSaysSo() throws {
+    let entry = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"p","state":"paused","explicitly_paused":false}"#.utf8))
+    #expect(entry.waitDescription == "Paused after restart")
+}
+
+@Test func aRowRetryRefusalOverridesAnOlderBatchAnswer() throws {
+    let entry = try MoldJSON.decoder.decode(QueueEntry.self, from: Data(#"{"id":"h","state":"held","retryable":false}"#.utf8))
+    let child = try MoldJSON.decoder.decode(BatchChild.self, from: Data(#"{"index":0,"job_id":"h","state":"held","retryable":true}"#.utf8))
+    #expect(QueueHold.resolve(entry: entry, child: child) == .prose("", retryable: false))
 }

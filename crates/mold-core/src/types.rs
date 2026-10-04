@@ -11647,6 +11647,14 @@ pub struct EventsCapabilities {
     pub available: bool,
 }
 
+/// Exact-output retained-source transfer receiver readiness. Presence means
+/// this server implements the named protocol and its encrypted store is ready.
+/// Older queue-durability capabilities do not imply receiver support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedMediaTransferCapabilities {
+    pub protocol_version: u32,
+}
+
 /// Restart-safe encrypted request-media support for the durable generation
 /// queue. Presence of this record is the availability signal: servers must
 /// omit it until the owner-scoped media store has passed startup validation
@@ -12151,6 +12159,10 @@ pub struct ServerCapabilities {
     /// admission, reconciliation, hydration, and cleanup lifecycle is live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_media: Option<DurableMediaCapabilities>,
+    /// Absent on older or unready destinations. Require a supported version
+    /// before importing an output whose retained sources must accompany it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_media_transfer: Option<RetainedMediaTransferCapabilities>,
     /// Absent on older servers. Availability advertises the ingress protocol,
     /// not MiniMax H3 model/license activation; model_access remains the
     /// authority for whether a request may run.
@@ -14141,6 +14153,7 @@ mod server_event_tests {
             r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
         )
         .unwrap();
+        assert!(caps.retained_media_transfer.is_none());
         assert!(!caps.events.available);
         assert!(!caps.discovery.can_browse);
     }

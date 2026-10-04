@@ -121,7 +121,7 @@ public extension QueueEntry {
         case .running: "Rendering"
         case .held: heldReason ?? "Waiting on the host"
         case .failed: error ?? "Failed"
-        case .paused: explicitlyPaused == true ? "Paused" : "Paused after restart"
+        case .paused: explicitlyPaused == false ? "Paused after restart" : "Paused"
         case .cancelling: "Stopping"
         case .cancelled: "Cancelled"
         case .complete: "Done"

@@ -279,7 +279,13 @@ See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 `mold queue` to manage remote work and `mold library` to browse and organize
 the host's prints, including `mold library source-media` to recover the
 conditioning image a print was made from and `mold trash delete` to remove one
-permanently. To install Mold's Agent Skill for supported coding agents,
+permanently. Retained sources survive queue cleanup and remain available while
+any referencing library output exists, including in the trash. Matching retained
+input sets from newly completed jobs share storage while keeping per-job
+provenance. Native Mac and
+desktop library copies also retain those sources on supported destinations.
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
+To install Mold's Agent Skill for supported coding agents,
 run:
 
 ```bash
@@ -349,3 +355,7 @@ Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
 in anonymous route proofs. Plain HTTP still requires a trusted network.
+
+Native iOS queue cards use concise curated model names and open full job details
+on tap, with state-aware per-job controls. Generate exposes searchable per-machine
+Prompt History with prompt-only recall.

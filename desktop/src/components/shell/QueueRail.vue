@@ -7,6 +7,7 @@
  * open the full Queue view. The explainer is never open by default.
  */
 import { computed, ref } from "vue";
+import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
@@ -32,6 +33,17 @@ const router = useRouter();
 const generation = useGenerationStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
+function sourceHost(row: QueueRow) {
+  const id = row.kind === "shared" ? row.shared.hostId : row.print.hostId;
+  return hosts.all.find((host) => host.id === id) ?? (id ? null : hosts.primaryHost);
+}
+function sourceTarget(row: QueueRow) {
+  const host = sourceHost(row);
+  return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+}
+function sourceJobId(row: QueueRow) {
+  return row.kind === "shared" ? row.shared.id : (row.print.recoveredJobId ?? row.print.id ?? "");
+}
 const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);
 const queue = useQueueActivity();
 const commands = useQueueCommands();
@@ -155,31 +167,38 @@ function progressPct(row: QueueRow): number | null {
         @contextmenu.prevent="commands.contextMenu($event, active)"
       >
         <div class="flex gap-2.5">
-          <span
-            class="flex h-[52px] w-[52px] shrink-0 items-center justify-center overflow-hidden border border-accent bg-bg-crust font-mono text-xs text-accent"
+          <QueueSourceThumbnail
+            :target="sourceTarget(active)"
+            :job-id="sourceJobId(active)"
+            :instance-id="sourceHost(active)?.instanceId"
+            :online="sourceHost(active)?.status === 'ready' && !sourceHost(active)?.stale"
           >
-            <img
-              v-if="meshPoster(active)"
-              :src="meshPoster(active)!"
-              alt=""
-              class="h-full w-full object-cover"
-            />
-            <AuthedMedia
-              v-else-if="libraryThumb(active)"
-              :path="thumbnailPath(libraryThumb(active)!.result!.filename!)"
-              :target="generation.targetForJob(libraryThumb(active)!.clientId)"
-              :cache-key="libraryThumb(active)!.hostId ?? hosts.primaryHost?.id ?? 'primary'"
-              :alt="title(active)"
-            />
-            <img
-              v-else-if="thumbSrc(active)"
-              :src="thumbSrc(active)!"
-              alt=""
-              class="h-full w-full object-cover"
-              style="filter: blur(1.4px)"
-            />
-            <span v-else class="ms-pulse">⠂</span>
-          </span>
+            <span
+              class="flex h-[52px] w-[52px] shrink-0 items-center justify-center overflow-hidden border border-accent bg-bg-crust font-mono text-xs text-accent"
+            >
+              <img
+                v-if="meshPoster(active)"
+                :src="meshPoster(active)!"
+                alt=""
+                class="h-full w-full object-cover"
+              />
+              <AuthedMedia
+                v-else-if="libraryThumb(active)"
+                :path="thumbnailPath(libraryThumb(active)!.result!.filename!)"
+                :target="generation.targetForJob(libraryThumb(active)!.clientId)"
+                :cache-key="libraryThumb(active)!.hostId ?? hosts.primaryHost?.id ?? 'primary'"
+                :alt="title(active)"
+              />
+              <img
+                v-else-if="thumbSrc(active)"
+                :src="thumbSrc(active)!"
+                alt=""
+                class="h-full w-full object-cover"
+                style="filter: blur(1.4px)"
+              />
+              <span v-else class="ms-pulse">⠂</span>
+            </span>
+          </QueueSourceThumbnail>
           <div class="flex min-w-0 flex-1 flex-col gap-1">
             <span class="truncate text-xs font-semibold text-fg">{{ title(active) }}</span>
             <span class="truncate text-micro text-fg-2">{{ status(active) }}</span>
@@ -258,31 +277,38 @@ function progressPct(row: QueueRow): number | null {
         @keydown.space.prevent="commands.open(row)"
         @contextmenu.prevent="commands.contextMenu($event, row)"
       >
-        <span
-          class="flex h-[38px] w-[38px] shrink-0 items-center justify-center overflow-hidden border border-border bg-bg-crust font-mono text-xs"
-          :class="rowTone(row)"
+        <QueueSourceThumbnail
+          :target="sourceTarget(row)"
+          :job-id="sourceJobId(row)"
+          :instance-id="sourceHost(row)?.instanceId"
+          :online="sourceHost(row)?.status === 'ready' && !sourceHost(row)?.stale"
         >
-          <img
-            v-if="meshPoster(row)"
-            :src="meshPoster(row)!"
-            alt=""
-            class="h-full w-full object-cover"
-          />
-          <AuthedMedia
-            v-else-if="libraryThumb(row)"
-            :path="thumbnailPath(libraryThumb(row)!.result!.filename!)"
-            :target="generation.targetForJob(libraryThumb(row)!.clientId)"
-            :cache-key="libraryThumb(row)!.hostId ?? hosts.primaryHost?.id ?? 'primary'"
-            :alt="title(row)"
-          />
-          <img
-            v-else-if="thumbSrc(row)"
-            :src="thumbSrc(row)!"
-            alt=""
-            class="h-full w-full object-cover"
-          />
-          <span v-else>{{ rowGlyph(row) }}</span>
-        </span>
+          <span
+            class="flex h-[38px] w-[38px] shrink-0 items-center justify-center overflow-hidden border border-border bg-bg-crust font-mono text-xs"
+            :class="rowTone(row)"
+          >
+            <img
+              v-if="meshPoster(row)"
+              :src="meshPoster(row)!"
+              alt=""
+              class="h-full w-full object-cover"
+            />
+            <AuthedMedia
+              v-else-if="libraryThumb(row)"
+              :path="thumbnailPath(libraryThumb(row)!.result!.filename!)"
+              :target="generation.targetForJob(libraryThumb(row)!.clientId)"
+              :cache-key="libraryThumb(row)!.hostId ?? hosts.primaryHost?.id ?? 'primary'"
+              :alt="title(row)"
+            />
+            <img
+              v-else-if="thumbSrc(row)"
+              :src="thumbSrc(row)!"
+              alt=""
+              class="h-full w-full object-cover"
+            />
+            <span v-else>{{ rowGlyph(row) }}</span>
+          </span>
+        </QueueSourceThumbnail>
         <div class="flex min-w-0 flex-1 flex-col gap-0.5">
           <span class="truncate text-micro font-medium text-fg">{{ title(row) }}</span>
           <span class="truncate text-micro" :class="rowTone(row)">{{ status(row) }}</span>

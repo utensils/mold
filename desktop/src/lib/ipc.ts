@@ -418,6 +418,22 @@ export const ipc = {
       paths.map((path) => invoke<DesktopImageImport>("import_source_image", { path })),
     );
   },
+  /** Mirror a library print together with its authoritative retained sources. */
+  async mirrorGalleryPrint(
+    source: ApiTarget,
+    filename: string,
+    metadata?: OutputMetadata | null,
+    timestamp?: number | null,
+  ): Promise<string> {
+    if (!inTauri()) throw new Error("Local saves require the desktop app.");
+    await ipc.ensureLocalServer();
+    return invoke<string>("mirror_gallery_print", {
+      source,
+      filename,
+      metadata: metadata ?? null,
+      timestamp: timestamp ?? null,
+    });
+  },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
   saveOutputBytes(
     filename: string,

@@ -13,28 +13,34 @@
  * shape it always had, and a queued row stands its place in line where the
  * picture will be.
  */
+import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
+import type { ApiTarget } from "@studio/api/client";
 import { computed } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 
 const props = withDefaults(
   defineProps<{
     title: string;
+    sourceTarget?: ApiTarget | null | undefined;
+    sourceJobId?: string | null | undefined;
+    sourceInstanceId?: string | null | undefined;
+    sourceOnline?: boolean | undefined;
     subtitle: string;
     status: string;
-    detail?: string | null;
+    detail?: string | null | undefined;
     cancelling?: boolean;
     ariaLabel?: string;
     /** The live latent preview, while there is one. */
-    thumbnailUrl?: string | null;
+    thumbnailUrl?: string | null | undefined;
     /** 0–100 while the engine is reporting steps. */
     progress?: number | null;
     /** The mono line under the meter: "image 2 of 4 · studio-rack". */
-    meta?: string | null;
+    meta?: string | null | undefined;
     /** Place in line, for a row with no pixels yet. */
-    position?: string | null;
+    position?: string | null | undefined;
     tone?: "neutral" | "warning";
     /** Identifies THIS row, where the card's own data-test names the kind. */
-    rowTestId?: string | null;
+    rowTestId?: string | null | undefined;
     /**
      * True while the host is actually working on this print. A running row
      * says what it is doing in plain words; every other row says a code.
@@ -42,6 +48,7 @@ const props = withDefaults(
     running?: boolean;
   }>(),
   {
+    sourceOnline: true,
     detail: null,
     cancelling: false,
     thumbnailUrl: null,
@@ -88,20 +95,27 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
     @keydown.enter.prevent="emit('activate')"
     @keydown.space.prevent="emit('activate')"
   >
-    <span
-      v-if="thumbnailUrl"
-      class="mobile-generation-job-thumb"
-      data-test="mobile-generation-job-thumb"
+    <QueueSourceThumbnail
+      :target="sourceTarget"
+      :job-id="sourceJobId ?? ''"
+      :instance-id="sourceInstanceId"
+      :online="sourceOnline"
     >
-      <img :src="thumbnailUrl" alt="" decoding="async" />
-    </span>
-    <span
-      v-else-if="position"
-      class="mobile-generation-job-position"
-      data-test="mobile-generation-job-position"
-      aria-hidden="true"
-      >{{ position }}</span
-    >
+      <span
+        v-if="thumbnailUrl"
+        class="mobile-generation-job-thumb"
+        data-test="mobile-generation-job-thumb"
+      >
+        <img :src="thumbnailUrl" alt="" decoding="async" />
+      </span>
+      <span
+        v-else-if="position"
+        class="mobile-generation-job-position"
+        data-test="mobile-generation-job-position"
+        aria-hidden="true"
+        >{{ position }}</span
+      >
+    </QueueSourceThumbnail>
     <div class="mobile-generation-job-copy">
       <p>{{ displayTitle }}</p>
       <span v-if="title.trim() && subtitle.trim()">{{ subtitle }}</span>

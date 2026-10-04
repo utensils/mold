@@ -3,12 +3,7 @@ import { defineStore } from "pinia";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 import { apiFetchTo, currentTarget, type ApiTarget, apiJsonTo } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
-import {
-  evictMedia,
-  fetchGalleryMediaBytes,
-  galleryMediaPath,
-  streamableMediaUrl,
-} from "../lib/gallery/media";
+import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { describeTransportError } from "../lib/api/errors";
@@ -51,7 +46,6 @@ import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { emptyChainJobLive, reduceChainJobFrame } from "@studio/lib/chainJobProgress";
 import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
 import type { ChainJobEvent, CreateChainJobResponse } from "@studio/lib/api/chainTypes";
-import { blobToBase64 } from "@studio/lib/base64";
 import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
@@ -1152,17 +1146,7 @@ export const useGenerationStore = defineStore("generation", {
               const origin = await originGalleryRow(target, filename);
               const metadata = origin?.metadata ?? null;
               if (metadata && result.filename === filename) result.metadata = metadata;
-              const bytes = await fetchGalleryMediaBytes(
-                galleryMediaPath(filename, "host"),
-                target,
-              );
-              const buffer = Uint8Array.from(bytes).buffer;
-              await ipc.saveOutputBytes(
-                filename,
-                await blobToBase64(new Blob([buffer])),
-                metadata,
-                origin?.timestamp,
-              );
+              await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
               void useGalleryStore().refreshHost("local");
             } catch (error) {
               console.warn("local save of remote durable output failed:", error);
@@ -2041,14 +2025,7 @@ export const useGenerationStore = defineStore("generation", {
       try {
         const origin = await originGalleryRow(target, filename);
         const metadata = origin?.metadata ?? null;
-        const bytes = await fetchGalleryMediaBytes(galleryMediaPath(filename, "host"), target);
-        const buffer = Uint8Array.from(bytes).buffer;
-        await ipc.saveOutputBytes(
-          filename,
-          await blobToBase64(new Blob([buffer])),
-          metadata,
-          origin?.timestamp,
-        );
+        await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
         void useGalleryStore().refreshHost("local");
       } catch (error) {
         console.warn("local save of remote sequence output failed:", error);

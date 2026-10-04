@@ -477,6 +477,8 @@ by its opaque id. A print that predates retention, or whose conditioning was
 recorded only as text, answers `unavailable_legacy` — that is a fact about the
 print, not damage.
 
+Retained source media stays attached while any generated library output references it, including trashed outputs. Native library copies transfer those sources with the output and report incomplete copies when a server cannot preserve them. Existing local copies can be repaired by saving again. Newly completed jobs with identical retained input sets share encrypted media storage; provenance remains per-job. This does not merge different accompanying inputs or migrate historical outputs.
+
 ```bash
 mold library source-media mold-flux-dev-q4-1700000000000.png
 mold library source-media mold-flux-dev-q4-1700000000000.png --json
@@ -740,3 +742,8 @@ Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
 in anonymous route proofs. Plain HTTP still requires a trusted network.
+
+Native iOS Queue cards open full job details on tap. Per-job Pause/Resume and
+held Retry follow server capabilities and current state. Generate's Prompt
+History searches one selected machine and recalls prompt text without replacing
+model settings or source attachments.

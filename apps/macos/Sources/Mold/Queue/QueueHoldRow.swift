@@ -7,6 +7,7 @@ import SwiftUI
 struct QueueHoldRow: View {
     let entry: QueueEntry
     let hold: QueueHold
+    var sourceHost: MoldHost? = nil
     let pullThenRetry: (String) -> Void
     let tryAgain: () -> Void
     let moveToDestinations: [TransferStore.TransferDestination]
@@ -18,7 +19,8 @@ struct QueueHoldRow: View {
     let cancel: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
+            if let sourceHost { QueueSourceThumbnail(entry: entry, host: sourceHost) }
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
                 .frame(width: 16)

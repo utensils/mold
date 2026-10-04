@@ -38,6 +38,21 @@ function mountList() {
 }
 
 describe("LiveActivityList swipe actions", () => {
+  it("uses a curated presentation label without changing the selected model id", async () => {
+    const source = { ...row, model: "minimax-h3-fl2va:comfy-pruned-int8" };
+    const wrapper = mount(LiveActivityList, {
+      props: {
+        rows: [source],
+        interactive: true,
+        modelLabel: () => "MiniMax H3 FL2VA",
+      },
+    });
+    expect(wrapper.text()).toContain("MiniMax H3 FL2VA");
+    expect(wrapper.text()).not.toContain("comfy-pruned");
+    await wrapper.get("button").trigger("click");
+    expect(wrapper.emitted("select")?.[0]?.[0]).toEqual(source);
+  });
+
   it("renders remote download progress without raw byte counters", () => {
     const wrapper = mount(LiveActivityList, {
       props: {

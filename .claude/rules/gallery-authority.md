@@ -127,3 +127,34 @@ is the only path that attaches retained authority (`composer.set` invalidates
 it). A same-host reuse session is one-time, short-lived, and bound to the exact
 target request — on a keyless host to one stable anonymous subject; cross-host
 reuse remains a client download-and-upload relay.
+
+Queue source previews on every GUI surface read the owning host's authenticated
+`/api/queue/:id/input-thumbnail` route. Keep source thumbnails distinct from live
+render previews, bound response bytes, cancel obsolete requests, and fence results
+by host, server instance and job identity. Never infer source bytes from a local
+submission cache or a provenance filename. Sibling output retention is covered
+through queue cleanup, trash/restore, permanent deletion and startup reconciliation.
+Active queue sets remain independently encrypted and job-bound. Future completed
+library handoffs canonicalize identical ordered visible-media contracts within
+the existing limits (64 entries, 512 MiB total and 64 MiB aggregate Memory payloads). Per-job
+provenance and empty-presence markers stay in separate private sets. Publish all
+replacement pins in one authority commit before releasing old pins; retry and
+SQLite repair preserve that authority. Different accompanying inputs, roles,
+positions or sinks, larger sets and historical outputs keep their existing
+storage. This is whole-contract sharing, not arbitrary per-member deduplication.
+
+Library mirrors transfer retained inputs through the authenticated, exact-output
+`GET`/`PUT /api/gallery/source-media/:filename/transfer` contract. The offer
+captures public output digest, recipe, archive identity and input slots together.
+The framed import streams bounded private staging, validates every member digest,
+pins before committing the destination archive binding, and acknowledges only
+after retention is durable. An equal retry repairs SQLite's projection; a changed
+output or existing different binding is refused. Imported siblings share an
+owner-local synthetic encrypted set, without reusing a generation job's authority.
+Native Mac and Tauri desktop copy completion includes this handoff, including
+cache, automatic mirrors and existing-file repair paths; capture source archive identity before output download, then verify source
+identity and destination output digest/recipe before attaching inputs.
+
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine. Destination queue-durability support alone does not prove an older server implements the transfer receiver.
+
+`/api/capabilities.retained_media_transfer = { "protocol_version": 1 }` is the explicit receiver-readiness contract. It is absent on older servers and while the encrypted Unix media lifecycle is unready. Clients require this supported version before importing source-bearing outputs; queue `durable_media` alone does not establish transfer support.

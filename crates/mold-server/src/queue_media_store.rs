@@ -815,6 +815,21 @@ fn cleanup_owned_publication_path(path: &Path) {
     }
 }
 
+#[cfg(unix)]
+pub(crate) struct TransferStaging {
+    guard: PlaintextStagingGuard,
+    _runtime: Arc<QueueMediaRuntimeStaging>,
+}
+#[cfg(unix)]
+impl TransferStaging {
+    pub(crate) fn file_path(&self, index: usize) -> PathBuf {
+        self.guard.path().join(format!("{index:08}.media"))
+    }
+    pub(crate) fn create_file(&self, index: usize) -> Result<File, QueueMediaError> {
+        create_private_file(&self.file_path(index))
+    }
+}
+
 impl PlaintextStagingGuard {
     fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
@@ -1261,6 +1276,39 @@ impl QueueMediaStore {
             .remove(&index)
             .map(SensitiveBytes::into_vec)
             .ok_or(QueueMediaError::NotFound)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn transfer_staging(&self) -> Result<TransferStaging, QueueMediaError> {
+        let path = self
+            .runtime_staging
+            .root
+            .join(format!("transfer-{}.partial", random_hex(16)?));
+        ensure_private_dir(&path)?;
+        Ok(TransferStaging {
+            guard: PlaintextStagingGuard::new(path),
+            _runtime: Arc::clone(&self.runtime_staging),
+        })
+    }
+
+    pub(crate) fn pin_gallery_copy(
+        &self,
+        source: &GalleryMediaPinRef,
+        pin_id: &str,
+    ) -> Result<GalleryMediaPinRef, QueueMediaError> {
+        validate_gallery_pin_ref(source)?;
+        let pin = GalleryMediaPinRef::new(source.media_set.clone(), pin_id)?;
+        let _lock = self.lock_job(&pin.media_set.owner_id, &pin.media_set.job_id)?;
+        let path = self.gallery_pin_path(source);
+        self.decode_bundle_from_path(&source.media_set, &path, None)?;
+        let destination = self.gallery_pin_path(&pin);
+        ensure_private_dir(destination.parent().expect("pin parent"))?;
+        if destination.exists() {
+            self.load_from_gallery_pin(&pin)?;
+        } else {
+            self.publish_gallery_pin(&path, &destination)?;
+        }
+        Ok(pin)
     }
 
     /// Seal a V2 bundle with a bounded authenticated projection before the
@@ -4768,6 +4816,48 @@ mod tests {
             store.load_from_gallery_pin(&first),
             Err(QueueMediaError::NotFound)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sibling_gallery_outputs_share_one_encrypted_payload() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let first = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"first-output"))
+            .unwrap();
+        let second = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"second-output"))
+            .unwrap();
+        let first_metadata = fs::metadata(store.gallery_pin_path(&first)).unwrap();
+        let second_metadata = fs::metadata(store.gallery_pin_path(&second)).unwrap();
+        assert_eq!(
+            (first_metadata.dev(), first_metadata.ino()),
+            (second_metadata.dev(), second_metadata.ino())
+        );
+        assert_eq!(
+            first_metadata.nlink(),
+            3,
+            "queue and both outputs share one encrypted inode"
+        );
+
+        store.delete(&reference).unwrap();
+        store.release_gallery_pin(&first).unwrap();
+        assert_eq!(
+            fs::metadata(store.gallery_pin_path(&second))
+                .unwrap()
+                .nlink(),
+            1
+        );
+        assert_eq!(
+            store.load_from_gallery_pin(&second).unwrap().entries.len(),
+            2
+        );
+        store.release_gallery_pin(&second).unwrap();
+        assert!(!store.gallery_pin_path(&second).exists());
     }
 
     #[test]

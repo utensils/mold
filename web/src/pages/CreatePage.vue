@@ -5614,6 +5614,8 @@ onBeforeUnmount(() => {
              Above Recent, and inside the same left column: nothing on this
              path may set an `overflow`. -->
         <ActivityStrip
+          :source-hosts="routing.hosts.value"
+          :models-for-host="routing.modelsForHost"
           :jobs="localActivityJobs"
           :shared="sharedActivityRows"
           :queue-status="routing.queueStatus.value"

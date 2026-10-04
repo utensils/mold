@@ -44,6 +44,16 @@ public extension HTTPBackend {
 extension HTTPBackend {
     /// Split out so the URL can be pinned without a network call, the same
     /// precedent as `deviceMutationPath`.
+    public func history(limit: Int, query: String) async throws -> HistoryListing {
+        try await get(historyPath(limit: limit, query: query))
+    }
+
+    func historyPath(limit: Int, query: String) -> String {
+        var parts = URLComponents()
+        parts.queryItems = [URLQueryItem(name: "limit", value: String(limit)), URLQueryItem(name: "query", value: query)]
+        return "/api/history?" + (parts.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B")
+    }
+
     func historyPath(limit: Int) -> String { "/api/history?limit=\(limit)" }
 
     func clearHistoryPath(keeping keep: Int?) -> String {

@@ -338,6 +338,8 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::sweep_gallery_trash,
         crate::gallery_source_media::inventory,
         crate::gallery_source_media::download,
+        crate::gallery_media_transfer::offer,
+        crate::gallery_media_transfer::receive,
         crate::queue_retention::sweep_held_queue,
         crate::queue_retention::sweep_settled_batches,
         server_status,
@@ -732,6 +734,12 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/gallery/source-media/:filename",
             get(crate::gallery_source_media::inventory),
+        )
+        .route(
+            "/api/gallery/source-media/:filename/transfer",
+            get(crate::gallery_media_transfer::offer)
+                .put(crate::gallery_media_transfer::receive)
+                .layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/api/gallery/source-media/:filename/:member_id",
@@ -8291,6 +8299,11 @@ async fn server_capabilities(
         },
         video_upscale: framewise_capabilities,
         durable_media: readiness.advertised_media(),
+        retained_media_transfer: (cfg!(unix) && readiness.advertised_media().is_some()).then_some(
+            mold_core::RetainedMediaTransferCapabilities {
+                protocol_version: 1,
+            },
+        ),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             // The request-bound upload protocol derives its authority from an
             // authenticated API-key identity. When server auth is disabled,

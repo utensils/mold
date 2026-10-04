@@ -6,6 +6,7 @@ import SwiftUI
 /// triangle over a single child is a control that reveals nothing.
 struct QueueBatchRow: View {
     let group: QueueGroup
+    var sourceHost: MoldHost? = nil
     /// What the machine will honour for ANY of this batch's children, and
     /// the same answer per child -- one authority for the group's buttons,
     /// its menu, and each child row (`QueueRowActions`).
@@ -29,12 +30,15 @@ struct QueueBatchRow: View {
         DisclosureGroup {
             ForEach(group.rows) { entry in
                 QueueRow(entry: entry, actions: childActions(entry),
-                         caption: entry.batchWaitDescription,
+                         caption: entry.batchWaitDescription, sourceHost: sourceHost,
                          act: { rowAct($0, entry) })
                     .padding(.leading, 20)
             }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
+                if let sourceHost, let entry = group.rows.first {
+                    QueueSourceThumbnail(entry: entry, host: sourceHost)
+                }
                 Image(systemName: "square.stack")
                     .foregroundStyle(.tertiary)
                     .frame(width: 16)
