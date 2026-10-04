@@ -157,7 +157,7 @@ private final class PendingSyncOrganization {
 
 private func sameDescriptor(_ source: GalleryPrint, _ local: GalleryPrint) -> Bool {
     source.timestamp == local.timestamp
-        && source.canonicalMetadataJSON == local.canonicalMetadataJSON
+        && RetainedSourceMedia.mirrorMetadataMatches(source.canonicalMetadataJSON, local.canonicalMetadataJSON)
         && (source.metadataSynthetic ?? false) == (local.metadataSynthetic ?? false)
 }
 
