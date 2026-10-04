@@ -1264,6 +1264,10 @@ onBeforeUnmount(() => {
           />
         </CardSurface>
         <QueueCard
+          :target="
+            host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null
+          "
+          :instance-id="poll.status.value?.instance_id"
           :entries="queue"
           :plan="queuePlan"
           :models="models"

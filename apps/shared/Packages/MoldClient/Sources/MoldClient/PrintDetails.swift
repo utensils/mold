@@ -50,6 +50,15 @@ public enum PrintDetails {
         ].compactMap(\.self)
     }
 
+    /// Queued work has metadata but no output file yet.
+    public static func groups(for metadata: OutputMetadata) -> [PrintDetailGroup] {
+        [promptGroup(metadata), settingsGroup(metadata),
+         group("Clip", [row("Frames", metadata.frames.map(String.init)),
+                         row("FPS", metadata.fps.map { String($0) })]),
+         meshGroup(metadata), sourcesGroup(metadata), sequenceGroup(metadata), workflowGroup(metadata)]
+            .compactMap(\.self)
+    }
+
     /// A group of the rows that exist, or nothing at all.
     static func group(_ title: String, _ rows: [PrintDetailRow?]) -> PrintDetailGroup? {
         let rows = rows.compactMap(\.self).filter { !$0.value.isEmpty }

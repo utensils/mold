@@ -73,6 +73,8 @@ struct ModelStoreTests {
         let id = hosts.hosts[0].id
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
+        fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }
         #expect(fake.count("retryJob(_:)") == 0, "not while it is still fetching")
@@ -82,12 +84,14 @@ struct ModelStoreTests {
     }
 
     @Test func aFailedPullNeverRetries() async throws {
-        let (models, _, hosts, fake) = try await setUp()
+        let (models, queue, hosts, fake) = try await setUp()
         fake.stub("startDownload(_:)", returning: try QueueStoreTests.decode(DownloadTicket.self, #"{"id":"d1"}"#))
         fake.stub("retryJob(_:)") { _ in () }
         let id = hosts.hosts[0].id
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
+        fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }
         models.apply(try frame(#"{"type":"job_failed","id":"d1","model":"wan","error":"disk full"}"#), on: id)

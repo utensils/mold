@@ -124,6 +124,7 @@ fn classify_existing_authority_error(error: anyhow::Error) -> CompletedOutputArc
 enum RetainedMediaTarget<'a> {
     Job(&'a str),
     Output(&'a ArchivedChildIdentity),
+    UnboundOutput(&'a ArchivedChildIdentity),
 }
 
 impl CachedCommittedArchiveIndex {
@@ -305,6 +306,39 @@ impl GalleryPublicationGate {
             );
         }
         Ok(ValidatedRetainedMedia::Missing)
+    }
+
+    /// Return bytes, recipe and retained pins from one validated archive snapshot.
+    pub(crate) fn validated_transfer_entry(
+        &self,
+        output_dir: &Path,
+        filename: &str,
+    ) -> anyhow::Result<Option<CommittedArchiveEntry>> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical = bookkeeping.canonical_root();
+        let index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        ensure!(
+            !index.quarantined_names.contains(filename),
+            "gallery output is quarantined"
+        );
+        if let Some(entry) = index.entries.get(filename) {
+            ensure!(
+                crate::gallery_authority::current_file_matches(canonical, entry)?,
+                "gallery output changed"
+            );
+            return Ok(Some(entry.clone()));
+        }
+        if let Some(entry) = index.retired_entries.get(filename) {
+            ensure!(
+                crate::gallery_authority::file_matches_entry_at(
+                    &gallery_trash_dir(canonical).join(filename),
+                    entry
+                )?,
+                "gallery output changed"
+            );
+            return Ok(Some(entry.clone()));
+        }
+        Ok(None)
     }
 
     pub(crate) fn committed_archive_index_while_locked(
@@ -618,6 +652,117 @@ impl GalleryPublicationGate {
         )
     }
 
+    pub(crate) fn bind_transferred_media_for_output(
+        &self,
+        output_dir: &Path,
+        identity: &ArchivedChildIdentity,
+        media_set: &crate::queue_media_store::MediaSetRef,
+        pin: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, GalleryMediaPin)>> {
+        self.bind_retained_media(
+            output_dir,
+            RetainedMediaTarget::UnboundOutput(identity),
+            media_set,
+            pin,
+        )
+    }
+
+    /// Replace only this original queue set, preserving other authored/derived
+    /// bindings. Publish all replacement pins before one authority commit.
+    #[cfg(unix)]
+    pub(crate) fn replace_retained_media_for_job(
+        &self,
+        output_dir: &Path,
+        job_id: &str,
+        original: &crate::queue_media_store::MediaSetRef,
+        replacements: &[crate::queue_media_store::MediaSetRef],
+        mut pin: impl FnMut(&crate::queue_media_store::MediaSetRef, &str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, Vec<GalleryMediaPin>)>> {
+        ensure!(
+            !replacements.is_empty(),
+            "canonical retained replacement is empty"
+        );
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical = bookkeeping.canonical_root();
+        let mut index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        let targets = index
+            .entries
+            .iter()
+            .filter(|(filename, entry)| {
+                !index.quarantined_names.contains(*filename)
+                    && entry.record.metadata.job_id.as_deref() == Some(job_id)
+            })
+            .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
+            .collect::<Vec<_>>();
+        ensure!(
+            !targets.is_empty(),
+            "no committed output belongs to canonicalized queue job"
+        );
+        let mut removed = Vec::new();
+        let mut changed = Vec::new();
+        for (filename, identity) in targets {
+            let entry = index
+                .entries
+                .get_mut(&filename)
+                .context("canonical retained target disappeared")?;
+            ensure!(
+                crate::gallery_authority::current_file_matches(canonical, entry)?,
+                "gallery output changed before canonical pinning"
+            );
+            let pin_id = gallery_media_pin_id(canonical, &identity)?;
+            let mut bindings = entry
+                .retained_media
+                .iter()
+                .filter(|binding| binding.media_set != *original)
+                .cloned()
+                .collect::<Vec<_>>();
+            let old = entry
+                .retained_media
+                .iter()
+                .filter(|binding| binding.media_set == *original)
+                .cloned()
+                .collect::<Vec<_>>();
+            for set in replacements {
+                pin(set, &pin_id)?;
+                let binding = GalleryMediaPin {
+                    media_set: set.clone(),
+                    pin_id: pin_id.clone(),
+                };
+                if !bindings.contains(&binding) {
+                    bindings.push(binding);
+                }
+            }
+            ensure!(
+                crate::gallery_authority::current_file_matches(canonical, entry)?,
+                "gallery output changed while canonical pins were published"
+            );
+            bindings.sort_by(|a, b| {
+                a.pin_id
+                    .cmp(&b.pin_id)
+                    .then_with(|| a.media_set.set_id.cmp(&b.media_set.set_id))
+            });
+            if bindings != entry.retained_media {
+                entry.retained_media = bindings;
+                changed.push(filename.clone());
+            }
+            removed.push((filename, old));
+        }
+        if !changed.is_empty() {
+            let generation = crate::gallery_authority::read_generation(canonical, &bookkeeping)?
+                .context("gallery authority generation missing")?;
+            let generation = crate::gallery_authority::commit_snapshot(
+                canonical,
+                &bookkeeping,
+                generation,
+                &mut index,
+                "canonicalize_retained_source_media",
+                changed,
+            )?;
+            self.install_committed_archive_index(canonical, generation, index);
+        }
+        Ok(removed)
+    }
+
     fn bind_retained_media(
         &self,
         output_dir: &Path,
@@ -639,7 +784,8 @@ impl GalleryPublicationGate {
                 })
                 .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
                 .collect::<Vec<_>>(),
-            RetainedMediaTarget::Output(identity) => index
+            RetainedMediaTarget::Output(identity)
+            | RetainedMediaTarget::UnboundOutput(identity) => index
                 .entries
                 .get(&identity.final_name)
                 .filter(|entry| {
@@ -656,7 +802,8 @@ impl GalleryPublicationGate {
                 RetainedMediaTarget::Job(job_id) => {
                     bail!("no committed gallery outputs belong to queue job {job_id}")
                 }
-                RetainedMediaTarget::Output(identity) => bail!(
+                RetainedMediaTarget::Output(identity)
+                | RetainedMediaTarget::UnboundOutput(identity) => bail!(
                     "no matching committed gallery identity available for source-media handoff: {}",
                     identity.final_name
                 ),
@@ -673,6 +820,12 @@ impl GalleryPublicationGate {
                     && crate::gallery_authority::current_file_matches(canonical_output_dir, entry)?,
                 "gallery output changed during source-media handoff: {filename}"
             );
+            if matches!(target, RetainedMediaTarget::UnboundOutput(_)) {
+                ensure!(
+                    entry.retained_media.is_empty(),
+                    "gallery output already has retained-media authority"
+                );
+            }
             let pin_id = gallery_media_pin_id(canonical_output_dir, identity)?;
             pin(&pin_id)?;
             bindings.push((
@@ -693,6 +846,12 @@ impl GalleryPublicationGate {
                 entry.identity == identity,
                 "gallery identity changed before binding commit"
             );
+            if matches!(target, RetainedMediaTarget::UnboundOutput(_)) {
+                ensure!(
+                    crate::gallery_authority::current_file_matches(canonical_output_dir, entry)?,
+                    "gallery output changed while pinning retained transfer: {filename}"
+                );
+            }
             if !entry.retained_media.contains(binding) {
                 entry.retained_media.push(binding.clone());
                 entry.retained_media.sort_by(|left, right| {

@@ -264,11 +264,18 @@ const selectionOrganizeBlockedReason = computed<string | null>(() => {
 const canReveal = (entry: MergedPrint) =>
   entry.sourceKey === "local" || gallery.hostFor(entry.sourceKey)?.kind === "local";
 
-/** Copyable to this Mac: a remote-origin tile with no local copy yet (by
- *  filename or byte identity). The menu item stays visible and grays out
- *  once a local copy exists. */
-const canSaveLocally = (entry: MergedPrint) =>
-  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote" && !gallery.existsLocally(entry);
+/** Use the physical remote copy even when a merged tile leads with its local copy.
+ * Existing local outputs remain eligible so missing retained sources can be repaired. */
+function localMirrorSource(entry: MergedPrint) {
+  for (const location of gallery.locationsOf(entry)) {
+    if (gallery.hostFor(location.sourceKey)?.kind !== "remote") continue;
+    const target = gallery.targetOf(location.sourceKey);
+    const item = gallery.rowOf(location.sourceKey, location.filename);
+    if (target && item) return { target, item };
+  }
+  return null;
+}
+const canSaveLocally = (entry: MergedPrint) => inTauri() && !!localMirrorSource(entry);
 
 /** Authed source bytes for a host-gallery item (origin-aware). */
 async function fetchItemBlob(entry: MergedPrint): Promise<Blob> {
@@ -296,11 +303,13 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
     for (const [index, entry] of targets.entries()) {
       localSaveProgress.value = `Saving ${index + 1} of ${targets.length}…`;
       try {
-        await ipc.saveOutputBytes(
-          entry.item.filename,
-          await fetchItemBase64(entry),
-          entry.item.metadata,
-          entry.item.timestamp,
+        const source = localMirrorSource(entry);
+        if (!source) throw new Error("The source machine is unavailable.");
+        await ipc.mirrorGalleryPrint(
+          source.target,
+          source.item.filename,
+          source.item.metadata,
+          source.item.timestamp,
         );
         saved++;
       } catch (error) {
@@ -313,7 +322,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
     const description =
       failures[0] ??
       (selection.length > targets.length
-        ? `${selection.length - targets.length} prints already local or unavailable for local saving.`
+        ? `${selection.length - targets.length} prints unavailable for local saving.`
         : "");
     toasts.push(
       `Saved locally ${saved} of ${targets.length} prints`,

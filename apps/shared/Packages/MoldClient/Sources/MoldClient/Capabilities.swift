@@ -22,6 +22,7 @@ public struct Capabilities: Codable, Hashable, Sendable {
     public let identity: IdentityCapabilities?
     public let videoUpscale: VideoUpscaleCapabilities?
     public let durableMedia: DurableMediaCapabilities?
+    public let retainedMediaTransfer: RetainedMediaTransferCapabilities?
     public let referenceUploads: ReferenceUploadCapabilities?
     /// 3-D. Absent on a host with no mesh family at all, which is why it is
     /// read through `meshExports` rather than directly -- see
@@ -60,4 +61,9 @@ public struct QueueCapabilities: Codable, Hashable, Sendable {
 
 public struct EventsCapabilities: Codable, Hashable, Sendable {
     public let available: Bool?
+}
+
+/// Positive readiness for authenticated retained-media gallery transfers.
+public struct RetainedMediaTransferCapabilities: Codable, Hashable, Sendable {
+    public let protocolVersion: Int
 }

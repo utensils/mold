@@ -74,7 +74,7 @@ impl QueueMediaLifecycle {
         }
     }
 
-    fn db(&self) -> Result<&MetadataDb, AdapterError> {
+    pub(crate) fn db(&self) -> Result<&MetadataDb, AdapterError> {
         self.db.as_ref().as_ref().ok_or_else(|| {
             AdapterError::new(
                 AdapterFailureKind::Database,
@@ -253,7 +253,7 @@ impl QueueMediaLifecycle {
         ))
     }
 
-    fn runtime_store(&self) -> Result<Arc<QueueMediaStore>, QueueMediaError> {
+    pub(crate) fn runtime_store(&self) -> Result<Arc<QueueMediaStore>, QueueMediaError> {
         let store = self
             .store
             .lock()
@@ -306,10 +306,49 @@ impl QueueMediaLifecycle {
         if candidates.is_empty() {
             return Ok(());
         }
+        #[cfg(unix)]
+        let _canonical_lock = crate::gallery_media_transfer::canonical_gallery_lock()?;
         let store = self.runtime_store()?;
         let mut filenames = BTreeSet::new();
         for candidate in candidates {
             let media_set = candidate.media_set;
+            #[cfg(unix)]
+            if let Some(groups) =
+                crate::gallery_media_transfer::canonicalize_queued_media_for_gallery(
+                    self, &media_set,
+                )?
+            {
+                let replacements = groups
+                    .iter()
+                    .map(|group| group.media_set.clone())
+                    .collect::<Vec<_>>();
+                let replaced = gate.replace_retained_media_for_job(
+                    output_dir,
+                    job_id,
+                    &media_set,
+                    &replacements,
+                    |set, pin_id| {
+                        groups
+                            .iter()
+                            .find(|group| group.media_set == *set)
+                            .expect("requested canonical group")
+                            .pin(pin_id)
+                    },
+                )?;
+                for (filename, old) in replaced {
+                    filenames.insert(filename);
+                    for binding in old {
+                        // Authority already owns the complete replacement. A
+                        // failed unlink leaves an orphan for startup cleanup.
+                        if let Err(error) =
+                            self.release_gallery_pin(binding.media_set, binding.pin_id)
+                        {
+                            tracing::warn!(%error,"superseded retained source pin cleanup deferred");
+                        }
+                    }
+                }
+                continue;
+            }
             let bindings =
                 gate.bind_retained_media_for_job(output_dir, job_id, &media_set, |pin_id| {
                     store
@@ -1301,27 +1340,29 @@ mod tests {
         let mut metadata =
             mold_core::OutputMetadata::from_generate_request(&request, 7, None, "test");
         metadata.job_id = Some("gallery-job".into());
-        let record = mold_db::GenerationRecord::from_save(
-            gallery.path(),
-            "mesh.glb",
-            mold_core::OutputFormat::Glb,
-            metadata,
-            mold_db::RecordSource::Server,
-            1,
-        );
         let gate = crate::batch_transaction::GalleryPublicationGate::default();
-        let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
-            gallery.path(),
-            "publication",
-            0,
-            serde_json::json!({"kind": "derived-media-test"}),
-            record,
-        )
-        .unwrap();
-        std::fs::write(publication.staging_path(), b"mesh bytes").unwrap();
-        publication.seal_staged_file().unwrap();
-        publication.mark_prepared().unwrap();
-        publication.commit(&gate, db.clone()).await.unwrap();
+        for filename in ["mesh.glb", "sibling.glb"] {
+            let record = mold_db::GenerationRecord::from_save(
+                gallery.path(),
+                filename,
+                mold_core::OutputFormat::Glb,
+                metadata.clone(),
+                mold_db::RecordSource::Server,
+                1,
+            );
+            let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
+                gallery.path(),
+                filename,
+                0,
+                serde_json::json!({"kind": "derived-media-test"}),
+                record,
+            )
+            .unwrap();
+            std::fs::write(publication.staging_path(), b"mesh bytes").unwrap();
+            publication.seal_staged_file().unwrap();
+            publication.mark_prepared().unwrap();
+            publication.commit(&gate, db.clone()).await.unwrap();
+        }
         lifecycle
             .handoff_to_gallery("gallery-job", gallery.path(), &gate)
             .unwrap();
@@ -1374,10 +1415,86 @@ mod tests {
                 CleanupOutcome::Deleted
             );
         }
+        // Queue ownership is gone. Trash must preserve source ownership,
+        // and deleting one sibling must not release the other's source.
+        let metadata_db = db.as_ref().as_ref().unwrap();
+        crate::gallery_trash::trash_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            metadata_db,
+            &gate,
+            1,
+        )
+        .unwrap();
+        for pin in &pins {
+            assert!(lifecycle
+                .gallery_member_bytes(pin.media_set.clone(), pin.pin_id.clone(), 0,)
+                .is_ok());
+        }
+        crate::gallery_trash::restore_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            metadata_db,
+            &gate,
+            0,
+        )
+        .unwrap();
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "mesh.glb",
+            Some(metadata_db),
+            &gate,
+            Some(&lifecycle),
+        )
+        .unwrap();
         for pin in pins {
             assert!(lifecycle
                 .gallery_member_bytes(pin.media_set, pin.pin_id, 0)
-                .is_ok());
+                .is_err());
+        }
+        let restarted = QueueMediaLifecycle::new(db.clone(), home.path().to_path_buf(), owner);
+        assert!(
+            reconcile_claimed_owner(&journal, &restarted)
+                .unwrap()
+                .durable_media_ready
+        );
+        let restarted_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        restarted
+            .reconcile_gallery_pins(gallery.path(), &restarted_gate)
+            .unwrap();
+        let (_, surviving) = restarted_gate
+            .retained_media_for_item(gallery.path(), "sibling.glb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(surviving.len(), 2);
+        for pin in &surviving {
+            let manifest = restarted
+                .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                .unwrap();
+            let expected = if manifest.entries[0].role == "source_image" {
+                vec![9]
+            } else {
+                vec![1, 2, 3]
+            };
+            assert_eq!(
+                restarted
+                    .gallery_member_bytes(pin.media_set.clone(), pin.pin_id.clone(), 0)
+                    .unwrap(),
+                expected
+            );
+        }
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "sibling.glb",
+            Some(metadata_db),
+            &restarted_gate,
+            Some(&restarted),
+        )
+        .unwrap();
+        for pin in surviving {
+            assert!(restarted
+                .gallery_member_bytes(pin.media_set, pin.pin_id, 0)
+                .is_err());
         }
     }
 
@@ -1742,5 +1859,612 @@ mod tests {
             .state,
             QueueMediaObligationState::GcPending
         );
+    }
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    async fn journal_gallery_job(
+        lifecycle: &Arc<QueueMediaLifecycle>,
+        journal: &Arc<QueueJournal>,
+        db: &Arc<Option<MetadataDb>>,
+        gallery: &std::path::Path,
+        gate: &crate::batch_transaction::GalleryPublicationGate,
+        job: &str,
+        filename: &str,
+        prompt: &str,
+        source_name: &str,
+    ) -> MediaSetRef {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({"prompt":prompt,"model":"flux-dev:q4","width":64,"height":64,"steps":1,"source_image":"YWJj","source_image_name":source_name,"id_images":[]})).unwrap();
+        let extracted = crate::queue_media::extract_request_media(
+            job,
+            request.clone(),
+            &crate::queue_media::ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
+        let projection = crate::queue_media::project_request_media(extracted.media()).unwrap();
+        let (request_json, media) = extracted.into_parts();
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(request_json.as_bytes());
+        let set = lifecycle
+            .seal_v2(
+                job,
+                &fingerprint,
+                &projection,
+                crate::queue_media::into_seal_media(media).unwrap(),
+            )
+            .unwrap();
+        let batch = format!("batch-{job}");
+        let receipt = lifecycle
+            .runtime_store()
+            .unwrap()
+            .seal_operation_receipt_v1(lifecycle.owner_uuid(), &batch, &fingerprint)
+            .unwrap();
+        journal
+            .record_batch_with_media(crate::queue_journal::MediaBatchJournalAdmission {
+                id: &batch,
+                client_batch_id: &batch,
+                operation_receipt: receipt.as_str(),
+                children: &[crate::queue_journal::MediaJournalAdmission {
+                    id: job,
+                    model: "flux-dev:q4",
+                    request_json: &request_json,
+                    media_set: Some(&set),
+                    output_dir: gallery,
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
+                    seed_pinned: false,
+                    admission_authority: None,
+                }],
+                observer_job_ids: &[],
+            })
+            .unwrap();
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request, 1, None, "test");
+        metadata.job_id = Some(job.into());
+        let record = mold_db::GenerationRecord::from_save(
+            gallery,
+            filename,
+            mold_core::OutputFormat::Png,
+            metadata,
+            mold_db::RecordSource::Server,
+            1,
+        );
+        let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
+            gallery,
+            filename,
+            0,
+            serde_json::json!({"kind":"journal-dedup-test"}),
+            record,
+        )
+        .unwrap();
+        std::fs::write(publication.staging_path(), filename.as_bytes()).unwrap();
+        publication.seal_staged_file().unwrap();
+        publication.mark_prepared().unwrap();
+        publication.commit(gate, db.clone()).await.unwrap();
+        set
+    }
+    #[cfg(unix)]
+    #[test]
+    fn canonical_media_preserves_order_duplicates_sink_and_bounded_fallback() {
+        use crate::gallery_media_transfer::{
+            canonical_gallery_lock, canonicalize_queued_media_for_gallery,
+        };
+        use crate::queue_media_store::{QueueMediaOperationFingerprint, QueueMediaSink};
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "order-test",
+        ));
+        let lifecycle = install_and_reconcile(home.path(), db, &journal);
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"test");
+        let _serial = canonical_gallery_lock().unwrap();
+        let original = lifecycle
+            .seal_v2(
+                "ordered",
+                &fingerprint,
+                &Default::default(),
+                vec![
+                    SealMedia::bytes("references", "item:0", b"duplicate".to_vec()),
+                    SealMedia::bytes("references", "item:1", b"duplicate".to_vec()),
+                    SealMedia::bytes("references", "item:10", b"last".to_vec()),
+                ],
+            )
+            .unwrap();
+        let first = canonicalize_queued_media_for_gallery(&lifecycle, &original)
+            .unwrap()
+            .unwrap();
+        first[0]
+            .pin("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        let manifest = lifecycle
+            .runtime_store()
+            .unwrap()
+            .load_from_gallery_pin(&crate::queue_media_store::GalleryMediaPinRef {
+                media_set: first[0].media_set.clone(),
+                pin_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item:0", "item:1", "item:10"]
+        );
+        assert_eq!(
+            manifest.entries[0].sha256_hex,
+            manifest.entries[1].sha256_hex
+        );
+        let mut changed_sink = vec![
+            SealMedia::bytes("references", "item:0", b"duplicate".to_vec()),
+            SealMedia::bytes("references", "item:1", b"duplicate".to_vec()),
+            SealMedia::bytes("references", "item:10", b"last".to_vec()),
+        ];
+        changed_sink[0].sink = QueueMediaSink::PrivateStaging;
+        let different = lifecycle
+            .seal_v2(
+                "different-sink",
+                &fingerprint,
+                &Default::default(),
+                changed_sink,
+            )
+            .unwrap();
+        let second = canonicalize_queued_media_for_gallery(&lifecycle, &different)
+            .unwrap()
+            .unwrap();
+        assert_ne!(first[0].media_set, second[0].media_set);
+        let many = lifecycle
+            .seal_v2(
+                "too-many",
+                &fingerprint,
+                &Default::default(),
+                (0..65)
+                    .map(|i| SealMedia::bytes("references", format!("item:{i}"), vec![1]))
+                    .collect(),
+            )
+            .unwrap();
+        assert!(canonicalize_queued_media_for_gallery(&lifecycle, &many)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            lifecycle
+                .runtime_store()
+                .unwrap()
+                .load(&many)
+                .unwrap()
+                .entries
+                .len(),
+            65
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_journal_jobs_share_pixels_but_keep_distinct_provenance_and_queue_authority(
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "canonical-test",
+        ));
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let first = journal_gallery_job(
+            &lifecycle,
+            &journal,
+            &db,
+            gallery.path(),
+            &gate,
+            "job-first",
+            "first.png",
+            "first prompt",
+            "original-upload.png",
+        )
+        .await;
+        let second = journal_gallery_job(
+            &lifecycle,
+            &journal,
+            &db,
+            gallery.path(),
+            &gate,
+            "job-second",
+            "second.png",
+            "different prompt",
+            "renamed-upload.png",
+        )
+        .await;
+        lifecycle
+            .handoff_to_gallery("job-first", gallery.path(), &gate)
+            .unwrap();
+        lifecycle
+            .handoff_to_gallery("job-second", gallery.path(), &gate)
+            .unwrap();
+        let (_, first_pins) = gate
+            .retained_media_for_item(gallery.path(), "first.png")
+            .unwrap()
+            .unwrap();
+        let (_, second_pins) = gate
+            .retained_media_for_item(gallery.path(), "second.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_pins.len(), 2);
+        assert_eq!(second_pins.len(), 2);
+        for pins in [&first_pins, &second_pins] {
+            assert!(
+                pins.iter().any(|pin| lifecycle
+                    .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.role == "identity_images"
+                        && entry.name == "collection"
+                        && entry.size_bytes == 0)),
+                "empty collection markers must survive canonicalization"
+            );
+        }
+        let pixel_pin = |pins: &[crate::batch_transaction::GalleryMediaPin]| {
+            pins.iter()
+                .find(|pin| {
+                    lifecycle
+                        .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                        .unwrap()
+                        .entries
+                        .iter()
+                        .any(|entry| entry.role == "source_image")
+                })
+                .unwrap()
+                .media_set
+                .clone()
+        };
+        assert_eq!(pixel_pin(&first_pins), pixel_pin(&second_pins), "identical source pixels across real journal jobs must share one retained encrypted set even when upload names and prompts differ");
+        use std::os::unix::fs::MetadataExt;
+        fn payloads(root: &std::path::Path, name: &str, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    payloads(&path, name, paths);
+                } else if path.file_name().unwrap() == name {
+                    paths.push(path);
+                }
+            }
+        }
+        let mut physical = Vec::new();
+        payloads(
+            home.path(),
+            &format!("{}.qms", pixel_pin(&first_pins).set_id),
+            &mut physical,
+        );
+        assert_eq!(
+            physical.len(),
+            2,
+            "completed output pins are the only retained canonical payload links"
+        );
+        let first_metadata = std::fs::metadata(&physical[0]).unwrap();
+        let second_metadata = std::fs::metadata(&physical[1]).unwrap();
+        assert_eq!(
+            (first_metadata.dev(), first_metadata.ino()),
+            (second_metadata.dev(), second_metadata.ino())
+        );
+        assert_eq!(
+            first_metadata.nlink(),
+            2,
+            "independent-job output pins physically share ciphertext"
+        );
+        assert_ne!(first, second); // Active queue replay remains job-bound.
+        let store = lifecycle.runtime_store().unwrap();
+        assert_eq!(store.load(&first).unwrap().media_set.job_id, "job-first");
+        assert_eq!(store.load(&second).unwrap().media_set.job_id, "job-second");
+        for (pins, expected) in [
+            (&first_pins, "original-upload.png"),
+            (&second_pins, "renamed-upload.png"),
+        ] {
+            let mut names = Vec::new();
+            for pin in pins {
+                let manifest = lifecycle
+                    .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                    .unwrap();
+                for (index, entry) in manifest.entries.iter().enumerate() {
+                    if entry.role == "source_image_name" {
+                        names.push(
+                            lifecycle
+                                .gallery_member_bytes(
+                                    pin.media_set.clone(),
+                                    pin.pin_id.clone(),
+                                    index,
+                                )
+                                .unwrap(),
+                        );
+                    }
+                }
+            }
+            assert_eq!(names, vec![expected.as_bytes().to_vec()]);
+        }
+        // Retry must reuse committed canonical pins, then ordinary queue
+        // cleanup must remove only the original per-job active bundles.
+        lifecycle
+            .handoff_to_gallery("job-first", gallery.path(), &gate)
+            .unwrap();
+        lifecycle
+            .handoff_to_gallery("job-second", gallery.path(), &gate)
+            .unwrap();
+        for job in ["job-first", "job-second"] {
+            let candidates = lifecycle.candidates_for_job(job).unwrap();
+            assert!(generation_queue::delete(db.as_ref().as_ref().unwrap(), job).unwrap());
+            for candidate in candidates {
+                assert_eq!(
+                    lifecycle
+                        .cleanup_after_committed_delete(&candidate)
+                        .unwrap(),
+                    CleanupOutcome::Deleted
+                );
+            }
+        }
+        let restarted = QueueMediaLifecycle::new(
+            db.clone(),
+            home.path().into(),
+            journal.owner_uuid().unwrap().into(),
+        );
+        assert!(
+            reconcile_claimed_owner(&journal, &restarted)
+                .unwrap()
+                .durable_media_ready
+        );
+        let fresh_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        restarted
+            .reconcile_gallery_pins(gallery.path(), &fresh_gate)
+            .unwrap();
+        let metadata_db = db.as_ref().as_ref().unwrap();
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "first.png",
+            Some(metadata_db),
+            &fresh_gate,
+            Some(&restarted),
+        )
+        .unwrap();
+        let (_, surviving) = fresh_gate
+            .retained_media_for_item(gallery.path(), "second.png")
+            .unwrap()
+            .unwrap();
+        let source = surviving
+            .iter()
+            .find(|pin| {
+                restarted
+                    .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                    .unwrap()
+                    .entries[0]
+                    .role
+                    == "source_image"
+            })
+            .unwrap();
+        assert_eq!(
+            restarted
+                .gallery_member_bytes(source.media_set.clone(), source.pin_id.clone(), 0)
+                .unwrap(),
+            b"abc"
+        );
+        crate::gallery_trash::hard_delete_live_print_blocking(
+            gallery.path(),
+            "second.png",
+            Some(metadata_db),
+            &fresh_gate,
+            Some(&restarted),
+        )
+        .unwrap();
+        assert!(restarted
+            .runtime_store()
+            .unwrap()
+            .inspect_gallery_pins()
+            .pins
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canonical_handoff_projection_failure_retains_sources_and_retry_repairs_without_duplicates(
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "projection-failure",
+        ));
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let original = journal_gallery_job(
+            &lifecycle,
+            &journal,
+            &db,
+            gallery.path(),
+            &gate,
+            "projection-job",
+            "projection.png",
+            "fixture prompt",
+            "private-source.png",
+        )
+        .await;
+        let metadata_db = db.as_ref().as_ref().unwrap();
+        metadata_db
+            .with_conn(|conn| {
+                conn.execute(
+                    "ALTER TABLE gallery_media_bindings RENAME TO held_gallery_media_bindings",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(lifecycle
+            .handoff_to_gallery("projection-job", gallery.path(), &gate)
+            .is_err());
+        let (_, retained) = gate
+            .retained_media_for_item(gallery.path(), "projection.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.len(), 2);
+        for pin in &retained {
+            assert!(lifecycle
+                .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                .is_ok());
+        }
+        assert!(lifecycle.runtime_store().unwrap().load(&original).is_ok());
+        metadata_db
+            .with_conn(|conn| {
+                conn.execute(
+                    "ALTER TABLE held_gallery_media_bindings RENAME TO gallery_media_bindings",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        lifecycle
+            .handoff_to_gallery("projection-job", gallery.path(), &gate)
+            .unwrap();
+        assert_eq!(
+            gate.retained_media_for_item(gallery.path(), "projection.png")
+                .unwrap()
+                .unwrap()
+                .1,
+            retained
+        );
+        assert_eq!(
+            mold_db::gallery_media::list_for_item(
+                metadata_db,
+                &std::fs::canonicalize(gallery.path())
+                    .unwrap()
+                    .to_string_lossy(),
+                "projection.png"
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+        assert_eq!(
+            lifecycle
+                .runtime_store()
+                .unwrap()
+                .inspect_gallery_pins()
+                .pins
+                .len(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_canonical_pinning_keeps_original_authority_and_restart_reclaims_orphans() {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "interrupted-canonical",
+        ));
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let original = journal_gallery_job(
+            &lifecycle,
+            &journal,
+            &db,
+            gallery.path(),
+            &gate,
+            "interrupted-job",
+            "interrupted.png",
+            "fixture prompt",
+            "retained-private-name.png",
+        )
+        .await;
+        let store = lifecycle.runtime_store().unwrap();
+        gate.bind_retained_media_for_job(gallery.path(), "interrupted-job", &original, |id| {
+            store.pin_for_gallery_item(&original, id)?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, old) = gate
+            .retained_media_for_item(gallery.path(), "interrupted.png")
+            .unwrap()
+            .unwrap();
+        {
+            let _lock = crate::gallery_media_transfer::canonical_gallery_lock().unwrap();
+            let mut groups = crate::gallery_media_transfer::canonicalize_queued_media_for_gallery(
+                &lifecycle, &original,
+            )
+            .unwrap()
+            .unwrap();
+            let replacement = groups
+                .iter()
+                .map(|group| group.media_set.clone())
+                .collect::<Vec<_>>();
+            let mut count = 0;
+            assert!(gate
+                .replace_retained_media_for_job(
+                    gallery.path(),
+                    "interrupted-job",
+                    &original,
+                    &replacement,
+                    |set, id| {
+                        count += 1;
+                        if count == 2 {
+                            anyhow::bail!("interrupted fixture pinning");
+                        }
+                        groups
+                            .iter()
+                            .find(|group| group.media_set == *set)
+                            .unwrap()
+                            .pin(id)
+                    }
+                )
+                .is_err());
+            assert_eq!(
+                gate.retained_media_for_item(gallery.path(), "interrupted.png")
+                    .unwrap()
+                    .unwrap()
+                    .1,
+                old
+            );
+            for group in &mut groups {
+                group.abandon_transient_for_restart_test();
+            }
+        }
+        let restarted = QueueMediaLifecycle::new(
+            db.clone(),
+            home.path().into(),
+            journal.owner_uuid().unwrap().into(),
+        );
+        let report = reconcile_claimed_owner(&journal, &restarted).unwrap();
+        assert!(report.durable_media_ready);
+        assert_eq!(report.deleted.len(), 2);
+        let fresh_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let cleanup = restarted
+            .reconcile_gallery_pins(gallery.path(), &fresh_gate)
+            .unwrap();
+        assert_eq!(cleanup.released, 1);
+        assert_eq!(
+            fresh_gate
+                .retained_media_for_item(gallery.path(), "interrupted.png")
+                .unwrap()
+                .unwrap()
+                .1,
+            old
+        );
+        restarted
+            .handoff_to_gallery("interrupted-job", gallery.path(), &fresh_gate)
+            .unwrap();
+        let (_, retained) = fresh_gate
+            .retained_media_for_item(gallery.path(), "interrupted.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|pin| pin.media_set != original));
+        assert!(restarted
+            .gallery_manifest(old[0].media_set.clone(), old[0].pin_id.clone())
+            .is_err());
     }
 }

@@ -30,7 +30,6 @@ struct MoreOptionsSheet: View {
                     IdentitySection(recipe: recipe)
                     RefineSection(recipe: recipe)
                     FileUnderSection()
-                    RecentPromptsSection { dismiss() }
                 } else {
                     Text("Choose a model first.").foregroundStyle(.secondaryText)
                 }
@@ -159,36 +158,6 @@ private struct FileUnderSection: View {
         guard !clean.isEmpty, !generate.draft.tags.contains(clean) else { return }
         generate.draft.tags.append(clean)
         tag = ""
-    }
-}
-
-/// The prompts this machine was last asked for, to use again.
-private struct RecentPromptsSection: View {
-    @Environment(GenerateController.self) private var generate
-    @Environment(HostStore.self) private var hosts
-    let used: () -> Void
-    @State private var recent: [HistoryEntry] = []
-
-    var body: some View {
-        Section {
-            if recent.isEmpty {
-                Text("Nothing yet.").foregroundStyle(.secondaryText)
-            }
-            ForEach(recent.prefix(8)) { entry in
-                Button {
-                    generate.draft.prompt = entry.prompt
-                    used()
-                } label: {
-                    Text(entry.prompt).foregroundStyle(.primary).lineLimit(3)
-                }
-            }
-        } header: {
-            SectionHeader(String(localized: "Recent prompts"))
-        }
-        .task(id: generate.target?.id) {
-            guard let host = generate.target else { return }
-            recent = (try? await hosts.backend(for: host).history(limit: 20).entries) ?? []
-        }
     }
 }
 

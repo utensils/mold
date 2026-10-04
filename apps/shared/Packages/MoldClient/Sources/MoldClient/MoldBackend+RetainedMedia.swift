@@ -8,6 +8,8 @@ import Foundation
 /// are different concerns, and the reuse session is the only route in the app
 /// that mints a credential.
 public protocol MoldRetainedMediaBackend: Sendable {
+    func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer
+    func importRetainedMedia(_ transfer: RetainedSourceMedia.Transfer, for filename: String) async throws
     /// Never throws for an unauthorised caller -- a keyed host refuses the
     /// probe in middleware, and that IS the answer `unavailable_auth`.
     func retainedSourceMedia(for filename: String) async throws
@@ -18,4 +20,13 @@ public protocol MoldRetainedMediaBackend: Sendable {
     func retainedMediaReuseSession(
         for filename: String, members memberIds: [String], target: GenerateRequest
     ) async throws -> RetainedSourceMedia.ReuseSession
+}
+
+public extension MoldRetainedMediaBackend {
+    func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
+        throw MoldClientError.http(status: 404, code: nil, message: "This machine cannot copy retained sources yet.")
+    }
+    func importRetainedMedia(_ transfer: RetainedSourceMedia.Transfer, for filename: String) async throws {
+        throw MoldClientError.http(status: 404, code: nil, message: "This machine cannot copy retained sources yet.")
+    }
 }

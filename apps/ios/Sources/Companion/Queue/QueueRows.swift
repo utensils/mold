@@ -12,7 +12,7 @@ struct QueueGroupRows: View {
             DisclosureGroup {
                 ForEach(group.rows) { entry in QueueEntryRow(entry: entry, host: host, inBatch: true) }
             } label: {
-                QueueBatchLabel(rows: group.rows)
+                QueueBatchLabel(rows: group.rows, host: host)
             }
         } else {
             QueueEntryRow(entry: group.rows[0], host: host, inBatch: false)
@@ -22,13 +22,15 @@ struct QueueGroupRows: View {
 
 /// "Batch of 4 · flux-dev:q4" over "1 rendering · 3 waiting".
 private struct QueueBatchLabel: View {
+    @Environment(QueueStore.self) private var queue
     let rows: [QueueEntry]
+    let host: MoldHost
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Batch of \(rows.count)")
-            if let model = rows.first?.model {
-                Text(verbatim: rows.first?.modelHeadline ?? model).font(.caption).foregroundStyle(.secondaryText)
+            if let row = rows.first {
+                Text(verbatim: queue.headline(for: row, on: host.id)).font(.caption).foregroundStyle(.secondaryText)
             }
             Text(summary).font(.caption).foregroundStyle(.secondaryText)
         }
@@ -57,32 +59,48 @@ struct QueueEntryRow: View {
     let entry: QueueEntry
     let host: MoldHost
     let inBatch: Bool
+    @State private var inspecting: QueueEntry?
 
     var body: some View {
         let layout = RowAxis.for(size) == .horizontal
             ? AnyLayout(HStackLayout(alignment: .top, spacing: 12))
             : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-        layout {
-            inputPreview
-            if entry.state == .running { preview }
-            VStack(alignment: .leading, spacing: 4) {
-                title
-                if let prompt = queue.prompt(for: entry, on: host.id), !prompt.isEmpty {
-                    Text(prompt).font(.callout).lineLimit(size.isAccessibilitySize ? nil : 3)
+        VStack(alignment: .leading, spacing: 8) {
+            Button { inspecting = entry } label: {
+                layout {
+                    inputPreview
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(queue.headline(for: entry, on: host.id)).font(.headline)
+                            .foregroundStyle(.primary)
+                        if let prompt = queue.prompt(for: entry, on: host.id), !prompt.isEmpty {
+                            Text(prompt).font(.callout).foregroundStyle(.primary)
+                                .lineLimit(size.isAccessibilitySize ? nil : 2)
+                        }
+                        HStack {
+                            Text(entry.state == .running ? String(localized: "Rendering") : caption)
+                            Spacer()
+                            Image(systemName: "chevron.right").accessibilityHidden(true)
+                        }
+                        .font(.callout).foregroundStyle(.secondaryText)
+                        if entry.state == .running, let step = queue.progress[entry.id]?.step,
+                           let total = queue.progress[entry.id]?.total, total > 0 {
+                            ProgressView(value: Double(step), total: Double(total))
+                                .accessibilityValue(ProgressWords.spoken(queue.progress[entry.id]))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if let hold = queue.hold(for: entry, on: host.id) {
-                    QueueHeldActions(entry: entry, hold: hold, host: host)
-                } else if entry.state == .running {
-                    running
-                } else {
-                    Text(caption).font(.callout).foregroundStyle(.secondaryText)
-                }
+                .contentShape(.rect)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("queue-open-" + entry.id)
+            .accessibilityHint("Show job details and controls")
+            QueueItemActions(entry: entry, host: host)
         }
         .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("queue-entry-" + entry.id)
+        .sheet(item: $inspecting) { row in QueueDetailSheet(entry: row, host: host) }
         .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
             await queue.loadSourceThumbnail(for: entry, on: host.id)
         }
@@ -105,36 +123,11 @@ struct QueueEntryRow: View {
         .contextMenu { menu }
     }
 
-    private var title: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if entry.state == .held {
-                // a11y: the paragraph below says it is held, in words.
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).accessibilityHidden(true)
-            }
-            Text(verbatim: entry.modelHeadline)
-                .font(.headline)
-        }
-    }
-
     private var caption: String {
         if inBatch, let index = entry.batchIndex {
             return String(localized: "Picture \(index) · \(entry.waitDescription)")
         }
         return entry.waitDescription
-    }
-
-    @ViewBuilder private var running: some View {
-        let progress = queue.progress[entry.id]
-        Text(ProgressWords.sentence(progress)).font(.callout)
-        if let step = progress?.step, let total = progress?.total, total > 0 {
-            ProgressView(value: Double(step), total: Double(total))
-                .accessibilityValue(ProgressWords.spoken(progress))
-        } else {
-            ProgressView().frame(maxWidth: .infinity, alignment: .leading)
-        }
-        if let figure = ProgressWords.figure(progress) {
-            Text(verbatim: "\(figure) · \(host.name)").font(.caption.monospacedDigit()).foregroundStyle(.secondaryText)
-        }
     }
 
     @ViewBuilder private var inputPreview: some View {
@@ -147,23 +140,6 @@ struct QueueEntryRow: View {
                     .accessibilityIdentifier("queue-source-" + entry.id)
                 Text("Source").font(.caption).foregroundStyle(.secondaryText)
             }
-        }
-    }
-
-    @ViewBuilder private var preview: some View {
-        let image = queue.progress[entry.id]?.previewData.flatMap(UIImage.init(data:))
-        VStack(alignment: .leading, spacing: 4) {
-            Group {
-                if let image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                } else {
-                    Rectangle().fill(.quaternary)
-                }
-            }
-            .frame(width: thumb, height: thumb)
-            .clipShape(.rect(cornerRadius: 5))
-            .accessibilityHidden(true) // a11y: the sentence beside it says what it shows.
-            Text("Rendering").font(.caption).foregroundStyle(.secondaryText)
         }
     }
 
@@ -195,7 +171,7 @@ struct QueueEntryRow: View {
 /// missing model, Retry where the machine says it would help, Move to…
 /// another machine, and Cancel -- side by side, stacked full width at AX
 /// sizes.
-private struct QueueHeldActions: View {
+struct QueueHeldActions: View {
     @Environment(QueueStore.self) private var queue
     @Environment(ModelStore.self) private var models
     @Environment(\.dynamicTypeSize) private var size
@@ -209,15 +185,16 @@ private struct QueueHeldActions: View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 8))
         layout {
-            if case let .missingModel(model, _) = hold {
+            if case let .missingModel(model, _) = hold, queue.canRetry(entry, on: host.id) {
                 Button("Pull and Retry") { models.pullThenRetry(model, entry: entry, on: host.id) }
                     .frame(maxWidth: stacked ? .infinity : nil)
-            } else if case .prose(_, retryable: true) = hold {
+            } else if queue.canRetry(entry, on: host.id) {
                 Button("Retry") { Task { await queue.retry(entry, on: host.id) } }
                     .frame(maxWidth: stacked ? .infinity : nil)
             }
-            MoveToMenu(entry: entry, host: host)
-                .frame(maxWidth: stacked ? .infinity : nil)
+            if entry.authority(instanceId: "") != nil, entry.state == .held {
+                MoveToMenu(entry: entry, host: host)
+            }
         }
         .buttonStyle(.bordered)
         .padding(.top, 4)
@@ -235,12 +212,13 @@ private struct QueueHeldActions: View {
 /// there are none.
 struct MoveToMenu: View {
     @Environment(TransferStore.self) private var transfers
+    @Environment(QueueStore.self) private var queue
     let entry: QueueEntry
     let host: MoldHost
 
     var body: some View {
         let destinations = transfers.destinations(from: host.id)
-        if !destinations.isEmpty {
+        if !destinations.isEmpty, queue.canTransfer(entry, on: host.id) {
             Menu {
                 ForEach(destinations) { destination in
                     Button(destination.name) {

@@ -19,6 +19,28 @@ describe("ipc.pickSourceImages", () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
+  it("starts the local authority before mirroring a print and its retained sources", async () => {
+    invoke
+      .mockResolvedValueOnce({ baseUrl: "http://localhost:7680" })
+      .mockResolvedValueOnce("actual.png");
+    const source = { baseUrl: "http://hal9000:7680", apiKey: "test-key" };
+    await expect(ipc.mirrorGalleryPrint(source, "remote.png", null, 42)).resolves.toBe(
+      "actual.png",
+    );
+    expect(invoke.mock.calls.map(([command, args]) => [command, args])).toEqual([
+      ["ensure_local_server", {}],
+      ["mirror_gallery_print", { source, filename: "remote.png", metadata: null, timestamp: 42 }],
+    ]);
+  });
+
+  it("does not copy when the local authority cannot start", async () => {
+    invoke.mockRejectedValueOnce(new Error("engine unavailable"));
+    await expect(
+      ipc.mirrorGalleryPrint({ baseUrl: "http://hal9000:7680", apiKey: null }, "remote.png"),
+    ).rejects.toThrow("engine unavailable");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it("opens the native chooser with only supported still-image filters", async () => {
     open.mockResolvedValue(["/tmp/source.png", "/tmp/reference.jpeg"]);
     invoke

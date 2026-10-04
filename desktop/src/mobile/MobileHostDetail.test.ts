@@ -655,6 +655,7 @@ describe("MobileHostDetail remote host data", () => {
     });
     const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (String(input).endsWith("/input-thumbnail")) return new Response(null, { status: 404 });
         expect(String(input)).toBe(`${studio.baseUrl}/api/queue/job-queued`);
         expect(init?.method).toBe("DELETE");
         expect((init?.headers as Headers).get("x-api-key")).toBe(studio.apiKey);
@@ -677,12 +678,12 @@ describe("MobileHostDetail remote host data", () => {
 
     // Revealing the tray is step one — nothing is cancelled by the gesture.
     await reveal.trigger("click");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
 
     await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
     expect(view.get("[data-test='host-detail-queue']").text()).not.toContain("z-image:q8");
     expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
   });
@@ -881,13 +882,15 @@ describe("MobileHostDetail remote host data", () => {
       }
       return originalApi(requestTarget, path);
     });
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
     const row = view.get("[data-test='host-detail-queue-row-job-running']");
 
     await row.get("[data-test='swipe-row-actions']").trigger("click");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
     await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
@@ -1054,7 +1057,9 @@ describe("MobileHostDetail remote host data", () => {
   });
 
   it("arms the sheet's cancel before it touches the host", async () => {
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
     await view.get("[data-test='host-detail-queue-open-job-queued']").trigger("click");
@@ -1062,7 +1067,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const cancel = view.get("[data-test='queue-detail-cancel']");
     await cancel.trigger("click");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
     expect(cancel.text()).toBe("Cancel job?");
 
     await cancel.trigger("click");

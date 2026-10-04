@@ -51,9 +51,10 @@ Reverse the sweep to shorten it, or hold near a grid edge to scroll further.
 Vertical swipes still scroll, and tapping selections keeps the viewport put.
 Status notices sit above the grid without covering date headings or prints.
 Its cached listing and images load before
-the machines respond. Opening a print keeps the grid's scroll position when
-you return; clips play automatically only while their page is selected in the
-viewer. Settings is available from Generate, Library and Machines;
+the machines respond. Closing a print restores the exact viewport, including
+partially visible tiles. Scrolling uses cached gallery projections and the viewer
+loads only nearby pages, so large libraries stay responsive. Clips play
+automatically only while their page is selected in the viewer. Settings is available from Generate, Library and Machines;
 Library settings show image storage against its limit and saved listing size,
 offer offline thumbnail saving, and
 can clear both pictures and saved listings after explaining the offline effect.
@@ -220,3 +221,18 @@ readable width; large accessibility text stacks the image and words.
 ### Unloading server models
 
 Open Machines → Models → Installed. Server Memory lists loaded models with visible Unload controls. Unload All Models releases every resident model on the selected server while retaining downloaded files. Controls are unavailable offline or while another model operation is pending; server refusals appear in the failure banner.
+
+### Queue details and prompt history
+
+Queue cards show the source image, a short curated model title, prompt excerpt,
+and current state. Tap a card for the full model ID, generation settings,
+source, progress, and job controls. Pause applies only to waiting jobs; Resume
+applies to paused jobs. Retry is offered only for a retryable held job with its
+original batch identity. Cancelling jobs are read-only, and controls wait for
+an in-flight change to finish.
+
+Prompt History is available directly in Generate. Choose a machine and search
+its saved prompts; selecting one changes only the prompt, preserving the model,
+settings, and attached media. Loading, offline, unavailable history, and failed
+requests have distinct messages. Clear asks for confirmation and removes that
+machine's entire history, including prompts hidden by search.

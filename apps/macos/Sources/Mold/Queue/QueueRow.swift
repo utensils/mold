@@ -14,6 +14,7 @@ struct QueueRow: View {
     /// BATCH rather than the machine's overall queue position -- see
     /// `QueueBatchRow`.
     var caption: String?
+    var sourceHost: MoldHost? = nil
     /// Drawn only on a `queued` row on a machine that advertises reorder --
     /// SwiftUI's own "absent, not disabled" rule the whole app follows.
     var isReorderable = false
@@ -24,7 +25,8 @@ struct QueueRow: View {
     let act: (Action) -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
+            if let sourceHost { QueueSourceThumbnail(entry: entry, host: sourceHost) }
             if isReorderable {
                 Image(systemName: "line.3.horizontal")
                     .foregroundStyle(.tertiary)

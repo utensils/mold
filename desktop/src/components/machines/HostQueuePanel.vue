@@ -9,6 +9,7 @@
  */
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
 import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
@@ -638,30 +639,37 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
             @click="openQueueDetail(entry)"
             @keydown.enter="openQueueDetail(entry)"
           >
-            <div
-              v-if="thumbnails"
-              class="h-12 w-12 shrink-0 overflow-hidden rounded-inner border border-border bg-media-bed"
+            <QueueSourceThumbnail
+              :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
+              :instance-id="host.instanceId"
+              :job-id="entry.id"
+              :online="host.status === 'ready' && !host.stale"
             >
-              <img
-                v-if="ownJob(entry)?.previewUrl"
-                :src="ownJob(entry)!.previewUrl!"
-                alt=""
-                class="h-full w-full object-cover"
-                style="filter: blur(1px)"
-              />
-              <DevelopCanvas
+              <div
+                v-if="thumbnails"
+                class="h-12 w-12 shrink-0 overflow-hidden rounded-inner border border-border bg-media-bed"
+              >
+                <img
+                  v-if="ownJob(entry)?.previewUrl"
+                  :src="ownJob(entry)!.previewUrl!"
+                  alt=""
+                  class="h-full w-full object-cover"
+                  style="filter: blur(1px)"
+                />
+                <DevelopCanvas
+                  v-else
+                  :seed="ownJob(entry)?.visualSeed ?? entry.id"
+                  :progress="ownJob(entry) ? jobProgress(ownJob(entry)!) : 0.2"
+                  :phase="ownJob(entry) ? jobPhase(ownJob(entry)!) : 'latent'"
+                />
+              </div>
+              <span
                 v-else
-                :seed="ownJob(entry)?.visualSeed ?? entry.id"
-                :progress="ownJob(entry) ? jobProgress(ownJob(entry)!) : 0.2"
-                :phase="ownJob(entry) ? jobPhase(ownJob(entry)!) : 'latent'"
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="entry.state === 'running' ? 'bg-accent' : 'bg-sapphire'"
+                aria-hidden="true"
               />
-            </div>
-            <span
-              v-else
-              class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="entry.state === 'running' ? 'bg-accent' : 'bg-sapphire'"
-              aria-hidden="true"
-            />
+            </QueueSourceThumbnail>
             <div class="min-w-0 flex-1">
               <div class="truncate text-sm text-fg" :title="ownJob(entry)?.prompt">
                 {{ ownJob(entry)?.prompt ?? modelLabel(entry.model) }}

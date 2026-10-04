@@ -55,7 +55,7 @@ pub(crate) fn validate_reuse_batch_cardinality(
 /// `device_patch_is_open_when_server_auth_is_disabled`). Retained source media
 /// is not more sensitive than the print bytes and full metadata that same host
 /// already serves unauthenticated, so it must not be the one route that refuses.
-fn private_media_authorized(
+pub(crate) fn private_media_authorized(
     auth: Option<&Extension<crate::auth::AuthState>>,
     authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
 ) -> bool {
@@ -160,22 +160,24 @@ fn safe_display_name(name: &str, role: &str, index: usize) -> String {
 }
 
 #[derive(Clone)]
-struct ResolvedMember {
-    media_set: crate::queue_media_store::MediaSetRef,
-    pin_id: String,
-    index: usize,
-    position: String,
-    member: Member,
+pub(crate) struct ResolvedMember {
+    pub(crate) media_set: crate::queue_media_store::MediaSetRef,
+    pub(crate) pin_id: String,
+    pub(crate) index: usize,
+    pub(crate) position: String,
+    pub(crate) sink: crate::queue_media_store::QueueMediaSink,
+    pub(crate) sha256: String,
+    pub(crate) member: Member,
 }
 
-struct ResolvedGalleryMedia {
-    archive_identity_sha256: String,
-    members: Vec<ResolvedMember>,
-    legacy: bool,
-    corrupt: bool,
+pub(crate) struct ResolvedGalleryMedia {
+    pub(crate) archive_identity_sha256: String,
+    pub(crate) members: Vec<ResolvedMember>,
+    pub(crate) legacy: bool,
+    pub(crate) corrupt: bool,
 }
 
-fn resolve_members(
+pub(crate) fn resolve_members(
     state: &AppState,
     filename: &str,
 ) -> Result<Option<ResolvedGalleryMedia>, ApiError> {
@@ -203,6 +205,14 @@ fn resolve_members(
             (identity, pins)
         }
     };
+    resolve_members_from_pins(state, identity, pins)
+}
+
+pub(crate) fn resolve_members_from_pins(
+    state: &AppState,
+    identity: crate::batch_transaction::ArchivedChildIdentity,
+    pins: Vec<crate::batch_transaction::GalleryMediaPin>,
+) -> Result<Option<ResolvedGalleryMedia>, ApiError> {
     if pins.is_empty() {
         return Ok(Some(ResolvedGalleryMedia {
             archive_identity_sha256: archive_identity_sha256(&identity)?,
@@ -239,6 +249,8 @@ fn resolve_members(
                 pin_id: pin.pin_id.clone(),
                 index,
                 position: entry.name.clone(),
+                sink: entry.sink,
+                sha256: entry.sha256_hex.clone(),
                 member: Member {
                     member_id: member_id(&pin.media_set, &pin.pin_id, index),
                     role: entry.role.clone(),
@@ -256,7 +268,7 @@ fn resolve_members(
     }))
 }
 
-fn archive_identity_sha256(
+pub(crate) fn archive_identity_sha256(
     identity: &crate::batch_transaction::ArchivedChildIdentity,
 ) -> Result<String, ApiError> {
     let bytes = serde_json::to_vec(identity).map_err(|error| {
@@ -944,6 +956,8 @@ mod tests {
             pin_id: "a".repeat(64),
             index: 0,
             position: "front".into(),
+            sink: crate::queue_media_store::QueueMediaSink::Memory,
+            sha256: "a".repeat(64),
             member: Member {
                 member_id: "processed-front".into(),
                 role: "matting_processed_references".into(),

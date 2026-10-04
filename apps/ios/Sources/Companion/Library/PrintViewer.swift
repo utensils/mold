@@ -10,18 +10,26 @@ struct PrintViewer: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(HostStore.self) private var hosts
     let start: PrintID
-    let entries: [LibraryEntry]
+    let projection: LibraryGridProjection
     let trashed: Bool
     @State private var current: PrintID?
+    @State private var pageAnchor: PrintID?
     @State private var chrome = true
     @State private var showsInfo = false
 
+    init(start: PrintID, entries: [LibraryEntry], trashed: Bool, projection: LibraryGridProjection? = nil) {
+        self.start = start
+        self.projection = projection ?? LibraryGridProjection(entries: entries)
+        self.trashed = trashed
+    }
+
     var body: some View {
-        let entry = entries.first { $0.id == (current ?? start) }
+        let entry = projection.entry(current ?? start)
+        let anchor = projection.anchor(for: current ?? start, preferred: pageAnchor ?? start)
         let visibleChrome = UIDevice.current.userInterfaceIdiom == .phone
             || Self.showsChrome(for: entry?.print.kind, requested: chrome)
-        return TabView(selection: Binding(get: { current ?? start }, set: { current = $0 })) {
-            ForEach(entries) { page in
+        return TabView(selection: Binding(get: { current ?? start }, set: { select($0) })) {
+            ForEach(projection.pages(around: anchor)) { page in
                 Group {
                     if page.print.kind == .clip || page.print.kind == .mesh {
                         // AVKit and the mesh viewer own their gestures.
@@ -33,9 +41,14 @@ struct PrintViewer: View {
                             .onTapGesture { withAnimation { chrome.toggle() } }
                     }
                 }
+                .accessibilityIdentifier("viewer-print-\(page.print.filename)")
                 .tag(page.id)
             }
         }
+        // UIPageViewController retains numeric page indices. Keep its window
+        // stable during ordinary swipes and recreate it only at a boundary;
+        // changing the leading item every swipe otherwise skips prints.
+        .id(anchor)
         .tabViewStyle(.page(indexDisplayMode: .never))
         .background(.black)
         .ignoresSafeArea(edges: visibleChrome ? [] : .all)
@@ -65,11 +78,13 @@ struct PrintViewer: View {
                     .onTapGesture { actions.status = nil }
             }
         }
-        .onChange(of: entries.map(\.id)) { _, ids in
+        .onChange(of: ObjectIdentifier(projection)) { _, _ in
             // The print on screen went away (deleted, moved): back to the grid.
-            if let now = current ?? Optional(start), !ids.contains(now) { dismiss() }
+            let now = current ?? start
+            guard projection.entry(now) != nil else { dismiss(); return }
+            pageAnchor = projection.anchor(for: now, preferred: pageAnchor ?? start)
         }
-        .keyboardShortcut(for: entries, current: $current, start: start, close: { dismiss() })
+        .keyboardShortcut(for: projection, current: Binding(get: { current }, set: { if let id = $0 { select(id) } }), start: start, close: { dismiss() })
         // Handoff: the same print, continued in Mold Studio on the Mac.
         .userActivity(PrintHandoff.activityType, element: entry) { entry, activity in
             guard let host = hosts.host(entry.hostID) else { return }
@@ -78,6 +93,11 @@ struct PrintViewer: View {
             activity.addUserInfoEntries(from: PrintHandoff.userInfo(
                 filename: entry.print.filename, address: host.baseURL, instanceId: hosts.instanceID(of: host.id)))
         }
+    }
+
+    private func select(_ id: PrintID) {
+        if projection.shouldRecenter(selected: id, anchor: pageAnchor ?? start) { pageAnchor = id }
+        current = id
     }
 
     /// Still-image chrome can be hidden; interactive media must retain the
@@ -116,15 +136,15 @@ struct PrintViewer: View {
 private extension View {
     /// ← → walk the prints on iPad or with a keyboard, and Esc closes, as on
     /// the Mac.
-    func keyboardShortcut(for entries: [LibraryEntry], current: Binding<PrintID?>, start: PrintID,
+    func keyboardShortcut(for projection: LibraryGridProjection, current: Binding<PrintID?>, start: PrintID,
                           close: @escaping () -> Void) -> some View {
         background {
             Group {
                 Button("Close", action: close)
                     .keyboardShortcut(.cancelAction)
-                Button("Previous Print") { step(-1, entries, current, start) }
+                Button("Previous Print") { step(-1, projection, current, start) }
                     .keyboardShortcut(.leftArrow, modifiers: [])
-                Button("Next Print") { step(1, entries, current, start) }
+                Button("Next Print") { step(1, projection, current, start) }
                     .keyboardShortcut(.rightArrow, modifiers: [])
             }
             .hidden()
@@ -132,9 +152,8 @@ private extension View {
     }
 }
 
-@MainActor private func step(_ by: Int, _ entries: [LibraryEntry], _ current: Binding<PrintID?>, _ start: PrintID) {
-    guard let index = entries.firstIndex(where: { $0.id == (current.wrappedValue ?? start) }) else { return }
-    let next = index + by
-    guard entries.indices.contains(next) else { return }
-    current.wrappedValue = entries[next].id
+@MainActor private func step(_ by: Int, _ projection: LibraryGridProjection,
+                            _ current: Binding<PrintID?>, _ start: PrintID) {
+    guard let next = projection.step(by, from: current.wrappedValue ?? start) else { return }
+    current.wrappedValue = next
 }

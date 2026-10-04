@@ -213,9 +213,11 @@ final class ModelStore {
     /// settles as a success, try the job again -- never on a cancelled or
     /// failed one, where it would just hold again (the Mac's rule).
     func pullThenRetry(_ model: String, entry: QueueEntry, on id: MoldHost.ID) {
+        guard queue.canRetry(entry, on: id) else { return }
         Task {
             if !isBusy(model, on: id) { await install(model, on: id) }
             guard await settles(model, on: id) else { return }
+            await queue.poll(id)
             await queue.retry(entry, on: id)
         }
     }
