@@ -161,7 +161,7 @@ Companion", `io.utensils.mold.companion`) has to be created by hand first:
 there is no API for it. The App Review note explains `NSAllowsArbitraryLoads`:
 this is a client for self-hosted servers at any address the owner chooses.
 
-Library keeps a compact offline-machine count above its saved prints. Tap the notice for scrollable details with every full machine name and a pinned Done action that scales with text size; long names and multiple offline machines do not consume the gallery viewport at large text sizes. Decorative Library badges fit the tile width; full names remain in the tile’s spoken label and Info.
+Library keeps a compact offline-machine count above its saved prints. Tap the notice for scrollable details with every full machine name and a pinned Done action that scales with text size. Navigation tabs return when details close. Long names and multiple offline machines do not consume the gallery viewport at large text sizes. Decorative Library badges fit the tile width; full names remain in the tile’s spoken label and Info.
 
 When machines are offline, Generate and Queue explain that their data is unavailable instead of claiming no models or jobs exist. A saved draft keeps its model while that machine reconnects; choosing a different kind or model explicitly replaces the pending selection.
 

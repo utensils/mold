@@ -86,6 +86,8 @@ final class LibraryLongPressTests: XCTestCase {
         try revealPrint(tile, app: app)
         attach(app, name: stage + " Retained print below bounded status")
         try selectRetainedPrint(tile, app: app)
+        let presentingTabs = try libraryNavigationChrome(app)
+        attach(app, name: stage + " Presenting native tabs before details")
         status.tap()
         attach(app, name: stage + " Initial offline details")
         let candidate = app.collectionViews["offline-library-details"].firstMatch
@@ -98,6 +100,9 @@ final class LibraryLongPressTests: XCTestCase {
             .containing(.navigationBar, identifier: "Saved Prints")
             .containing(.button, identifier: "offline-library-done").allElementsBoundByIndex
         let owner = try XCTUnwrap(owners.last, "The presented sheet must own its List, navigation bar and footer: \(app.debugDescription)")
+        attach(app, name: stage + " Details owning navigation before tab visibility assertion")
+        XCTAssertTrue(presentingTabs.waitForNonExistence(timeout: 5),
+                      "The modal must remove presenting native tab chrome: \(app.debugDescription)")
         XCTAssertFalse(owner.frame.isEmpty)
         let explanation = details.staticTexts["This device's saved prints remain available."].firstMatch
         let section = details.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Unavailable Machines")).firstMatch
@@ -182,6 +187,7 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(finalDone.isHittable)
         finalDone.tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5))
+        _ = try libraryNavigationChrome(app)
         try revealPrint(tile, app: app)
         try auditSelect(app, stage: stage + " after details dismissal")
         try selectRetainedPrint(tile, app: app)
@@ -194,6 +200,7 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(done.exists && done.isHittable, "Each native sheet must dismiss through its visible Done")
         done.tap()
         XCTAssertTrue(previous.waitForNonExistence(timeout: 5))
+        let presentingTabs = try libraryNavigationChrome(app)
         let status = app.buttons["offline-library-status"]
         XCTAssertTrue(status.exists && status.isHittable)
         status.tap()
@@ -201,6 +208,7 @@ final class LibraryLongPressTests: XCTestCase {
         let title = app.navigationBars["Saved Prints"]
         XCTAssertTrue(details.waitForExistence(timeout: 5))
         XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(presentingTabs.waitForNonExistence(timeout: 5), "Every details presentation must remove native tab chrome")
         let owners = app.otherElements.containing(.collectionView, identifier: "offline-library-details")
             .containing(.navigationBar, identifier: "Saved Prints")
             .containing(.button, identifier: "offline-library-done").allElementsBoundByIndex
@@ -226,6 +234,30 @@ final class LibraryLongPressTests: XCTestCase {
         try assertDetailsContrastInventory(owner, labels: contrastLabels)
         attach(app, name: stage + " Fresh native details before private sweep")
         return (details, title, owner)
+    }
+
+    @MainActor private func libraryNavigationChrome(_ app: XCUIApplication) throws -> XCUIElement {
+        let library = app.buttons.matching(NSPredicate(format: "label == %@", "Library")).firstMatch
+        XCTAssertTrue(library.waitForExistence(timeout: 5), "Dismissal must restore native Library navigation")
+        let tabBar = app.tabBars.firstMatch
+        let chrome: XCUIElement
+        if tabBar.exists {
+            chrome = tabBar
+        } else {
+            // iPad exports its native floating tabs as an Other container.
+            let owners = app.otherElements.containing(.button, identifier: "wand.and.sparkles")
+                .containing(.button, identifier: "square.grid.2x2")
+                .containing(.button, identifier: "list.bullet")
+                .containing(.button, identifier: "desktopcomputer").allElementsBoundByIndex
+            chrome = try XCTUnwrap(owners.last, "Native floating tab ownership must be observable: \(app.debugDescription)")
+        }
+        XCTAssertFalse(chrome.frame.isEmpty)
+        XCTAssertTrue(app.frame.contains(chrome.frame))
+        XCTAssertLessThan(chrome.frame.height, app.frame.height, "The native tab owner must be distinct from the app root")
+        XCTAssertTrue(chrome.frame.contains(library.frame))
+        XCTAssertTrue(library.isSelected)
+        XCTAssertTrue(library.isHittable)
+        return chrome
     }
 
     @MainActor private func assertDetailsContrastInventory(_ owner: XCUIElement, labels: Set<String>) throws {

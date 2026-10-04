@@ -14,6 +14,7 @@ struct LibraryView: View {
     @State private var query = LibraryQuery()
     @State private var selecting = false
     @State private var managingCollections = false
+    @State private var showsOfflineDetails = false
     @State private var selection: Set<PrintID> = []
     @State private var showingCache = LibraryShowingCache()
     @State private var scrollPosition = LibraryScrollPosition()
@@ -67,7 +68,7 @@ struct LibraryView: View {
         .toolbar { toolbar(showing) }
         // A modal owns navigation while open; keep the presenting floating
         // tab chrome out of its layout and restore it on dismissal.
-        .toolbarVisibility(managingCollections ? .hidden : .automatic, for: .tabBar)
+        .toolbarVisibility(managingCollections || showsOfflineDetails ? .hidden : .automatic, for: .tabBar)
         .sheet(isPresented: $managingCollections) {
             CollectionsSheet { scope in
                 if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }
@@ -105,7 +106,7 @@ struct LibraryView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 4) {
                 FailureBanner()
-                OfflineNote()
+                OfflineNote(showsDetails: $showsOfflineDetails)
             }
         }
         .onChange(of: sort) { query.sort = sort }

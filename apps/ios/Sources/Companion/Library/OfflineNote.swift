@@ -15,7 +15,7 @@ enum OfflineLibraryNotice {
 /// Said at the top of the Library when it shows this device's saved copy.
 struct OfflineNote: View {
     @Environment(LibraryStore.self) private var library
-    @State private var showsDetails = false
+    @Binding var showsDetails: Bool
 
     var body: some View {
         if let summary = OfflineLibraryNotice.summary(hosts: library.offlineHosts) {
