@@ -32,7 +32,7 @@ final class ShellAccessibilityTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         let history = app.buttons["prompt-history"]
         XCTAssertTrue(history.waitForExistence(timeout: 5))
-        settle(history)
+        Self.settle(history)
         XCTAssertGreaterThanOrEqual(history.frame.height, 44, "Prompt History needs a 44-point touch target")
         XCTAssertGreaterThanOrEqual(history.frame.width, 44)
     }
@@ -52,7 +52,7 @@ final class ShellAccessibilityTests: XCTestCase {
             app.terminate()
             app.launch()
             XCTAssertTrue(app.navigateToDestination(tab, shortcut: "\(index + 1)"))
-            settle(app.navigationBars.firstMatch)
+            Self.settle(app.navigationBars.firstMatch)
             if tab == "Generate" { try auditComposer(app, size: size) }
             try check(app, "\(tab) at \(size)")
 
@@ -67,11 +67,12 @@ final class ShellAccessibilityTests: XCTestCase {
                     let composer = app.scrollViews["phone-generate-form"].exists
                         ? app.scrollViews["phone-generate-form"]
                         : app.descendants(matching: .any)["bottom-chrome"].firstMatch
-                    for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
+                    XCTAssertTrue(Self.revealComposerControl(chooser, composer: composer, app: app),
+                                  "The entire Model control must fit the composer viewport")
                     XCTAssertTrue(chooser.isHittable)
                     chooser.tap()
                     XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
-                    settle(app.navigationBars["Choose a Model"])
+                    Self.settle(app.navigationBars["Choose a Model"])
                     try check(app, "Model chooser at \(size)",
                               within: app.descendants(matching: .any)["model-chooser"].firstMatch)
                     // Size probing can leave UIKit exporting the presenting
@@ -95,7 +96,7 @@ final class ShellAccessibilityTests: XCTestCase {
             showSidebar.tap()
             let row = app.descendants(matching: .any)["Favourites"].firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
-            settle(row)
+            Self.settle(row)
             let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
             XCTAssertTrue(sidebar.exists, app.debugDescription)
             try check(app, "Sidebar at \(size)", within: sidebar)
@@ -136,7 +137,7 @@ final class ShellAccessibilityTests: XCTestCase {
             }
             XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         }
-        settle(app.navigationBars["Settings"])
+        Self.settle(app.navigationBars["Settings"])
         try check(app, "Settings at \(size)", within: app.descendants(matching: .any)["settings-sheet"].firstMatch,
                   lazyForm: true)
         if settingsInSidebar {
@@ -154,7 +155,7 @@ final class ShellAccessibilityTests: XCTestCase {
         // field and for it to stop moving.
         // (The iPad's sidebar draws Search without a field until it is used.)
         let field = app.searchFields.firstMatch
-        if field.waitForExistence(timeout: 3) { settle(field) }
+        if field.waitForExistence(timeout: 3) { Self.settle(field) }
         try check(app, "Search at \(size)")
     }
 
@@ -179,20 +180,29 @@ final class ShellAccessibilityTests: XCTestCase {
         let expected = Set(elements().map(key))
         var seen = Set<String>()
         for step in 0..<20 {
-            settle(composer)
-            let visible = elements().filter { composerViewport(composer, in: app).contains($0.frame) }
+            Self.settle(composer)
+            let visible = elements().filter { Self.composerViewport(composer, in: app).contains($0.frame) }
             try check(app, "Composer scroll \(step) at \(size)", contrastOnly: true)
             seen.formUnion(visible.map(key))
             if expected.isSubset(of: seen) { break }
-            // Small, non-flinging steps ensure even tall wrapped guidance is
-            // sampled in full. The right edge avoids the photo well, and the
-            // drag starts above the pinned Generate action.
-            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60))
-                .press(forDuration: 0.1, thenDragTo: composer.coordinate(
-                    withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28)),
-                       withVelocity: .slow, thenHoldForDuration: 0.1)
+            // A fixed pan can skip the narrow fully-visible interval of a
+            // tall control. Align the next uncovered node by measured bounds.
+            if let target = elements().first(where: { !seen.contains(key($0)) }) {
+                guard Self.revealComposerControl(target, composer: composer, app: app) else { break }
+            }
         }
-        XCTAssertTrue(expected.isSubset(of: seen), "Composer content never fully visible: \(expected.subtracting(seen).sorted())")
+        if !expected.isSubset(of: seen) {
+            let missing = expected.subtracting(seen)
+            let details = elements().filter { missing.contains(key($0)) }
+                .map { "\(key($0)) at \($0.frame)" }
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Composer coverage hierarchy at \(size)"
+            hierarchy.lifetime = .keepAlways; add(hierarchy)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Composer coverage pixels at \(size)"
+            screenshot.lifetime = .keepAlways; add(screenshot)
+            XCTFail("Composer content never fully visible: \(details); viewport \(Self.composerViewport(composer, in: app))")
+        }
         let submit = app.buttons["submit-generation"]
         XCTAssertTrue(submit.exists)
         // Return to the prompt before the size-changing audit.
@@ -202,14 +212,43 @@ final class ShellAccessibilityTests: XCTestCase {
                     withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60)),
                        withVelocity: .slow, thenHoldForDuration: 0.1)
         }
-        settle(composer)
+        Self.settle(composer)
     }
 
-    @MainActor private func composerViewport(_ composer: XCUIElement, in app: XCUIApplication) -> CGRect {
+    /// Center the complete AX frame using the clear left gutter, avoiding
+    /// prompt editing and horizontal reference scrollers. No partial-frame
+    /// success: an oversized control fails instead of being exempted.
+    @MainActor static func revealComposerControl(_ control: XCUIElement, composer: XCUIElement,
+                                                 app: XCUIApplication) -> Bool {
+        for _ in 0..<8 {
+            Self.settle(control)
+            let viewport = composerViewport(composer, in: app)
+            guard control.exists, control.frame.height <= viewport.height,
+                  control.frame.width <= viewport.width else { return false }
+            if viewport.contains(control.frame) { return true }
+            let delta = control.frame.midY - viewport.midY
+            let distance = min(abs(delta), viewport.height * 0.4)
+            let direction: CGFloat = delta > 0 ? 1 : -1
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = viewport.minX + viewport.width * 0.03
+            let start = origin.withOffset(CGVector(dx: x, dy: viewport.midY + direction * distance / 2))
+            let end = origin.withOffset(CGVector(dx: x, dy: viewport.midY - direction * distance / 2))
+            let before = control.frame
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            Self.settle(control)
+            if !viewport.contains(control.frame), abs(control.frame.midY - before.midY) < 0.5 {
+                XCTFail("Composer pan made no progress or hit a scroll boundary: \(control.label), before \(before), after \(control.frame), viewport \(viewport)")
+                return false
+            }
+        }
+        return composerViewport(composer, in: app).contains(control.frame)
+    }
+
+    @MainActor static func composerViewport(_ composer: XCUIElement, in app: XCUIApplication) -> CGRect {
         guard composer.identifier == "phone-generate-form" else { return composer.frame }
         let top = max(composer.frame.minY, app.navigationBars.firstMatch.frame.maxY)
         let submit = app.buttons["submit-generation"]
-        let bottom = submit.exists && !isDescendant(submit, of: composer)
+        let bottom = submit.exists && !composer.descendants(matching: .any).matching(identifier: submit.identifier).firstMatch.exists
             ? submit.frame.minY : min(composer.frame.maxY, app.tabBars.firstMatch.frame.minY)
         return CGRect(x: composer.frame.minX, y: top, width: composer.frame.width,
                       height: max(0, bottom - top))
@@ -344,7 +383,7 @@ final class ShellAccessibilityTests: XCTestCase {
     /// Waits for an element to stop moving: a sheet sliding up, a field
     /// growing out of the tab bar. Audited mid-animation, both read as
     /// clipped or low-contrast when neither is.
-    @MainActor private func settle(_ element: XCUIElement) {
+    @MainActor private static func settle(_ element: XCUIElement) {
         var frame = CGRect.null
         for _ in 0..<20 where element.exists && element.frame != frame {
             frame = element.frame
@@ -374,7 +413,7 @@ final class ShellAccessibilityTests: XCTestCase {
     @MainActor private func isUnderChrome(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
         let phoneForm = app.scrollViews["phone-generate-form"]
         if phoneForm.exists, isDescendant(element, of: phoneForm) {
-            return !composerViewport(phoneForm, in: app).contains(element.frame)
+            return !Self.composerViewport(phoneForm, in: app).contains(element.frame)
         }
         // Any type: at AX5 the composer is a ScrollView, not a plain group.
         let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch

@@ -120,7 +120,9 @@ jobs:
         appearance: [light, dark]
         suite:
           - name: app
-            classes: GenerationInteractionTests PopulatedGenerationTests ReferenceParityTests ShellAccessibilityTests
+            classes: GenerationInteractionTests PopulatedGenerationTests ShellAccessibilityTests
+          - name: references
+            classes: ReferenceParityTests
           - name: library
             classes: HiddenCollectionTests LibraryCollectionPickerTests LibraryLongPressTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
     defaults:

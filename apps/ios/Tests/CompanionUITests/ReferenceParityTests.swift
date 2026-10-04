@@ -91,6 +91,35 @@ final class ReferenceParityTests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "MiniMax two references native"; shot.lifetime = .keepAlways; add(shot)
     }
 
+    @MainActor func testUnavailableReferenceModelRemainsFullyReachableAtLargestText() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(referenceFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch(); try addMachine(app, port: port)
+        let identity = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step"
+        try choose(identity, in: app)
+        // Cold launch with a saved, unavailable host exercises the full raw
+        // identity fallback independently of another test's persisted fixture.
+        machine.stop(); app.terminate()
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch(); XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let composer = app.scrollViews["phone-generate-form"].exists
+            ? app.scrollViews["phone-generate-form"] : app.descendants(matching: .any)["bottom-chrome"].firstMatch
+        let chooser = app.buttons["choose-model"]
+        XCTAssertTrue(chooser.waitForExistence(timeout: 5))
+        XCTAssertTrue(chooser.label.contains(identity), "The full unavailable identity stays accessible")
+        XCTAssertTrue(ShellAccessibilityTests.revealComposerControl(chooser, composer: composer, app: app),
+                      "Model frame \(chooser.frame) must fit \(ShellAccessibilityTests.composerViewport(composer, in: app))")
+        XCTAssertTrue(chooser.isHittable)
+        let pixels = XCTAttachment(screenshot: app.screenshot()); pixels.name = "Unavailable full Model identity at AX5"; pixels.lifetime = .keepAlways; add(pixels)
+        chooser.tap()
+        XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
+    }
+
     @MainActor func testNamedViewsAndBoundaryWellsFollowModelCapabilities() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 4)

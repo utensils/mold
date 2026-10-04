@@ -139,12 +139,17 @@ final class GenerationInteractionTests: XCTestCase {
         XCTAssertTrue(prompt.waitForExistence(timeout: 5))
         prompt.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        let text = "A lighthouse at dusk"
+        let before = prompt.value as? String
+        if let before, !before.isEmpty, before != prompt.placeholderValue {
+            prompt.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        }
+        let text = "A lighthouse at dusk \(UUID().uuidString.prefix(4))"
+        XCTAssertNotEqual(before, text, "A persisted prompt must not satisfy the input assertion")
         prompt.typeText(text)
-        // SwiftUI's accessibility value can lag synthesized keyboard input.
-        // Wait for the same text contract, without typing a second time.
+        // Match the observed exact AX value directly; a closure can spend its
+        // deadline fetching snapshots on a loaded runner. Never type twice.
         let typed = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in (prompt.value as? String)?.contains(text) == true }, object: prompt
+            predicate: NSPredicate(format: "value == %@", text), object: prompt
         )
         XCTAssertEqual(XCTWaiter.wait(for: [typed], timeout: 5), .completed,
                        "Prompt must retain typed text; actual value: \(String(describing: prompt.value))")

@@ -83,6 +83,7 @@ struct QueueView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .accessibilityIdentifier("queue-list")
         .frame(maxWidth: QueueLayout.readableWidth)
         .frame(maxWidth: .infinity)
         .background(Color(uiColor: .systemGroupedBackground))

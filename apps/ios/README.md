@@ -93,7 +93,7 @@ in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSO
 and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
 and result bundles remain under `build/UITestResults/`, uploaded even on failure.
-CI splits all test classes into app and Library groups, each in light and dark,
+CI splits all test classes into app, references and Library groups, each in light and dark,
 while unit/shared-package tests run independently. App UI, shared code, UI tests,
 build inputs, and unknown paths require the full audit matrix. Widget Swift,
 inert docs, and named static routing/branding contracts can skip app audits;
@@ -191,7 +191,7 @@ are never replayed by the relay.
 
 Live Activity identity uses the bundled Mold logo on the Lock Screen and in every Dynamic Island state, including completion and failure; status remains available through text and accessibility labels. System notification banners use the app icon.
 
-Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
+Hold a Library tile to preview it and open its actions. Preview and drag presentations share the grid's thumbnail loader. Source-image Library selection remains available after a long press. Notification Center uses the same Mold logo in light and dark appearances; iOS controls the notification card background. Native CI runs app, references and Library audit groups in both light and dark in parallel, and TestFlight follows successful native checks without waiting for the full nightly release.
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
 
