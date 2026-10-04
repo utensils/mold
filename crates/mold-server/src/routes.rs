@@ -8299,6 +8299,11 @@ async fn server_capabilities(
         },
         video_upscale: framewise_capabilities,
         durable_media: readiness.advertised_media(),
+        retained_media_transfer: (cfg!(unix) && readiness.advertised_media().is_some()).then_some(
+            mold_core::RetainedMediaTransferCapabilities {
+                protocol_version: 1,
+            },
+        ),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             // The request-bound upload protocol derives its authority from an
             // authenticated API-key identity. When server auth is disabled,

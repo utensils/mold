@@ -156,3 +156,5 @@ cache, automatic mirrors and existing-file repair paths; capture source archive 
 identity and destination output digest/recipe before attaching inputs.
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine. Destination queue-durability support alone does not prove an older server implements the transfer receiver.
+
+`/api/capabilities.retained_media_transfer = { "protocol_version": 1 }` is the explicit receiver-readiness contract. It is absent on older servers and while the encrypted Unix media lifecycle is unready. Clients require this supported version before importing source-bearing outputs; queue `durable_media` alone does not establish transfer support.
