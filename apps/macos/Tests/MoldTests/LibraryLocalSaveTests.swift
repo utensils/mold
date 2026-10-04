@@ -14,6 +14,38 @@ struct LibraryLocalSaveTests {
            outputSizeBytes: 3, metadata: metadata)
     }
 
+    @Test func existingEmbeddedCopyRepairsArchiveSourcesWithoutDuplicatingOutput() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("archive-enriched-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let embedded = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"archive-enriched.png","timestamp":1000,"size_bytes":3,"media_version":"1000:3","metadata":{"prompt":"fox","version":"0.32.0"}}"#.utf8))
+        let archived = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"archive-enriched.png","timestamp":1000,"size_bytes":3,"media_version":"1000:3","metadata":{"prompt":"fox","version":"0.32.0 (5b61d17 2026-09-27)","job_id":"original-job","generation_time_ms":8516}}"#.utf8))
+        source.prints = [archived]
+        target.prints = [embedded]
+        source.mediaAnswer = Data([1, 2, 3])
+        target.mediaAnswers[embedded.filename] = Data([1, 2, 3])
+        source.retainedTransferOffers[archived.filename] = retainedOffer(metadata: archived.metadata)
+        source.retainedMemberBytes["source"] = Data([1, 2, 3])
+        target.capabilityBlock = try MoldJSON.decoder.decode(Capabilities.self, from: Data(
+            #"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(target.importedNames.isEmpty)
+        #expect(target.retainedTransfers.count == 1)
+        #expect(library.localSaveFailures.isEmpty)
+        let outputReads = source.callCount("mediaFile")
+        await library.syncAllLocally()
+        #expect(target.importedNames.isEmpty)
+        #expect(target.retainedTransfers.count == 1)
+        #expect(source.callCount("mediaFile") == outputReads)
+        #expect(library.localSaveFailures.isEmpty)
+    }
+
     @Test func unsupportedRetainedDestinationDoesNotImportOutput() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("unsupported-retained-remote")

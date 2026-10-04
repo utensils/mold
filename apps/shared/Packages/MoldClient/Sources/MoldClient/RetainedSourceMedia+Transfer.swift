@@ -121,8 +121,8 @@ public extension RetainedSourceMedia {
         }
         guard validTransferDigest(destination.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
         guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes,
-              destination.metadata == sourceMetadata else {
-            throw transferIncomplete("The copied print no longer matches its original. Try again.")
+              mirrorMetadataMatches(destination.metadata, sourceMetadata) else {
+            throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
         if destination.members.map(\.contentIdentity) == offer.members.map(\.contentIdentity) { return }
         guard destination.members.isEmpty else {
