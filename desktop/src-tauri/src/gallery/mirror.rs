@@ -26,6 +26,34 @@ struct Offer {
     metadata: Option<Box<mold_core::OutputMetadata>>,
 }
 
+fn destination_can_retain_sources(capabilities: &serde_json::Value) -> bool {
+    capabilities["retained_media_transfer"]["protocol_version"].as_u64() == Some(1)
+}
+
+async fn require_destination_retention(
+    client: &reqwest::Client,
+    local: &LocalServerInfo,
+) -> Result<(), String> {
+    let destination = MediaSaveTarget {
+        base_url: local.base_url.clone(),
+        api_key: Some(api_key(local)?.to_string()),
+    };
+    let response = request(client, &destination, "/api/capabilities")
+        .send()
+        .await
+        .map_err(|_| "Couldn't check whether the local gallery can retain source media.")?;
+    if !response.status().is_success() {
+        return Err("The local gallery cannot confirm retained source-media support. Update it before copying this print.".into());
+    }
+    let capabilities: serde_json::Value =
+        serde_json::from_slice(&bounded_response(response, 1024 * 1024).await?)
+            .map_err(|_| "Invalid local gallery capabilities.")?;
+    if !destination_can_retain_sources(&capabilities) {
+        return Err("The local gallery cannot retain this print's source media. Use a capable host or update it before copying.".into());
+    }
+    Ok(())
+}
+
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -394,6 +422,213 @@ mod tests {
         )
     }
 
+    #[test]
+    fn destination_retention_requires_explicit_supported_transfer_protocol() {
+        for unsupported in [
+            serde_json::json!({}),
+            serde_json::json!({"durable_media":{"protocol_version":2,"encrypted_at_rest":true,"generate_request_media":true}}),
+            serde_json::json!({"retained_media_transfer":null}),
+            serde_json::json!({"retained_media_transfer":{"protocol_version":0}}),
+            serde_json::json!({"retained_media_transfer":{"protocol_version":2}}),
+        ] {
+            assert!(!destination_can_retain_sources(&unsupported));
+        }
+        assert!(destination_can_retain_sources(
+            &serde_json::json!({"retained_media_transfer":{"protocol_version":1}})
+        ));
+    }
+    fn copy_offer(with_source: bool) -> Offer {
+        let request = serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({"prompt":"test","model":"flux-dev:q4","width":8,"height":8,"steps":4})).unwrap();
+        Offer {
+            archive_identity_sha256: "a".repeat(64),
+            members: if with_source {
+                vec![Member {
+                    member_id: Some("member".into()),
+                    role: "source_image".into(),
+                    position: "scalar".into(),
+                    sink: "memory".into(),
+                    size_bytes: 3,
+                    sha256: digest(b"abc"),
+                }]
+            } else {
+                vec![]
+            },
+            output_sha256: Some(digest(b"output")),
+            output_size_bytes: Some(6),
+            metadata: Some(Box::new(mold_core::OutputMetadata::from_generate_request(
+                &request, 1, None, "test",
+            ))),
+        }
+    }
+    #[tokio::test]
+    async fn unsupported_destination_refuses_sources_before_any_output_import() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let origin = copy_offer(true);
+        let encoded = serde_json::to_vec(&origin).unwrap();
+        let (source, source_thread) = protocol_host(3, move |headers, _| {
+            if headers.starts_with("GET /api/gallery/image/") {
+                b"output".to_vec()
+            } else {
+                encoded.clone()
+            }
+        });
+        let imports = Arc::new(AtomicUsize::new(0));
+        let observed = imports.clone();
+        let (destination, destination_thread) = protocol_host(1, move |headers, _| {
+            if headers.starts_with("PUT /api/gallery/import/") {
+                observed.fetch_add(1, Ordering::SeqCst);
+                return br#"{"filename":"copied.png"}"#.to_vec();
+            }
+            assert!(headers.starts_with("GET /api/capabilities "));
+            br#"{"durable_media":null}"#.to_vec()
+        });
+        let local = LocalServerInfo {
+            kind: "external",
+            base_url: destination.base_url,
+            api_key: Some("local-key".into()),
+            port: 0,
+        };
+        let result = mirror_to_local(source, "source.png".into(), None, None, local).await;
+        assert!(result.is_err());
+        assert_eq!(
+            imports.load(Ordering::SeqCst),
+            0,
+            "unsupported retention must refuse before publishing any output"
+        );
+        source_thread.join().unwrap();
+        destination_thread.join().unwrap();
+    }
+    #[tokio::test]
+    async fn legacy_source_without_metadata_is_refused_before_any_import() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        fn serve(
+            mut reply: impl FnMut(&str) -> (&'static str, Vec<u8>) + Send + 'static,
+        ) -> (
+            MediaSaveTarget,
+            Arc<AtomicBool>,
+            std::thread::JoinHandle<()>,
+        ) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopped = stop.clone();
+            let worker = std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(value) => value,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("test server accept failed: {error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let (headers, _) = read_http(&mut stream);
+                    let (status, body) = reply(&headers);
+                    std::io::Write::write_all(
+                        &mut stream,
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                    std::io::Write::write_all(&mut stream, &body).unwrap();
+                }
+            });
+            (
+                MediaSaveTarget {
+                    base_url: format!("http://{address}"),
+                    api_key: None,
+                },
+                stop,
+                worker,
+            )
+        }
+        let (source, source_stop, source_thread) = serve(|headers| {
+            if headers.lines().next().unwrap().contains("/transfer ") {
+                ("404 Not Found", b"{}".to_vec())
+            } else if headers.starts_with("GET /api/gallery/source-media/") {
+                (
+                    "200 OK",
+                    br#"{"availability":"unavailable_legacy"}"#.to_vec(),
+                )
+            } else {
+                ("200 OK", b"output".to_vec())
+            }
+        });
+        let imports = Arc::new(AtomicUsize::new(0));
+        let observed = imports.clone();
+        let (destination, destination_stop, destination_thread) = serve(move |headers| {
+            if headers.starts_with("PUT /api/gallery/import/") {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+            ("200 OK", br#"{"filename":"copied.png"}"#.to_vec())
+        });
+        let local = LocalServerInfo {
+            kind: "external",
+            base_url: destination.base_url,
+            api_key: Some("key".into()),
+            port: 0,
+        };
+        let result = mirror_to_local(source, "legacy.png".into(), None, None, local).await;
+        source_stop.store(true, Ordering::SeqCst);
+        destination_stop.store(true, Ordering::SeqCst);
+        source_thread.join().unwrap();
+        destination_thread.join().unwrap();
+        assert!(
+            result.is_err(),
+            "unknown legacy metadata cannot prove a source-free copy"
+        );
+        assert_eq!(
+            imports.load(Ordering::SeqCst),
+            0,
+            "unknown legacy provenance must refuse before import"
+        );
+    }
+    #[tokio::test]
+    async fn source_free_copy_needs_no_destination_retention_capability() {
+        let origin = copy_offer(false);
+        let encoded = serde_json::to_vec(&origin).unwrap();
+        let (source, source_thread) = protocol_host(3, move |headers, _| {
+            if headers.starts_with("GET /api/gallery/image/") {
+                b"output".to_vec()
+            } else {
+                encoded.clone()
+            }
+        });
+        let (destination, destination_thread) = protocol_host(1, move |headers, _| {
+            assert!(
+                !headers.starts_with("GET /api/capabilities "),
+                "source-free copies must not require retention support"
+            );
+            if headers.starts_with("PUT /api/gallery/import/") {
+                br#"{"filename":"copied.png"}"#.to_vec()
+            } else {
+                panic!(
+                    "source-free copy must not require capability or transfer endpoints: {headers}"
+                )
+            }
+        });
+        let local = LocalServerInfo {
+            kind: "external",
+            base_url: destination.base_url,
+            api_key: Some("local-key".into()),
+            port: 0,
+        };
+        assert_eq!(
+            mirror_to_local(source, "source.png".into(), None, None, local)
+                .await
+                .unwrap(),
+            "copied.png"
+        );
+        source_thread.join().unwrap();
+        destination_thread.join().unwrap();
+    }
     #[tokio::test]
     async fn two_hosts_copy_output_and_private_sources_to_actual_imported_filename() {
         let output = b"output bytes".to_vec();
@@ -450,11 +685,14 @@ mod tests {
         let destination_offer_bytes = serde_json::to_vec(&destination_offer).unwrap();
         let destination_identity = destination_offer.archive_identity_sha256.clone();
         let expected_metadata = serde_json::to_value(&metadata).unwrap();
-        let (destination, destination_thread) = protocol_host(3, move |headers, body| {
+        let (destination, destination_thread) = protocol_host(4, move |headers, body| {
             assert!(headers
                 .to_lowercase()
                 .contains("x-api-key: destination-key"));
             let first = headers.lines().next().unwrap();
+            if first.starts_with("GET /api/capabilities ") {
+                return br#"{"retained_media_transfer":{"protocol_version":1}}"#.to_vec();
+            }
             if first.starts_with("PUT /api/gallery/import/") {
                 let descriptor = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
                 let output_length = u64::from_be_bytes(body[4..12].try_into().unwrap()) as usize;
@@ -639,9 +877,9 @@ async fn mirror_to_local(
             );
         }
     }
-    if origin.is_none() && metadata.as_deref().is_some_and(has_source_markers) {
+    if origin.is_none() && metadata.as_deref().is_none_or(has_source_markers) {
         return Err(
-            "This print's retained source media cannot be copied from this older host.".into(),
+            "This older host cannot verify that this print is source-free. Update it before copying.".into(),
         );
     }
     let output = fetch_gallery_bytes(
@@ -668,6 +906,12 @@ async fn mirror_to_local(
         }
         same_output(origin, &current)?;
     }
+    if origin
+        .as_ref()
+        .is_some_and(|offer| !offer.members.is_empty())
+    {
+        require_destination_retention(&client, &local).await?;
+    }
     let imported_metadata = origin
         .as_ref()
         .map(|origin| origin.metadata.clone())
@@ -680,7 +924,7 @@ async fn mirror_to_local(
         timestamp,
     )
     .await?;
-    let Some(origin) = origin else {
+    let Some(origin) = origin.filter(|offer| !offer.members.is_empty()) else {
         return Ok(destination_filename);
     };
     let destination = MediaSaveTarget {
@@ -696,9 +940,6 @@ async fn mirror_to_local(
         .await?
         .ok_or("The local gallery cannot retain source media. Update it before copying.")?;
     same_output(&origin, &destination_offer)?;
-    if origin.members.is_empty() {
-        return Ok(destination_filename);
-    }
 
     let mut members = origin.members.clone();
     for member in &mut members {
