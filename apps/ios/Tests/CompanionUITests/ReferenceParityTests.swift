@@ -242,7 +242,7 @@ final class ReferenceParityTests: XCTestCase {
     @MainActor private func form(in app: XCUIApplication) -> XCUIElement {
         let phone = app.scrollViews["phone-generate-form"]
         if phone.exists { return phone }
-        return app.descendants(matching: .any)["bottom-chrome"].firstMatch.scrollViews.firstMatch
+        return app.descendants(matching: .any)["bottom-chrome"].firstMatch
     }
     @MainActor private func auditContrast(_ scope: XCUIElement, app: XCUIApplication, size: String) throws {
         // Audit each region once, fully visible. Other form regions may be
@@ -260,6 +260,10 @@ final class ReferenceParityTests: XCTestCase {
     @MainActor private func centerForAudit(_ scope: XCUIElement, app: XCUIApplication) throws {
         let scroll = form(in: app)
         XCTAssertTrue(scroll.exists, "References must belong to the generation form")
+        XCTAssertTrue(["phone-generate-form", "bottom-chrome"].contains(scroll.identifier))
+        XCTAssertTrue(scroll.descendants(matching: scope.elementType)
+            .matching(NSPredicate(format: "label == %@", scope.label)).allElementsBoundByIndex
+            .contains { $0.frame == scope.frame }, "Audit region must belong to the identified composer")
         XCTAssertTrue(ShellAccessibilityTests.revealComposerControl(scope, composer: scroll, app: app),
                       "Complete reference audit region must fit the unobstructed composer: \(scope.frame)")
         XCTAssertTrue(ShellAccessibilityTests.composerViewport(scroll, in: app).contains(scope.frame))
