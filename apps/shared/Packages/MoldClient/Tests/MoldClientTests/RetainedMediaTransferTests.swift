@@ -11,6 +11,43 @@ struct RetainedMediaTransferTests {
             metadata: try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8)))
     }
 
+    @Test func unsupportedDestinationRefusesBeforeAnyOutputImport() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: [member()]))
+        target.stub("capabilities()", returning: try MoldJSON.decoder.decode(Capabilities.self, from: Data("{}".utf8)))
+        await #expect(throws: (any Error).self) {
+            _ = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: nil, from: source, to: target)
+        }
+        #expect(target.count("importPrint(_:as:)") == 0)
+        #expect(target.count("importRetainedMedia(_:for:)") == 0)
+        #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+    }
+
+    @Test func sourceBearingPreflightRequiresExplicitTransferProtocol() async throws {
+        for block in [#"{"durable_media":{"protocol_version":2,"encrypted_at_rest":true,"generate_request_media":true,"identity":true}}"#,
+                      #"{"retained_media_transfer":{"protocol_version":2}}"#,
+                      #"{"retained_media_transfer":{"protocol_version":1}}"#] {
+            let source = FakeBackend(), target = FakeBackend()
+            source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: [member()]))
+            target.stub("capabilities()", returning: try MoldJSON.decoder.decode(Capabilities.self, from: Data(block.utf8)))
+            if block.contains(#""retained_media_transfer":{"protocol_version":1}"#) {
+                #expect(try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: nil, from: source, to: target) == "a".repeated(64))
+            } else {
+                await #expect(throws: (any Error).self) {
+                    _ = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: nil, from: source, to: target)
+                }
+            }
+        }
+    }
+
+    @Test func sourceFreeOutputNeedsNoDurableDestination() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))
+        let identity = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: nil, from: source, to: target)
+        #expect(identity == "a".repeated(64))
+        #expect(target.calls.isEmpty)
+    }
+
     private func member(_ id: String = "source", role: String = "source_image",
                         position: String = "scalar", bytes: Data = Data([1, 2, 3])) -> RetainedSourceMedia.TransferMember {
         .init(memberId: id, role: role, position: position, sizeBytes: bytes.count,

@@ -56,6 +56,26 @@ public extension RetainedSourceMedia {
         }
     }
 
+    /// Check destination readiness before importing output bytes. An absent
+    /// additive block cannot safely promise a source-bearing copy.
+    static func preflightMirror(for filename: String, metadata: OutputMetadata?,
+                                from origin: any MoldBackend, to target: any MoldBackend) async throws -> String? {
+        let offer: TransferOffer
+        do { offer = try await origin.retainedMediaTransferOffer(for: filename) }
+        catch let error as MoldClientError {
+            guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
+            return nil
+        }
+        guard validTransferDigest(offer.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
+        if !offer.members.isEmpty {
+            let capabilities = try await target.capabilities()
+            guard capabilities.retainedMediaTransfer?.protocolVersion == 1 else {
+                throw transferIncomplete("Update the destination machine to retain this print’s source media.")
+            }
+        }
+        return offer.archiveIdentitySha256
+    }
+
     /// A mirror is complete only after its private inputs have destination authority.
     static func mirrorSources(for sourceFilename: String, metadata: OutputMetadata?,
                               from origin: any MoldBackend, to target: any MoldBackend,

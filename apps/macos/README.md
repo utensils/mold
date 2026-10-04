@@ -655,3 +655,5 @@ including work submitted on another device. Expanded batch children and held job
 use the same authenticated preview route. A source remains attached to its library
 outputs after the queue finishes; **Use These Settings** recalls retained sources.
 Trash preserves them, and permanent deletion releases only that output's reference.
+
+Before importing a library copy with retained source media, This Mac must advertise `retained_media_transfer.protocol_version: 1`. An unsupported destination is refused before creating a local output; source-free copies remain available.

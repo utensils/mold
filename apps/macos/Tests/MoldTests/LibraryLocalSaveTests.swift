@@ -14,11 +14,31 @@ struct LibraryLocalSaveTests {
            outputSizeBytes: 3, metadata: metadata)
     }
 
+    @Test func unsupportedRetainedDestinationDoesNotImportOutput() async {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("unsupported-retained-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data("{}".utf8))
+        let print = versionedPrint("unsupported.png", prompt: "fox")
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.retainedTransferOffers[print.filename] = retainedOffer(metadata: print.metadata)
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.saveLocally([LibraryEntry(host: remote, print: print)])
+        #expect(target.callCount("importPrint") == 0)
+        #expect(source.callCount("mediaFile") == 0)
+        #expect(!library.localSaveFailures.isEmpty)
+    }
+
     @Test func saveLocallyRetainsSourceMediaBeforeReportingSuccess() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("retained-remote")
         let source = FakeBackend(host: remote, noRetainedMedia: true)
         let target = FakeBackend(host: local, noRetainedMedia: true)
+        target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("retained.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -39,6 +59,7 @@ struct LibraryLocalSaveTests {
         let remote = host("cached-retained-remote")
         let source = FakeBackend(host: remote, noRetainedMedia: true)
         let target = FakeBackend(host: local, noRetainedMedia: true)
+        target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("cached-retained.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
@@ -63,6 +84,7 @@ struct LibraryLocalSaveTests {
         let remote = host("failed-retained-remote")
         let source = FakeBackend(host: remote, noRetainedMedia: true)
         let target = FakeBackend(host: local, noRetainedMedia: true)
+        target.capabilityBlock = try! MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
         let print = versionedPrint("failed-retained.png", prompt: "fox")
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])

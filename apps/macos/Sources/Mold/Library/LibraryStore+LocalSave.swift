@@ -216,12 +216,8 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                     pending: PendingSyncOrganization?) async -> MirrorResult {
     do {
         try checkSyncStagingSpace(for: target.print)
-        let sourceIdentity: String?
-        do { sourceIdentity = try await target.source.retainedMediaTransferOffer(for: target.print.filename).archiveIdentitySha256 }
-        catch let error as MoldClientError {
-            guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
-            sourceIdentity = nil
-        }
+        let sourceIdentity = try await RetainedSourceMedia.preflightMirror(
+            for: target.print.filename, metadata: target.print.metadata, from: target.source, to: destination)
         let file = try await target.source.mediaFile(target.print.filename, trashed: false)
         defer { try? FileManager.default.removeItem(at: file) }
         if occupied {
