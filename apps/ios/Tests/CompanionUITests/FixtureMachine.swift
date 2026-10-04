@@ -11,6 +11,9 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
+    private let referenceFixture: Bool
+    private let capturedGenerations = Mutex<[Data]>([])
+    var generationRequests: [Data] { capturedGenerations.withLock { $0 } }
     private var gallery: Data
     private let libraryMutations: Bool
     private let removePrintOnFavorite: String?
@@ -28,7 +31,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+    init(referenceFixture: Bool = false, galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+        self.referenceFixture = referenceFixture
         self.removePrintOnFavorite = removePrintOnFavorite
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
@@ -45,11 +49,15 @@ final class FixtureMachine: @unchecked Sendable {
         let document = try JSONSerialization.jsonObject(with: Data(contentsOf:
             root.appending(path: "docs/generated/generation-profiles-v1.json"))) as! [String: Any]
         let profiles = document["profiles"] as! [[String: Any]]
-        let names = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"]
+        let names = referenceFixture
+            ? ["minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+               "qwen-image-2.1:q8", "qwen-image-edit-2511:q4", "flux2-klein:bf16", "sdxl-base:fp16",
+               "hunyuan3d-2mv:fp16", "wan22-ti2v-5b:fp16"]
+            : ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"]
         models = try JSONSerialization.data(withJSONObject: names.map { name -> [String: Any] in
             let row = profiles.first { ($0["models"] as! [[String: Any]]).contains { $0["model"] as? String == name } }!
-            return ["name": name, "family": name.hasPrefix("flux") ? "flux" : "ltx",
-                    "description": name, "downloaded": !(queueFixture && name.hasPrefix("flux")), "display_name": name.hasPrefix("flux") ? "FLUX.1 Dev Q4" : "LTX-2.5 Distilled BF16", "hf_repo": name.hasPrefix("flux") ? "black-forest-labs/FLUX.1-dev" : "Lightricks/LTX-2.5", "generation_profile": row["profile"]!]
+            return ["name": name, "family": (row["models"] as! [[String: Any]]).first { $0["model"] as? String == name }?["family"] ?? "unknown",
+                    "description": name, "downloaded": !(queueFixture && name.hasPrefix("flux")), "display_name": referenceFixture ? name : name.hasPrefix("flux") ? "FLUX.1 Dev Q4" : "LTX-2.5 Distilled BF16", "hf_repo": name.hasPrefix("flux") ? "black-forest-labs/FLUX.1-dev" : "Lightricks/LTX-2.5", "generation_profile": row["profile"]!]
         })
         gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
             ["filename": "fixture-\(index).\(mixedMedia ? ["png", "mp4", "glb"][index % 3] : "png")", "timestamp": 1_790_000_000 - index,
@@ -157,6 +165,8 @@ final class FixtureMachine: @unchecked Sendable {
                 }
                 gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
             }
+            let captureGeneration = referenceFixture && request.first == "POST" && path == "/api/generation-batches"
+            if captureGeneration { capturedGenerations.withLock { $0.append(Data(bodyText.utf8)) } }
             let allowed = libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
             let isTrashListing = libraryMutations && path == "/api/gallery" && String(request[1]).contains("view=trash")

@@ -99,6 +99,8 @@ struct Composer: View {
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
             ModelMenu()
             PictureWells()
+            TypedReferenceWells()
+            BoundaryFrameWells()
             if let notice = generate.retainedReuse.notice {
                 Label(notice, systemImage: "photo.on.rectangle")
                     .font(.subheadline)

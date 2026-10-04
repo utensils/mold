@@ -45,9 +45,11 @@ final class ExpandStore {
         }
         expansion = .working(.expand)
         do {
-            let response = try await backend.expand(ExpandRequest(
+            var request = ExpandRequest(
                 prompt: controller.draft.prompt, modelFamily: modelFamily,
-                variations: Self.expansionChoices, task: asked.task))
+                variations: Self.expansionChoices, task: asked.task)
+            request.context = ExpandContext(request: RenderRequest.one(controller.draft, model: controller.modelName ?? ""))
+            let response = try await backend.expand(request)
             if let stale = asked.refusalIfStale(against: snapshot(of: controller)) {
                 expansion = .refused(stale)
                 return
@@ -86,12 +88,14 @@ final class ExpandStore {
         }
         expansion = .working(.remix)
         do {
-            let response = try await backend.remix(RemixRequest(
+            var request = RemixRequest(
                 sourcePrompt: controller.draft.prompt,
                 rootPrompt: controller.draft.originalPrompt,
                 sourceKind: controller.draft.originalPrompt == nil ? .direct : .current,
                 modelFamily: modelFamily,
-                variations: Self.expansionChoices, task: asked.task))
+                variations: Self.expansionChoices, task: asked.task)
+            request.context = ExpandContext(request: RenderRequest.one(controller.draft, model: controller.modelName ?? ""))
+            let response = try await backend.remix(request)
             if let stale = asked.refusalIfStale(against: snapshot(of: controller)) {
                 expansion = .refused(stale)
                 return

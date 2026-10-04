@@ -10,18 +10,10 @@ public extension RetainedSourceMedia {
     enum Field: Hashable, Sendable {
         case sourceImage, identityImage, identityImages, editImages
         case maskImage, controlImage, audioFile, sourceVideo, extendVideo
-        case keyframes
+        case keyframes, references
     }
 
-    /// The table, exactly as studio holds it -- MINUS `references`.
-    ///
-    /// H3's ordered references are not modelled on this app's
-    /// `GenerateRequest` at all, so there is no descriptor list for retained
-    /// bytes to be matched against. Studio hydrates them only when EVERY
-    /// descriptor is descriptor-only; with no descriptors there is nothing
-    /// that rule could be true of, so the role is never selected and never
-    /// relayed. It is listed here so the omission is a decision rather than
-    /// an oversight.
+    /// Every reusable conditioning role, including ordered typed references.
     static let fieldForRole: [String: Field] = [
         "source_image": .sourceImage,
         "identity_image": .identityImage,
@@ -36,6 +28,7 @@ public extension RetainedSourceMedia {
         "extend_video": .extendVideo,
         "extend_video_path": .extendVideo,
         "keyframes": .keyframes,
+        "references": .references,
     ]
 
     /// Roles the host will hand over for DOWNLOAD but refuses to hydrate: a
@@ -81,6 +74,7 @@ public extension GenerateRequest {
         case .sourceVideo: sourceVideo == nil
         case .extendVideo: extendVideo == nil
         case .keyframes: keyframes?.isEmpty ?? true
+        case .references: references?.isEmpty == false && references?.allSatisfy { $0.media.authority == "descriptor" } == true
         }
     }
 }

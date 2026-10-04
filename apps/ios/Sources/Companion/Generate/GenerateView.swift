@@ -71,7 +71,7 @@ struct GenerateView: View {
                 if !hosts.hosts.isEmpty { FromShareCard() }
             }
         }
-        .onChange(of: router.pendingReuse) { _, entry in
+        .onChange(of: router.pendingReuse, initial: true) { _, entry in
             guard let entry else { return }
             generate.reuse(entry)
             router.pendingReuse = nil

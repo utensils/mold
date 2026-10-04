@@ -23,10 +23,9 @@ extension QueuePane {
     /// state of its own, only the rule.
     var gate: QueueGateControl { QueueGateControl(hosts: hosts, queue: queue) }
 
-    /// `selection` is a GROUP id -- `List`'s own automatic `Identifiable`
-    /// tagging over `rows(host:entries:)`'s `ForEach(groups)` -- resolved by
-    /// `QueueGroup.selectedEntry`, which says why an entry-id lookup missed
-    /// every row this app queues.
+    /// Plain rows use group ids and expanded batch children use entry ids.
+    /// The shared resolver preserves singleton mapping and refuses a batch
+    /// header, which does not identify one job for these focused commands.
     private var selectedJob: QueueSelection.Job? {
         guard let selection else { return nil }
         for host in hosts.hosts {

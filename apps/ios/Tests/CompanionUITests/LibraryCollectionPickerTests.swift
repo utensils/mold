@@ -45,9 +45,9 @@ final class LibraryCollectionPickerTests: XCTestCase {
         app.terminate()
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
-        let offlineNote = app.staticTexts.matching(NSPredicate(format:
-            "label CONTAINS 'Showing' AND label CONTAINS 'saved prints.'")).firstMatch
+        let offlineNote = app.buttons["offline-library-status"]
         XCTAssertTrue(offlineNote.waitForExistence(timeout: 10))
+        XCTAssertTrue(offlineNote.label.localizedCaseInsensitiveContains("saved prints"))
         let picker = app.navigationBars.buttons["All Prints"].firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         XCTAssertTrue(picker.isHittable, "The navigation title shelf picker must be visible at \(size)")
@@ -64,10 +64,11 @@ final class LibraryCollectionPickerTests: XCTestCase {
                 && element.elementType == $0.elementType && element.frame == $0.frame }) {
                 return false
             }
-            let descendants = picker.descendants(matching: element.elementType)
-                .matching(NSPredicate(format: "label == %@ AND identifier == %@",
-                                      element.label, element.identifier))
-            return !descendants.allElementsBoundByIndex.contains { $0.frame == element.frame }
+            return ![picker, dayHeader, offlineNote].contains { scope in
+                scope.descendants(matching: element.elementType)
+                    .matching(NSPredicate(format: "label == %@ AND identifier == %@", element.label, element.identifier))
+                    .allElementsBoundByIndex.contains { $0.frame == element.frame }
+            }
         }
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Library title and date heading contrast at \(size)"

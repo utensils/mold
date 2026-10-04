@@ -103,17 +103,23 @@ struct Badge: View {
     static let identifier = "tile-badge"
 
     var body: some View {
-        HStack(spacing: 3) {
-            // a11y: decorative -- the tile's spoken label says what each badge says.
-            if let symbol { Image(systemName: symbol).accessibilityHidden(true).accessibilityIdentifier(Self.identifier) }
-            if let text {
-                Text(text).font(mono ? .caption2.monospacedDigit() : .caption2)
-                    .accessibilityIdentifier(Self.identifier)
+        Group {
+            if let symbol, text != nil {
+                // Native fitting keeps a crowded combined badge useful
+                // without shrinking its font or the tile's full spoken label.
+                ViewThatFits(in: .horizontal) {
+                    line
+                    Image(systemName: symbol)
+                        .accessibilityHidden(true)
+                        .accessibilityIdentifier(Self.identifier)
+                }
+            } else {
+                line
             }
         }
         .font(.caption2.weight(.semibold))
         // Never wraps onto the picture: a badge is one short line or none.
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .padding(.vertical, 2)
@@ -124,5 +130,17 @@ struct Badge: View {
         // a11y: the tile is one element whose spoken label already says what
         // each badge shows; a second, tiny copy would only be noise.
         .accessibilityHidden(true)
+    }
+
+    private var line: some View {
+        HStack(spacing: 3) {
+            // Decorative: the tile's spoken label contains the full metadata.
+            if let symbol { Image(systemName: symbol).accessibilityHidden(true).accessibilityIdentifier(Self.identifier) }
+            if let text {
+                Text(text).font(mono ? .caption2.monospacedDigit() : .caption2)
+                    .lineLimit(1)
+                    .accessibilityIdentifier(Self.identifier)
+            }
+        }
     }
 }

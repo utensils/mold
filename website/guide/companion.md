@@ -76,6 +76,10 @@ keeps its original filename and file type.
   way they do on the Mac, across every machine that holds a copy. On iPhone,
   tap the navigation title to change shelves; it stays readable as you scroll.
   Status notices reserve space above the grid so dates and prints stay visible.
+  The offline notice shows a compact machine count; tap it for scrollable
+  details with every full machine name and a pinned Done action, including at large text sizes. Navigation tabs return when details close.
+  Decorative machine badges fit their tiles; full names remain in accessibility
+  labels and Info.
   **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
   Tap **Select**, then tap tiles or sweep sideways across them. Starting on
   a selected tile deselects the range; reverse to shorten it, or hold near
@@ -197,4 +201,12 @@ mobile queues, regardless of the submitting device. Library outputs retain their
 source media after queue cleanup; trash preserves those references, and deleting
 one output permanently does not remove sources still used by another output.
 
+Native Mac mirrors accept missing archive-only job IDs and generation durations, and a short version matching the same version with a build suffix. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
+
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
+
+### References and boundary frames
+
+Both native apps expose the server's reference contracts. MiniMax H3 **Ref2VA** takes an ordered mixture of images, H.264 MP4 clips and mono/stereo PCM WAV audio; image references can come from Photos/Camera/Library/Share on iOS or Finder/Library/Paste on macOS, and movie/audio files use Files/Finder. Replace, remove and reorder attachments before generating. Use `image 1`, `video 1` and `audio 1` in the prompt (numbered within each media kind). Audio references need at least one visual reference. The limits are nine images, three videos, three audio files and twelve files total; each clip is 2–15 seconds, with at most 15 seconds of video and 15 seconds of audio including video soundtracks. Authenticated hosts use request-bound upload sessions; keyless hosts accept at most 32 MiB of inline reference media per render. Video clips with sound require authenticated uploads so the server can supply exact decoded soundtrack counts; on keyless hosts use a silent MP4 plus separate PCM WAV audio. Unsupported or oversized files report an error instead of silently disappearing.
+
+Hunyuan3D multiview models offer named Front/Left/Back/Right wells from their recipe. Wan offers a first/last pair rather than arbitrary middle frames; MiniMax **FL2VA** offers separate optional first/last frames. Changing clip length updates the closing frame. Existing Qwen Edit, Qwen Image 2.1 and Flux.2 reference strips honor their source-image relation, count and pixel budgets; the last Qwen Image 2.1 reference updates the default canvas until you choose a size. SD1.5/SDXL reference weight comes from the model's own control. Model changes park unsupported attachments so they can return. Reuse restores retained typed references with fresh media authority while their original set and order stay unchanged. Changing retained slots requires reattaching the remaining originals; archived bytes never overwrite new attachments. Imported mesh texture/roundtrip workflows remain API/CLI-only.

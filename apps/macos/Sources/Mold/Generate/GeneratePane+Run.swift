@@ -16,6 +16,10 @@ extension GeneratePane {
     /// answer the fresh probe it asked for (`GeneratePane+Licence.swift`).
     func startRun(accepted: Set<String>, licenceSettled: Bool = false) {
         guard let host else { return }
+        if let refusal = reuse.referenceRefusal(for: controller.draft) {
+            reuse.notice = refusal
+            return
+        }
         // A render that would FETCH a gated model -- Qwen Image 2.1 and its
         // turbo tiers, Qwen Research -- asks for the terms before anything is
         // queued, the way the web does (`licenseRequirements`); accepting

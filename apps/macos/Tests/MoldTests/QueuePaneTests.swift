@@ -64,16 +64,21 @@ struct QueuePaneTests {
     @Test func aSelectedBatchOfOneResolvesToItsEntryForTheQueueMenu() {
         let solo = FakeFixtures.queueEntry("solo", state: "queued")
         let only = FakeFixtures.queueEntry("only", state: "queued", batchId: "b1", batchIndex: 1)
-        let pair = (1 ... 2).map {
-            FakeFixtures.queueEntry("p\($0)", state: "queued", batchId: "b2", batchIndex: $0)
+        let pair = (1 ... 2).map { (index: Int) in
+            FakeFixtures.queueEntry("p\(index)", state: "queued", batchId: "b2", batchIndex: index)
         }
         let groups = QueueGroup.build([solo, only] + pair, children: [:])
+        #expect(pair.map(\.id) == ["p1", "p2"])
+        #expect(groups.last?.isExpandable == true)
 
         #expect(QueueGroup.selectedEntry("solo", in: groups)?.id == "solo")
         #expect(QueueGroup.selectedEntry("b1", in: groups)?.id == "only")
         // The batch's own disclosure row is not a job.
         #expect(QueueGroup.selectedEntry("b2", in: groups) == nil)
         #expect(QueueGroup.selectedEntry("only", in: groups) == nil)
+        // Expanded child rows carry explicit entry tags, unlike their header.
+        #expect(QueueGroup.selectedEntry("p1", in: groups)?.id == "p1")
+        #expect(QueueGroup.selectedEntry("p2", in: groups)?.id == "p2")
     }
 
     // MARK: - Group action

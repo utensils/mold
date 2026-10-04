@@ -32,7 +32,7 @@ final class ShellAccessibilityTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         let history = app.buttons["prompt-history"]
         XCTAssertTrue(history.waitForExistence(timeout: 5))
-        settle(history)
+        Self.settle(history)
         XCTAssertGreaterThanOrEqual(history.frame.height, 44, "Prompt History needs a 44-point touch target")
         XCTAssertGreaterThanOrEqual(history.frame.width, 44)
     }
@@ -52,7 +52,7 @@ final class ShellAccessibilityTests: XCTestCase {
             app.terminate()
             app.launch()
             XCTAssertTrue(app.navigateToDestination(tab, shortcut: "\(index + 1)"))
-            settle(app.navigationBars.firstMatch)
+            Self.settle(app.navigationBars.firstMatch)
             if tab == "Generate" { try auditComposer(app, size: size) }
             try check(app, "\(tab) at \(size)")
 
@@ -67,11 +67,12 @@ final class ShellAccessibilityTests: XCTestCase {
                     let composer = app.scrollViews["phone-generate-form"].exists
                         ? app.scrollViews["phone-generate-form"]
                         : app.descendants(matching: .any)["bottom-chrome"].firstMatch
-                    for _ in 0..<5 where !chooser.isHittable { composer.swipeUp() }
+                    XCTAssertTrue(Self.revealComposerControl(chooser, composer: composer, app: app),
+                                  "The entire Model control must fit the composer viewport")
                     XCTAssertTrue(chooser.isHittable)
                     chooser.tap()
                     XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
-                    settle(app.navigationBars["Choose a Model"])
+                    Self.settle(app.navigationBars["Choose a Model"])
                     try check(app, "Model chooser at \(size)",
                               within: app.descendants(matching: .any)["model-chooser"].firstMatch)
                     // Size probing can leave UIKit exporting the presenting
@@ -92,12 +93,24 @@ final class ShellAccessibilityTests: XCTestCase {
         // from contrast, as behind a sheet.
         let showSidebar = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
         if showSidebar.waitForExistence(timeout: 2), showSidebar.isHittable {
-            showSidebar.tap()
-            let row = app.descendants(matching: .any)["Favourites"].firstMatch
-            XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar did not open at \(size)")
-            settle(row)
-            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
-            XCTAssertTrue(sidebar.exists, app.debugDescription)
+            let sidebar = try openSidebar(in: app)
+            Self.settle(sidebar)
+            XCTAssertTrue(revealSidebarRow("Shelves", sidebar: sidebar, app: app))
+            // Tab sections and their rows are lazy. A shelf is not proof
+            // that the sidebar opened, and an off-screen shelf is not missing.
+            if !revealSidebarRow("Favourites", sidebar: sidebar, app: app) {
+                XCTAssertTrue(revealSidebarRow("Shelves", sidebar: sidebar, app: app))
+                sidebar.cells.matching(NSPredicate(format: "label == 'Shelves'")).firstMatch.tap()
+            }
+            for label in ["Favourites", "Recently Deleted"] {
+                XCTAssertTrue(revealSidebarRow(label, sidebar: sidebar, app: app),
+                              "The full \(label) sidebar row must be reachable at \(size)")
+                let row = sidebar.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
+                let pixels = XCTAttachment(screenshot: app.screenshot())
+                pixels.name = "Sidebar \(label) at \(size)"; pixels.lifetime = .keepAlways; add(pixels)
+                try check(app, "Sidebar \(label) at \(size)", within: row)
+                XCTAssertTrue(sidebarViewport(sidebar, app: app).contains(row.frame))
+            }
             try check(app, "Sidebar at \(size)", within: sidebar)
             let hide = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'sidebar'")).firstMatch
             if hide.exists, hide.isHittable { hide.tap() } else { app.typeKey("1", modifierFlags: .command) }
@@ -107,15 +120,13 @@ final class ShellAccessibilityTests: XCTestCase {
         // text-size cycling when Settings is presented over it. Audit the
         // identical Form through its native sidebar page on iPad instead.
         // Sheet presentation/dismissal has separate interaction coverage.
-        let settingsInSidebar = app.buttons["ToggleSideBar"].exists
+        let settingsInSidebar = showSidebar.exists
         if settingsInSidebar {
             app.terminate()
             app.launch()
-            let favourites = app.descendants(matching: .any)["Favourites"].firstMatch
-            if !favourites.exists || !favourites.isHittable { app.buttons["ToggleSideBar"].tap() }
-            let sidebar = app.collectionViews.containing(.any, identifier: "Favourites").firstMatch
-            let settings = sidebar.descendants(matching: .any).matching(NSPredicate(format: "label == 'Settings'")).firstMatch
-            XCTAssertTrue(settings.waitForExistence(timeout: 5))
+            let sidebar = try openSidebar(in: app)
+            XCTAssertTrue(revealSidebarRow("Settings", sidebar: sidebar, app: app))
+            let settings = sidebar.cells.matching(NSPredicate(format: "label == 'Settings'")).firstMatch
             settings.tap()
             XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         } else {
@@ -136,7 +147,7 @@ final class ShellAccessibilityTests: XCTestCase {
             }
             XCTAssertTrue(app.buttons["Done"].firstMatch.waitForExistence(timeout: 5), "Settings did not open at \(size)")
         }
-        settle(app.navigationBars["Settings"])
+        Self.settle(app.navigationBars["Settings"])
         try check(app, "Settings at \(size)", within: app.descendants(matching: .any)["settings-sheet"].firstMatch,
                   lazyForm: true)
         if settingsInSidebar {
@@ -154,8 +165,63 @@ final class ShellAccessibilityTests: XCTestCase {
         // field and for it to stop moving.
         // (The iPad's sidebar draws Search without a field until it is used.)
         let field = app.searchFields.firstMatch
-        if field.waitForExistence(timeout: 3) { settle(field) }
+        if field.waitForExistence(timeout: 3) { Self.settle(field) }
         try check(app, "Search at \(size)")
+    }
+
+    /// The sidebar's native Show/Hide state survives launches. Its lazy
+    /// collection must be located independently of whichever rows are realized.
+    @MainActor private func openSidebar(in app: XCUIApplication) throws -> XCUIElement {
+        let hide = app.buttons.matching(NSPredicate(format: "label == 'Hide Sidebar'")).firstMatch
+        if !hide.exists {
+            let show = app.buttons.matching(NSPredicate(format: "label == 'Show Sidebar' OR (identifier == 'ToggleSideBar' AND label == 'Toggle sidebar')")).firstMatch
+            XCTAssertTrue(show.waitForExistence(timeout: 5))
+            show.tap()
+        }
+        XCTAssertTrue(hide.waitForExistence(timeout: 5), "The sidebar must be open before locating its collection")
+        let owner = app.collectionViews.allElementsBoundByIndex.first { collection in
+            collection.exists && collection.frame.width < app.frame.width
+                && collection.frame.contains(CGPoint(x: hide.frame.midX, y: hide.frame.midY))
+        }
+        return try XCTUnwrap(owner, "The opened sidebar must have its own native collection: \(app.debugDescription)")
+    }
+
+    @MainActor private func sidebarViewport(_ sidebar: XCUIElement, app: XCUIApplication) -> CGRect {
+        let hide = app.buttons.matching(NSPredicate(format: "label == 'Hide Sidebar'")).firstMatch
+        let top = max(sidebar.frame.minY, hide.frame.maxY)
+        return CGRect(x: sidebar.frame.minX, y: top, width: sidebar.frame.width,
+                      height: max(0, sidebar.frame.maxY - top))
+    }
+
+    @MainActor private func revealSidebarRow(_ label: String, sidebar: XCUIElement,
+                                            app: XCUIApplication) -> Bool {
+        let row = sidebar.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        func fullyVisible() -> Bool {
+            row.exists && sidebarViewport(sidebar, app: app).contains(row.frame) && row.isHittable
+        }
+        func pan(_ direction: CGFloat) -> Bool {
+            Self.settle(sidebar)
+            let viewport = sidebarViewport(sidebar, app: app)
+            let before = sidebar.cells.allElementsBoundByIndex.map { "\($0.label):\($0.frame)" }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.midY - direction * viewport.height * 0.2))
+            let end = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.midY + direction * viewport.height * 0.2))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            Self.settle(sidebar)
+            return before != sidebar.cells.allElementsBoundByIndex.map { "\($0.label):\($0.frame)" }
+        }
+        if fullyVisible() { return true }
+        // An absent lazy row gives no direction. Restore the real list top
+        // before scanning down, including after a missing/collapsed shelf.
+        for _ in 0..<8 {
+            if fullyVisible() { return true }
+            if !pan(1) { break }
+        }
+        for _ in 0..<8 {
+            if fullyVisible() { return true }
+            if !pan(-1) { break }
+        }
+        return fullyVisible()
     }
 
     /// Audit every exported composer label/control while fully inside the
@@ -179,20 +245,29 @@ final class ShellAccessibilityTests: XCTestCase {
         let expected = Set(elements().map(key))
         var seen = Set<String>()
         for step in 0..<20 {
-            settle(composer)
-            let visible = elements().filter { composerViewport(composer, in: app).contains($0.frame) }
+            Self.settle(composer)
+            let visible = elements().filter { Self.composerViewport(composer, in: app).contains($0.frame) }
             try check(app, "Composer scroll \(step) at \(size)", contrastOnly: true)
             seen.formUnion(visible.map(key))
             if expected.isSubset(of: seen) { break }
-            // Small, non-flinging steps ensure even tall wrapped guidance is
-            // sampled in full. The right edge avoids the photo well, and the
-            // drag starts above the pinned Generate action.
-            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60))
-                .press(forDuration: 0.1, thenDragTo: composer.coordinate(
-                    withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28)),
-                       withVelocity: .slow, thenHoldForDuration: 0.1)
+            // A fixed pan can skip the narrow fully-visible interval of a
+            // tall control. Align the next uncovered node by measured bounds.
+            if let target = elements().first(where: { !seen.contains(key($0)) }) {
+                guard Self.revealComposerControl(target, composer: composer, app: app) else { break }
+            }
         }
-        XCTAssertTrue(expected.isSubset(of: seen), "Composer content never fully visible: \(expected.subtracting(seen).sorted())")
+        if !expected.isSubset(of: seen) {
+            let missing = expected.subtracting(seen)
+            let details = elements().filter { missing.contains(key($0)) }
+                .map { "\(key($0)) at \($0.frame)" }
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Composer coverage hierarchy at \(size)"
+            hierarchy.lifetime = .keepAlways; add(hierarchy)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Composer coverage pixels at \(size)"
+            screenshot.lifetime = .keepAlways; add(screenshot)
+            XCTFail("Composer content never fully visible: \(details); viewport \(Self.composerViewport(composer, in: app))")
+        }
         let submit = app.buttons["submit-generation"]
         XCTAssertTrue(submit.exists)
         // Return to the prompt before the size-changing audit.
@@ -202,14 +277,43 @@ final class ShellAccessibilityTests: XCTestCase {
                     withNormalizedOffset: CGVector(dx: 0.9, dy: 0.60)),
                        withVelocity: .slow, thenHoldForDuration: 0.1)
         }
-        settle(composer)
+        Self.settle(composer)
     }
 
-    @MainActor private func composerViewport(_ composer: XCUIElement, in app: XCUIApplication) -> CGRect {
+    /// Center the complete AX frame using the clear left gutter, avoiding
+    /// prompt editing and horizontal reference scrollers. No partial-frame
+    /// success: an oversized control fails instead of being exempted.
+    @MainActor static func revealComposerControl(_ control: XCUIElement, composer: XCUIElement,
+                                                 app: XCUIApplication) -> Bool {
+        for _ in 0..<8 {
+            Self.settle(control)
+            let viewport = composerViewport(composer, in: app)
+            guard control.exists, control.frame.height <= viewport.height,
+                  control.frame.width <= viewport.width else { return false }
+            if viewport.contains(control.frame) { return true }
+            let delta = control.frame.midY - viewport.midY
+            let distance = min(abs(delta), viewport.height * 0.4)
+            let direction: CGFloat = delta > 0 ? 1 : -1
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = viewport.minX + viewport.width * 0.03
+            let start = origin.withOffset(CGVector(dx: x, dy: viewport.midY + direction * distance / 2))
+            let end = origin.withOffset(CGVector(dx: x, dy: viewport.midY - direction * distance / 2))
+            let before = control.frame
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            Self.settle(control)
+            if !viewport.contains(control.frame), abs(control.frame.midY - before.midY) < 0.5 {
+                XCTFail("Composer pan made no progress or hit a scroll boundary: \(control.label), before \(before), after \(control.frame), viewport \(viewport)")
+                return false
+            }
+        }
+        return composerViewport(composer, in: app).contains(control.frame)
+    }
+
+    @MainActor static func composerViewport(_ composer: XCUIElement, in app: XCUIApplication) -> CGRect {
         guard composer.identifier == "phone-generate-form" else { return composer.frame }
         let top = max(composer.frame.minY, app.navigationBars.firstMatch.frame.maxY)
         let submit = app.buttons["submit-generation"]
-        let bottom = submit.exists && !isDescendant(submit, of: composer)
+        let bottom = submit.exists && !composer.descendants(matching: .any).matching(identifier: submit.identifier).firstMatch.exists
             ? submit.frame.minY : min(composer.frame.maxY, app.tabBars.firstMatch.frame.minY)
         return CGRect(x: composer.frame.minX, y: top, width: composer.frame.width,
                       height: max(0, bottom - top))
@@ -221,6 +325,10 @@ final class ShellAccessibilityTests: XCTestCase {
     @MainActor private func check(_ app: XCUIApplication, _ place: String, region: CGRect? = nil,
                                   within container: XCUIElement? = nil, lazyForm: Bool = false,
                                   contrastOnly: Bool = false) throws {
+        if let container {
+            _ = try XCTUnwrap(container.exists && !container.frame.isEmpty ? container : nil,
+                              "A scoped audit requires its actual visible container: \(place)")
+        }
         do {
             try audit(app, place, region: region, within: container, lazyForm: lazyForm, contrastOnly: contrastOnly)
         } catch where Self.isTimeout(error) {
@@ -344,7 +452,7 @@ final class ShellAccessibilityTests: XCTestCase {
     /// Waits for an element to stop moving: a sheet sliding up, a field
     /// growing out of the tab bar. Audited mid-animation, both read as
     /// clipped or low-contrast when neither is.
-    @MainActor private func settle(_ element: XCUIElement) {
+    @MainActor private static func settle(_ element: XCUIElement) {
         var frame = CGRect.null
         for _ in 0..<20 where element.exists && element.frame != frame {
             frame = element.frame
@@ -358,7 +466,9 @@ final class ShellAccessibilityTests: XCTestCase {
 
 
     @MainActor private func isDescendant(_ element: XCUIElement, of container: XCUIElement) -> Bool {
-        container.descendants(matching: element.elementType)
+        if element.elementType == container.elementType, element.label == container.label,
+           element.frame == container.frame { return true }
+        return container.descendants(matching: element.elementType)
             .matching(NSPredicate(format: "label == %@", element.label))
             .allElementsBoundByIndex
             .contains { $0.frame == element.frame }
@@ -374,7 +484,7 @@ final class ShellAccessibilityTests: XCTestCase {
     @MainActor private func isUnderChrome(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
         let phoneForm = app.scrollViews["phone-generate-form"]
         if phoneForm.exists, isDescendant(element, of: phoneForm) {
-            return !composerViewport(phoneForm, in: app).contains(element.frame)
+            return !Self.composerViewport(phoneForm, in: app).contains(element.frame)
         }
         // Any type: at AX5 the composer is a ScrollView, not a plain group.
         let pinned = app.descendants(matching: .any)["bottom-chrome"].firstMatch

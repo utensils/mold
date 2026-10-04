@@ -14,8 +14,10 @@ final class RetainedReuse {
     private(set) var probing = false
     var notice: String?
     private var version = 0
+    private var originalReferences: [GenerationReference] = []
 
     func begin(_ draft: RenderDraft) -> Int {
+        originalReferences = draft.media.generationReferences
         version += 1
         authority = nil
         notice = nil
@@ -110,7 +112,14 @@ final class RetainedReuse {
     /// press keeps these disclosed files until explicit dismissal/selection.
     func snapshot() -> Authority? { authority }
 
+    func canHydrateReferences(_ references: [GenerationReference]) -> Bool {
+        guard !probing, let authority else { return false }
+        return RetainedReferenceGuard.canHydrate(references: references, original: originalReferences,
+            members: authority.members)
+    }
+
     func clear() {
+        originalReferences = []
         version += 1
         authority = nil
         probing = false

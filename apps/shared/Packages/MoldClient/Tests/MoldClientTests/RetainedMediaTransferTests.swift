@@ -11,6 +11,79 @@ struct RetainedMediaTransferTests {
             metadata: try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8)))
     }
 
+    @Test func embeddedRecipeCanReceiveArchiveEnrichedSources() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        let embedded = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"qwen-image-2.1-turbo:q8","seed":2818450336,"version":"0.32.0","edit_image_sha256s":["abc"]}"#.utf8))
+        let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"qwen-image-2.1-turbo:q8","seed":2818450336,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"original-job","generation_time_ms":8516,"edit_image_sha256s":["abc"]}"#.utf8))
+        let base = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+        source.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                members: base.members, outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: archived))
+        target.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64),
+                members: [], outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: embedded))
+        source.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        target.stub("importRetainedMedia(_:for:)", returning: ())
+        try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: archived,
+            from: source, to: target, as: "copy.png")
+        #expect(target.count("importRetainedMedia(_:for:)") == 1)
+        target.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64),
+                members: base.members.map(\.contentIdentity), outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: embedded))
+        try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: archived,
+            from: source, to: target, as: "copy.png")
+        #expect(target.count("importRetainedMedia(_:for:)") == 1)
+        #expect(source.count("retainedSourceMediaBytes(for:member:)") == 1)
+    }
+
+    @Test func mirrorCompatibilityPreservesRecipesAndConflictingProvenance() {
+        let original = Data(#"{"seed":1,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"one","generation_time_ms":8516,"future_recipe":{"enabled":true}}"#.utf8)
+        for changed in [
+            #"{"seed":2,"version":"0.32.0","future_recipe":{"enabled":true}}"#,
+            #"{"seed":1,"version":"0.31.0","future_recipe":{"enabled":true}}"#,
+            #"{"seed":1,"version":"0.32.0","job_id":"two","future_recipe":{"enabled":true}}"#,
+            #"{"seed":1,"version":"0.32.0","generation_time_ms":99,"future_recipe":{"enabled":true}}"#,
+            #"{"seed":1,"version":"0.32.0","future_recipe":{"enabled":false}}"#,
+            #"{"seed":1,"version":"0.32.0 (7efd234 2026-09-27)","future_recipe":{"enabled":true}}"#,
+        ] {
+            #expect(!RetainedSourceMedia.mirrorMetadataMatches(original, Data(changed.utf8)))
+        }
+        let embedded = Data(#"{"seed":1,"version":"0.32.0","future_recipe":{"enabled":true}}"#.utf8)
+        #expect(RetainedSourceMedia.mirrorMetadataMatches(original, embedded))
+        #expect(RetainedSourceMedia.mirrorMetadataMatches(embedded, original))
+        #expect(!RetainedSourceMedia.mirrorMetadataMatches(nil as Data?, embedded))
+    }
+
+    @Test func destinationRecipeAndSizeConflictsNeverFetchRetainedPayloads() async throws {
+        let originalMetadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"seed":1,"edit_image_sha256s":["original"]}"#.utf8))
+        for (index, recipe) in [#"{"seed":2,"edit_image_sha256s":["original"]}"#,
+                       #"{"seed":1,"edit_image_sha256s":["changed"]}"#,
+                       #"{"seed":1,"edit_image_sha256s":["original"]}"#].enumerated() {
+            let source = FakeBackend(), target = FakeBackend()
+            let base = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+            source.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                    members: base.members, outputSha256: base.outputSha256,
+                    outputSizeBytes: 3, metadata: originalMetadata))
+            target.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64), members: [],
+                    outputSha256: base.outputSha256, outputSizeBytes: index == 2 ? 4 : 3,
+                    metadata: try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(recipe.utf8))))
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: originalMetadata,
+                    from: source, to: target, as: "copy.png")
+            }
+            #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+            #expect(target.count("importRetainedMedia(_:for:)") == 0)
+        }
+    }
+
     @Test func unsupportedDestinationRefusesBeforeAnyOutputImport() async throws {
         let source = FakeBackend(), target = FakeBackend()
         source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: [member()]))
@@ -149,7 +222,7 @@ struct RetainedMediaTransferTests {
     }
 
     @Test func mirrorAllowsArchiveBookkeepingButRejectsRecipeChanges() async throws {
-        // A real Plato output embeds the release version, while its archive
+        // A source output embeds the release version, while its archive
         // adds build provenance and completion bookkeeping after publication.
         let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"test","seed":42,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"source-job","generation_time_ms":8516}"#.utf8))
         for changedRecipe in [false, true] {

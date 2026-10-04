@@ -26075,7 +26075,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "de703b5969b2b7891bb9d65bdab5fa4c7543b578ff9475dd65663d953c3421fd",
+        "profile_hash": "101b23fea62f11e34323d4609c96bd87c0e8fd6afb412fdd34b01670dff4dd89",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26295,6 +26295,13 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "boundary_frames": {
+                "mode": "adjustable",
+                "first_required": false,
+                "last_required": false,
+                "min_frames": 107,
+                "wire": "h3-endpoints"
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -26337,7 +26344,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "42da523dd42783792cd0221f3ffaadb9803e77e8ce772cfc13bd6a9709a14c77",
+        "profile_hash": "427c543e65142f5af7778d64da94804784cf8abbcd80c14c83ce34abe93e8440",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26556,6 +26563,13 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "boundary_frames": {
+                "mode": "adjustable",
+                "first_required": false,
+                "last_required": false,
+                "min_frames": 107,
+                "wire": "h3-endpoints"
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -26598,7 +26612,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "20442d12e6519fd2b450050ca2f1ff83e57f8f57216fccc7a0fe2b5802465201",
+        "profile_hash": "01ab0d9e1360c3a66bce7b67beeb55f6b03ec0f03637c3f530adc3d9bc2e6080",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26817,6 +26831,13 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "boundary_frames": {
+                "mode": "adjustable",
+                "first_required": false,
+                "last_required": false,
+                "min_frames": 107,
+                "wire": "h3-endpoints"
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -26849,7 +26870,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "38c99ca8527c9b23728efb12eacc2fe9d13afa88ce6d2945df9fd2c71724c5b0",
+        "profile_hash": "26cd3bcd429e49d13b79f0911f6c54c42fe0d5edee3b476a903d9c8e9bb7fbf1",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -27060,6 +27081,13 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "boundary_frames": {
+                "mode": "adjustable",
+                "first_required": false,
+                "last_required": false,
+                "min_frames": 107,
+                "wire": "h3-endpoints"
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -27097,7 +27125,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "c64e7c65771474603efd72e6b0944323f125b88217694cedc3ec0b08965d625a",
+        "profile_hash": "ee55e0206a0eb377c7f2ab183906fb721a65ab748e0333402cac6a9d1661f2ed",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -27317,6 +27345,25 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "generation_references": {
+                "mode": "adjustable",
+                "required": true,
+                "kinds": [
+                  "image",
+                  "video",
+                  "audio"
+                ],
+                "max_count": 12,
+                "max_images": 9,
+                "max_videos": 3,
+                "max_audios": 3,
+                "min_duration_ms": 2000,
+                "max_duration_ms": 15000,
+                "max_video_duration_ms": 15000,
+                "max_audio_duration_ms": 15000,
+                "max_inline_bytes": 33554432,
+                "requires_visual": true
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -27354,7 +27401,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "753edfd5f713556b3a49cb31b87e922164f36701c16424d781283e2cafb35848",
+        "profile_hash": "4f4190c21846fd5150a0dacd4dc342515dce81764670d68800a8c58d07106242",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -27573,6 +27620,25 @@
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
               },
+              "generation_references": {
+                "mode": "adjustable",
+                "required": true,
+                "kinds": [
+                  "image",
+                  "video",
+                  "audio"
+                ],
+                "max_count": 12,
+                "max_images": 9,
+                "max_videos": 3,
+                "max_audios": 3,
+                "min_duration_ms": 2000,
+                "max_duration_ms": 15000,
+                "max_video_duration_ms": 15000,
+                "max_audio_duration_ms": 15000,
+                "max_inline_bytes": 33554432,
+                "requires_visual": true
+              },
               "transparency": {
                 "mode": "hidden",
                 "default": false,
@@ -27605,7 +27671,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "2a11dcba11625af781cef18551d9fbe7ede66828b815805b49f4545cfd901f26",
+        "profile_hash": "c45fc806e205a2a705dfcab352dfbe649f5f38f8efc4b5535d05937599970699",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -27815,6 +27881,25 @@
                 "primary_is_target": false,
                 "source_relation": "replaces",
                 "reason": "This model does not accept reference images (edit_images)."
+              },
+              "generation_references": {
+                "mode": "adjustable",
+                "required": true,
+                "kinds": [
+                  "image",
+                  "video",
+                  "audio"
+                ],
+                "max_count": 12,
+                "max_images": 9,
+                "max_videos": 3,
+                "max_audios": 3,
+                "min_duration_ms": 2000,
+                "max_duration_ms": 15000,
+                "max_video_duration_ms": 15000,
+                "max_audio_duration_ms": 15000,
+                "max_inline_bytes": 33554432,
+                "requires_visual": true
               },
               "transparency": {
                 "mode": "hidden",

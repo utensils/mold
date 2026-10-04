@@ -96,6 +96,7 @@ public struct ExpandRequest: Codable, Sendable {
     public var modelFamily: String
     public var variations: Int
     public var task: ExpandTask?
+    public var context: ExpandContext? = nil
 
     public init(
         prompt: String,
@@ -121,6 +122,7 @@ public struct RemixRequest: Codable, Sendable {
     public var modelFamily: String
     public var variations: Int
     public var task: ExpandTask?
+    public var context: ExpandContext? = nil
     /// Empty means the server's task-aware default set.
     public var dimensions: [RemixDimension]
 

@@ -234,6 +234,8 @@ final class PopulatedGenerationTests: XCTestCase {
         address.tap(); address.typeText("127.0.0.1:\(port)")
         app.buttons["Add"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        XCTAssertTrue(app.collectionViews["queue-list"].waitForExistence(timeout: 5),
+                      "Queue rows must belong to the identified native Queue List")
         let open = app.buttons["queue-open-fixture-video"]
         XCTAssertTrue(open.waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["A legacy verbose title that must not appear"].exists)
@@ -294,7 +296,29 @@ final class PopulatedGenerationTests: XCTestCase {
             app.terminate(); app.launchArguments = ["-UIPreferredContentSizeCategoryName", category]; app.launch()
             XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
             let row = app.buttons["queue-open-fixture-video"]
-            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            _ = row.waitForExistence(timeout: 10)
+            // A restored List can retain a scroll offset across size changes;
+            // materialize the first known fixture row in that List, not by
+            // swiping the surrounding screen or relaxing the row assertion.
+            let list = app.collectionViews["queue-list"]
+            XCTAssertTrue(list.waitForExistence(timeout: 5), "The native Queue List must be present")
+            // Missing lazy rows can lie past a tall header or above a restored
+            // bottom offset. Search upward through content, then reverse once.
+            for step in 0..<12 where !row.exists || !row.isHittable {
+                if row.exists {
+                    let top = app.navigationBars["Queue"].frame.maxY
+                    let bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : list.frame.maxY
+                    if row.frame.midY < (top + bottom) / 2 { list.swipeDown() }
+                    else { list.swipeUp() }
+                } else if step < 6 { list.swipeUp() }
+                else { list.swipeDown() }
+            }
+            guard row.exists, row.isHittable else {
+                attach(app)
+                XCTFail("Fixture video must be reachable after \(category): requests \(machine.requestLog()); \(app.debugDescription)")
+                return
+            }
+            row.tap()
             XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
             attach(app)
             app.buttons["Done"].firstMatch.tap()

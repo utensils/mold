@@ -25,14 +25,16 @@ struct QueueBatchRow: View {
     var canMoveDown = false
     var moveUp: () -> Void = {}
     var moveDown: () -> Void = {}
+    @State var expanded = false
 
     var body: some View {
-        DisclosureGroup {
+        DisclosureGroup(isExpanded: $expanded) {
             ForEach(group.rows) { entry in
                 QueueRow(entry: entry, actions: childActions(entry),
                          caption: entry.batchWaitDescription, sourceHost: sourceHost,
                          act: { rowAct($0, entry) })
                     .padding(.leading, 20)
+                    .tag(entry.id)
             }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -51,12 +53,12 @@ struct QueueBatchRow: View {
                 Spacer(minLength: 12)
                 buttons
             }
+            .rowActionMenu(
+                actions.groupOffered(canMoveUp: canMoveUp, canMoveDown: canMoveDown),
+                perform: perform)
         }
+        .disclosureGroupStyle(QueueBatchDisclosureStyle(id: group.id))
         .padding(.vertical, 3)
-        // THE list its buttons are built from -- see `QueueRow`'s own note.
-        .rowActionMenu(
-            actions.groupOffered(canMoveUp: canMoveUp, canMoveDown: canMoveDown),
-            perform: perform)
     }
 
     private func perform(_ kind: QueueRowActions.Kind) {

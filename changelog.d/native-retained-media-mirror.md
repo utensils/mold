@@ -1,0 +1,1 @@
+- **Fix native Mac library sync.** Copy retained inputs when identical output files carry embedded metadata without archive-only completion facts; retry repairs existing copies without duplicating outputs, while changed bytes and generation settings remain refused.

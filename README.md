@@ -190,6 +190,8 @@ and the full-screen viewer keeps its media actions accessible. It is in TestFlig
 
 The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print from the background or a cold launch, with notification activation completed on the main thread. Library long-press and drag previews retain their thumbnail loader, and source selection prefers a reachable machine copy; the notification icon keeps the same authored colors in light and dark appearances. Its Live Activity uses the system background material with matching semantic text, a full-width progress row, and a separate machine/queue footer. Generate Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.
 
+The native iOS Library keeps its offline notice compact and offers scrollable details with every full machine name, preserving room for saved prints at large text sizes. Decorative Library badges stay within their tiles; the full machine names remain in accessibility labels and Info.
+
 The native iOS Models screen offers visible per-model Unload and Unload All Models controls for the selected server; unloading keeps downloaded files.
 
 Native iOS development: `nix develop -c companion-dev` watches Swift sources,
@@ -284,6 +286,8 @@ any referencing library output exists, including in the trash. Matching retained
 input sets from newly completed jobs share storage while keeping per-job
 provenance. Native Mac and
 desktop library copies also retain those sources on supported destinations.
+Native Mac mirrors accept missing archive-only job IDs and generation durations, and a short version matching the same version with a build suffix. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
+
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 To install Mold's Agent Skill for supported coding agents,
 run:
@@ -359,3 +363,5 @@ in anonymous route proofs. Plain HTTP still requires a trusted network.
 Native iOS queue cards use concise curated model names and open full job details
 on tap, with state-aware per-job controls. Generate exposes searchable per-machine
 Prompt History with prompt-only recall.
+
+Native iOS and macOS generation controls support ordered MiniMax H3 image/video/audio references, Hunyuan3D named views, and Wan/MiniMax boundary frames. See the [native reference parity audit](docs/plans/native-reference-parity.md) and native app guides for limits and media formats.

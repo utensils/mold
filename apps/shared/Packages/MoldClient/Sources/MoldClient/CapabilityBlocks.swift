@@ -98,4 +98,6 @@ public struct ReferenceUploadCapabilities: Codable, Hashable, Sendable {
     public let uploadHandleHeader: String?
     public let maxFileBytes: Int?
     public let maxSessionBytes: Int?
+    public let maxActiveSessions: Int?
+    public let sessionTtlMs: Int?
 }

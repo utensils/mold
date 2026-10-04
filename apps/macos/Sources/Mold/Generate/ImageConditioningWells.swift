@@ -98,7 +98,9 @@ extension ImageConditioningWells {
         let setsCanvas = mode == .references && references?.canvas == .lastReference
         let canvasNote = setsCanvas && !media.editImages.isEmpty ? Self.canvasNote : nil
         return Layout(
-            showsSourceWell: mode.showsSourceWell && PromptPanel.showsSourceWell(for: recipe),
+            showsSourceWell: !GenerationReferencesGroup.isShown(recipe.capabilities)
+                && BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) == nil
+                && mode.showsSourceWell && PromptPanel.showsSourceWell(for: recipe),
             references: mode.showsReferenceStrip ? references : nil,
             parked: wells?.parked,
             note: wells?.parked == nil ? canvasNote : ExclusiveWells.note,

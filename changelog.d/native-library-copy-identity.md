@@ -1,1 +1,1 @@
-- Native Library sync no longer rejects identical prints when the source archive adds a job ID, completion time, or build-version annotation. Copied bytes, recipe settings, and retained source media remain verified.
+- Fixed native library sync regression coverage for identical prints whose embedded recipe omits archive completion provenance.

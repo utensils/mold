@@ -571,3 +571,7 @@ validation, capability, safety, and operational controls continue to apply.
 The official BF16 checkpoints remain download-only qualification references.
 Their much larger artifact graphs are visible to preserve exact acquisition
 and inventory authority, but no released build executes them.
+
+## Native authoring
+
+Mold Studio on macOS and its iOS companion offer ordered Ref2VA image, MP4 and PCM WAV references, including replacement, ordering and retained-source reuse. FL2VA has first/last-frame wells. These controls use the generation profile and shared request policy; see the [macOS guide](../guide/macos.md) or [iOS companion guide](../guide/companion.md) for limits.

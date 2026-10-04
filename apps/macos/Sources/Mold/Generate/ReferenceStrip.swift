@@ -14,6 +14,7 @@ struct ReferenceStrip: View {
     /// Read by the canvas rule on every add, replace, move and removal
     /// (`RenderDraft.followLastReference`).
     let recipe: GenerationRecipe
+    @Environment(GenerateController.self) var controller
     @Binding var draft: RenderDraft
     /// Pictures the request carries before the strip (`Layout.ordinalBase`).
     var ordinalBase = 0
@@ -33,14 +34,18 @@ struct ReferenceStrip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: WellCaption.spacing) {
-            HStack(alignment: .top, spacing: 6) {
-                ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
-                    well(index: index, encoded: encoded)
-                }
-                if capability.hasRoom(for: draft.media.editImages.count) {
-                    addWell
+            ScrollView(.horizontal) {
+                HStack(alignment: .top, spacing: 6) {
+                    ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
+                        well(index: index, encoded: encoded)
+                    }
+                    if capability.hasRoom(for: draft.media.editImages.count) {
+                        addWell
+                    }
                 }
             }
+            .scrollIndicators(.visible)
+            .frame(maxWidth: 320)
             if let caption { WellCaption.text(caption) }
         }
         .rowActionMenu(stripMenu) { perform($0, at: nil) }
@@ -51,7 +56,8 @@ struct ReferenceStrip: View {
     /// swallows the taps those need. Its contextual menu and its drop are the
     /// chooser's, like every other well.
     private func well(index: Int, encoded: String) -> some View {
-        PictureWell(
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+        return PictureWell(
             rows: itemMenu(index),
             picture: encoded,
             accepting: Self.accepting(capability),
@@ -59,7 +65,7 @@ struct ReferenceStrip: View {
             opensOnClick: false,
             alphaBed: true,
             label: label(index),
-            pick: { replace($0, at: index) },
+            pick: { replace($0, at: index, session: session) },
             perform: { perform($0, at: index) })
             .overlay(alignment: .topLeading) { badge(index) }
             .overlay(alignment: .topTrailing) { remove(index) }
@@ -69,14 +75,15 @@ struct ReferenceStrip: View {
     /// The same three doors the source well offers, on a `+` that says what it
     /// is rather than being a second anonymous square.
     private var addWell: some View {
-        PictureWell(
+        let session = ReferenceImportSession(controller: controller, recipe: recipe, media: draft.media)
+        return PictureWell(
             rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
             placeholder: Self.addGlyph,
             accepting: Self.accepting(capability),
             allowsMultiple: true,
             size: Self.thumbnailSize,
             label: addWellLabel,
-            pick: append)
+            pick: { append($0, session: session) })
     }
 
     /// The one sentence the add well's tooltip and its VoiceOver label share.

@@ -394,6 +394,72 @@ pub struct AdapterControlProfile {
     pub reason: Option<String>,
 }
 
+/// Ordered heterogeneous reference conditioning, derived from the admission authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct GenerationReferencesProfile {
+    pub mode: ControlMode,
+    pub required: bool,
+    pub kinds: Vec<String>,
+    pub max_count: u32,
+    pub max_images: u32,
+    pub max_videos: u32,
+    pub max_audios: u32,
+    #[ts(type = "number")]
+    pub min_duration_ms: u64,
+    #[ts(type = "number")]
+    pub max_duration_ms: u64,
+    #[ts(type = "number")]
+    pub max_video_duration_ms: u64,
+    #[ts(type = "number")]
+    pub max_audio_duration_ms: u64,
+    #[ts(type = "number")]
+    pub max_inline_bytes: u64,
+    pub requires_visual: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct BoundaryFramesProfile {
+    pub mode: ControlMode,
+    pub first_required: bool,
+    pub last_required: bool,
+    pub min_frames: u32,
+    pub wire: String,
+}
+
+pub fn generation_references_for_model(model: &str) -> Option<GenerationReferencesProfile> {
+    use crate::minimax_h3 as h3;
+    let contract = h3::capability_contract_for_model(model)?;
+    if contract.task != h3::Task::Ref2va {
+        return None;
+    }
+    Some(GenerationReferencesProfile {
+        mode: ControlMode::Adjustable,
+        required: true,
+        kinds: vec!["image".into(), "video".into(), "audio".into()],
+        max_count: h3::MAX_REFERENCE_FILES as u32,
+        max_images: h3::MAX_REFERENCE_IMAGES as u32,
+        max_videos: h3::MAX_REFERENCE_VIDEOS as u32,
+        max_audios: h3::MAX_REFERENCE_AUDIOS as u32,
+        min_duration_ms: h3::MIN_REFERENCE_DURATION_MS,
+        max_duration_ms: h3::MAX_REFERENCE_DURATION_MS,
+        max_video_duration_ms: h3::MAX_AGGREGATE_REFERENCE_VIDEO_MS,
+        max_audio_duration_ms: h3::MAX_AGGREGATE_REFERENCE_AUDIO_MS,
+        max_inline_bytes: h3::MAX_INLINE_REFERENCE_BYTES as u64,
+        requires_visual: true,
+    })
+}
+
+pub fn boundary_frames_for_model(model: &str) -> Option<BoundaryFramesProfile> {
+    let contract = crate::minimax_h3::capability_contract_for_model(model)?;
+    (contract.task == crate::minimax_h3::Task::Fl2va).then(|| BoundaryFramesProfile {
+        mode: ControlMode::Adjustable,
+        first_required: false,
+        last_required: false,
+        min_frames: crate::minimax_h3::MIN_FRAMES,
+        wire: "h3-endpoints".into(),
+    })
+}
+
 /// How a recipe's ordered reference images relate to `source_image`.
 ///
 /// Two questions, two fields: `source_image` keeps saying whether the
@@ -769,6 +835,10 @@ pub struct GenerationCapabilitiesProfile {
     /// build emits carries `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_images: Option<ReferenceImagesProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_references: Option<GenerationReferencesProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_frames: Option<BoundaryFramesProfile>,
     /// The transparent-background contract, or `None` on an OLDER SERVER
     /// (clients hide the toggle). Every recipe this build emits carries
     /// `Some`; see [`transparency_for_recipe`].
@@ -2654,6 +2724,8 @@ fn recipe(
             ),
             source_image,
             reference_images: Some(reference_images),
+            generation_references: generation_references_for_model(input.model),
+            boundary_frames: boundary_frames_for_model(input.model),
             transparency: Some(transparency_for_recipe(family, input.model)),
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
@@ -3134,6 +3206,20 @@ fn provenance(family: &str) -> Vec<ProfileProvenance> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_h3_reference_capability_matches_task_limits() {
+        let refs = super::generation_references_for_model(crate::minimax_h3::REF2VA_COMFY).unwrap();
+        assert_eq!(
+            refs.max_images as usize,
+            crate::minimax_h3::MAX_REFERENCE_IMAGES
+        );
+        assert_eq!(
+            refs.max_inline_bytes as usize,
+            crate::minimax_h3::MAX_INLINE_REFERENCE_BYTES
+        );
+        assert!(super::generation_references_for_model(crate::minimax_h3::FL2VA_COMFY).is_none());
+    }
+
     use super::*;
 
     /// Every workflow mode's default model is one that ADVERTISES that mode.

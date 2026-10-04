@@ -92,6 +92,13 @@ struct ClipMediaTests {
         #expect(atZeroFrames == 0)
     }
 
+    @Test func aZeroBasedKeyframeNeverMovesToTheMinimumClipLength() throws {
+        let auto = try Self.recipe("recipe-ltx2.json", "auto")
+        let temporal = try #require(auto.temporal)
+        #expect(KeyframeTable.snappedFrame(0, temporal: temporal, frames: 121) == 0)
+        #expect(KeyframeTable.snappedFrame(8, temporal: temporal, frames: 121) == 8)
+    }
+
     // MARK: - The Clip group shows for a temporal recipe with no audio
 
     @Test func theClipGroupShowsForATemporalRecipeWithoutAudio() {

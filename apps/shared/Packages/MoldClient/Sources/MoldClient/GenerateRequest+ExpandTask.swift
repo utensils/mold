@@ -45,6 +45,7 @@ public extension ExpandTask {
     }
 
     private static func h3Task(_ request: GenerateRequest) -> ExpandTask {
+        if !(request.references ?? []).isEmpty { return .referenceToAudioVideo }
         let first = request.sourceImage != nil
         let last = !(request.keyframes ?? []).isEmpty
         if first, last { return .keyframeInterpolation }

@@ -7,7 +7,11 @@ import UniformTypeIdentifiers
 /// split from `ClipGroup.swift` purely for size.
 extension ClipGroup {
     @ViewBuilder var keyframesSection: some View {
-        if recipe?.capabilities.acceptsKeyframes == true {
+        if let recipe, BoundaryFramePolicy.resolve(capabilities: recipe.capabilities) != nil {
+            LabeledSection("Boundary frames") {
+                BoundaryFrameWells(recipe: recipe, draft: $draft)
+            }
+        } else if recipe?.capabilities.acceptsKeyframes == true {
             LabeledSection("Keyframes") {
                 KeyframeTable(temporal: recipe?.temporal, draft: $draft)
             }

@@ -25,13 +25,13 @@ extension ReferenceStrip {
         switch action {
         case .moveLeft:
             guard let index, index > 0 else { return }
-            draft.media.editImages.swapAt(index, index - 1)
+            DraftPictureAttachment.moveReference(from: index, to: index - 1, in: &draft, recipe: recipe)
         case .moveRight:
             guard let index, index < draft.media.editImages.count - 1 else { return }
-            draft.media.editImages.swapAt(index, index + 1)
+            DraftPictureAttachment.moveReference(from: index, to: index + 1, in: &draft, recipe: recipe)
         case .removeReference:
             guard let index, draft.media.editImages.indices.contains(index) else { return }
-            draft.media.editImages.remove(at: index)
+            DraftPictureAttachment.removeReference(at: index, from: &draft, recipe: recipe)
         case .removeAllReferences:
             draft.media.editImages.removeAll()
         default:
@@ -76,7 +76,7 @@ extension ReferenceStrip {
     func remove(_ index: Int) -> some View {
         Button {
             guard draft.media.editImages.indices.contains(index) else { return }
-            draft.media.editImages.remove(at: index)
+            DraftPictureAttachment.removeReference(at: index, from: &draft, recipe: recipe)
             draft.followLastReference(recipe: recipe)
         } label: {
             Image(systemName: "xmark.circle.fill")

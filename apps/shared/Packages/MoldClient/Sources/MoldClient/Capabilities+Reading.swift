@@ -104,7 +104,10 @@ public extension Capabilities {
     /// Advertised-but-off is real and common: the upload protocol needs
     /// API-key auth, so every keyless host reports `available: false`. That is
     /// not a reason to refuse a small reference -- it means send it inline.
-    var canUploadLargeReferences: Bool { referenceUploads?.available ?? false }
+    var canUploadLargeReferences: Bool {
+        guard let referenceUploads else { return false }
+        return (try? ReferenceUploadPolicy.validate(referenceUploads)) != nil
+    }
 
     // MARK: - Machines and models
 
