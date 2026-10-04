@@ -106,9 +106,11 @@ final class LibraryLongPressTests: XCTestCase {
         attach(app, name: stage + " Full details sheet before contrast audit")
         try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: .contrast)
         let information = [(explanation, "explanation"), (section, "section heading")]
+        var requestedExplanationSize = CGSize.zero
         for (text, label) in information {
             try revealDetailsText(text, details: details, title: title, app: app)
             try auditContrast(text, app: app, stage: stage + " details " + label)
+            if label == "explanation" { requestedExplanationSize = text.frame.size }
         }
         XCTAssertEqual(Set(identities).count, names.count, "Duplicate names must keep distinct host identities")
         for (index, name) in names.enumerated() {
@@ -147,22 +149,73 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(done.frame.height, 44)
         XCTAssertTrue(done.isHittable)
         try auditContrast(done, app: app, stage: stage + " details Done")
+        let requestedDoneHeight = done.frame.height
+        let requestedTitleHeight = title.frame.height
         let noncontrast: XCUIAccessibilityAuditType = [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription]
-        // Exercise Done before any other private sweep so unsupported native
-        // label scaling cannot be attributed to an earlier audit's state.
+        // Each private size sweep gets a fresh native presentation at the
+        // requested launch category. Preserve the original nil-element failure
+        // evidence while avoiding state carried from an earlier private sweep.
         attach(app, name: stage + " Details before noncontrast gates")
-        try auditAccessibility(done, app: app, stage: stage + " details Done", types: noncontrast)
-        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: noncontrast)
-        for (text, label) in information {
-            try revealDetailsText(text, details: details, title: title, app: app)
+        var fresh = try reopenDetails(app, stage: stage + " Done", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+        try auditAccessibility(fresh.owner.buttons["offline-library-done"], app: app,
+                               stage: stage + " details Done", types: noncontrast)
+        fresh = try reopenDetails(app, stage: stage + " full sheet", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+        try auditAccessibility(fresh.owner, app: app, stage: stage + " details sheet", types: noncontrast)
+        for label in ["explanation", "section heading"] {
+            fresh = try reopenDetails(app, stage: stage + " " + label, doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+            let text = label == "explanation"
+                ? fresh.details.staticTexts["This device's saved prints remain available."].firstMatch
+                : fresh.details.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Unavailable Machines")).firstMatch
+            try revealDetailsText(text, details: fresh.details, title: fresh.title, app: app)
             try auditAccessibility(text, app: app, stage: stage + " details " + label, types: noncontrast)
         }
-        XCTAssertTrue(done.isHittable)
-        done.tap()
+        let finalDone = fresh.owner.buttons["offline-library-done"]
+        XCTAssertTrue(finalDone.isHittable)
+        finalDone.tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5))
         try revealPrint(tile, app: app)
         try auditSelect(app, stage: stage + " after details dismissal")
         try selectRetainedPrint(tile, app: app)
+    }
+
+    @MainActor private func reopenDetails(_ app: XCUIApplication, stage: String, doneHeight: CGFloat, titleHeight: CGFloat, explanationSize: CGSize) throws
+        -> (details: XCUIElement, title: XCUIElement, owner: XCUIElement) {
+        let previous = app.collectionViews["offline-library-details"].firstMatch
+        let done = app.buttons["offline-library-done"].firstMatch
+        XCTAssertTrue(done.exists && done.isHittable, "Each native sheet must dismiss through its visible Done")
+        done.tap()
+        XCTAssertTrue(previous.waitForNonExistence(timeout: 5))
+        let status = app.buttons["offline-library-status"]
+        XCTAssertTrue(status.exists && status.isHittable)
+        status.tap()
+        let details = app.collectionViews["offline-library-details"].firstMatch
+        let title = app.navigationBars["Saved Prints"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5))
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let owners = app.otherElements.containing(.collectionView, identifier: "offline-library-details")
+            .containing(.navigationBar, identifier: "Saved Prints")
+            .containing(.button, identifier: "offline-library-done").allElementsBoundByIndex
+        let owner = try XCTUnwrap(owners.last, "The fresh sheet must own its List, title and footer: \(app.debugDescription)")
+        let footer = owner.descendants(matching: .any)["offline-library-footer"].firstMatch
+        let freshDone = owner.buttons["offline-library-done"]
+        settle(freshDone)
+        XCTAssertFalse(owner.frame.isEmpty)
+        XCTAssertTrue(app.frame.contains(owner.frame))
+        XCTAssertTrue(owner.frame.contains(title.frame))
+        XCTAssertTrue(footer.exists)
+        XCTAssertTrue(owner.frame.contains(footer.frame))
+        XCTAssertTrue(footer.frame.contains(freshDone.frame))
+        XCTAssertTrue(app.frame.contains(freshDone.frame))
+        XCTAssertGreaterThanOrEqual(freshDone.frame.height, 44)
+        XCTAssertEqual(freshDone.frame.height, doneHeight, "Each presentation must restore the requested-size native action")
+        XCTAssertEqual(title.frame.height, titleHeight, "Each presentation must restore the requested-size native title")
+        XCTAssertTrue(freshDone.isHittable)
+        let explanation = details.staticTexts["This device's saved prints remain available."].firstMatch
+        try revealDetailsText(explanation, details: details, title: title, app: app)
+        XCTAssertEqual(explanation.frame.size, explanationSize,
+                       "The fresh text must restore the complete requested-size geometry before a private sweep")
+        attach(app, name: stage + " Fresh native details before private sweep")
+        return (details, title, owner)
     }
 
     @MainActor private func libraryViewport(_ app: XCUIApplication) -> CGRect {
@@ -283,7 +336,13 @@ final class LibraryLongPressTests: XCTestCase {
         _ = try XCTUnwrap(scope.exists && !scope.frame.isEmpty ? scope : nil,
                           "An owning-region audit requires its actual visible native element")
         try app.performAccessibilityAudit(for: types) { issue in
-            guard let element = issue.element else { return false }
+            guard let element = issue.element else {
+                let diagnostic = XCTAttachment(string: "\(stage): \(issue.compactDescription)\n\(issue.detailedDescription)\n\(app.debugDescription)")
+                diagnostic.name = stage + " Accessibility issue without element"
+                diagnostic.lifetime = .keepAlways; self.add(diagnostic)
+                self.attach(app, name: stage + " Accessibility issue without element")
+                return false
+            }
             let belongs = element.elementType == scope.elementType && element.label == scope.label && element.frame == scope.frame
                 || scope.descendants(matching: element.elementType)
                     .matching(NSPredicate(format: "label == %@", element.label)).allElementsBoundByIndex
