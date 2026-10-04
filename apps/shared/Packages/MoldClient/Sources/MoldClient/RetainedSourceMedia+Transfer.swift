@@ -121,7 +121,7 @@ public extension RetainedSourceMedia {
         }
         guard validTransferDigest(destination.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
         guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes,
-              destination.metadata == sourceMetadata else {
+              try mirrorRecipeMatches(destination.metadata, sourceMetadata) else {
             throw transferIncomplete("The copied print no longer matches its original. Try again.")
         }
         if destination.members.map(\.contentIdentity) == offer.members.map(\.contentIdentity) { return }
@@ -150,6 +150,22 @@ public extension RetainedSourceMedia {
         try await target.importRetainedMedia(
             Transfer(archiveIdentitySha256: destination.archiveIdentitySha256,
                      members: offer.members.map(\.contentIdentity), files: files), for: targetFilename)
+    }
+
+    /// Called only after exact output digest and size match. The archive adds
+    /// completion provenance after the file's recipe has been embedded; those
+    /// fields do not change the recipe or which retained inputs belong to it.
+    private static func mirrorRecipeMatches(_ destination: OutputMetadata?, _ source: OutputMetadata) throws -> Bool {
+        guard let destination else { return false }
+        func recipe(_ metadata: OutputMetadata) throws -> Data {
+            let encoded = try MoldJSON.encoder.encode(metadata)
+            guard var fields = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                throw MoldClientError.malformedResponse
+            }
+            for key in ["job_id", "generation_time_ms", "version"] { fields.removeValue(forKey: key) }
+            return try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+        }
+        return try recipe(destination) == recipe(source)
     }
 
     static func transferIncomplete(_ reason: String) -> MoldClientError {

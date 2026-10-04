@@ -657,3 +657,5 @@ outputs after the queue finishes; **Use These Settings** recalls retained source
 Trash preserves them, and permanent deletion releases only that output's reference.
 
 Before importing a library copy with retained source media, This Mac must advertise `retained_media_transfer.protocol_version: 1`. An unsupported destination is refused before creating a local output; source-free copies remain available.
+
+Library sync verifies identical output bytes and generation settings before attaching retained inputs. Archive-only job IDs, completion duration, and build-version annotations may differ from the embedded recipe without making an otherwise identical copy fail.
