@@ -95,28 +95,26 @@ final class LibraryLongPressTests: XCTestCase {
         // The native List and navigation bar are siblings. Select their
         // innermost actual common owner, not the dimmed Library behind it.
         let owners = app.otherElements.containing(.collectionView, identifier: "offline-library-details")
-            .containing(.navigationBar, identifier: "Saved Prints").allElementsBoundByIndex
-        let owner = try XCTUnwrap(owners.last, "The presented sheet must own its List and navigation bar: \(app.debugDescription)")
+            .containing(.navigationBar, identifier: "Saved Prints")
+            .containing(.button, identifier: "offline-library-done").allElementsBoundByIndex
+        let owner = try XCTUnwrap(owners.last, "The presented sheet must own its List, navigation bar and footer: \(app.debugDescription)")
         XCTAssertFalse(owner.frame.isEmpty)
-        let explanation = details.staticTexts["These machines aren't answering. You can keep browsing this device's saved prints."].firstMatch
+        let explanation = details.staticTexts["This device's saved prints remain available."].firstMatch
         let section = details.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Unavailable Machines")).firstMatch
-        for (text, label) in [(explanation, "explanation"), (section, "section heading")] {
+        // Pixel sampling always precedes the auditor's private size cycling,
+        // including samples of rows revealed later in this scrollable List.
+        attach(app, name: stage + " Full details sheet before contrast audit")
+        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: .contrast)
+        let information = [(explanation, "explanation"), (section, "section heading")]
+        for (text, label) in information {
             try revealDetailsText(text, details: details, title: title, app: app)
             try auditContrast(text, app: app, stage: stage + " details " + label)
-            try auditAccessibility(text, app: app, stage: stage + " details " + label,
-                                   types: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription])
         }
-        attach(app, name: stage + " Full details sheet before accessibility audit")
-        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: .contrast)
-        try auditAccessibility(owner, app: app, stage: stage + " details sheet",
-                               types: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription])
         XCTAssertEqual(Set(identities).count, names.count, "Duplicate names must keep distinct host identities")
         for (index, name) in names.enumerated() {
             let text = details.staticTexts["offline-library-host-" + identities[index]].firstMatch
             for _ in 0..<12 {
-                let viewport = details.frame.intersection(app.frame)
-                let visible = CGRect(x: viewport.minX, y: max(viewport.minY, title.frame.maxY),
-                                     width: viewport.width, height: max(0, viewport.maxY - max(viewport.minY, title.frame.maxY)))
+                let visible = detailsViewport(details, title: title, app: app)
                 if text.exists, visible.contains(text.frame) { break }
                 if !text.exists { details.swipeUp() }
                 else {
@@ -134,19 +132,32 @@ final class LibraryLongPressTests: XCTestCase {
             XCTAssertTrue(text.exists, "Every full unavailable machine name must be reachable: \(name)")
             XCTAssertEqual(text.label, name)
             settle(text)
-            let frame = details.frame.intersection(app.frame)
-            let top = max(frame.minY, title.frame.maxY)
-            let viewport = CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, frame.maxY - top))
+            let viewport = detailsViewport(details, title: title, app: app)
             XCTAssertTrue(viewport.contains(text.frame), "Full host name \(text.frame) must fit \(viewport)")
             try auditContrast(text, app: app, stage: stage + " name " + identities[index])
             attach(app, name: stage + " Full offline name " + identities[index])
         }
-        let done = title.buttons["Done"]
+        let done = owner.buttons["offline-library-done"]
         XCTAssertTrue(done.exists)
         XCTAssertTrue(app.frame.contains(done.frame))
-        XCTAssertTrue(title.frame.contains(done.frame))
+        let footer = app.descendants(matching: .any)["offline-library-footer"].firstMatch
+        XCTAssertTrue(footer.exists)
+        XCTAssertTrue(owner.frame.contains(footer.frame))
+        XCTAssertTrue(footer.frame.contains(done.frame))
+        XCTAssertGreaterThanOrEqual(done.frame.height, 44)
         XCTAssertTrue(done.isHittable)
         try auditContrast(done, app: app, stage: stage + " details Done")
+        let noncontrast: XCUIAccessibilityAuditType = [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription]
+        // Exercise Done before any other private sweep so unsupported native
+        // label scaling cannot be attributed to an earlier audit's state.
+        attach(app, name: stage + " Details before noncontrast gates")
+        try auditAccessibility(done, app: app, stage: stage + " details Done", types: noncontrast)
+        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: noncontrast)
+        for (text, label) in information {
+            try revealDetailsText(text, details: details, title: title, app: app)
+            try auditAccessibility(text, app: app, stage: stage + " details " + label, types: noncontrast)
+        }
+        XCTAssertTrue(done.isHittable)
         done.tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5))
         try revealPrint(tile, app: app)
@@ -286,11 +297,18 @@ final class LibraryLongPressTests: XCTestCase {
         }
     }
 
+    @MainActor private func detailsViewport(_ details: XCUIElement, title: XCUIElement, app: XCUIApplication) -> CGRect {
+        let frame = details.frame.intersection(app.frame)
+        let footer = app.descendants(matching: .any)["offline-library-footer"].firstMatch
+        XCTAssertTrue(footer.exists, "The details must have an opaque, unobstructed Done footer")
+        let top = max(frame.minY, title.frame.maxY)
+        let bottom = min(frame.maxY, footer.frame.minY)
+        return CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, bottom - top))
+    }
+
     @MainActor private func revealDetailsText(_ text: XCUIElement, details: XCUIElement,
                                             title: XCUIElement, app: XCUIApplication) throws {
-        let frame = details.frame.intersection(app.frame)
-        let top = max(frame.minY, title.frame.maxY)
-        let viewport = CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, frame.maxY - top))
+        let viewport = detailsViewport(details, title: title, app: app)
         for _ in 0..<12 {
             if text.exists, viewport.contains(text.frame) { break }
             if !text.exists { details.swipeDown(); continue }

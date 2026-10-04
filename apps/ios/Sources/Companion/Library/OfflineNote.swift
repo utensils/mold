@@ -41,24 +41,36 @@ struct OfflineNote: View {
                 NavigationStack {
                     List {
                         Section {
-                            Text("These machines aren't answering. You can keep browsing this device's saved prints.")
+                            Text("This device's saved prints remain available.")
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        Section("Unavailable Machines") {
+                        Section {
                             ForEach(library.offlineHosts) { host in
                                 Text(host.name).fixedSize(horizontal: false, vertical: true)
                                     .accessibilityIdentifier("offline-library-host-\(host.id)")
                             }
+                        } header: {
+                            Text("Unavailable Machines").foregroundStyle(.secondaryText)
                         }
                     }
                     .accessibilityIdentifier("offline-library-details")
                     .navigationTitle("Saved Prints")
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                     .toolbarBackground(.visible, for: .navigationBar)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { showsDetails = false }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        VStack {
+                            Button { showsDetails = false } label: {
+                                Text("Done").font(.body)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                            .prominentAction()
+                            .accessibilityIdentifier("offline-library-done")
                         }
+                        .padding(12)
+                        .background(Color(uiColor: .systemBackground))
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("offline-library-footer")
                     }
                 }
                 .presentationDetents([.large])

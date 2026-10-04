@@ -77,7 +77,7 @@ keeps its original filename and file type.
   tap the navigation title to change shelves; it stays readable as you scroll.
   Status notices reserve space above the grid so dates and prints stay visible.
   The offline notice shows a compact machine count; tap it for scrollable
-  details with every full machine name, including at large text sizes.
+  details with every full machine name and a pinned Done action, including at large text sizes.
   Decorative machine badges fit their tiles; full names remain in accessibility
   labels and Info.
   **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
