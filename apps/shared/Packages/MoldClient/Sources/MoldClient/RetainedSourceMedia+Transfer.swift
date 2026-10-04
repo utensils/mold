@@ -64,9 +64,16 @@ public extension RetainedSourceMedia {
         do { offer = try await origin.retainedMediaTransferOffer(for: filename) }
         catch let error as MoldClientError {
             guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
+            let inventory = try await origin.retainedSourceMedia(for: filename)
+            guard inventory.availability == .unavailableLegacy, !disclosable(metadata) else {
+                throw transferIncomplete("Update the source machine to copy this print’s retained media.")
+            }
             return nil
         }
         guard validTransferDigest(offer.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
+        if offer.members.isEmpty && (disclosable(metadata) || disclosable(offer.metadata)) {
+            throw transferIncomplete("The source machine no longer has this print’s original media.")
+        }
         if !offer.members.isEmpty {
             let capabilities = try await target.capabilities()
             guard capabilities.retainedMediaTransfer?.protocolVersion == 1 else {

@@ -33,6 +33,27 @@ struct LibraryLocalSaveTests {
         #expect(!library.localSaveFailures.isEmpty)
     }
 
+    @Test func unavailableDisclosedSourceDoesNotImportOutput() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("unavailable-source-remote")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        var object = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(versionedPrint("missing-source.png"))) as? [String: Any])
+        var metadata = try #require(object["metadata"] as? [String: Any])
+        metadata["source_image_sha256"] = "abc"
+        object["metadata"] = metadata
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: object))
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.saveLocally([LibraryEntry(host: remote, print: print)])
+        #expect(target.callCount("importPrint") == 0)
+        #expect(source.callCount("mediaFile") == 0)
+        #expect(!library.localSaveFailures.isEmpty)
+    }
+
     @Test func saveLocallyRetainsSourceMediaBeforeReportingSuccess() async {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
         let remote = host("retained-remote")

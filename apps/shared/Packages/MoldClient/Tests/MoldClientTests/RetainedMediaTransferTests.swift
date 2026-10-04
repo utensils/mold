@@ -40,6 +40,23 @@ struct RetainedMediaTransferTests {
         }
     }
 
+    @Test func unavailableSourceRefusesBeforeOutputImport() async throws {
+        let disclosed = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"source_image_sha256":"abc"}"#.utf8))
+        for legacy in [true, false] {
+            let source = FakeBackend(), target = FakeBackend()
+            if legacy {
+                source.stub("retainedMediaTransferOffer(for:)", throwing: MoldClientError.http(status: 404, code: nil, message: nil))
+                source.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy, members: []))
+            } else {
+                source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))
+            }
+            await #expect(throws: (any Error).self) {
+                _ = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: disclosed, from: source, to: target)
+            }
+            #expect(target.calls.isEmpty)
+        }
+    }
+
     @Test func sourceFreeOutputNeedsNoDurableDestination() async throws {
         let source = FakeBackend(), target = FakeBackend()
         source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))
