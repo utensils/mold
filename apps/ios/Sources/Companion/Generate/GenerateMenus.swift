@@ -9,15 +9,24 @@ struct ModelMenu: View {
 
     var body: some View {
         Button { choosing = true } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model").font(.caption).foregroundStyle(.secondaryText)
-                    Text(generate.model?.headline ?? generate.modelName ?? String(localized: "Choose a Model"))
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Model").foregroundStyle(.secondaryText)
+                    Spacer(minLength: 8)
+                    // a11y: decorative -- the button's label names its action.
+                    Image(systemName: "chevron.up.chevron.down").accessibilityHidden(true)
                 }
-                Spacer(minLength: 8)
-                // a11y: decorative -- the button's label names its action.
-                Image(systemName: "chevron.up.chevron.down").accessibilityHidden(true)
+                .font(.caption)
+                if let headline = generate.model?.headline {
+                    Text(headline).fixedSize(horizontal: false, vertical: true)
+                } else if let identity = generate.modelName {
+                    // An unavailable model supplies a technical identity,
+                    // like the identifier beneath a ModelChooser headline.
+                    Text(verbatim: identity).font(.caption.monospaced())
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Choose a Model").fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .contentShape(.rect)

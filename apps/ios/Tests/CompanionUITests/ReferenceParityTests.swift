@@ -104,6 +104,10 @@ final class ReferenceParityTests: XCTestCase {
         try choose(identity, in: app)
         // Cold launch with a saved, unavailable host exercises the full raw
         // identity fallback independently of another test's persisted fixture.
+        // Drafts are saved on backgrounding, not a force-kill. Exercise that
+        // real lifecycle so a fresh simulator has the selected identity.
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         machine.stop(); app.terminate()
         app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         app.launch(); XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
@@ -111,10 +115,12 @@ final class ReferenceParityTests: XCTestCase {
             ? app.scrollViews["phone-generate-form"] : app.descendants(matching: .any)["bottom-chrome"].firstMatch
         let chooser = app.buttons["choose-model"]
         XCTAssertTrue(chooser.waitForExistence(timeout: 5))
-        XCTAssertTrue(chooser.label.contains(identity), "The full unavailable identity stays accessible")
+        XCTAssertTrue(chooser.label.contains(identity), "The full unavailable identity stays accessible: \(chooser.label)")
         XCTAssertTrue(ShellAccessibilityTests.revealComposerControl(chooser, composer: composer, app: app),
                       "Model frame \(chooser.frame) must fit \(ShellAccessibilityTests.composerViewport(composer, in: app))")
         XCTAssertTrue(chooser.isHittable)
+        let geometry = XCTAttachment(string: "Model \(chooser.frame); viewport \(ShellAccessibilityTests.composerViewport(composer, in: app)); full label \(chooser.label)")
+        geometry.name = "Unavailable Model successful geometry at AX5"; geometry.lifetime = .keepAlways; add(geometry)
         let pixels = XCTAttachment(screenshot: app.screenshot()); pixels.name = "Unavailable full Model identity at AX5"; pixels.lifetime = .keepAlways; add(pixels)
         chooser.tap()
         XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
