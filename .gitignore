@@ -140,3 +140,7 @@ apps/shared/**/build/
 
 # Native widget notification branding asset
 !apps/ios/Sources/Widgets/Resources/Assets.xcassets/MoldLogo.imageset/MoldLogo.png
+
+# Tiny native media decoder regression fixtures.
+!apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-video.mp4
+!apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-hevc.mp4
