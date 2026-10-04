@@ -221,6 +221,38 @@ struct RetainedMediaTransferTests {
         #expect(target.count("importRetainedMedia(_:for:)") == 0)
     }
 
+    @Test func mirrorAllowsArchiveBookkeepingButRejectsRecipeChanges() async throws {
+        // A source output embeds the release version, while its archive
+        // adds build provenance and completion bookkeeping after publication.
+        let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"test","seed":42,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"source-job","generation_time_ms":8516}"#.utf8))
+        for changedRecipe in [false, true] {
+            let embedded = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{\"prompt\":\"test\",\"seed\":\(changedRecipe ? 43 : 42),\"version\":\"0.32.0\"}".utf8))
+            let source = FakeBackend(), target = FakeBackend()
+            let original = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+            source.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: original.archiveIdentitySha256,
+                    members: original.members, outputSha256: original.outputSha256,
+                    outputSizeBytes: original.outputSizeBytes, metadata: archived))
+            target.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64), members: [],
+                    outputSha256: original.outputSha256, outputSizeBytes: original.outputSizeBytes, metadata: embedded))
+            source.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+            target.stub("importRetainedMedia(_:for:)", returning: ())
+            if changedRecipe {
+                await #expect(throws: (any Error).self) {
+                    try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: archived,
+                        from: source, to: target, as: "copy.png")
+                }
+                #expect(target.count("importRetainedMedia(_:for:)") == 0)
+                #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+            } else {
+                try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: archived,
+                    from: source, to: target, as: "copy.png")
+                #expect(target.count("importRetainedMedia(_:for:)") == 1)
+            }
+        }
+    }
+
     @Test func duplicateSlotsAreRejectedBeforeFetchingAnyPayload() async throws {
         let source = FakeBackend(), target = FakeBackend()
         source.stub("retainedMediaTransferOffer(for:)", returning:
