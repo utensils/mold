@@ -154,3 +154,5 @@ owner-local synthetic encrypted set, without reusing a generation job's authorit
 Native Mac and Tauri desktop copy completion includes this handoff, including
 cache, automatic mirrors and existing-file repair paths; capture source archive identity before output download, then verify source
 identity and destination output digest/recipe before attaching inputs.
+
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine. Destination queue-durability support alone does not prove an older server implements the transfer receiver.

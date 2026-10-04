@@ -68,6 +68,8 @@ machine that cannot transfer retained inputs explains that the copy is incomplet
 Sibling copied outputs share one retained encrypted payload. Each surviving
 library output keeps its source independently of the original machine's output.
 
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
+
 A print lives on the machine that made it, and Quick Look, sharing, saving and
 dragging one to the Finder all need a real file here. They share one cache,
 keyed on `(machine, filename, media_version)` — the same `media_version` the

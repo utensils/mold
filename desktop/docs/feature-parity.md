@@ -487,3 +487,5 @@ first setup. This foundation retains the existing Images and Styles workflows;
 further visual refinements and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
 intentionally absent.
+
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.

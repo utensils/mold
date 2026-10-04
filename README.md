@@ -283,7 +283,8 @@ permanently. Retained sources survive queue cleanup and remain available while
 any referencing library output exists, including in the trash. Matching retained
 input sets from newly completed jobs share storage while keeping per-job
 provenance. Native Mac and
-desktop library copies also retain those sources on the destination machine.
+desktop library copies also retain those sources on supported destinations.
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 To install Mold's Agent Skill for supported coding agents,
 run:
 

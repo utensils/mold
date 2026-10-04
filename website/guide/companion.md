@@ -196,3 +196,5 @@ Retained queue sources are also visible in the native Mac, web, desktop and Taur
 mobile queues, regardless of the submitting device. Library outputs retain their
 source media after queue cleanup; trash preserves those references, and deleting
 one output permanently does not remove sources still used by another output.
+
+Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
