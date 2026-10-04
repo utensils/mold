@@ -507,6 +507,10 @@ class VisualCaptureContract(unittest.TestCase):
                 "testdata" in parts
                 or parts[:2] == ("tests", "fixtures")
                 or path == "apps/ios/Tests/Fixtures/playback-tone.mp4"
+                or path in {
+                    "apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-video.mp4",
+                    "apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-hevc.mp4",
+                }
             )
             if not in_fixture_root:
                 return False

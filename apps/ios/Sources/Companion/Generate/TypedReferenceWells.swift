@@ -41,7 +41,7 @@ struct TypedReferenceWells: View {
                             }
                             if generate.draft.media.generationReferences.count < cap.maxCount {
                                 if cap.kinds.contains("image"), count("image") < cap.maxImages {
-                                    Well(title: "Add reference image", image: nil, side: side, accepting: PictureImport.identityReadable,
+                                    Well(title: "Add image", image: nil, side: side, accepting: PictureImport.identityReadable,
                                          set: { attachImage($0) }, clear: {})
                                 }
                                 if cap.kinds.contains("video") || cap.kinds.contains("audio") {
@@ -51,6 +51,7 @@ struct TypedReferenceWells: View {
                             }
                         }
                     }
+                    .accessibilityIdentifier("generation-references")
                     Text("\(generate.draft.media.generationReferences.count) of \(cap.maxCount) references")
                         .font(.caption).foregroundStyle(.secondaryText)
                 }

@@ -163,8 +163,8 @@ final class GenerateController {
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
         if draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
-           !retainedReuse.probing, retainedReuse.snapshot() == nil {
-            return retainedReuse.notice ?? "Reattach this print's reference media before generating."
+           !retainedReuse.probing, !retainedReuse.canHydrateReferences(draft.media.generationReferences) {
+            return String(localized: "Reattach this print’s reference media before generating.")
         }
         if retainedReuse.probing { return String(localized: "Restoring the print’s source media…") }
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }

@@ -57,7 +57,7 @@ final class FixtureMachine: @unchecked Sendable {
         models = try JSONSerialization.data(withJSONObject: names.map { name -> [String: Any] in
             let row = profiles.first { ($0["models"] as! [[String: Any]]).contains { $0["model"] as? String == name } }!
             return ["name": name, "family": (row["models"] as! [[String: Any]]).first { $0["model"] as? String == name }?["family"] ?? "unknown",
-                    "description": name, "downloaded": !(queueFixture && name.hasPrefix("flux")), "display_name": name.hasPrefix("flux") ? "FLUX.1 Dev Q4" : "LTX-2.5 Distilled BF16", "hf_repo": name.hasPrefix("flux") ? "black-forest-labs/FLUX.1-dev" : "Lightricks/LTX-2.5", "generation_profile": row["profile"]!]
+                    "description": name, "downloaded": !(queueFixture && name.hasPrefix("flux")), "display_name": referenceFixture ? name : name.hasPrefix("flux") ? "FLUX.1 Dev Q4" : "LTX-2.5 Distilled BF16", "hf_repo": name.hasPrefix("flux") ? "black-forest-labs/FLUX.1-dev" : "Lightricks/LTX-2.5", "generation_profile": row["profile"]!]
         })
         gallery = try JSONSerialization.data(withJSONObject: (0..<galleryPrints).map { index in
             ["filename": "fixture-\(index).\(mixedMedia ? ["png", "mp4", "glb"][index % 3] : "png")", "timestamp": 1_790_000_000 - index,

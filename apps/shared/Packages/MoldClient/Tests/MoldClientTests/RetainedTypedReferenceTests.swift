@@ -24,6 +24,20 @@ import Testing
         #expect(result.references?.allSatisfy { $0.media.authority == "inline" } == true)
         #expect(RetainedSourceMedia.members(members, forHydrating: result).isEmpty)
     }
+    @Test func retainedDescriptorReuseRequiresUnchangedOrderAndMatchingArchive() {
+        let refs = [descriptor(Data([1]), name: "First"), descriptor(Data([2]), name: "Second")]
+        let members = [RetainedSourceMedia.Member(memberId: "a", role: "references", displayName: "A", sizeBytes: 1),
+                       RetainedSourceMedia.Member(memberId: "b", role: "references", displayName: "B", sizeBytes: 1)]
+        #expect(RetainedReferenceGuard.canHydrate(references: refs, original: refs, members: members))
+        #expect(!RetainedReferenceGuard.canHydrate(references: refs, original: refs, members: []))
+        #expect(!RetainedReferenceGuard.canHydrate(references: refs, original: refs, members: [
+            .init(memberId: "a", role: "source_image", displayName: "A", sizeBytes: 1)]))
+        #expect(!RetainedReferenceGuard.canHydrate(references: [refs[0]], original: refs, members: members))
+        #expect(!RetainedReferenceGuard.canHydrate(references: refs.reversed(), original: refs, members: members))
+        var mixed = refs; mixed[0].media = .init(authority: "inline", data: "AQ==")
+        #expect(!RetainedReferenceGuard.canHydrate(references: mixed, original: refs, members: members))
+        #expect(!RetainedReferenceGuard.canHydrate(references: refs, original: refs, members: [members[0]]))
+    }
     @Test func mismatchedCountAndContentAndNewUserInputsAreNeverOverwritten() throws {
         let a = Data([1]), member = RetainedSourceMedia.Member(memberId: "a", role: "references", displayName: "A", sizeBytes: 1)
         var request = request()

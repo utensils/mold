@@ -44,9 +44,12 @@ struct Well: View {
             } label: {
                 face
             }
-            .accessibilityLabel(image == nil ? String(localized: "\(title), empty") : title)
-            Text(title).font(.caption).foregroundStyle(.secondaryText).lineLimit(2)
+            .accessibilityLabel(image == nil ? String(localized: "\(title), empty")
+                : number.map { String(localized: "Reference \($0), \(title)") } ?? title)
+            Text(title).font(.caption).foregroundStyle(.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
                 .multilineTextAlignment(.center).frame(maxWidth: side)
+                .accessibilityHidden(true) // The menu speaks the full name and ordinal.
             if let problem { Text(problem).font(.caption2).foregroundStyle(.red).frame(maxWidth: side * 1.6) }
         }
         // iPad: a picture dragged from Photos, Files or the Library grid.
@@ -87,7 +90,7 @@ struct Well: View {
                 Image(systemName: "plus").font(.title3).foregroundStyle(.secondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true)
             }
-            if let number, image != nil { Badge(text: "\(number)", mono: true) }
+            if let number, image != nil { Badge(text: "\(number)", mono: true).accessibilityHidden(true) }
         }
         .frame(width: side, height: side)
     }

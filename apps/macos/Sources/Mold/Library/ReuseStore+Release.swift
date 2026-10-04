@@ -34,8 +34,11 @@ extension ReuseStore {
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
-        guard draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
-              pending(for: draft) == nil else { return nil }
+        let references = draft.media.generationReferences
+        guard references.contains(where: { $0.media.authority == "descriptor" }) else { return nil }
+        if RetainedReferenceGuard.canHydrate(references: references,
+            original: restored?.media.generationReferences ?? [],
+            members: pending(for: draft)?.members ?? []) { return nil }
         return "The retained references are unavailable. Replace or remove them before generating."
     }
 

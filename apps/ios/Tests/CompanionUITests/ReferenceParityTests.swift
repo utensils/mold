@@ -24,14 +24,24 @@ final class ReferenceParityTests: XCTestCase {
         app.launch()
         try addMachine(app, port: port)
         try choose("minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", in: app)
-        let prompt = app.textViews["generation-prompt"]
+        let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
         reveal(prompt, app: app); prompt.tap(); prompt.typeText("A scene using image 1 and image 2")
-        app.buttons["Hide keyboard"].firstMatch.exists ? app.buttons["Hide keyboard"].firstMatch.tap() : app.tap()
-        try pickLibrary("Add reference image, empty", image: 0, app: app)
-        try pickLibrary("Add reference image, empty", image: 1, app: app)
+        let done = app.toolbars.buttons["Done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+        done.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        try pickLibrary("Add image, empty", image: 0, app: app)
+        try pickLibrary("Add image, empty", image: 1, app: app)
         let order = app.buttons["Order reference 2"]
-        reveal(order, app: app); XCTAssertTrue(order.exists); order.tap()
-        app.buttons["Move earlier"].firstMatch.tap()
+        reveal(order, app: app); XCTAssertTrue(order.exists)
+        let earlier = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Move earlier'")).firstMatch
+        // Library dismissal and attachment decoding can replace the menu node.
+        for _ in 0..<3 {
+            order.tap()
+            if earlier.waitForExistence(timeout: 2) { break }
+        }
+        XCTAssertTrue(earlier.exists, app.debugDescription)
+        earlier.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let reference = app.buttons["Order reference 1"]
         reveal(reference, app: app)
         try app.performAccessibilityAudit(for: .contrast) { issue in
@@ -45,6 +55,9 @@ final class ReferenceParityTests: XCTestCase {
             return true
         }
         try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription]) { issue in
+            // Match ShellAccessibilityTests' narrow exemption: XCUITest reports
+            // hidden caption2 tile badges although the well speaks their ordinal.
+            if issue.auditType == .dynamicType, issue.element?.identifier == "tile-badge" { return true }
             XCTFail("Populated references at \(size): \(issue.compactDescription), \(issue.element?.label ?? "unnamed")")
             return true
         }
@@ -103,8 +116,7 @@ final class ReferenceParityTests: XCTestCase {
         let kind = sheet.buttons.matching(NSPredicate(format: "label IN %@", ["Still picture", "Short clip", "3-D object"])).firstMatch
         XCTAssertTrue(kind.waitForExistence(timeout: 5), app.debugDescription)
         if kind.label != title {
-            let actualMenu = kind.buttons.firstMatch
-            if actualMenu.exists { actualMenu.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() } else { kind.tap() }
+            tapMenu(kind)
             let nested = app.popUpButtons.matching(NSPredicate(format: "label BEGINSWITH 'Kind'")).firstMatch
             if nested.waitForExistence(timeout: 2) { nested.tap() }
             let entry = app.buttons.matching(NSPredicate(format: "label == %@", title)).allElementsBoundByIndex.last { $0.isHittable }
@@ -122,7 +134,22 @@ final class ReferenceParityTests: XCTestCase {
         XCTAssertTrue(tile.waitForExistence(timeout: 10)); tile.tap()
         XCTAssertTrue(app.navigationBars["Choose from Library"].waitForNonExistence(timeout: 10))
     }
+    @MainActor private func tapMenu(_ element: XCUIElement) {
+        // SwiftUI List's wrapping button includes blank row space outside Menu's label.
+        let target = element.descendants(matching: .button).allElementsBoundByIndex
+            .filter { !$0.frame.isEmpty }.min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height } ?? element
+        target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
     @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication) {
-        for _ in 0..<10 where !element.isHittable { app.swipeUp() }
+        for _ in 0..<10 {
+            let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : app.frame.minY
+            let bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
+            if element.exists, element.isHittable, element.frame.minY >= top, element.frame.maxY <= bottom { return }
+            if element.exists, element.frame.minX >= app.frame.maxX {
+                app.scrollViews["generation-references"].swipeLeft()
+            } else if element.exists, element.frame.maxX <= app.frame.minX {
+                app.scrollViews["generation-references"].swipeRight()
+            } else if element.exists, element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
+        }
     }
 }
