@@ -180,9 +180,51 @@ final class ReferenceParityTests: XCTestCase {
             let option = try XCTUnwrap(entry, app.debugDescription)
             option.tap()
         }
-        let row = app.buttons["model-" + model]
-        for _ in 0..<10 where !row.exists || !row.isHittable { app.swipeUp() }
-        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        let search = sheet.searchFields.firstMatch
+        let searchField = try XCTUnwrap(search.waitForExistence(timeout: 5) ? search : nil,
+                                       "Model chooser must expose its native search field")
+        searchField.tap()
+        if let value = searchField.value as? String, !value.isEmpty, value != searchField.placeholderValue {
+            searchField.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        }
+        searchField.typeText(model + "\n")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
+                      "Native Search submission must dismiss its keyboard")
+        let list = sheet.collectionViews.firstMatch
+        let ownedList = try XCTUnwrap(list.waitForExistence(timeout: 5) ? list : nil,
+                                      "Model chooser must own its native List: \(app.debugDescription)")
+        let row = sheet.buttons["model-" + model]
+        for _ in 0..<10 where !row.exists || !row.isHittable {
+            let frame = ownedList.frame.intersection(sheet.frame).intersection(app.frame)
+            var top = max(frame.minY, app.navigationBars["Choose a Model"].frame.maxY) + 8
+            var bottom = frame.maxY - 8
+            let overlays = [app.buttons["model-chooser-close"]] + sheet.searchFields.allElementsBoundByIndex
+            for overlay in overlays where overlay.exists {
+                let covered = overlay.frame.intersection(frame)
+                guard !covered.isNull, !covered.isEmpty else { continue }
+                if covered.midY < frame.midY { top = max(top, covered.maxY + 8) }
+                else { bottom = min(bottom, covered.minY - 8) }
+            }
+            guard bottom > top + 60 else {
+                _ = try XCTUnwrap(Optional<XCUIElement>.none,
+                                  "Chooser List has no unobstructed pan interval: \(frame), \(top)...\(bottom)")
+                return
+            }
+            let distance = (bottom - top) * 0.4
+            let midpoint = (top + bottom) / 2
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = frame.minX + frame.width * 0.03
+            origin.withOffset(CGVector(dx: x, dy: midpoint + distance / 2))
+                .press(forDuration: 0.1, thenDragTo: origin.withOffset(
+                    CGVector(dx: x, dy: midpoint - distance / 2)),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        if !row.exists || !row.isHittable {
+            let pixels = XCTAttachment(screenshot: app.screenshot()); pixels.name = "Model chooser discovery failure"; pixels.lifetime = .keepAlways; add(pixels)
+        }
+        let target = try XCTUnwrap(row.exists && row.isHittable ? row : nil,
+                                  "Model row must exist and be hittable: \(model); \(app.debugDescription)")
+        target.tap()
     }
     @MainActor private func pickLibrary(_ label: String, image: Int, app: XCUIApplication) throws {
         let well = app.buttons[label]; reveal(well, app: app); XCTAssertTrue(well.exists); well.tap()
@@ -216,22 +258,11 @@ final class ReferenceParityTests: XCTestCase {
         }
     }
     @MainActor private func centerForAudit(_ scope: XCUIElement, app: XCUIApplication) throws {
-        reveal(scope, app: app)
         let scroll = form(in: app)
-        guard scroll.exists else { return }
-        let top = max(app.navigationBars.firstMatch.frame.maxY + 64, scroll.frame.minY)
-        let bottom = min(app.buttons["submit-generation"].frame.minY - 24, scroll.frame.maxY)
-        let center = (top + bottom) / 2
-        for _ in 0..<8 {
-            let delta = center - scope.frame.midY
-            if abs(delta) <= 20 { break }
-            let travel = (delta < 0 ? -1.0 : 1.0) * max(40, min(200, abs(delta)))
-            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5))
-            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: travel)),
-                        withVelocity: .slow, thenHoldForDuration: 0.3)
-        }
-        XCTAssertGreaterThanOrEqual(scope.frame.minY, app.navigationBars.firstMatch.frame.maxY)
-        XCTAssertLessThanOrEqual(scope.frame.maxY, app.buttons["submit-generation"].frame.minY)
+        XCTAssertTrue(scroll.exists, "References must belong to the generation form")
+        XCTAssertTrue(ShellAccessibilityTests.revealComposerControl(scope, composer: scroll, app: app),
+                      "Complete reference audit region must fit the unobstructed composer: \(scope.frame)")
+        XCTAssertTrue(ShellAccessibilityTests.composerViewport(scroll, in: app).contains(scope.frame))
     }
     @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication, geometryOnly: Bool = false) {
         for _ in 0..<10 {
