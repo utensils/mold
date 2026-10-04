@@ -47,8 +47,8 @@ struct Well: View {
             .accessibilityLabel(image == nil ? String(localized: "\(title), empty")
                 : number.map { String(localized: "Reference \($0), \(title)") } ?? title)
             Text(title).font(.caption).foregroundStyle(.secondaryText)
+                .multilineTextAlignment(.center).frame(width: side)
                 .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.center).frame(maxWidth: side)
                 .accessibilityHidden(true) // The menu speaks the full name and ordinal.
             if let problem { Text(problem).font(.caption2).foregroundStyle(.red).frame(maxWidth: side * 1.6) }
         }

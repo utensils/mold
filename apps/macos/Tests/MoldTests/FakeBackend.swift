@@ -766,6 +766,20 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// first ran straight through. Off by default.
     nonisolated(unsafe) var queueYields = false
 
+    nonisolated(unsafe) var queueThumbnailBytes: Data?
+    nonisolated(unsafe) var queueThumbnailPending = false
+    nonisolated(unsafe) var queueThumbnailReturned = false
+    func queueInputThumbnail(id: String) async throws -> Data {
+        try record("queueInputThumbnail")
+        while queueThumbnailPending {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
+        queueThumbnailReturned = true
+        guard let queueThumbnailBytes else { throw notPlanted() }
+        return queueThumbnailBytes
+    }
+
     func queue() async throws -> QueueListing {
         try record("queue")
         if queueYields { await Task.yield() }

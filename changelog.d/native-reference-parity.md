@@ -1,1 +1,2 @@
 - **Native reference parity.** Mold Studio on iOS and macOS now authors ordered MiniMax H3 image/video/audio references, Hunyuan3D named camera views, and Wan/MiniMax first/last frames. Reference ordering, pixel budgets, retained-source reuse, upload sessions and placement redaction share one tested contract; iOS also honors still-reference source relations, formats, weight and canvas updates.
+- **macOS Queue layout.** Source thumbnails reserve their image and caption space while loading, preventing clipped or overlapping rows. Jobs without a retained source remain compact.

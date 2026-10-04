@@ -55,7 +55,9 @@ for Macs that cannot run macOS 26, and remains the default desktop app on
   collection itself and Recently Deleted remain accessible. Context menus keep
   their rows stable while background transfer status changes.
 - **Queue** — every machine's work live from its event stream: reorder,
-  pause, resume, cancel, and move held jobs between machines.
+  pause, resume, cancel, and move held jobs between machines. Source thumbnails
+  reserve their image and caption space while loading; jobs without retained
+  source media remain compact.
 - **Models** — installed models grouped by family, catalog discovery, and
   downloads with gated-licence acceptance in place.
 - **Machines** — the fleet at a glance, per-GPU memory and load, nearby

@@ -25,7 +25,13 @@ final class ReferenceParityTests: XCTestCase {
         try addMachine(app, port: port)
         try choose("minimax-h3-ref2va:comfy-pruned-int8-turbo-4step", in: app)
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch
-        reveal(prompt, app: app); prompt.tap(); prompt.typeText("A scene using image 1 and image 2")
+        reveal(prompt, app: app); prompt.tap()
+        let text = "A scene using image 1 and image 2"
+        if let value = prompt.value as? String, !value.isEmpty, value != prompt.placeholderValue {
+            prompt.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        }
+        prompt.typeText(text)
+        XCTAssertEqual(prompt.value as? String, text, "Each run replaces the persisted prompt")
         let done = app.toolbars.buttons["Done"].firstMatch
         XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
         done.tap()
@@ -33,11 +39,14 @@ final class ReferenceParityTests: XCTestCase {
         try pickLibrary("Add image, empty", image: 0, app: app)
         try pickLibrary("Add image, empty", image: 1, app: app)
         let order = app.buttons["Order reference 2"]
-        reveal(order, app: app); XCTAssertTrue(order.exists)
+        reveal(order, app: app, geometryOnly: true); XCTAssertTrue(order.exists)
         let earlier = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Move earlier'")).firstMatch
         // Library dismissal and attachment decoding can replace the menu node.
         for _ in 0..<3 {
-            order.tap()
+            let title = order.staticTexts["Order"].firstMatch
+            let anchor = title.exists ? title : order
+            reveal(anchor, app: app, geometryOnly: true)
+            anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             if earlier.waitForExistence(timeout: 2) { break }
         }
         XCTAssertTrue(earlier.exists, app.debugDescription)
@@ -50,6 +59,11 @@ final class ReferenceParityTests: XCTestCase {
         try auditContrast(guidance, app: app, size: size)
         try centerForAudit(references, app: app)
         try auditContrast(references, app: app, size: size)
+        let label = app.buttons["Order reference 1"].staticTexts["Order"].firstMatch
+        XCTAssertTrue(label.exists, app.debugDescription)
+        XCTAssertTrue(references.frame.contains(label.frame), "Order label \(label.frame) must fit reference row \(references.frame)")
+        let count = app.staticTexts["2 of 12 references"].firstMatch
+        XCTAssertGreaterThanOrEqual(count.frame.minY, label.frame.maxY, "Count must not overlap Order")
         let settled = XCTAttachment(screenshot: app.screenshot()); settled.name = "Audited MiniMax reference row \(size)"; settled.lifetime = .keepAlways; add(settled)
         try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription]) { issue in
             // Match ShellAccessibilityTests' narrow exemption: XCUITest reports
@@ -105,7 +119,15 @@ final class ReferenceParityTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
     }
     @MainActor private func choose(_ model: String, in app: XCUIApplication) throws {
-        let chooser = app.buttons["choose-model"]; reveal(chooser, app: app); chooser.tap()
+        if app.keyboards.firstMatch.exists, app.toolbars.buttons["Done"].firstMatch.exists {
+            app.toolbars.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        }
+        let chooser = app.buttons["choose-model"]
+        let heading = chooser.staticTexts["Model"].firstMatch
+        reveal(heading.exists ? heading : chooser, app: app)
+        if heading.exists { heading.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        else { tapMenu(chooser) }
         let sheet = app.otherElements["model-chooser"].firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
         let title = model.hasPrefix("hunyuan") ? "3-D object" : (model.hasPrefix("minimax") || model.hasPrefix("wan")) ? "Short clip" : "Still picture"
@@ -172,13 +194,13 @@ final class ReferenceParityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(scope.frame.minY, app.navigationBars.firstMatch.frame.maxY)
         XCTAssertLessThanOrEqual(scope.frame.maxY, app.buttons["submit-generation"].frame.minY)
     }
-    @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication) {
+    @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication, geometryOnly: Bool = false) {
         for _ in 0..<10 {
             let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : app.frame.minY
             var bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
             let submit = app.buttons["submit-generation"]
             if element.identifier != "submit-generation", submit.exists { bottom = min(bottom, submit.frame.minY) }
-            if element.exists, (element.elementType == .scrollView || element.isHittable), element.frame.minY >= top, element.frame.maxY <= bottom { return }
+            if element.exists, (geometryOnly || element.elementType == .scrollView || element.isHittable), element.frame.minY >= top, element.frame.maxY <= bottom { return }
             if element.exists, element.frame.minX >= app.frame.maxX {
                 app.scrollViews["generation-references"].swipeLeft()
             } else if element.exists, element.frame.maxX <= app.frame.minX {

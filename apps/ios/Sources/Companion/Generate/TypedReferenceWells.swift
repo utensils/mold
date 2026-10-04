@@ -90,8 +90,10 @@ struct TypedReferenceWells: View {
                 Button("Move later") { generate.draft.media.moveGenerationReference(from: index, to: index + 1) }
                     .disabled(index + 1 == generate.draft.media.generationReferences.count)
             } label: {
-                Text("Order").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-            }.accessibilityLabel("Order reference \(index + 1)")
+                Text("Order").font(.caption).fixedSize(horizontal: false, vertical: true)
+                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            }
+            .accessibilityLabel("Order reference \(index + 1)")
         }
     }
 
