@@ -882,7 +882,7 @@ for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*
 suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
 assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
 assert len(suites) == 2 and set(re.findall(r'          - name: (\w+)', native)) == {'app', 'library'}
-assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests']
+assert suites[0].split() == ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ReferenceParityTests', 'ShellAccessibilityTests']
 check, audit = native.split('\n  audit:\n', 1)
 assert 'needs: changes' in audit
 assert "always() && !cancelled() &&" in audit

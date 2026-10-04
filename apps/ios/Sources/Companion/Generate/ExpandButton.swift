@@ -45,10 +45,15 @@ struct ExpandButton: View {
         guard let host = generate.target else { return }
         working = true
         defer { working = false }
-        let request = ExpandRequest(prompt: generate.draft.prompt, modelFamily: generate.model?.family ?? "",
-                                    variations: variations, task: nil)
+        let snapshot = generate.draft
+        let model = generate.modelName ?? ""
+        let generation = RenderRequest.one(snapshot, model: model)
+        var request = ExpandRequest(prompt: snapshot.prompt, modelFamily: generate.model?.family ?? "",
+                                    variations: variations, task: ExpandTask.forRequest(family: generate.model?.family, request: generation))
+        request.context = ExpandContext(request: generation)
         do {
             let answer = try await hosts.backend(for: host).expand(request)
+            guard generate.draft == snapshot, generate.modelName == model, generate.target?.id == host.id else { return }
             if variations == 1, let first = answer.expanded.first {
                 original = generate.draft.prompt
                 generate.draft.prompt = first

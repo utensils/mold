@@ -26,6 +26,7 @@ public extension GenerateRequest {
     func redactedForPlacement() -> GenerateRequest {
         var redacted = self
         redacted.prompt = ""
+        redacted.references = references?.map { $0.redactedForPlacement() }
         redacted.negativePrompt = Self.blanked(negativePrompt)
         redacted.originalPrompt = Self.blanked(originalPrompt)
         redacted.sourceImage = Self.blanked(sourceImage)
@@ -41,7 +42,7 @@ public extension GenerateRequest {
         redacted.idImageNames = idImageNames.map { $0.map { _ in "" } }
         redacted.editImages = editImages.map { $0.map { _ in "" } }
         redacted.keyframes = keyframes?.map {
-            KeyframeCondition(frame: $0.frame, image: "", name: $0.name)
+            KeyframeCondition(frame: $0.frame, image: "", name: nil)
         }
         // Filing is DELETED. The title is the SAME class of user-authored
         // filing text as the tags it composes into ("Client X, unannounced"),

@@ -11,13 +11,25 @@ import Foundation
 public extension HTTPBackend {
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
         if let refusal = admission.retainedMediaBatchRefusal { throw refusal }
-        return try await post(
-            "/api/generation-batches", body: admission,
-            // The reuse handle is a credential and rides a header, so it can
-            // never end up in a persisted body or a log line.
-            headers: admission.retainedMediaSession.map {
-                [RetainedSourceMedia.sessionHeader: $0]
-            } ?? [:])
+        return try await submitWithReferenceUploads(admission)
+    }
+
+    internal func postAdmission(_ admission: BatchAdmission) async throws -> BatchStatus {
+        var request = try body("/api/generation-batches", method: "POST", admission)
+        if let handle = admission.retainedMediaSession {
+            request.setValue(handle, forHTTPHeaderField: RetainedSourceMedia.sessionHeader)
+        }
+        guard (request.httpBody?.count ?? 0) <= RequestBodyLimit.bytes else {
+            throw ReferenceUploadPolicy.refusal("REFERENCE_REQUEST_TOO_LARGE", "The reference batch exceeds the host's request limit. Make fewer copies at a time.")
+        }
+        // Scoped upload and retained credentials must never travel in a redirected POST.
+        let containsHandles = admission.retainedMediaSession != nil || admission.requests.contains {
+            $0.references?.contains { $0.media.authority == "upload" } == true
+        }
+        let data: Data
+        if containsHandles { data = try await referenceUploadBytes(request) }
+        else { data = try await bytes(for: request) }
+        return try decoded(BatchStatus.self, from: data, route: "/api/generation-batches")
     }
 
     func batchStatus(id: String) async throws -> BatchStatus {

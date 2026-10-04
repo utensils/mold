@@ -18,7 +18,7 @@ struct MoreOptionsSheet: View {
                     }
                     SamplerSection(recipe: recipe)
                     SourceFitSection(recipe: recipe)
-                    if generate.draft.media.sourceImage != nil, recipe.capabilities.supportsStrength != false {
+                    if generate.draft.media.requestConditioning.carriesSource, generate.draft.media.sourceImage != nil, recipe.capabilities.supportsStrength != false {
                         Section {
                             LabeledSlider(title: String(localized: "How much to change it"),
                                           value: $generate.draft.strength, range: 0.05 ... 1, step: 0.05)

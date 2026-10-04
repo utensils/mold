@@ -359,3 +359,5 @@ in anonymous route proofs. Plain HTTP still requires a trusted network.
 Native iOS queue cards use concise curated model names and open full job details
 on tap, with state-aware per-job controls. Generate exposes searchable per-machine
 Prompt History with prompt-only recall.
+
+Native iOS and macOS generation controls support ordered MiniMax H3 image/video/audio references, Hunyuan3D named views, and Wan/MiniMax boundary frames. See the [native reference parity audit](docs/plans/native-reference-parity.md) and native app guides for limits and media formats.

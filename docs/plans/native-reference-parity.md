@@ -1,0 +1,52 @@
+# Native reference parity
+
+## Scope and findings
+
+Audit the shared Swift request/draft/placement/reuse path and native iOS/macOS authoring against server admission and the Studio reference controls. MiniMax H3 Ref2VA uses ordered typed `references`, not `edit_images`; neither native app models it. Hunyuan3D named multiview references likewise lack authoring. Still references exist, but iOS does not implement recipe-aware source layouts, reorder controls, accepted reference formats, reference strength, or canvas updates on replace/remove. macOS's unbounded horizontal strip needs scrolling. Wan exposes arbitrary keyframes despite accepting only a first/last pair; MiniMax FL2VA closing-frame authoring is absent. Texture-only and durable mesh workflows remain API/CLI-only per mesh-3d.md; they are documented scope boundaries, not silently exposed generation inputs.
+
+## Implementation
+
+1. Add an additive recipe capability for typed H3 references, derived from the existing task/validation authority and limits, with tests and generated contract refresh. Read existing mesh named-view capability in Swift. Hide unsupported/unknown reference kinds rather than guessing; no model-name allowlists in UI.
+2. Introduce shared typed reference request, draft, import, validation and parking contracts. Preserve ordered image/video/audio inputs, names, content digests and accurate probed descriptors. Use inline authority within existing conservative bounds; add request-bound upload support if required to cover advertised media sizes. Placement sends descriptors only and strips private names/bytes/handles. Restore retained typed references safely, including same-host and cross-host reuse, and report unavailable inputs accurately. Expansion receives the correct reference task/context. Named mesh views retain semantic roles and are validated separately from H3 ordering.
+3. Add shared boundary-frame policy and native first/last wells. Wan sends exactly two keyframes at 0 and frames-1 with no source_image, respects its advertised minimum length, and updates the last anchor on length changes. FL2VA sends the opening source_image and optional closing endpoint according to its task authority; LTX interpolation remains distinct. Add native reference controls to both apps: attach multiple inputs, replace/remove/reorder, clear count/required guidance, named-view wells, capability limits/formats, errors for invalid or oversized media, accessible scrolling. All mutations go through shared draft helpers. Enforce single/multiple pixel ceilings and required inputs before submission. Upload V2 must canonicalize metadata, use fresh leases for each batch request, preserve scope/instance fences, and cancel unused leases on errors/cancellation. Exact frame/sample descriptors come from media decoding or canonical upload probing, never rounded duration arithmetic. Model/host switches park unsupported inputs and revalidate before sending. iOS still controls adopt the shared source layout and expose weight/canvas/order semantics.
+4. Update affected native/user/agent docs, website guide and changelog fragment; include the audit matrix and actual validation evidence here.
+
+## Verification
+
+Use failing contract tests before code: typed JSON and absence behavior, descriptor redaction, limits/kinds/required refs, switching and parking, ordered mutations/canvas, named roles, expansion and retained reuse. Test exported behavior rather than private implementation. Run shared Swift tests, both architecture lints/builds, iOS unit tests, local iPhone/iPad interaction and accessibility UAT with fixture hosts/media and captured outgoing requests. Exercise macOS with isolated fresh preferences and a fixture host, including many references/narrow windows, ordering and rejected inputs. Use fixtures for network/media admission; any live GPU generation must be serialized and clearly distinguished from UI/request proof. Run required Rust/contract checks for the capability addition and exact-head hosted CI. Independent subagent reviews this plan before implementation and another reviews the final diff; fix valid findings, create PR, monitor exact-head checks and merge after green. Do not claim physical-device or model quality proof from Simulator/fixture tests.
+
+## Plan review
+
+Independent reviewer confirmed the server contract must take precedence over a stale Studio Wan test: Wan sends endpoint keyframes only, never a simultaneous source_image. Review revisions include boundary-frame authoring, pre-submit pixel/required-input refusal, exact media descriptors, canonical upload metadata and lease lifecycle, metadata restore and retained-media reuse.
+
+## Audit matrix
+
+| Route | Server authority / wire | Current native gap | Acceptance |
+| --- | --- | --- | --- |
+| Qwen Edit | reference_images; edit_images; required first target; no count ceiling | iOS source layout/order/required validation | Target remains first, reorder/remove/replace, source omitted, missing target blocks submission |
+| Qwen Image 2.1 | reference_images; edit_images; max 10; last-reference canvas; advertised PNG/JPEG/WebP | iOS formats and canvas mutation | Alpha retained, last-reference canvas updates unless user-chosen, 10-limit, narrow scrolling |
+| Flux.2 Dev/Klein | reference_images; edit_images; advertised single/multiple pixel budgets; replaces/exclusive | missing pixel ceilings, iOS relation semantics | Single/multi limits, source-vs-reference last-write, parking on model/host changes |
+| SD1.5/SDXL | reference_images; one edit_image; combines; weight control | iOS weight unavailable | source+reference coexist; recipe weight range/default, one-image limit |
+| MiniMax Ref2VA | new additive generation_references; typed references | both absent including reuse/task/placement | ordered image/video/audio, max 9/3/3 and 12 total, visual required; each clip 2–15 seconds; sum video <=15 seconds and sum audio plus video soundtracks <=15 seconds; <=32MiB inline or valid V2 upload transport |
+| Hunyuan3D multiview | mesh.named_views; typed named_image role refs | both absent | front/left/back/right offered by capability, unique roles and advertised min/max; source omitted |
+| Wan endpoints | wan_recipe and keyframes; pair at 0/frames-1 | iOS absent; Mac arbitrary frames | first/last only, length changes update final index, minimum frame rule, no source_image |
+| MiniMax FL2VA | task-derived boundary capability | closing endpoint absent | first/last separately optional according to admission, no typed Ref2VA inputs |
+| Mesh texture/roundtrip | mesh_input + workflow contracts | intentional API/CLI boundary | document scope; no unqualified native workflow exposure |
+
+All routes must preserve unsupported drafts through parking, restore reusable metadata/media without overriding new attachments, and redact placement payloads. UAT includes model/host switches with active references, missing retained media, mixed-kind reorder, named-view replacement, share/Library capability routing, malformed content and filename mismatches. V2 uploads are in scope for authenticated media canonicalization; inline fallback remains bounded and accurate. Existing still-reference paths receive regression coverage alongside additions.
+
+## Research sources
+
+The repository's admission functions are the executable authority: `generation_profile::reference_images_for_recipe`, `minimax_h3::validate_references`, `validation::validate_keyframes`, and Hunyuan named-view validation. Upstream research confirms distinct MiniMax reference and boundary-frame tasks: [official MiniMax-H3 repository](https://github.com/MiniMax-AI/MiniMax-H3) and [official announcement](https://www.minimax.io/news/minimax-h3-open-source). Named Hunyuan views follow the [Tencent Hunyuan3D-2 repository](https://github.com/Tencent-Hunyuan/Hunyuan3D-2). No inference algorithm was changed.
+
+## Verification so far
+
+Independent plan review approved the revised matrix before implementation. Shared Swift baseline: 1,136 passing tests; implementation: 1,158 passing tests. Rust core: 1,921 passing tests including generation-profile capability/hash coverage. Generated authority refresh/check and formatting passed. Native iOS unit/store suite: 163 tests in 30 suites passed. Local native UAT and independent final review are in progress; exact-head CI and merge evidence will be appended after completion.
+
+## Media decoder parity evidence
+
+The 3-second fixture `apps/shared/Packages/MoldClient/Tests/MoldClientTests/Fixtures/reference-video.mp4` contains H.264 video and a mono AAC soundtrack. Native import regression checks the actual decoded video count (72), encoded geometry (128×128), track duration (3,000 ms), and frame rate (24 FPS). A final decoded video buffer can omit its sample duration; track duration supplies the closing-frame duration while the frame count still comes from decoding. ImageIO can expose a movie thumbnail, so the importer accepts its image branch only for a UTI conforming to `image`.
+
+A scratch executable using the same `mp4` 0.14 and Symphonia 0.5 dependencies and accumulation algorithm as `ltx2::media::probe_video_file` and `DecodedAudio::decode_with_probe_with_checkpoint` measured 97,280 AAC samples per channel at 32,000 Hz, one channel, or 3,040 ms. AVFoundation and ffmpeg produce 96,000 samples / 3,000 ms because they trim codec padding. This difference is material: ordinary inline ingress compares exact soundtrack sample counts. Audio-bearing MP4 references therefore require authenticated V2 upload canonicalization; keyless inline fallback must refuse them with a clear explanation. Silent videos and standalone PCM mono/stereo WAV retain their exact bounded inline path. Upload canonicalization uses the server's probed metadata before admission and must revalidate aggregate duration limits. The executable measurement log is `/tmp/mold-native-media-oracle.log`; ffmpeg's independent trimmed PCM capture is `/tmp/mold-reference-media/blue-tone-decoded.pcm` (192,000 bytes of mono signed-16 PCM).
+
+The server's MP4 decoder accepts H.264/AVC, so native import must refuse HEVC despite AVFoundation being able to decode it. A separate small HEVC fixture covers this refusal. These are media-ingress tests and native UI/request evidence, not GPU generation or physical-device quality qualification.

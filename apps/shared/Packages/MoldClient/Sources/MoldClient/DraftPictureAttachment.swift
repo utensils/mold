@@ -30,4 +30,29 @@ public enum DraftPictureAttachment {
         draft.media.lastExclusiveWrite = .references
         draft.followLastReference(recipe: recipe)
     }
+    public static func replaceReference(
+        _ picked: ImportedPicture, at index: Int, in draft: inout RenderDraft,
+        recipe: GenerationRecipe?
+    ) {
+        guard draft.media.editImages.indices.contains(index) else { return }
+        draft.media.editImages[index] = picked.encoded
+        draft.media.lastExclusiveWrite = .references
+        draft.followLastReference(recipe: recipe)
+    }
+
+    public static func removeReference(at index: Int, from draft: inout RenderDraft, recipe: GenerationRecipe?) {
+        guard draft.media.editImages.indices.contains(index) else { return }
+        draft.media.editImages.remove(at: index)
+        draft.followLastReference(recipe: recipe)
+    }
+
+    public static func moveReference(from index: Int, to destination: Int, in draft: inout RenderDraft,
+                                     recipe: GenerationRecipe?) {
+        guard draft.media.editImages.indices.contains(index),
+              draft.media.editImages.indices.contains(destination), index != destination else { return }
+        let value = draft.media.editImages.remove(at: index)
+        draft.media.editImages.insert(value, at: destination)
+        draft.media.lastExclusiveWrite = .references
+        draft.followLastReference(recipe: recipe)
+    }
 }

@@ -78,9 +78,21 @@ final class GenerateController {
     /// the model's default for this kind.
     var recipe: GenerationRecipe? {
         guard let profile = model?.generationProfile else { return nil }
-        if let recipeID, let chosen = profile.recipe(named: recipeID), chosen.makes == kind { return chosen }
-        return profile.recipes.first { $0.makes == kind && $0.id == profile.defaultRecipeId }
-            ?? profile.recipes.first { $0.makes == kind }
+        let selected: GenerationRecipe?
+        if let recipeID, let chosen = profile.recipe(named: recipeID), chosen.makes == kind { selected = chosen }
+        else {
+            selected = profile.recipes.first { $0.makes == kind && $0.id == profile.defaultRecipeId }
+                ?? profile.recipes.first { $0.makes == kind }
+        }
+        return selected?.resolvingReferenceCapabilities(family: model?.family, model: modelName)
+    }
+
+    var referenceBatchLimit: Int {
+        guard let host = target else { return 1 }
+        let limit = hosts.capabilities[host.id]?.maxBatchOutputs ?? 1
+        let request = RenderRequest.one(draft, model: modelName ?? "")
+        return max(1, ReferenceUploadPolicy.batchLimit(requests: [request], apiKey: host.apiKey,
+            capabilities: hosts.capabilities[host.id]?.referenceUploads, batchLimit: limit))
     }
 
     /// Recipes this model offers for this kind, when there is a choice.
@@ -150,6 +162,10 @@ final class GenerateController {
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
+        if draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
+           !retainedReuse.probing, retainedReuse.snapshot() == nil {
+            return retainedReuse.notice ?? "Reattach this print's reference media before generating."
+        }
         if retainedReuse.probing { return String(localized: "Restoring the print’s source media…") }
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }
         if hosts.upHosts.isEmpty { return String(localized: "No machine is answering. Check Machines to reconnect.") }

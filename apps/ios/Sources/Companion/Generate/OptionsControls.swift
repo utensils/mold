@@ -17,7 +17,7 @@ struct OptionsControls: View {
         }
         if generate.kind == .picture {
             StepperChip(title: String(localized: "Batch"), value: generate.draft.batchSize,
-                        range: 1 ... max(1, generate.target.flatMap { generate.hosts.capabilities[$0.id]?.maxBatchOutputs } ?? 4)) {
+                        range: 1 ... generate.referenceBatchLimit) {
                 generate.draft.batchSize = $0
             }
             .accessibilityIdentifier("options-batch")

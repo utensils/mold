@@ -16,7 +16,7 @@ extension GenerateRequest {
     enum CodingKeys: String, CodingKey {
         case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
              saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
-             sourceImageName, strength, editImages, referenceWeight, maskImage, loras, idImage,
+             sourceImageName, strength, editImages, references, referenceWeight, maskImage, loras, idImage,
              idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
              controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
              sourceVideo, scheduler, cfgPlus, sampleShift, distillStrengthHigh,
@@ -58,6 +58,7 @@ public extension GenerateRequest {
         try container.encodeIfPresent(sourceImageName, forKey: .sourceImageName)
         try container.encodeIfPresent(strength, forKey: .strength)
         try container.encodeIfPresent(editImages, forKey: .editImages)
+        try container.encodeIfPresent(references, forKey: .references)
         try container.encodeIfPresent(referenceWeight, forKey: .referenceWeight)
         try container.encodeIfPresent(maskImage, forKey: .maskImage)
         try encodeLoras(into: &container)

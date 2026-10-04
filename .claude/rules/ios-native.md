@@ -90,3 +90,5 @@ retry identity and reachability and stay guarded through refresh; cancelling
 rows are read-only. Prompt History is machine-scoped server search, with fenced
 requests and prompt-only recall. Search during Clear must reload the latest
 query; reconnecting reloads without requiring a query edit.
+
+**Reference parity.** Both native apps use shared `GenerationReference`/`DraftMedia` contracts for H3 image/MP4/PCM-WAV references and Hunyuan named views. Capability resolution owns older-host fallback; UI never matches model names. `BoundaryFramePolicy` owns Wan pairs and FL2VA endpoints. `DraftPictureAttachment` owns still-reference reorder/replace/remove and canvas refresh. Placement sends descriptors only; HTTP admission stages fresh upload V2 leases, canonicalizes exact media facts and cleans unused leases. Retained reuse requires matching descriptors, preserves new inputs, and never submits unresolved descriptors without a reuse session. Keep Photos/Library/Share routing in parity with primary attachment controls. Validation/UAT matrix: `docs/plans/native-reference-parity.md`.

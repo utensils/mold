@@ -25,7 +25,11 @@ extension GenerateController {
         guard let modelName else { return }
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
-        let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
+        let caps = hosts.capabilities(of: host)
+        let limit = ReferenceUploadPolicy.batchLimit(
+            requests: [RenderRequest.one(draft, model: modelName)], apiKey: host.apiKey,
+            capabilities: caps?.referenceUploads, batchLimit: caps?.maxBatchOutputs ?? draft.batchSize)
+        let copies = min(draft.batchSize, limit)
         let built = RenderRequest.batch(
             draft, model: modelName, copies: copies,
             randomBase: .random(in: 0 ... UInt64(UInt32.max)),

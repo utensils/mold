@@ -2091,7 +2091,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `de703b5969b2b7891bb9d65bdab5fa4c7543b578ff9475dd65663d953c3421fd` · default recipe `default`
+Schema 1 · hash `101b23fea62f11e34323d4609c96bd87c0e8fd6afb412fdd34b01670dff4dd89` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
@@ -2115,7 +2115,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `42da523dd42783792cd0221f3ffaadb9803e77e8ce772cfc13bd6a9709a14c77` · default recipe `default`
+Schema 1 · hash `427c543e65142f5af7778d64da94804784cf8abbcd80c14c83ce34abe93e8440` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
 
@@ -2139,7 +2139,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `20442d12e6519fd2b450050ca2f1ff83e57f8f57216fccc7a0fe2b5802465201` · default recipe `default`
+Schema 1 · hash `01ab0d9e1360c3a66bce7b67beeb55f6b03ec0f03637c3f530adc3d9bc2e6080` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
 
@@ -2163,7 +2163,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:official-bf16`
 
-Schema 1 · hash `38c99ca8527c9b23728efb12eacc2fe9d13afa88ce6d2945df9fd2c71724c5b0` · default recipe `default`
+Schema 1 · hash `26cd3bcd429e49d13b79f0911f6c54c42fe0d5edee3b476a903d9c8e9bb7fbf1` · default recipe `default`
 
 Models: `minimax-h3-fl2va:official-bf16`.
 
@@ -2187,7 +2187,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `c64e7c65771474603efd72e6b0944323f125b88217694cedc3ec0b08965d625a` · default recipe `default`
+Schema 1 · hash `ee55e0206a0eb377c7f2ab183906fb721a65ab748e0333402cac6a9d1661f2ed` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
@@ -2211,7 +2211,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `753edfd5f713556b3a49cb31b87e922164f36701c16424d781283e2cafb35848` · default recipe `default`
+Schema 1 · hash `4f4190c21846fd5150a0dacd4dc342515dce81764670d68800a8c58d07106242` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`.
 
@@ -2235,7 +2235,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-ref2va:official-bf16`
 
-Schema 1 · hash `2a11dcba11625af781cef18551d9fbe7ede66828b815805b49f4545cfd901f26` · default recipe `default`
+Schema 1 · hash `c45fc806e205a2a705dfcab352dfbe649f5f38f8efc4b5535d05937599970699` · default recipe `default`
 
 Models: `minimax-h3-ref2va:official-bf16`.
 

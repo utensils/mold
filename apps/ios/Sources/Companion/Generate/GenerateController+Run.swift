@@ -49,7 +49,7 @@ extension GenerateController {
     func generate() {
         guard blocker == nil, let host = target, let modelName else { return }
         let backend = hosts.backend(for: host)
-        let copies = min(draft.batchSize, hosts.capabilities[host.id]?.maxBatchOutputs ?? draft.batchSize)
+        let copies = min(draft.batchSize, referenceBatchLimit)
         let retained = retainedReuse.snapshot()
         let snapshot = draft
         let recipe = recipe

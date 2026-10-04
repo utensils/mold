@@ -285,7 +285,7 @@ supports_strength: boolean,
  * name predicate, never to a `Hidden` nobody wrote. Every recipe this
  * build emits carries `Some`.
  */
-reference_images?: ReferenceImagesProfile | null,
+reference_images?: ReferenceImagesProfile | null, generation_references?: GenerationReferencesProfile | null, boundary_frames?: BoundaryFramesProfile | null,
 /**
  * The transparent-background contract, or `None` on an OLDER SERVER
  * (clients hide the toggle). Every recipe this build emits carries

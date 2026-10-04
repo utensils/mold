@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // The CROSS-HOST half: bytes downloaded from the print's origin, placed
@@ -110,6 +111,20 @@ extension GenerateRequest {
         case .extendVideo: extendVideo = try one()
         case .identityImages: idImages = bytes.map { $0.base64EncodedString() }
         case .editImages: editImages = bytes.map { $0.base64EncodedString() }
+        case .references:
+            guard let descriptors = references, descriptors.count == bytes.count,
+                  descriptors.allSatisfy({ $0.media.authority == "descriptor" }) else {
+                throw RetainedSourceMedia.RelayFailure.ambiguous(field)
+            }
+            references = try zip(descriptors, bytes).map { descriptor, data in
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                if let expected = descriptor.provenance?.sha256, expected.lowercased() != digest {
+                    throw RetainedSourceMedia.RelayFailure.ambiguous(field)
+                }
+                var restored = descriptor
+                restored.media = .init(authority: "inline", data: data.base64EncodedString())
+                return restored
+            }
         case .keyframes:
             keyframes = try bytes.map {
                 do { return try MoldJSON.decoder.decode(KeyframeCondition.self, from: $0) }

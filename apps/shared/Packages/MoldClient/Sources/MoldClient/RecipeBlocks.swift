@@ -66,6 +66,9 @@ public struct ReferenceImagesCapability: Codable, Hashable, Sendable {
     /// is the server's legacy PNG-and-JPEG set; read it through
     /// `acceptedFormats`, never directly.
     public var formats: [String]? = nil
+    /// Host-advertised pixel budgets, per reference, for one or several images.
+    public var maxPixelsSingle: Int? = nil
+    public var maxPixelsMulti: Int? = nil
 
     /// `ImageInputFormat::LEGACY`: what a recipe that advertises no list
     /// accepts.

@@ -32,6 +32,19 @@ struct ImageConditioningWellsTests {
         return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))
     }
 
+    @Test func typedReferencesDoNotOfferAnUnusedSourceWell() {
+        let refs = #"""
+        null, "generation_references":{"mode":"adjustable","required":true,
+        "kinds":["image","video","audio"],"max_count":12,"max_images":9,"max_videos":3,
+        "max_audios":3,"min_duration_ms":2000,"max_duration_ms":15000,
+        "max_video_duration_ms":15000,"max_audio_duration_ms":15000,
+        "max_inline_bytes":33554432,"requires_visual":true}
+        """#
+        let layout = ImageConditioningWells.layout(recipe: recipe(references: refs), model: nil, media: DraftMedia())
+        #expect(!layout.showsSourceWell)
+        #expect(layout.references == nil)
+    }
+
     private func block(_ relation: String, primaryIsTarget: Bool = false) -> String {
         #"""
         {"mode": "adjustable", "required": false, "max_count": 4,
