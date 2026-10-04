@@ -104,7 +104,15 @@ final class LibraryLongPressTests: XCTestCase {
         // Pixel sampling always precedes the auditor's private size cycling,
         // including samples of rows revealed later in this scrollable List.
         attach(app, name: stage + " Full details sheet before contrast audit")
-        try auditAccessibility(owner, app: app, stage: stage + " details sheet", types: .contrast)
+        let contrastLabels = Set(names + ["Saved Prints", "This device's saved prints remain available.", "Unavailable Machines", "Done"])
+        try assertDetailsContrastInventory(owner, labels: contrastLabels)
+        XCTAssertTrue(owner.frame.contains(title.frame))
+        let titleText = title.staticTexts["Saved Prints"]
+        XCTAssertTrue(titleText.exists)
+        XCTAssertTrue(title.frame.contains(titleText.frame))
+        // Audit every semantic label only once its complete bounds are exposed.
+        // An initial List row can extend beneath the opaque pinned footer.
+        try auditContrast(title, app: app, stage: stage + " details title")
         let information = [(explanation, "explanation"), (section, "section heading")]
         var requestedExplanationSize = CGSize.zero
         for (text, label) in information {
@@ -136,6 +144,7 @@ final class LibraryLongPressTests: XCTestCase {
             settle(text)
             let viewport = detailsViewport(details, title: title, app: app)
             XCTAssertTrue(viewport.contains(text.frame), "Full host name \(text.frame) must fit \(viewport)")
+            try assertDetailsContrastInventory(owner, labels: contrastLabels)
             try auditContrast(text, app: app, stage: stage + " name " + identities[index])
             attach(app, name: stage + " Full offline name " + identities[index])
         }
@@ -156,13 +165,13 @@ final class LibraryLongPressTests: XCTestCase {
         // requested launch category. Preserve the original nil-element failure
         // evidence while avoiding state carried from an earlier private sweep.
         attach(app, name: stage + " Details before noncontrast gates")
-        var fresh = try reopenDetails(app, stage: stage + " Done", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+        var fresh = try reopenDetails(app, stage: stage + " Done", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize, contrastLabels: contrastLabels)
         try auditAccessibility(fresh.owner.buttons["offline-library-done"], app: app,
                                stage: stage + " details Done", types: noncontrast)
-        fresh = try reopenDetails(app, stage: stage + " full sheet", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+        fresh = try reopenDetails(app, stage: stage + " full sheet", doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize, contrastLabels: contrastLabels)
         try auditAccessibility(fresh.owner, app: app, stage: stage + " details sheet", types: noncontrast)
         for label in ["explanation", "section heading"] {
-            fresh = try reopenDetails(app, stage: stage + " " + label, doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize)
+            fresh = try reopenDetails(app, stage: stage + " " + label, doneHeight: requestedDoneHeight, titleHeight: requestedTitleHeight, explanationSize: requestedExplanationSize, contrastLabels: contrastLabels)
             let text = label == "explanation"
                 ? fresh.details.staticTexts["This device's saved prints remain available."].firstMatch
                 : fresh.details.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Unavailable Machines")).firstMatch
@@ -178,7 +187,7 @@ final class LibraryLongPressTests: XCTestCase {
         try selectRetainedPrint(tile, app: app)
     }
 
-    @MainActor private func reopenDetails(_ app: XCUIApplication, stage: String, doneHeight: CGFloat, titleHeight: CGFloat, explanationSize: CGSize) throws
+    @MainActor private func reopenDetails(_ app: XCUIApplication, stage: String, doneHeight: CGFloat, titleHeight: CGFloat, explanationSize: CGSize, contrastLabels: Set<String>) throws
         -> (details: XCUIElement, title: XCUIElement, owner: XCUIElement) {
         let previous = app.collectionViews["offline-library-details"].firstMatch
         let done = app.buttons["offline-library-done"].firstMatch
@@ -214,8 +223,23 @@ final class LibraryLongPressTests: XCTestCase {
         try revealDetailsText(explanation, details: details, title: title, app: app)
         XCTAssertEqual(explanation.frame.size, explanationSize,
                        "The fresh text must restore the complete requested-size geometry before a private sweep")
+        try assertDetailsContrastInventory(owner, labels: contrastLabels)
         attach(app, name: stage + " Fresh native details before private sweep")
         return (details, title, owner)
+    }
+
+    @MainActor private func assertDetailsContrastInventory(_ owner: XCUIElement, labels: Set<String>) throws {
+        for text in owner.staticTexts.allElementsBoundByIndex {
+            let covered = labels.contains(text.label) || text.label.caseInsensitiveCompare("Unavailable Machines") == .orderedSame
+            XCTAssertTrue(covered, "Every semantic details label must have explicit full-visible contrast coverage: \(text.label)")
+        }
+        for button in owner.buttons.allElementsBoundByIndex {
+            XCTAssertEqual(button.identifier, "offline-library-done", "Every details action must have explicit contrast coverage")
+        }
+        XCTAssertEqual(owner.textFields.count, 0, "New details inputs require explicit contrast coverage")
+        XCTAssertEqual(owner.textViews.count, 0, "New details text requires explicit contrast coverage")
+        XCTAssertEqual(owner.links.count, 0, "New details links require explicit contrast coverage")
+        XCTAssertEqual(owner.switches.count, 0, "New details switches require explicit contrast coverage")
     }
 
     @MainActor private func libraryViewport(_ app: XCUIApplication) -> CGRect {
