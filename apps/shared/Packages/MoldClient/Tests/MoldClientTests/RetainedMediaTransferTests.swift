@@ -57,6 +57,23 @@ struct RetainedMediaTransferTests {
         }
     }
 
+    @Test func legacyUnknownRecipeCannotProveSourceFreeCopy() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        source.stub("retainedMediaTransferOffer(for:)", throwing: MoldClientError.http(status: 404, code: nil, message: nil))
+        source.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy, members: []))
+        await #expect(throws: (any Error).self) {
+            _ = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: nil, from: source, to: target)
+        }
+        await #expect(throws: (any Error).self) {
+            try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: nil, from: source, to: target, as: "copy.png")
+        }
+        #expect(target.calls.isEmpty)
+        let sourceFree = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8))
+        #expect(try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: sourceFree, from: source, to: target) == nil)
+        try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: sourceFree, from: source, to: target, as: "copy.png")
+        #expect(target.calls.isEmpty)
+    }
+
     @Test func sourceFreeOutputNeedsNoDurableDestination() async throws {
         let source = FakeBackend(), target = FakeBackend()
         source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))

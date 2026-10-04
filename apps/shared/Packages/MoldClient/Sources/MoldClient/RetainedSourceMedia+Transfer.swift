@@ -65,7 +65,7 @@ public extension RetainedSourceMedia {
         catch let error as MoldClientError {
             guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
             let inventory = try await origin.retainedSourceMedia(for: filename)
-            guard inventory.availability == .unavailableLegacy, !disclosable(metadata) else {
+            guard inventory.availability == .unavailableLegacy, metadata != nil, !disclosable(metadata) else {
                 throw transferIncomplete("Update the source machine to copy this print’s retained media.")
             }
             return nil
@@ -93,7 +93,7 @@ public extension RetainedSourceMedia {
         catch let error as MoldClientError {
             guard case let .http(status, _, _) = error, status == 404 || status == 405 else { throw error }
             let inventory = try await origin.retainedSourceMedia(for: sourceFilename)
-            guard inventory.availability == .unavailableLegacy, !disclosable(metadata) else {
+            guard inventory.availability == .unavailableLegacy, metadata != nil, !disclosable(metadata) else {
                 throw transferIncomplete("Update the source machine to copy this print’s retained media.")
             }
             return
