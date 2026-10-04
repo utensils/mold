@@ -243,7 +243,7 @@ final class LibraryLongPressTests: XCTestCase {
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = stage + " Select contrast failure hierarchy"; hierarchy.lifetime = .keepAlways; self.add(hierarchy)
             self.attach(app, name: stage + " Select contrast failure")
-            XCTFail("\(stage): \(issue.compactDescription), \(element.label) at \(element.frame)")
+            XCTFail("\(stage): \(issue.compactDescription), \(element.label) at \(element.frame). \(issue.detailedDescription)")
             return true
         }
     }

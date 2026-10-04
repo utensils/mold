@@ -53,6 +53,8 @@ struct OfflineNote: View {
                     }
                     .accessibilityIdentifier("offline-library-details")
                     .navigationTitle("Saved Prints")
+                    .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+                    .toolbarBackground(.visible, for: .navigationBar)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") { showsDetails = false }
