@@ -45,7 +45,9 @@ struct TypedReferenceWells: View {
                                          set: { attachImage($0) }, clear: {})
                                 }
                                 if cap.kinds.contains("video") || cap.kinds.contains("audio") {
-                                    Button("Add reference file…") { openFiles() }
+                                    Button { openFiles() } label: {
+                                        Text("Add reference file…").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                                    }
                                         .disabled(importing).accessibilityIdentifier("add-reference-file")
                                 }
                             }
@@ -74,15 +76,21 @@ struct TypedReferenceWells: View {
             } else {
                 Text(reference.name).font(.caption).frame(maxWidth: side * 1.5)
                 Text(reference.kind.capitalized).font(.caption).foregroundStyle(.secondaryText)
-                Button("Replace…") { openFiles(replacing: reference, at: index) }
+                Button { openFiles(replacing: reference, at: index) } label: {
+                    Text("Replace…").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
                     .accessibilityLabel("Replace reference \(index + 1)")
-                Button("Remove") { generate.draft.media.removeGenerationReference(at: index) }
+                Button { generate.draft.media.removeGenerationReference(at: index) } label: {
+                    Text("Remove").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
                     .accessibilityLabel("Remove reference \(index + 1)")
             }
-            Menu("Order") {
+            Menu {
                 Button("Move earlier") { generate.draft.media.moveGenerationReference(from: index, to: index - 1) }.disabled(index == 0)
                 Button("Move later") { generate.draft.media.moveGenerationReference(from: index, to: index + 1) }
                     .disabled(index + 1 == generate.draft.media.generationReferences.count)
+            } label: {
+                Text("Order").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }.accessibilityLabel("Order reference \(index + 1)")
         }
     }

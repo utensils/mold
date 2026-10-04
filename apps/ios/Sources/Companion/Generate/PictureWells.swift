@@ -48,10 +48,12 @@ struct PictureWells: View {
                      accepting: capability.acceptingTypes, number: index + 1,
                      set: { DraftPictureAttachment.replaceReference($0, at: index, in: &generate.draft, recipe: generate.recipe) },
                      clear: { DraftPictureAttachment.removeReference(at: index, from: &generate.draft, recipe: generate.recipe) })
-                Menu("Order") {
+                Menu {
                     Button("Move earlier") { move(index, to: index - 1) }.disabled(index == 0)
                     Button("Move later") { move(index, to: index + 1) }
                         .disabled(index + 1 == generate.draft.media.editImages.count)
+                } label: {
+                    Text("Order").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("Order image \(index + 1)")
                 if capability.canvas == .lastReference, index + 1 == generate.draft.media.editImages.count {

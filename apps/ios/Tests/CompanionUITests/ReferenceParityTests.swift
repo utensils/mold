@@ -44,21 +44,13 @@ final class ReferenceParityTests: XCTestCase {
         earlier.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let references = app.scrollViews["generation-references"]
         reveal(references, app: app)
-        try app.performAccessibilityAudit(for: .contrast) { issue in
-            guard let element = issue.element else { return false }
-            let bar = app.tabBars.firstMatch
-            let navigation = app.navigationBars.firstMatch
-            let form = app.scrollViews["phone-generate-form"]
-            let isFormContent = form.exists && form.descendants(matching: element.elementType)
-                .matching(NSPredicate(format: "label == %@", element.label)).allElementsBoundByIndex.contains { $0.frame == element.frame }
-            if navigation.exists, isFormContent, element.frame.maxY <= navigation.frame.maxY { return true }
-            // Only form content scrolled beneath the system glass, never its controls.
-            if bar.exists, element.frame.minY >= bar.frame.minY,
-               !bar.descendants(matching: element.elementType).matching(NSPredicate(format: "label == %@", element.label))
-                .allElementsBoundByIndex.contains(where: { $0.frame == element.frame }) { return true }
-            XCTFail("Populated references at \(size): \(issue.compactDescription), \(element.label) at \(element.frame)")
-            return true
-        }
+        let populated = XCTAttachment(screenshot: app.screenshot()); populated.name = "Populated MiniMax references \(size)"; populated.lifetime = .keepAlways; add(populated)
+        let guidance = app.staticTexts["Use image 1, video 1, or audio 1 in your prompt. Reference order is preserved."].firstMatch
+        try centerForAudit(guidance, app: app)
+        try auditContrast(guidance, app: app, size: size)
+        try centerForAudit(references, app: app)
+        try auditContrast(references, app: app, size: size)
+        let settled = XCTAttachment(screenshot: app.screenshot()); settled.name = "Audited MiniMax reference row \(size)"; settled.lifetime = .keepAlways; add(settled)
         try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .hitRegion, .sufficientElementDescription]) { issue in
             // Match ShellAccessibilityTests' narrow exemption: XCUITest reports
             // hidden caption2 tile badges although the well speaks their ordinal.
@@ -66,7 +58,6 @@ final class ReferenceParityTests: XCTestCase {
             XCTFail("Populated references at \(size): \(issue.compactDescription), \(issue.element?.label ?? "unnamed")")
             return true
         }
-        let populated = XCTAttachment(screenshot: app.screenshot()); populated.name = "Populated MiniMax references \(size)"; populated.lifetime = .keepAlways; add(populated)
         let submit = app.buttons["submit-generation"]
         reveal(submit, app: app); XCTAssertTrue(submit.isEnabled); submit.tap()
         for _ in 0..<50 where machine.generationRequests.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
@@ -145,6 +136,42 @@ final class ReferenceParityTests: XCTestCase {
             .filter { !$0.frame.isEmpty }.min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height } ?? element
         target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
+    @MainActor private func form(in app: XCUIApplication) -> XCUIElement {
+        let phone = app.scrollViews["phone-generate-form"]
+        if phone.exists { return phone }
+        return app.descendants(matching: .any)["bottom-chrome"].firstMatch.scrollViews.firstMatch
+    }
+    @MainActor private func auditContrast(_ scope: XCUIElement, app: XCUIApplication, size: String) throws {
+        // Audit each region once, fully visible. Other form regions may be
+        // scrolled through system glass while this region is sampled.
+        try app.performAccessibilityAudit(for: .contrast) { issue in
+            guard let element = issue.element else { return false }
+            let belongs = element.frame == scope.frame && element.label == scope.label
+                || scope.descendants(matching: element.elementType).matching(NSPredicate(format: "label == %@", element.label))
+                    .allElementsBoundByIndex.contains { $0.frame == element.frame }
+            guard belongs else { return true }
+            XCTFail("References at \(size): \(issue.compactDescription), \(element.label) at \(element.frame)")
+            return true
+        }
+    }
+    @MainActor private func centerForAudit(_ scope: XCUIElement, app: XCUIApplication) throws {
+        reveal(scope, app: app)
+        let scroll = form(in: app)
+        guard scroll.exists else { return }
+        let top = max(app.navigationBars.firstMatch.frame.maxY + 64, scroll.frame.minY)
+        let bottom = min(app.buttons["submit-generation"].frame.minY - 24, scroll.frame.maxY)
+        let center = (top + bottom) / 2
+        for _ in 0..<8 {
+            let delta = center - scope.frame.midY
+            if abs(delta) <= 20 { break }
+            let travel = (delta < 0 ? -1.0 : 1.0) * max(40, min(200, abs(delta)))
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: travel)),
+                        withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        XCTAssertGreaterThanOrEqual(scope.frame.minY, app.navigationBars.firstMatch.frame.maxY)
+        XCTAssertLessThanOrEqual(scope.frame.maxY, app.buttons["submit-generation"].frame.minY)
+    }
     @MainActor private func reveal(_ element: XCUIElement, app: XCUIApplication) {
         for _ in 0..<10 {
             let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : app.frame.minY
@@ -157,15 +184,16 @@ final class ReferenceParityTests: XCTestCase {
             } else if element.exists, element.frame.maxX <= app.frame.minX {
                 app.scrollViews["generation-references"].swipeRight()
             } else {
-                let form = app.scrollViews["phone-generate-form"]
+                let form = form(in: app)
                 if form.exists {
                     // The center can fall inside the multiline prompt and scroll
                     // that text field. Drag the form's observed padding instead.
                     let delta = element.exists
                         ? (element.frame.minY < top ? top - element.frame.minY + 8 : bottom - element.frame.maxY - 8)
                         : -200
-                    let start = form.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5))
-                    let end = start.withOffset(CGVector(dx: 0, dy: max(-250, min(250, delta))))
+                    let start = form.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5))
+                    let travel = (delta < 0 ? -1.0 : 1.0) * max(40, min(250, abs(delta)))
+                    let end = start.withOffset(CGVector(dx: 0, dy: travel))
                     start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
                 } else if element.exists, element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
             }
