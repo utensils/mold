@@ -111,20 +111,20 @@ throughput claim.
 
 ## Compact variants
 
-| Model                                                      | Task                                                       | Total pull | Runtime status                             |
-| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ------------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; optional endpoints |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references  |
-| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable        |
-| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable        |
+| Model                                                      | Task                                                       | Total pull | Runtime status                            |
+| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ----------------------------------------- |
+| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable       |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable       |
 
 The official `minimax-h3-fl2va:official-bf16` and
 `minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
