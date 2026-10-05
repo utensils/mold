@@ -10,6 +10,7 @@ import Synchronization
 /// update only the fixture’s own in-memory state.
 final class FixtureMachine: @unchecked Sendable {
     let exportFixture: Bool
+    private let unsupportedExportFormats: Bool
     private let capturedExports = Mutex<[Data]>([])
     var exportRequests: [Data] { capturedExports.withLock { $0 } }
     private let downloadedModels = Mutex<[String]>([])
@@ -38,8 +39,9 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
         self.exportFixture = exportFixture
+        self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
         self.referenceFixture = referenceFixture
         self.removePrintOnFavorite = removePrintOnFavorite
@@ -253,6 +255,7 @@ final class FixtureMachine: @unchecked Sendable {
         let json: String
         switch path {
         case "/api/gallery/export-options":
+            if unsupportedExportFormats { return Data(#"{"formats":["glb","future-animation"]}"#.utf8) }
             json = exportFixture ? #"{"formats":["gif","apng"],"gif_playback":["loop","bounce"],"gif_repeat":["forever","once"],"gif_pause":{"min":0,"max":5000,"step":10,"default":0}}"# : #"{"formats":["gif"]}"#
         case "/api/gallery/source-media/fixture-0.png":
             json = retainedMediaFixture

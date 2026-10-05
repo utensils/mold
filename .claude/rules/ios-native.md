@@ -105,3 +105,9 @@ errors. Refresh Settings/scanning/discovery after activation. See
 `apps/ios/docs/PERMISSIONS.md` for the audit and hardware validation boundary.
 
 **Export parity.** `MediaExportSession` captures the displayed print copy; generation results promote their rendering-host copy before opening actions. Every capability read, conversion and sidecar download uses that captured identity. Video request fields live in MoldClient; GIF `pause_ms` is extra boundary dwell and explicit zero is retained only when `gif_pause` is advertised and valid. Park/omit pause for non-GIF and Loop/Once. Mesh defaults and frame budgets use the shared authorities. `PrintSheets` releases only the dismissed delivery's files; pending delivery survives options dismissal. Documents/Mold contains user-owned exports only, with collision-safe names; private state stays in Application Support/Keychain. Texture sidecars verify digest and size before delivery. PhotoKit export destinations are conservative: GIF only for converted animation, with APNG/WebP routed to Files/Share.
+
+Conversion/delivery failures remain visible beside Export, while loading and
+unsupported-format explanations stay at the top. Audit text detection in every
+settled export viewport before predictive clipping/Dynamic Type resize the Form.
+Files-cancellation UAT follows the native picker to Cancel/Close and requires
+its navigation bar to disappear before reopening export.

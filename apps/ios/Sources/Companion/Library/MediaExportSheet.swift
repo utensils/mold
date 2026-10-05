@@ -8,7 +8,7 @@ struct MediaExportSheet: View {
         NavigationStack {
             Form {
                 if session.loading { ProgressView("Reading export options…") }
-                if let error = session.error {
+                if session.options == nil || session.formats.isEmpty, let error = session.error {
                     Section { Text(error).foregroundStyle(.secondaryText)
                         if session.options == nil { Button("Retry") { session.load() } }
                     }
@@ -27,6 +27,10 @@ struct MediaExportSheet: View {
                         }
                     }
                     Section {
+                        if let error = session.error {
+                            Text(error).foregroundStyle(.secondaryText)
+                                .accessibilityIdentifier("export-error")
+                        }
                         Button(session.converting ? "Converting…" : "Export") { session.submit() }
                             .prominentAction().disabled(!session.valid)
                             .accessibilityIdentifier("export-submit")

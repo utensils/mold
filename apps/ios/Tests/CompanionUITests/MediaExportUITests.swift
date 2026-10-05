@@ -3,9 +3,9 @@ import XCTest
 final class MediaExportUITests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions(); continueAfterFailure = false }
 
-    @MainActor private func fixture(size: String = "UICTContentSizeCategoryL") async throws -> (XCUIApplication, FixtureMachine, String) {
+    @MainActor private func fixture(size: String = "UICTContentSizeCategoryL", unsupportedFormats: Bool = false) async throws -> (XCUIApplication, FixtureMachine, String) {
         let identity = UUID().uuidString
-        let machine = try FixtureMachine(exportFixture: true, galleryPrints: 3, galleryID: identity, mixedMedia: true)
+        let machine = try FixtureMachine(exportFixture: true, unsupportedExportFormats: unsupportedFormats, galleryPrints: 3, galleryID: identity, mixedMedia: true)
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)
@@ -71,6 +71,19 @@ final class MediaExportUITests: XCTestCase {
         submit(app); XCTAssertTrue(app.navigationBars["Export Media"].waitForNonExistence(timeout: 15))
         body = try JSONSerialization.jsonObject(with: XCTUnwrap(machine.exportRequests.last)) as! [String: Any]
         XCTAssertEqual(body["pause_ms"] as? Int, 250); XCTAssertEqual(body["playback"] as? String, "bounce")
+        try export(app); choose("export-playback", "Bounce", app: app)
+        let resetPause = app.textFields["export-pause"]
+        resetPause.tap(); resetPause.typeText(XCUIKeyboardKey.delete.rawValue + "250")
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertEqual(resetPause.value as? String, "250")
+        app.buttons["No pause (0 ms)"].tap()
+        XCTAssertEqual(resetPause.value as? String, "0")
+        choose("export-destination", "Save to Mold folder", app: app)
+        evidence(app, "Native GIF Bounce reset to zero pause")
+        submit(app); XCTAssertTrue(app.navigationBars["Export Media"].waitForNonExistence(timeout: 15))
+        body = try JSONSerialization.jsonObject(with: XCTUnwrap(machine.exportRequests.last)) as! [String: Any]
+        XCTAssertEqual(body["pause_ms"] as? Int, 0); XCTAssertEqual(body["playback"] as? String, "bounce")
+        XCTAssertEqual(machine.exportRequests.count, 3)
     }
     @MainActor func testAPNGFolderDeliveryOmitsParkedGifControls() async throws {
         let (app, machine, identity) = try await fixture()
@@ -111,11 +124,39 @@ final class MediaExportUITests: XCTestCase {
         XCTAssertTrue(close.waitForExistence(timeout: 15)); evidence(app, "Exported GIF native share sheet"); close.tap()
         XCTAssertTrue(app.buttons["More"].firstMatch.waitForExistence(timeout: 5))
         try export(app); choose("export-destination", "Save to Files", app: app); submit(app)
-        let cancel = app.buttons["Cancel"].firstMatch
-        XCTAssertTrue(cancel.waitForExistence(timeout: 15)); evidence(app, "Exported GIF native Files picker"); cancel.tap()
+        try cancelFilesPicker(app)
         XCTAssertTrue(app.buttons["More"].firstMatch.waitForExistence(timeout: 5))
         try export(app); app.buttons["export-cancel"].tap()
         XCTAssertTrue(app.buttons["More"].firstMatch.waitForExistence(timeout: 5))
+    }
+    @MainActor private func cancelFilesPicker(_ app: XCUIApplication) throws {
+        let save = app.buttons["Save"].firstMatch
+        let picker = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
+        XCTAssertTrue(save.waitForExistence(timeout: 15), "The native Files export picker must be presented")
+        guard save.exists && save.isHittable else { throw ExportUATFailure.missingControl("native Files Save") }
+        evidence(app, "Exported GIF native Files picker")
+        // iOS 26.5 starts inside Mold Studio. Its BackButton visits On My
+        // iPhone, then Browse, where the native Close action dismisses it.
+        // Other system presentations expose Cancel directly.
+        for step in 0..<5 {
+            for label in ["Cancel", "Close"] {
+                let dismiss = app.buttons[label].firstMatch
+                if dismiss.exists && dismiss.isHittable {
+                    evidence(app, "Native Files cancellation via \(label)")
+                    dismiss.tap()
+                    XCTAssertTrue(picker.waitForNonExistence(timeout: 10), "The native Files picker must dismiss")
+                    return
+                }
+            }
+            let back = picker.buttons["BackButton"].firstMatch
+            guard back.exists && back.isHittable else {
+                evidence(app, "Native Files missing cancellation affordance")
+                throw ExportUATFailure.missingControl("native Files Back, Close or Cancel")
+            }
+            evidence(app, "Native Files parent navigation \(step): \(back.label)")
+            back.tap()
+        }
+        throw ExportUATFailure.missingControl("native Files cancellation after bounded parent navigation")
     }
     @MainActor func testExportedGIFSavesToPhotos() async throws {
         let (app, _, identity) = try await fixture()
@@ -150,10 +191,24 @@ final class MediaExportUITests: XCTestCase {
         machine.refuseNextExport(); submit(app)
         let error = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Fixture refused'")).firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 10))
+        XCTAssertTrue(error.isHittable, "Conversion failures must be visible beside Export without searching the form")
         evidence(app, "Refused GIF export retains its options")
         submit(app)
         XCTAssertTrue(app.navigationBars["Export Media"].waitForNonExistence(timeout: 15))
         XCTAssertEqual(machine.exportRequests.count, 2)
+    }
+    @MainActor func testUnsupportedFormatsShowAnExplanation() async throws {
+        let (app, machine, identity) = try await fixture(unsupportedFormats: true)
+        try open(1, identity: identity, app: app)
+        app.buttons["More"].firstMatch.tap(); app.buttons["Export…"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Export Media"].waitForExistence(timeout: 10))
+        let explanation = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'no conversions'")).firstMatch
+        XCTAssertTrue(explanation.waitForExistence(timeout: 10))
+        XCTAssertTrue(explanation.isHittable)
+        XCTAssertFalse(app.buttons["export-submit"].exists)
+        XCTAssertTrue(machine.exportRequests.isEmpty)
+        evidence(app, "Unsupported export formats retain a visible explanation")
+        app.buttons["export-cancel"].tap()
     }
     @MainActor func testExportSheetExtraSmall() async throws { try await auditExport(size: "UICTContentSizeCategoryXS") }
     @MainActor func testExportSheetLarge() async throws { try await auditExport(size: "UICTContentSizeCategoryL") }
@@ -242,9 +297,9 @@ final class MediaExportUITests: XCTestCase {
             inventory.lifetime = .keepAlways; add(inventory)
             evidence(app, "Export text coverage \(animation ? "GIF" : "geometry") \(size) viewport \(pass)")
             // Clipping/Dynamic Type audits resize and reset a lazy Form's
-            // scroll position. Finish settled pixel passes before resizing it,
+            // scroll position. Finish settled pixel and text-detection passes before resizing it,
             // matching ShellAccessibilityTests' ordering.
-            try app.performAccessibilityAudit(for: [.contrast, .hitRegion, .sufficientElementDescription]) { issue in
+            try app.performAccessibilityAudit(for: [.contrast, .elementDetection, .hitRegion, .sufficientElementDescription]) { issue in
                 guard let element = issue.element else {
                     let report = XCTAttachment(string: issue.compactDescription + ": " + issue.detailedDescription + "\n" + app.debugDescription)
                     report.name = "Unnamed export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
@@ -273,7 +328,7 @@ final class MediaExportUITests: XCTestCase {
         XCTAssertTrue(app.buttons["export-cancel"].isHittable)
         evidence(app, "Settled export prediction audit at \(size)")
         // Check clipping before Dynamic Type temporarily rebuilds the hierarchy.
-        for types: XCUIAccessibilityAuditType in [[.textClipped, .elementDetection, .hitRegion, .sufficientElementDescription], [.dynamicType]] {
+        for types: XCUIAccessibilityAuditType in [[.textClipped], [.dynamicType]] {
         try app.performAccessibilityAudit(for: types) { issue in
             // UIKit navigation bars cap their font size and offer the Large
             // Content Viewer. Match ShellAccessibilityTests' system-bar rule.

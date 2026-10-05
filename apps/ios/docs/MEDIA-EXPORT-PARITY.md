@@ -285,11 +285,23 @@ repeated actions and a late old response arriving while a new export is active.
 The complete native unit suite passes 189 tests in 36 suites. Independent review
 accepted the fixes and regressions.
 
+Simulator UAT also reproduced an offscreen conversion failure: submission
+scrolls to the Export action while the error was inserted at the top of the
+Form. Conversion/delivery errors now appear beside Export; capability-load
+failures and unsupported-format explanations remain at the top. Independent
+review caught the empty-format response state, and a new UI regression failed
+before its explanation was restored. Files cancellation follows the actual
+system picker navigation to Close or Cancel and proves picker dismissal before
+reopening export.
+
 The iOS 26.5 accessibility auditor emits an unnamed prediction of clipping at
 larger Dynamic Type sizes even at maximum AX5. The test handles only that exact
 prediction at AX5 on iOS 26.5, retains its diagnostics, and requires complete
 label/value coverage plus independent inspection of every retained viewport.
 Named clipping, other runtimes/text sizes and unnamed contrast remain strict.
+Strict text detection runs in every settled viewport before predictive clipping
+and Dynamic Type sweeps resize the lazy Form; unnamed text-detection failures
+remain failures.
 Final review remains conditional on the recorded visual UAT and final-head CI.
 
 ## Completion checklist

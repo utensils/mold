@@ -296,6 +296,18 @@ older-host capability fixture omitted `gif_pause`; the visible control and
 request field disappeared while real GIF conversion still worked. Browser
 console checks reported zero errors and warnings.
 
+The native SwiftUI app also exported through that real server on the isolated
+iPhone 17 Pro Simulator. ImageIO decoded every saved frame: Loop/Forever/0
+produced 72 frames at 80 ms; Bounce/Forever/250 produced 142 frames with 140 at
+80 ms and two at 330 ms. APNG retained 72 frames at 83 ms. Animated WebP retained
+64 frames: 56 at 83 ms and eight coalesced duplicate-frame pairs at 166 ms,
+preserving the encoder's 5976 ms duration. The native container checks accepted
+the actual outputs and saved them with their correct extensions into
+Documents/Mold; repeated GIF delivery preserved the first file as `(2)`.
+The native Files picker opened inside Mold Studio; navigating through On My
+iPhone to Browse exposed its system Close action, which cancelled delivery and
+returned to the existing viewer.
+
 Native SwiftUI delivery tests use valid media from an isolated HTTP fixture,
 including real PhotoKit writes and native Share/Files presentation. Those tests
 verify client requests and delivery ownership; the fixture does not encode the
