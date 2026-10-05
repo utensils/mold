@@ -553,7 +553,7 @@ describe("MobileGalleryViewer", () => {
     const view = mountViewer({ ...image, filename: "loop.mp4", format: "mp4" });
     await flushPromises();
     await view.get("[data-test='gallery-viewer-export']").trigger("click");
-    await view.setProps({ target: { ...view.props("target") } });
+    await view.setProps({ target: { ...target } });
     finish({ formats: ["gif"], gif_pause: { min: 0, max: 5000, step: 10, default: 0 } });
     await flushPromises();
     expect(view.find("[data-test='export-pause']").exists()).toBe(true);
