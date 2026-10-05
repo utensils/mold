@@ -1,3 +1,5 @@
+import CoreGraphics
+import ImageIO
 import Foundation
 import Network
 import Synchronization
@@ -11,6 +13,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
+    private let aspectFixture: Bool
     private let referenceFixture: Bool
     private let capturedGenerations = Mutex<[Data]>([])
     var generationRequests: [Data] { capturedGenerations.withLock { $0 } }
@@ -31,7 +34,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(referenceFixture: Bool = false, galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+    init(aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+        self.aspectFixture = aspectFixture
         self.referenceFixture = referenceFixture
         self.removePrintOnFavorite = removePrintOnFavorite
         self.libraryMutations = libraryMutations
@@ -205,6 +209,17 @@ final class FixtureMachine: @unchecked Sendable {
         // real image import; no generation or external machine is involved.
         if (path.hasPrefix("/api/gallery/image/fixture-") && path.hasSuffix(".png"))
             || path.hasPrefix("/api/gallery/thumbnail/fixture-") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source")) {
+            if aspectFixture {
+                let portrait = path.contains("fixture-1")
+                let width = portrait ? 90 : 160, height = portrait ? 160 : 90
+                let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+                let data = NSMutableData()
+                let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+                CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+                precondition(CGImageDestinationFinalize(destination))
+                return data as Data
+            }
             return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")!
         }
         let json: String

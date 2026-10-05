@@ -55,9 +55,14 @@ public enum BoundaryFramePolicy {
 
     public static func set(
         first: Bool, picture: ImportedPicture?, draft: inout RenderDraft,
-        capabilities: RecipeCapabilities
+        capabilities: RecipeCapabilities, recipe: GenerationRecipe? = nil
     ) {
         guard let wire = resolve(capabilities: capabilities) else { return }
+        let previousFirst = image(first: true, draft: draft, capabilities: capabilities)
+        if first, let picture, let pixels = ReferenceCanvas.uprightPixels(ofBase64: picture.encoded) {
+            draft.attachSourceShape((pixels.width, pixels.height), recipe: recipe,
+                                    replaced: previousFirst != picture.encoded)
+        }
         if first && wire == "h3-endpoints" {
             draft.media.sourceImage = picture?.encoded
             draft.media.sourceImageName = picture?.name

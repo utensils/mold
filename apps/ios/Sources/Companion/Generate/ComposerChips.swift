@@ -24,12 +24,18 @@ struct ShapeChip: View {
                             }
                         }
                     } label: {
-                        Label { Text(group.label) } icon: {
-                            if let preset = group.presets.first {
+                        Label {
+                            Text(group.id == shape.aspect
+                                ? String(localized: "\(group.label) · Selected") : group.label)
+                        } icon: {
+                            if group.id == shape.aspect {
+                                Image(systemName: "checkmark")
+                            } else if let preset = group.presets.first {
                                 Image(uiImage: AspectRatioIcon.image(width: preset.width, height: preset.height))
                             }
                         }
                     }
+                    .accessibilityIdentifier("aspect-\(group.id)")
                 }
             } label: {
                 chipLabel(shape.aspect, detail: short ? nil : "\(generate.draft.width)×\(generate.draft.height)")

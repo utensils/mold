@@ -126,6 +126,34 @@ final class ReferenceParityTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Choose a Model"].waitForExistence(timeout: 5))
     }
 
+    @MainActor func testStartFrameSelectsClosestAspectAndMenuMarksIt() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(aspectFixture: true, referenceFixture: true, galleryPrints: 2)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app); continueAfterFailure = false
+        app.launch(); try addMachine(app, port: port)
+        try choose("minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p", in: app)
+        try pickLibrary("First frame, empty", image: 0, app: app)
+        try pickLibrary("Last frame, empty", image: 1, app: app)
+        let options = app.buttons["Options"].firstMatch
+        reveal(options, app: app); tapMenu(options)
+        XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
+        let shape = app.buttons["options-shape"].firstMatch
+        XCTAssertTrue(shape.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(shape.label.contains("16:9"), shape.label)
+        tapMenu(shape)
+        let selected = app.descendants(matching: .any)["aspect-16:9"].firstMatch
+        XCTAssertTrue(selected.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(selected.label.contains("Selected"), "Current aspect must be identified in the top-level menu: \(selected.label)")
+        let other = app.descendants(matching: .any)["aspect-7:4"].firstMatch
+        XCTAssertTrue(other.exists, "Alternative aspects remain available")
+        XCTAssertFalse(other.label.contains("Selected"))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Start frame aspect and selected menu"; shot.lifetime = .keepAlways; add(shot)
+    }
+
     @MainActor func testNamedViewsAndBoundaryWellsFollowModelCapabilities() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 4)
