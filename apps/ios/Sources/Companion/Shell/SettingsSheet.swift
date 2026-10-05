@@ -5,6 +5,8 @@ import SwiftUI
 /// section: the system decides. Section headers are drawn in `.secondaryText`
 /// -- the system header colour failed the contrast audit on white.
 struct SettingsSheet: View {
+    @State private var access = SettingsAccess()
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
@@ -39,7 +41,7 @@ struct SettingsSheet: View {
                     Text("The machines Mold Studio uses. Their details are under Machines.")
                         .foregroundStyle(.secondaryText)
                 }
-                SettingsSections()
+                SettingsSections(access: access)
                 Section {
                     AdaptiveRow {
                         Text("Version")
@@ -77,6 +79,11 @@ struct SettingsSheet: View {
                     }
                 }
             }
+        }
+        .permissionAlert($access.recovery)
+        .task { await access.refresh() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await access.refresh() } }
         }
     }
 

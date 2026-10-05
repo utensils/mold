@@ -30,6 +30,7 @@ final class PrintActions {
     /// place and cleared on the next action -- never a toast.
     var status: String?
     var busy = false
+    var permissionRecovery: PermissionRecovery?
 
     @ObservationIgnored var sharedFiles: [URL] = []
     @ObservationIgnored let hosts: HostStore
@@ -47,28 +48,38 @@ final class PrintActions {
 
     /// Stills and clips into Photos (add-only permission). A 3-D object has
     /// no place in Photos, so it is skipped and said so.
-    func saveToPhotos(_ entries: [LibraryEntry]) {
+    func saveToPhotos(_ entries: [LibraryEntry], interactive: Bool = true) {
         Task {
+            status = nil
             let saveable = entries.filter { $0.print.kind != .mesh }
-            guard let urls = await files(for: saveable), !urls.isEmpty else { return }
-            defer { Self.removeFiles(urls) }
-            let allowed = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard allowed == .authorized || allowed == .limited else {
-                status = String(localized: "Mold Studio needs permission to add to Photos. Allow it in Settings.")
+            guard !saveable.isEmpty else { return }
+            let allowed = interactive ? await PhotosAccess.request() : PHPhotoLibrary.authorizationStatus(for: .addOnly)
+            guard PhotosAccess.canSave(allowed) else {
+                if interactive { permissionRecovery = PermissionRecovery.photos(allowed) }
                 return
             }
+            guard let urls = await files(for: saveable), !urls.isEmpty else { return }
+            defer { Self.removeFiles(urls) }
+            // Resolve app-isolated metadata before entering PhotoKit's queue.
+            let resources = Self.photoResources(urls: urls, entries: saveable)
             do {
-                try await PHPhotoLibrary.shared().performChanges {
-                    for (url, entry) in zip(urls, saveable) {
-                        let request = PHAssetCreationRequest.forAsset()
-                        request.addResource(with: entry.print.isVideo ? .video : .photo, fileURL: url, options: nil)
-                    }
-                }
+                try await PhotosWriter.save(resources)
                 status = saveable.count == 1 ? String(localized: "Saved to Photos.")
                     : String(localized: "Saved \(saveable.count) prints to Photos.")
             } catch {
-                status = String(localized: "Photos couldn't save that: \(error.localizedDescription)")
+                if interactive, let recovery = PermissionRecovery.photos(PHPhotoLibrary.authorizationStatus(for: .addOnly)) {
+                    permissionRecovery = recovery
+                } else { status = String(localized: "Photos couldn't save that: \(error.localizedDescription)") }
             }
+        }
+    }
+
+    static func photoResources(urls: [URL], entries: [LibraryEntry]) -> [PhotosWriter.Resource] {
+        zip(urls, entries).map { url, entry in
+            // Playback also calls animated GIF/WebP a clip; PhotoKit needs
+            // their image resource, and only video containers use .video.
+            let format = (entry.print.format ?? url.pathExtension).lowercased()
+            return PhotosWriter.Resource(url: url, video: ["mp4", "mov", "m4v"].contains(format))
         }
     }
 

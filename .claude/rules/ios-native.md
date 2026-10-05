@@ -92,3 +92,14 @@ requests and prompt-only recall. Search during Clear must reload the latest
 query; reconnecting reloads without requiring a query edit.
 
 **Reference parity.** Both native apps use shared `GenerationReference`/`DraftMedia` contracts for H3 image/MP4/PCM-WAV references and Hunyuan named views. Capability resolution owns older-host fallback; UI never matches model names. `BoundaryFramePolicy` owns Wan pairs and FL2VA endpoints. `DraftPictureAttachment` owns still-reference reorder/replace/remove and canvas refresh. Placement sends descriptors only; HTTP admission stages fresh upload V2 leases, canonicalizes exact media facts and cleans unused leases. Retained reuse requires matching descriptors, preserves new inputs, and never submits unresolved descriptors without a reuse session. Keep Photos/Library/Share routing in parity with primary attachment controls. Consume pending Library reuse on the actual Generate view's first mount and later changes; clear it synchronously so remounting never replays a handoff over user edits. Validation/UAT matrix: `docs/plans/native-reference-parity.md`.
+
+**Permission recovery.** Native denial alerts use PermissionRecovery and public
+UIApplication Settings URLs; restricted access explains Screen Time/MDM without
+a Settings promise. Photos imports stay picker-only; saves request addOnly before
+downloading, and auto-save never prompts. PhotosWriter's change callback is
+nonisolated and Sendable, capturing immutable descriptors rather than app models;
+PhotoKit invokes it off-main. Preserve files through completion. Camera capture
+and supported QR scanning request authorization contextually. Nearby permission
+recovery is only for Bonjour policy denial (-65570), never generic connectivity
+errors. Refresh Settings/scanning/discovery after activation. See
+`apps/ios/docs/PERMISSIONS.md` for the audit and hardware validation boundary.

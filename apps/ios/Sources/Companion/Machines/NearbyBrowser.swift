@@ -22,23 +22,33 @@ final class NearbyBrowser {
     /// permission declined -- rather than an empty list that looks like
     /// "nothing out there".
     private(set) var problem: String?
+    private(set) var permissionDenied = false
 
     @ObservationIgnored private var browser: NWBrowser?
 
     func start() {
         guard browser == nil else { return }
+        problem = nil
+        permissionDenied = false
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_mold._tcp", domain: nil), using: .tcp)
-        browser.browseResultsChangedHandler = { results, _ in
+        browser.browseResultsChangedHandler = { [weak browser] results, _ in
             let found = results.compactMap(Self.machine(from:)).sorted { $0.name < $1.name }
-            Task { @MainActor in self.machines = found }
-        }
-        browser.stateUpdateHandler = { state in
             Task { @MainActor in
+                guard let browser, self.browser === browser else { return }
+                self.machines = found
+            }
+        }
+        browser.stateUpdateHandler = { [weak browser] state in
+            Task { @MainActor in
+                guard let browser, self.browser === browser else { return }
                 switch state {
-                case .failed, .waiting:
-                    self.problem = String(localized: "Mold Studio can't look on this network. Allow Local Network access for Mold Studio in Settings.")
+                case let .failed(error), let .waiting(error):
+                    self.permissionDenied = Self.isPermissionDenied(error)
+                    self.problem = self.permissionDenied ? PermissionRecovery.localNetwork.message
+                        : String(localized: "Nearby discovery is unavailable. Check your network connection and try again.")
                 case .ready:
                     self.problem = nil
+                    self.permissionDenied = false
                 default:
                     break
                 }
@@ -46,6 +56,11 @@ final class NearbyBrowser {
         }
         browser.start(queue: .main)
         self.browser = browser
+    }
+
+    static func isPermissionDenied(_ error: NWError) -> Bool {
+        if case .dns(-65570) = error { return true }
+        return false
     }
 
     func stop() {

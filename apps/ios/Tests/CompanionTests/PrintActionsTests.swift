@@ -7,6 +7,23 @@ import Testing
 
 @MainActor
 struct PrintActionsTests {
+    @Test(arguments: [("dawn.mp4", Optional<String>.none, true), ("dawn.mp4", "mp4", true),
+                      ("camera.mov", nil, true), ("camera.m4v", nil, true),
+                      ("loop.gif", nil, false), ("loop.gif", "gif", false),
+                      ("loop.webp", "webp", false), ("loop.apng", "apng", false),
+                      ("still.png", nil, false)])
+    func photosExportDistinguishesVideoContainersFromAnimatedPhotos(filename: String, format: String?, video: Bool) async throws {
+        let (_, hosts, _) = try await QueueStoreTests.setUp()
+        var json: [String: Any] = ["filename": filename, "metadata": ["frames": 10], "timestamp": 1790000000]
+        if let format { json["format"] = format }
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: json))
+        let url = URL(fileURLWithPath: "/tmp/" + filename)
+        let resources = PrintActions.photoResources(urls: [url], entries: [LibraryEntry(host: hosts.hosts[0], print: print)])
+        #expect(resources.count == 1)
+        #expect(resources[0].video == video)
+        #expect(resources[0].url == url)
+    }
+
     @Test func aRemovedMachineDoesNotSilentlyDropAnExportEntry() async throws {
         let (_, hosts, fake) = try await QueueStoreTests.setUp()
         let host = hosts.hosts[0]
