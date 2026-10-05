@@ -24,7 +24,9 @@ extension PrintActions {
         }
     }
     func cancelExports() {
-        fileExportTask?.cancel(); fileExportTask = nil
+        if let operation = fileExportTask {
+            operation.cancel(); fileExportTask = nil; activeExportID = nil; busy = false
+        }
         if case let .export(session) = sheet { session.cancel() }
         if case let .share(urls) = pendingDelivery { Self.removeFiles(urls) }
         if case let .files(urls) = pendingDelivery { Self.removeFiles(urls) }
@@ -32,9 +34,12 @@ extension PrintActions {
     }
     func deliverOriginal(_ entry: LibraryEntry, destination: ExportDestination) {
         guard !busy else { return }
+        busy = true; status = nil
+        let operation = UUID(); activeExportID = operation
         fileExportTask = Task {
+            defer { finishFileExport(operation) }
             guard !Task.isCancelled else { return }
-            guard let urls = await files(for: [entry]), let url = urls.first else { return }
+            guard let urls = await downloadedFiles(for: [entry]), let url = urls.first else { return }
             guard !Task.isCancelled else { Self.removeFiles(urls); return }
             deliver(url, destination: destination)
         }
@@ -42,8 +47,9 @@ extension PrintActions {
     func deliverAsset(_ asset: GenerationAsset, entry: LibraryEntry, destination: ExportDestination) {
         guard !busy else { return }
         busy = true; status = nil
+        let operation = UUID(); activeExportID = operation
         fileExportTask = Task {
-            defer { busy = false }
+            defer { finishFileExport(operation) }
             var staged: URL?
             defer { if let staged { Self.removeFiles([staged]) } }
             do {
@@ -58,6 +64,10 @@ extension PrintActions {
                 staged = nil
             } catch { if !Task.isCancelled { status = "Couldn't export that file: \(error.localizedDescription)" } }
         }
+    }
+    private func finishFileExport(_ operation: UUID) {
+        guard activeExportID == operation else { return }
+        activeExportID = nil; busy = false; fileExportTask = nil
     }
     private func deliver(_ url: URL, destination: ExportDestination) {
         if destination == .folder {

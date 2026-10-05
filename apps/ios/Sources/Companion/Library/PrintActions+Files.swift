@@ -8,9 +8,15 @@ extension PrintActions {
         guard !busy else { return nil }
         busy = true
         defer { busy = false }
+        return await downloadedFiles(for: entries)
+    }
+
+    /// The calling operation owns busy state and cancellation cleanup.
+    func downloadedFiles(for entries: [LibraryEntry]) async -> [URL]? {
         status = nil
         var urls: [URL] = []
         for entry in entries {
+            guard !Task.isCancelled else { Self.removeFiles(urls); return nil }
             guard let host = hosts.host(entry.hostID) else {
                 Self.removeFiles(urls)
                 hosts.report(entry.hostID, name: entry.hostName,
@@ -22,6 +28,7 @@ extension PrintActions {
                 let downloaded = try await hosts.backend(for: host).mediaFile(entry.print.filename,
                                                                             trashed: entry.print.trashedAt != nil)
                 defer { try? FileManager.default.removeItem(at: downloaded) }
+                try Task.checkCancellation()
                 let directory = FileManager.default.temporaryDirectory.appending(path: "mold-print-export-\(UUID())")
                 guard let named = SafeFilename.url(entry.print.filename, in: directory) else {
                     throw MoldClientError.malformedResponse
@@ -36,6 +43,7 @@ extension PrintActions {
                 urls.append(named)
             } catch {
                 Self.removeFiles(urls)
+                guard !Task.isCancelled else { return nil }
                 hosts.report(host, doing: String(localized: "send \(entry.print.displayName)"), error)
                 return nil
             }

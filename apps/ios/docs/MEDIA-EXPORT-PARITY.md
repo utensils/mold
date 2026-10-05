@@ -277,8 +277,13 @@ A follow-up review identified a Photos authorization cancellation race:
 a denial arriving after cancellation could publish a recovery alert. A suspended
 authorization regression reproduced it; checking cancellation immediately after
 authorization returns suppresses late UI publication and releases staged files.
-The complete native unit suite passes 186 tests after the fix. Independent review
-accepted the fix and regression.
+Original-file delivery review also reproduced cancellation being reported as a
+machine failure and immediate repeated actions replacing the tracked task.
+Original and asset delivery now reserve ownership synchronously and release it
+only for their own operation. Deferred-response regressions cover cancellation,
+repeated actions and a late old response arriving while a new export is active.
+The complete native unit suite passes 189 tests in 36 suites. Independent review
+accepted the fixes and regressions.
 
 The iOS 26.5 accessibility auditor emits an unnamed prediction of clipping at
 larger Dynamic Type sizes even at maximum AX5. The test handles only that exact

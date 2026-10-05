@@ -306,5 +306,9 @@ ImageIO inspection of the actual PhotoKit-persisted GIF resource confirmed all
 three fixture frames and their 100 ms delays were retained. A separate native
 unit regression suspends Photos authorization, cancels the export, then returns
 denial: no recovery alert, error/status, delivery or staged directory survives.
-It failed before the cancellation fence and passes with all 186 native unit
-tests after the fix.
+It failed before the cancellation fence. Original download cancellation also
+reproduced a false machine-failure banner, and two immediate delivery actions
+reproduced lost task ownership. Deferred-response tests verify that cancellation
+stays silent, late responses clean their files, and a cancelled old asset cannot
+release a newer original export. All 189 native unit tests in 36 suites pass;
+independent review accepted these fixes.
