@@ -240,3 +240,15 @@ named unload, inventory refresh, server refusal, older residency metadata,
 same-host serialization and independent-host concurrency. Native lint, routing
 contracts and independent source/visual peer review pass. Simulator evidence
 remains separate from physical-device or live-GPU-server acceptance.
+
+### First-frame aspect selection (2026-10-04)
+
+On an isolated iPhone 17 Pro Simulator running iOS 26.5, the loopback
+`testStartFrameSelectsClosestAspectAndMenuMarksIt` imported a 160×90 first frame
+and a 90×160 closing frame through Choose from Library for the H3 FL2VA 768p
+recipe. Shape became 16:9 (1024×576), stayed there after the closing frame, and
+the top-level aspect menu displayed a checkmark and “16:9 · Selected”. Other
+aspects remained available without the selected label. The captured menu was
+visually inspected. This test performs no inference and uses disposable media.
+Shared attachment regressions cover both Wan and H3, replacement and manual
+intent, plus the centered crop-fill default. Physical-device UAT was not run.

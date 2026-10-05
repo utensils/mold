@@ -850,3 +850,5 @@ copies from trusting future updates. Key rotation must be staged by first
 shipping the replacement public key in an update signed with the existing key.
 Runner-only key material is written to temporary paths, and the temporary
 signing keychain is removed even if the build fails.
+
+Attaching a first/start frame selects the closest supported aspect ratio from that image; adding a closing frame preserves it. Crop to fill is the default. The iOS aspect menu marks its current selection with a checkmark.

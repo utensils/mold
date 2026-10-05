@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 
@@ -7,7 +8,7 @@ import Testing
 /// never per a comparison with the size the canvas happens to hold.
 /// **Fails today**: the draft recorded no intent and no source moved it.
 struct CanvasIntentTests {
-    private func recipe(_ groups: String) -> GenerationRecipe {
+    private func recipe(_ groups: String, wire: String? = nil) -> GenerationRecipe {
         let json = """
         {"id": "r", "label": "R",
          "defaults": {"width": 1024, "height": 1024, "steps": 20, "guidance": 3.5,
@@ -19,7 +20,7 @@ struct CanvasIntentTests {
                    "mode": "adjustable", "note": null},
          "guidance": {"default": 3.5, "min": 0, "max": 10, "step": 0.1, "mode": "adjustable",
                       "note": null},
-         "temporal": null, "capabilities": {}, "request_selector": null}
+         "temporal": null, "capabilities": \(wire.map { "{\"boundary_frames\":{\"mode\":\"adjustable\",\"wire\":\"\($0)\",\"min_frames\":9,\"first_required\":false,\"last_required\":false}}" } ?? "{}"), "request_selector": null}
         """
         return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))
     }
@@ -111,4 +112,44 @@ struct CanvasIntentTests {
         #expect(draft.width == 1024)
         #expect(draft.height == 576)
     }
+    @Test(arguments: ["wan-pair", "h3-endpoints"])
+    func firstBoundaryPictureSelectsAspectAndLastPictureCannotChangeIt(wire: String) throws {
+        let video = recipe(ladder, wire: wire)
+        func picture(_ width: Int, _ height: Int) -> ImportedPicture {
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+            let data = SourceFitRender.encodePNG(context.makeImage()!)!
+            return ImportedPicture(encoded: data.base64EncodedString(), name: "frame.png", data: data)
+        }
+        var draft = RenderDraft()
+        BoundaryFramePolicy.set(first: true, picture: picture(160, 90), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344)
+        #expect(draft.height == 768)
+        #expect(draft.canvasIntent == .source)
+        #expect(draft.media.sourceFit == .default)
+        BoundaryFramePolicy.set(first: false, picture: picture(90, 160), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1344)
+        #expect(draft.height == 768)
+        // Reattaching the same first frame must not undo a later manual size.
+        draft.canvasIntent = .manual
+        draft.width = 512
+        draft.height = 512
+        BoundaryFramePolicy.set(first: true, picture: picture(160, 90), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 512)
+        #expect(draft.height == 512)
+        #expect(draft.canvasIntent == .manual)
+        // Replacing the first frame re-arms automatic sizing, including over
+        // a manual selection; the closing frame never owns this decision.
+        draft.canvasIntent = .manual
+        BoundaryFramePolicy.set(first: true, picture: picture(90, 160), draft: &draft,
+                                capabilities: video.capabilities, recipe: video)
+        #expect(draft.width == 1024)
+        #expect(draft.height == 1024)
+        #expect(draft.canvasIntent == .source)
+    }
+
 }

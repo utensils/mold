@@ -27,14 +27,14 @@ struct BoundaryFrameWells: View {
                 pick: { picked in
                     guard session.isCurrent(controller: controller, media: draft.media) else { return }
                     BoundaryFramePolicy.set(first: first, picture: picked, draft: &draft,
-                                            capabilities: recipe.capabilities)
+                                            capabilities: recipe.capabilities, recipe: recipe)
                 })
             HStack {
                 Text(first ? "First frame" : "Last frame").font(.caption)
                 if BoundaryFramePolicy.image(first: first, draft: draft, capabilities: recipe.capabilities) != nil {
                     Button("Remove", systemImage: "xmark.circle") {
                         BoundaryFramePolicy.set(first: first, picture: nil, draft: &draft,
-                                                capabilities: recipe.capabilities)
+                                                capabilities: recipe.capabilities, recipe: recipe)
                     }.labelStyle(.iconOnly).buttonStyle(.plain)
                 }
             }

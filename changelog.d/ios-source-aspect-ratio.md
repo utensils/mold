@@ -1,0 +1,1 @@
+- Fixed native video first-frame attachment choosing no source aspect after boundary-frame support was added; closing frames preserve the first-frame choice, and the iOS aspect menu visibly marks the current selection.
