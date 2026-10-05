@@ -16,7 +16,8 @@ final class LibraryViewerTests: XCTestCase {
 
     @MainActor private func saveToPhotos(video: Bool, deny: Bool) async throws {
         continueAfterFailure = false
-        let machine = try FixtureMachine(galleryPrints: 3, mixedMedia: true)
+        let identity = UUID().uuidString
+        let machine = try FixtureMachine(galleryPrints: 3, galleryID: identity, mixedMedia: true)
         let port = try await machine.start()
         let app = XCUIApplication()
         cleanUpFixture(machine, port: port, app: app)
@@ -31,7 +32,7 @@ final class LibraryViewerTests: XCTestCase {
         app.buttons["Add"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
         if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
-        let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", video ? "Fixture 1," : "Fixture 0,")).firstMatch
+        let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Photos-\(identity) \(video ? 1 : 0),")).firstMatch
         XCTAssertTrue(print.waitForExistence(timeout: 10)); print.tap()
         func save() {
             app.buttons["More"].firstMatch.tap()
