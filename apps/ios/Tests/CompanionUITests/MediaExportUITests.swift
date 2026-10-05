@@ -24,7 +24,14 @@ final class MediaExportUITests: XCTestCase {
     }
     @MainActor private func open(_ index: Int, identity: String, app: XCUIApplication) throws {
         let tile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Photos-\(identity) \(index),")).firstMatch
-        guard tile.waitForExistence(timeout: 10) else { throw ExportUATFailure.missingControl("fixture print \(index)") }; tile.tap()
+        let grid = app.scrollViews.firstMatch
+        _ = tile.waitForExistence(timeout: 5)
+        for _ in 0..<8 where !tile.exists || !tile.isHittable {
+            guard grid.exists else { throw ExportUATFailure.missingControl("Library viewport") }
+            grid.swipeUp()
+        }
+        guard tile.exists && tile.isHittable else { throw ExportUATFailure.missingControl("fixture print \(index)") }
+        tile.tap()
     }
     private enum ExportUATFailure: Error { case missingControl(String) }
     @MainActor private func export(_ app: XCUIApplication) throws {
@@ -181,13 +188,32 @@ final class MediaExportUITests: XCTestCase {
         }
         for _ in 0..<32 {
             let visible = viewport()
-            for id in required {
+            for id in required where !covered.contains(id) {
                 let control = form.descendants(matching: .any)[id].firstMatch
-                if control.exists && control.isHittable && visible.contains(control.frame) { covered.insert(id) }
+                // A Stepper is an accessibility group; its child buttons are
+                // audited for hit regions rather than treating the group as a button.
+                if control.exists {
+                    let frame = control.frame
+                    if frame.width > 0 && frame.height > 0 && visible.contains(frame) { covered.insert(id) }
+                }
             }
-            try app.performAccessibilityAudit(for: [.contrast]) { issue in
-                guard let element = issue.element else { return true }
-                return !form.descendants(matching: .any).allElementsBoundByIndex.contains(element) || !visible.contains(element.frame)
+            let elements = form.descendants(matching: .any).allElementsBoundByIndex
+            let navigation = app.navigationBars["Export Media"].descendants(matching: .any).allElementsBoundByIndex
+            // Clipping/Dynamic Type audits resize and reset a lazy Form's
+            // scroll position. Finish settled pixel passes before resizing it,
+            // matching ShellAccessibilityTests' ordering.
+            try app.performAccessibilityAudit(for: [.contrast, .hitRegion, .sufficientElementDescription]) { issue in
+                guard let element = issue.element else {
+                    let report = XCTAttachment(string: issue.compactDescription + ": " + issue.detailedDescription + "\n" + app.debugDescription)
+                    report.name = "Unnamed export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
+                    print("EXPORT AUDIT unnamed: \(issue.compactDescription): \(issue.detailedDescription)")
+                    return false
+                }
+                if !navigation.contains(element) && (!elements.contains(element) || !visible.contains(element.frame)) { return true }
+                let report = XCTAttachment(string: "\(issue.compactDescription): \(element.elementType) '\(element.label)' [\(element.identifier)] at \(element.frame)\n\(issue.detailedDescription)\n\(app.debugDescription)")
+                report.name = "Visible export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
+                print("EXPORT AUDIT: \(issue.compactDescription): '\(element.label)' [\(element.identifier)] \(issue.detailedDescription)")
+                return false
             }
             if covered.count == required.count { break }
             // Overlapping viewports prevent a tall Dynamic Type row from
@@ -199,6 +225,19 @@ final class MediaExportUITests: XCTestCase {
         guard covered == Set(required) else { throw ExportUATFailure.missingControl(required.filter { !covered.contains($0) }.joined(separator: ", ")) }
         XCTAssertTrue(app.buttons["export-cancel"].isHittable)
         try app.performAccessibilityAudit(for: [.dynamicType, .textClipped, .elementDetection, .hitRegion, .sufficientElementDescription]) { issue in
+            // UIKit navigation bars cap their font size and offer the Large
+            // Content Viewer. Match ShellAccessibilityTests' system-bar rule.
+            // Unnamed Dynamic Type reports are a known auditor limitation;
+            // retain diagnostics rather than identifying them as system chrome.
+            if issue.auditType == .dynamicType {
+                guard let element = issue.element else {
+                    let report = XCTAttachment(string: issue.detailedDescription + "\n" + app.debugDescription)
+                    report.name = "Unnamed Dynamic Type auditor report"; report.lifetime = .keepAlways; self.add(report)
+                    self.evidence(app, "Unnamed Dynamic Type auditor report")
+                    return true
+                }
+                if app.navigationBars["Export Media"].descendants(matching: .any).allElementsBoundByIndex.contains(element) { return true }
+            }
             guard let element = issue.element else { return false }
             // The underlying Library/viewer is dimmed behind this sheet.
             return !form.descendants(matching: .any).allElementsBoundByIndex.contains(element)

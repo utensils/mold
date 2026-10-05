@@ -275,4 +275,25 @@ describe("VideoExportDialog", () => {
       fps: 12,
     });
   });
+  it("offers only the advertised animation intersection and disables geometry-only hosts", async () => {
+    const wrapper = mount(VideoExportDialog, {
+      props: {
+        open: true,
+        filename: "loop.mp4",
+        formats: ["gif", "apng", "webp", "obj", "stl"],
+      },
+    });
+    expect(
+      wrapper
+        .findAll('input[name="export-format"]')
+        .map((input) => input.attributes("value")),
+    ).toEqual(["gif", "apng", "webp"]);
+    await wrapper.setProps({ formats: ["obj", "stl"] });
+    expect(wrapper.findAll('input[name="export-format"]')).toHaveLength(0);
+    expect(
+      wrapper.get('button[type="submit"]').attributes("disabled"),
+    ).toBeDefined();
+    await wrapper.get("form").trigger("submit");
+    expect(wrapper.emitted("export")).toBeUndefined();
+  });
 });

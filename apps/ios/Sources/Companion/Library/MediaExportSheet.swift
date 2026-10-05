@@ -15,16 +15,16 @@ struct MediaExportSheet: View {
                 }
                 if session.options != nil && !session.formats.isEmpty {
                     Section("Format") {
-                        Picker("Format", selection: $session.format) {
+                        MediaExportPicker("Format", value: session.format.uppercased(), selection: $session.format, identifier: "export-format") {
                             ForEach(session.formats, id: \.self) { Text($0.uppercased()).tag($0) }
-                        }.accessibilityIdentifier("export-format")
+                        }
                     }
                     if session.animation { animationOptions }
                     else if session.geometry != nil { geometryOptions }
                     Section("Destination") {
-                        Picker("Destination", selection: $session.destination) {
+                        MediaExportPicker("Destination", value: session.destination.title, selection: $session.destination, identifier: "export-destination") {
                             ForEach(session.destinations) { Text($0.title).tag($0) }
-                        }.accessibilityIdentifier("export-destination")
+                        }
                     }
                     Section {
                         Button(session.converting ? "Converting…" : "Export") { session.submit() }
@@ -55,16 +55,16 @@ struct MediaExportSheet: View {
     @ViewBuilder private var animationOptions: some View {
         if session.isGif {
             Section("Playback") {
-                Picker("Playback", selection: $session.playback) {
+                MediaExportPicker("Playback", value: session.playback == .loop ? "Loop" : "Bounce", selection: $session.playback, identifier: "export-playback") {
                     ForEach(session.options?.playbackChoices ?? [], id: \.self) {
                         Text($0 == .loop ? "Loop" : "Bounce").tag($0)
                     }
-                }.accessibilityIdentifier("export-playback")
-                Picker("Repeat", selection: $session.repeatMode) {
+                }
+                MediaExportPicker("Repeat", value: session.repeatMode == .forever ? "Forever" : "Once", selection: $session.repeatMode, identifier: "export-repeat") {
                     ForEach(session.options?.repeatChoices ?? [], id: \.self) {
                         Text($0 == .forever ? "Forever" : "Once").tag($0)
                     }
-                }.accessibilityIdentifier("export-repeat")
+                }
                 Text("Bounce plays forward, then reverses.").foregroundStyle(.secondaryText)
             }
             if session.takesPause, let control = session.pauseControl {
@@ -80,16 +80,16 @@ struct MediaExportSheet: View {
             }
         }
         Section("Size and frame rate") {
-            Picker("Longest side", selection: $session.maxDimension) {
+            MediaExportPicker("Longest side", value: session.maxDimension == 0 ? "Original" : "\(session.maxDimension) px", selection: $session.maxDimension, identifier: "export-size") {
                 if session.kind == .video { Text("Original").tag(0) }
                 ForEach(session.kind == .mesh ? [1024, 720, 512, 480] : [1080, 720, 480], id: \.self) {
                     Text("\($0) px").tag($0)
                 }
-            }.accessibilityIdentifier("export-size")
-            Picker("Frame rate", selection: $session.fps) {
+            }
+            MediaExportPicker("Frame rate", value: session.fps == 0 ? "Original" : "\(session.fps) fps", selection: $session.fps, identifier: "export-fps") {
                 if session.kind == .video { Text("Original").tag(0) }
                 ForEach(session.kind == .mesh ? [24, 12, 10, 8] : [24, 12, 8], id: \.self) { Text("\($0) fps").tag($0) }
-            }.accessibilityIdentifier("export-fps")
+            }
             if session.kind == .mesh {
                 Stepper("Views per turn: \(session.frames)", value: $session.frames, in: 8...session.frameLimit)
                     .accessibilityIdentifier("export-frames")
@@ -113,16 +113,43 @@ struct MediaExportSheet: View {
                     TextField("Longest side in mm", value: Binding(get: { session.geometry?.sizeMm ?? caps.sizeMm.default },
                         set: { session.geometry?.sizeMm = $0 }), format: .number).keyboardType(.decimalPad).accessibilityIdentifier("export-size-mm")
                 }
-                Picker("Up axis", selection: Binding(get: { session.geometry?.upAxis ?? .y }, set: { session.geometry?.upAxis = $0 })) {
+                MediaExportPicker("Up axis", value: (session.geometry?.upAxis ?? .y).rawValue.uppercased(), selection: Binding(get: { session.geometry?.upAxis ?? .y }, set: { session.geometry?.upAxis = $0 }), identifier: "export-axis") {
                     ForEach(caps.upAxes, id: \.self) { Text($0.rawValue.uppercased()).tag($0) }
-                }.accessibilityIdentifier("export-axis")
-                Picker("Origin", selection: Binding(get: { session.geometry?.origin ?? .floor }, set: { session.geometry?.origin = $0 })) {
+                }
+                MediaExportPicker("Origin", value: session.geometry?.origin == .floor ? "Floor" : "Center", selection: Binding(get: { session.geometry?.origin ?? .floor }, set: { session.geometry?.origin = $0 }), identifier: "export-origin") {
                     ForEach(caps.origins, id: \.self) { Text($0 == .floor ? "Floor" : "Center").tag($0) }
-                }.accessibilityIdentifier("export-origin")
+                }
             }
         }
     }
     private func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+/// A native checkmarked menu with an explicit wrapping selected-value label.
+/// The standard Form Picker can truncate even after stacking at AX5.
+private struct MediaExportPicker<Selection: Hashable, Choices: View>: View {
+    let title: String
+    let value: String
+    @Binding var selection: Selection
+    let identifier: String
+    let choices: Choices
+    init(_ title: String, value: String, selection: Binding<Selection>, identifier: String, @ViewBuilder choices: () -> Choices) {
+        self.title = title; self.value = value; _selection = selection
+        self.identifier = identifier; self.choices = choices()
+    }
+    var body: some View {
+        AdaptiveRow {
+            Text(title)
+        } value: {
+            Menu {
+                Picker(title, selection: $selection) { choices }
+            } label: {
+                Text(value).fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityLabel("\(title), \(value)")
+            .accessibilityIdentifier(identifier)
+        }
     }
 }

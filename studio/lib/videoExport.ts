@@ -20,7 +20,8 @@ export interface VideoExportOptions {
 }
 
 export interface VideoExportCapabilities {
-  formats: VideoExportFormat[];
+  /** The shared route advertises animation and geometry containers. */
+  formats: string[];
   gif_playback: GifPlayback[];
   gif_repeat: GifRepeat[];
   gif_pause?: GifPauseControl;

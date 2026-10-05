@@ -1027,6 +1027,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         exportRequests.append(request)
         try record("export"); throw notPlanted()
     }
+
+    func export(_ filename: String, request: VideoExportRequest) async throws -> Data {
+        try record("exportVideo"); throw notPlanted()
+    }
+
+    func generationAsset(_ filename: String, assetID: String) async throws -> Data {
+        try record("generationAsset"); throw notPlanted()
+    }
     func playableURL(for filename: String) async throws -> URL {
         try record("playableURL")
         return host.baseURL.appendingPathComponent(filename)

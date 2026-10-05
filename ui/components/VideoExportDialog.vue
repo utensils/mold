@@ -24,7 +24,7 @@ const props = withDefaults(
   defineProps<{
     open: boolean;
     filename: string;
-    formats: VideoExportFormat[];
+    formats: string[];
     busy?: boolean;
     error?: string;
     /**
@@ -56,6 +56,11 @@ const emit = defineEmits<{
   export: [options: VideoExportOptions, destination?: string];
 }>();
 
+const supportedFormats = computed(() =>
+  props.formats.filter((value): value is VideoExportFormat =>
+    ["gif", "apng", "webp"].includes(value),
+  ),
+);
 const format = ref<VideoExportFormat>("gif");
 const playback = ref<GifPlayback>("loop");
 const repeat = ref<GifRepeat>("forever");
@@ -102,11 +107,11 @@ const isGif = computed(() => format.value === "gif");
 const offersDestinations = computed(() => props.destinations.length > 1);
 
 watch(
-  () => [props.open, props.formats, props.destinations] as const,
+  () => [props.open, supportedFormats.value, props.destinations] as const,
   ([open]) => {
     if (!open) return;
-    if (!props.formats.includes(format.value))
-      format.value = props.formats[0] ?? "gif";
+    if (!supportedFormats.value.includes(format.value))
+      format.value = supportedFormats.value[0] ?? "gif";
     if (
       !props.destinations.some((choice) => choice.value === destination.value)
     )
@@ -118,7 +123,7 @@ watch(
 function submit(): void {
   if (
     props.busy ||
-    !props.formats.includes(format.value) ||
+    !supportedFormats.value.includes(format.value) ||
     !pauseValid.value ||
     (props.transparency &&
       (!Number.isInteger(frames.value) ||
@@ -178,7 +183,7 @@ function submit(): void {
       <fieldset :disabled="busy">
         <legend>Format</legend>
         <div class="video-export-options">
-          <label v-for="candidate in formats" :key="candidate">
+          <label v-for="candidate in supportedFormats" :key="candidate">
             <input
               v-model="format"
               type="radio"
@@ -363,7 +368,7 @@ function submit(): void {
           class="video-export-primary"
           :disabled="
             busy ||
-            formats.length === 0 ||
+            supportedFormats.length === 0 ||
             !pauseValid ||
             (transparency &&
               (!Number.isInteger(frames) || frames < 8 || frames > frameLimit))
