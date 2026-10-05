@@ -1713,3 +1713,20 @@ Any change to the pinned license, Q&A, source revisions, component identities,
 supported territory, execution layout, attention backend, quantization policy,
 or public product surface requires updating this record and re-running the
 applicable review before release.
+
+## Public FL2VA endpoint admission correction (2026-10-04)
+
+The public compact envelope previously transcribed one first-frame endpoint
+from its measurement. A native first+last request with 30 prompt tokens then
+needed 2,062 conditioner text rows, against the first-only ceiling of 2,048;
+shortening the prompt would still hit endpoint-count and vision/latent caps.
+The public policy now derives those axes from the validated FL2VA mode, with
+exact endpoint order. A second endpoint adds 1,008 pads and 32 presentation
+rows to the text budget, preserving paragraph-scale prompts, and adds its own
+4,032 pre-merge patches and 1,008 conditioning latents. Qwen and denoise grants
+scale from the existing measurements; the first-only ledger is unchanged.
+The original authenticated private qualification record above remains scoped
+to its own first-only envelope. Hermetic tests prove admission/profile parity,
+row refusals and memory accounting; they do not constitute a new paired-frame
+hardware quality campaign. Upstream evidence and validation plan:
+[`h3-endpoint-prompt-budget`](../plans/h3-endpoint-prompt-budget.md).

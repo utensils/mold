@@ -111,20 +111,20 @@ throughput claim.
 
 ## Compact variants
 
-| Model                                                      | Task                                                       | Total pull | Runtime status                             |
-| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ------------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references  |
-| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable        |
-| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable        |
+| Model                                                      | Task                                                       | Total pull | Runtime status                            |
+| ---------------------------------------------------------- | ---------------------------------------------------------- | ---------: | ----------------------------------------- |
+| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio                   |  42.482 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)               |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps)     |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)          |  44.438 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | FL2VA + reviewed Turbo 4-step 768p LoRA, rank 21 (5 steps) |  42.780 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | FL2VA + reviewed Turbo 8-step LoRA, rank 21 (9 steps)      |  42.809 GB | CUDA/Metal generation; boundary frames    |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)              |  44.438 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | Ref2VA + reviewed Turbo 4-step LoRA, rank 21 (5 steps)     |  42.809 GB | CUDA/Metal generation; reference profile  |
+| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                        |  42.482 GB | CUDA/Metal generation; ordered references |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio                   |  34.040 GB | Downloadable; execution unavailable       |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                        |  34.040 GB | Downloadable; execution unavailable       |
 
 The official `minimax-h3-fl2va:official-bf16` and
 `minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
@@ -366,13 +366,18 @@ The current compact implementation supports this request profile:
   (9 for `-turbo-8step`, `-turbo-8step-768p`, and `-turbo-8step-r21`, 5 for
   `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, and `-turbo-4step-768p-r21`),
   because that count is the distilled adapter's own schedule length
-- one required first-frame image; the current compact runtime refuses a
-  closing endpoint
+- at least one boundary image: first frame, last frame, or both; endpoint
+  order is first then last, and each image contributes its own conditioning
+  and memory charge. Text-only generation remains unavailable (tracked in
+  [#1552](https://github.com/utensils/mold/issues/1552))
 - MP4 output with synchronized generated audio
 - a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
-  budgets 2,048 rows, of which the first-frame image's vision pads and label
-  take 1,014, and a longer prompt is refused immediately with its exact budget
-  named rather than after artifact verification
+  keeps the first-only 2,048-row budget and adds 1,040 rows for a second
+  endpoint (1,008 vision pads plus label/delimiter allowance). Both frames
+  therefore retain roughly 1,000 prompt tokens. The exact remaining budget is
+  derived from the tokenized presentation; a longer prompt is refused before
+  artifact verification. Two endpoints also increase the Qwen and denoise
+  memory grants, so they still must pass live device and host admission
 - the prompt is **optional** once the request carries conditioning — a first or
   last frame here, a reference set for Ref2VA. What you attached already
   decides the shot, so a prompt refines it; expect near-static micro-motion

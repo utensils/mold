@@ -104,6 +104,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Metal as well as CUDA; fp8-scaled Wan checkpoints remain CUDA-only.
   MiniMax H3's compact runtime is supported on SM89 CUDA and Apple Metal;
   Metal admission checks each request against live unified-memory headroom.
+  FL2VA requires at least one boundary frame: first, last, or both, with roughly 1,000
+  prompt tokens with paired frames and charging their additional memory.
   Forced-local H3 execution accepts one FL2VA request; batches, sequences, and
   Ref2VA reference uploads require the server route.
   Qwen Image 2.1 (non-commercial Qwen Research License) edits from up to ten

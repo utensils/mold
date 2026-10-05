@@ -205,6 +205,11 @@ attempt. Local batches and chains are refused before preparation. Ref2VA
 reference uploads use the server route. The same limits apply to local
 fallback when the server is unavailable; never retry a refused local batch
 by reusing its first request's prepared authority.
+MiniMax H3 FL2VA requires at least one boundary frame: first, last, or both. The server derives endpoint count, order, conditioning row limits,
+and memory grants from the validated request mode. Paired frames keep roughly
+1,000 prompt tokens; over-budget prompts report the exact tokenizer budget
+before artifact verification. A paired request may need more host/GPU memory.
+
 The released runtime accepts qualified NVIDIA CUDA and Apple Metal devices.
 Admission uses the selected request's exact device and host-memory budget, so
 do not replace its answer with a blanket system-RAM threshold.

@@ -271,8 +271,8 @@ impl H3PrivateRuntimeEnvelopeRecord {
 
     /// Validate the envelope against an optional authenticated Turbo adapter.
     ///
-    /// The reviewed canvas is identical either way — same 1344x768, 124 frames,
-    /// 24 fps, one first-frame endpoint. The ONLY axis a Turbo tier moves is
+    /// A Turbo tier keeps the selected canvas, clip length, fps and endpoint
+    /// mode. The ONLY axis a Turbo tier moves is
     /// the step count, and it may move it only to the count that tier's
     /// distillation was reviewed for. Without an adapter the 21-step pin is
     /// exactly as strict as before.
@@ -365,8 +365,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
     fn validate_shape(&self, task: Task) -> Result<()> {
         let conditioning_ok = match task {
             Task::Fl2va => {
-                self.endpoint_count == 1
-                    && self.endpoint_anchor == "first"
+                fl2va_mode_for_envelope(self.endpoint_count, &self.endpoint_anchor).is_some()
                     && self.max_condition_visual_rows > 0
             }
             Task::Ref2va => {
@@ -508,7 +507,8 @@ impl H3PrivateRuntimeEnvelopeRecord {
 
         let mut mismatches = Vec::new();
         let reviewed_mode = match request.task {
-            Task::Fl2va => Mode::FirstFrameToAudioVideo,
+            Task::Fl2va => fl2va_mode_for_envelope(self.endpoint_count, &self.endpoint_anchor)
+                .expect("the envelope shape was validated"),
             Task::Ref2va => Mode::ReferenceToAudioVideo,
         };
         if request.mode != reviewed_mode {
@@ -516,6 +516,11 @@ impl H3PrivateRuntimeEnvelopeRecord {
                 "mode {:?} (reviewed {reviewed_mode:?} for {:?})",
                 request.mode, request.task
             ));
+        }
+        if request.task == Task::Fl2va {
+            if let Err(error) = runtime_envelope_conditioning(request) {
+                mismatches.push(error.to_string());
+            }
         }
         let anchor = requested_anchor(request);
         if anchor != self.endpoint_anchor {
@@ -2000,7 +2005,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // it is the same scaling that budget's own grant is derived from.
     // Task-keyed, because the conditioning half of the envelope and every
     // workspace scaled from it are a function of the ordered reference set
-    // for Ref2VA and of the canvas alone for FL2VA. Asking FL2VA's question
+    // for Ref2VA and of the canvas and endpoint mode for FL2VA. Asking FL2VA's question
     // here refused every Ref2VA request for a text ceiling its references'
     // own vision pads had already spent.
     #[cfg(feature = "h3")]
@@ -2013,10 +2018,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     };
     #[cfg(feature = "h3")]
     let precheck_bounds = match precheck_reference_rows.as_ref() {
-        None => public_runtime_bounds_for_shape(
+        None => public_fl2va_runtime_bounds_for_mode(
             (request.width, request.height),
             request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
-        ),
+            mode,
+        )?,
         Some(rows) => public_ref2va_runtime_bounds_for_shape(
             (request.width, request.height),
             request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -2080,11 +2086,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // against the tier's own minted envelope.
     #[cfg(feature = "h3")]
     let precheck_envelope = match precheck_reference_rows.as_ref() {
-        None => public_runtime_envelope_for_shape(
+        None => public_fl2va_runtime_envelope_for_mode(
             (request.width, request.height),
             request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
             contract::COMFY_DEFAULT_STEPS,
-        ),
+            mode,
+        )?,
         Some(rows) => public_ref2va_runtime_envelope_for_shape(
             (request.width, request.height),
             request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
@@ -2203,6 +2210,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         // already accepted. Ref2VA's conditioning envelope is a function of
         // it; FL2VA carries none.
         request.references.as_deref().unwrap_or_default(),
+        mode,
     )?;
     progress.checkpoint()?;
 
@@ -3347,6 +3355,8 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         // reference set cannot reopen the plan.
         frozen_route.task,
         request.references.as_deref().unwrap_or_default(),
+        contract::validate_resolved_request_contract(request, frozen_route.task)
+            .map_err(|error| anyhow!("{}: {}", error.code, error.message))?,
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -4353,7 +4363,7 @@ struct H3PrivateConcretePreparedRunner {
 /// The conditioning shape one capture observation records, keyed on the task
 /// the request was admitted for.
 ///
-/// FL2VA pins exactly one first-frame endpoint; Ref2VA carries none at all and
+/// FL2VA pins the validated mode's exact endpoint order; Ref2VA carries none and
 /// conditions on its ordered references, so demanding an endpoint here refused
 /// every Ref2VA attempt before it reached a device.
 #[cfg(feature = "mp4")]
@@ -4362,14 +4372,37 @@ fn runtime_envelope_conditioning(
 ) -> Result<(u32, &'static str)> {
     match request.task {
         Task::Fl2va => {
-            let endpoint = request
+            let expected: &[H3FactoryEndpointAnchor] = match request.mode {
+                Mode::TextToAudioVideo => {
+                    bail!("public H3 text-only qualification remains unavailable")
+                }
+                Mode::FirstFrameToAudioVideo => &[H3FactoryEndpointAnchor::First],
+                Mode::LastFrameToAudioVideo => &[H3FactoryEndpointAnchor::Last],
+                Mode::FirstAndLastFrameToAudioVideo => &[
+                    H3FactoryEndpointAnchor::First,
+                    H3FactoryEndpointAnchor::Last,
+                ],
+                Mode::ReferenceToAudioVideo => bail!("private H3 FL2VA envelope has a Ref2VA mode"),
+            };
+            if !request
                 .endpoints
-                .first()
-                .ok_or_else(|| anyhow!("private H3 runtime envelope has no endpoint"))?;
-            if request.endpoints.len() != 1 || endpoint.anchor != H3FactoryEndpointAnchor::First {
-                bail!("private H3 runtime envelope requires exactly one first-frame endpoint")
+                .iter()
+                .map(|endpoint| endpoint.anchor)
+                .eq(expected.iter().copied())
+            {
+                bail!(
+                    "private H3 FL2VA endpoint order differs from {:?}",
+                    request.mode
+                )
             }
-            Ok((1, "first"))
+            Ok((
+                expected.len() as u32,
+                match expected.first() {
+                    Some(H3FactoryEndpointAnchor::First) => "first",
+                    Some(H3FactoryEndpointAnchor::Last) => "last",
+                    None => "none",
+                },
+            ))
         }
         Task::Ref2va => {
             if !request.endpoints.is_empty() || request.references.is_empty() {
@@ -5724,6 +5757,96 @@ fn public_runtime_envelope_for_shape(
     }
 }
 
+/// The serialized count and first anchor identify supported endpoint modes.
+fn fl2va_mode_for_envelope(count: u32, anchor: &str) -> Option<Mode> {
+    match (count, anchor) {
+        (1, "first") => Some(Mode::FirstFrameToAudioVideo),
+        (1, "last") => Some(Mode::LastFrameToAudioVideo),
+        (2, "first") => Some(Mode::FirstAndLastFrameToAudioVideo),
+        _ => None,
+    }
+}
+
+/// Each additional endpoint contributes its own Picture label, vision markers,
+/// merged pads, pre-merge patches and conditioning latents. ComfyUI
+/// b87fe48b `comfy/text_encoders/minimax.py:193-197` and
+/// `comfy_extras/nodes_minimax_h3.py:140-163` prepare both images separately.
+/// Keep the first-only budget and measurement denominators unchanged.
+#[cfg(feature = "h3")]
+fn public_fl2va_runtime_envelope_for_mode(
+    canvas: (u32, u32),
+    frames: u32,
+    steps: u32,
+    mode: Mode,
+) -> Result<H3PrivateRuntimeEnvelopeRecord> {
+    let (count, anchor) = match mode {
+        Mode::TextToAudioVideo => bail!("public H3 text-only qualification remains unavailable"),
+        Mode::FirstFrameToAudioVideo => (1, "first"),
+        Mode::LastFrameToAudioVideo => (1, "last"),
+        Mode::FirstAndLastFrameToAudioVideo => (2, "first"),
+        Mode::ReferenceToAudioVideo => bail!("public FL2VA envelope cannot authorize Ref2VA"),
+    };
+    let mut envelope = public_runtime_envelope_for_shape(canvas, frames, steps);
+    envelope.endpoint_count = count;
+    envelope.endpoint_anchor = anchor.into();
+    // A generous label/delimiter allowance is separate from the image pads;
+    // actual token counts still decide the prompt budget at the precheck.
+    envelope.max_qwen_output_text_rows +=
+        u64::from(count.saturating_sub(1)) * (REVIEWED_FL2VA_VISION_PAD_ROWS + 32);
+    envelope.max_qwen_vision_rows = u64::from(count) * REVIEWED_MAX_QWEN_VISION_ROWS;
+    envelope.max_condition_visual_rows = u64::from(count) * REVIEWED_MAX_CONDITION_VISUAL_ROWS;
+    envelope.max_total_packed_rows = envelope.max_qwen_output_text_rows
+        + envelope.max_condition_visual_rows
+        + envelope.max_target_video_rows
+        + envelope.max_target_audio_rows;
+    Ok(envelope)
+}
+
+#[cfg(feature = "h3")]
+fn public_fl2va_runtime_bounds_for_mode(
+    canvas: (u32, u32),
+    frames: u32,
+    mode: Mode,
+) -> Result<H3PrivateRuntimeBoundRecord> {
+    let envelope = public_fl2va_runtime_envelope_for_mode(
+        canvas,
+        frames,
+        contract::COMFY_DEFAULT_STEPS,
+        mode,
+    )?;
+    let mut bounds = public_runtime_bounds_for_shape(canvas, frames);
+    let scale = |observed: u64, numerator: u64, denominator: u64| {
+        public_runtime_bound(
+            (u128::from(observed) * u128::from(numerator) / u128::from(denominator)) as u64,
+        )
+    };
+    // Qwen demand is linear in text rows plus pre-merge vision patches. Use
+    // the measured sequence as a floor so existing first-only grants stay
+    // byte-identical, while two endpoints receive the larger charged grant.
+    bounds.qwen_activation_workspace_bytes = scale(
+        fl2va_observed::QWEN_ACTIVATION_WORKSPACE_DEVICE_BYTES,
+        if envelope.endpoint_count > 1 {
+            envelope.max_qwen_output_text_rows + envelope.max_qwen_vision_rows
+        } else {
+            fl2va_observed::QWEN_SEQUENCE_ROWS
+        },
+        fl2va_observed::QWEN_SEQUENCE_ROWS,
+    );
+    bounds.attention_workspace_device_bytes = scale(
+        fl2va_observed::ATTENTION_WORKSPACE_DEVICE_BYTES,
+        envelope.max_total_packed_rows,
+        fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+    );
+    bounds.ffn_workspace_device_bytes = scale(
+        fl2va_observed::FFN_WORKSPACE_DEVICE_BYTES,
+        envelope.max_total_packed_rows,
+        fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+    );
+    // Endpoints encode sequentially. Their retained latents/conditioner state
+    // are charged by the prepared-row ledger; the VAE transient is not doubled.
+    Ok(bounds)
+}
+
 #[cfg(feature = "h3")]
 fn validate_public_runtime_profile(
     record: &H3PrivateRuntimeQualificationRecord,
@@ -5828,8 +5951,8 @@ const PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION: &str = "supported-compact-ref2va-c
 /// The prompt, per-reference label, and vision-delimiter budget the Ref2VA
 /// conditioner sequence gets ON TOP of its references' own merged vision pads.
 ///
-/// FL2VA's ceiling is one number because its conditioning is one endpoint on
-/// the request canvas; Ref2VA's pads are a function of up to
+/// FL2VA's ceiling follows its endpoint count on the request canvas;
+/// Ref2VA's pads are a function of up to
 /// `contract::MAX_REFERENCE_FILES` normalized reference canvases, so the
 /// ceiling has to be pads-plus-budget or a plain 16:9 photograph — 2048 short
 /// edge, 3584 long, 7,168 merged pads on its own — would be refused before it
@@ -6517,9 +6640,10 @@ fn public_runtime_qualification(
     turbo: Option<&H3FactoryTurboAdapterAuthority>,
     // The partition this record authorizes, and — for Ref2VA — the ordered
     // reference set its conditioning envelope is derived from. FL2VA carries
-    // none and its envelope is a pure function of the shape above.
+    // none and its envelope also depends on the validated endpoint mode.
     task: Task,
     references: &[mold_core::GenerationReference],
+    mode: Mode,
 ) -> Result<H3PrivateRuntimeQualificationAuthority> {
     // A tier reviewed for another task may not set this record's step count —
     // the FL2V 768p and Ref2V tiers share a 5-point schedule, so a bare count
@@ -6550,11 +6674,19 @@ fn public_runtime_qualification(
                 bail!("public H3 FL2VA runtime qualification was handed ordered references")
             }
             (
-                public_runtime_envelope_for_shape(canvas, frames, turbo_steps.unwrap_or(steps)),
-                public_runtime_bounds_for_shape(canvas, frames),
+                public_fl2va_runtime_envelope_for_mode(
+                    canvas,
+                    frames,
+                    turbo_steps.unwrap_or(steps),
+                    mode,
+                )?,
+                public_fl2va_runtime_bounds_for_mode(canvas, frames, mode)?,
             )
         }
         Task::Ref2va => {
+            if mode != Mode::ReferenceToAudioVideo {
+                bail!("public Ref2VA qualification has a FL2VA mode")
+            }
             let rows = ref2va_reference_rows(references, frames)?;
             (
                 public_ref2va_runtime_envelope_for_shape(
@@ -8158,6 +8290,11 @@ mod tests {
                 None,
                 task,
                 references,
+                if task == Task::Fl2va {
+                    Mode::FirstFrameToAudioVideo
+                } else {
+                    Mode::ReferenceToAudioVideo
+                },
             )
         };
         let authority = mint(&artifact, Task::Ref2va, &references).unwrap();
@@ -8508,7 +8645,7 @@ mod tests {
             batched.batch_size = 2;
             assert!(batched.validate_with_adapter(Some(&adapter)).is_err());
             let mut anchored = reviewed_envelope(reviewed_steps);
-            anchored.endpoint_anchor = "last".into();
+            anchored.endpoint_anchor = "invalid".into();
             assert!(anchored.validate_with_adapter(Some(&adapter)).is_err());
             let mut zeroed = reviewed_envelope(reviewed_steps);
             zeroed.max_total_packed_rows = 0;
@@ -8597,6 +8734,187 @@ mod tests {
             .unwrap();
     }
 
+    /// Regression for the native first+last request: two 1,008-pad images
+    /// plus 16 label/delimiter rows and a 30-token prompt used to need 2,062
+    /// text rows against a first-only 2,048-row envelope.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn public_fl2va_authority_accepts_supported_endpoint_modes() {
+        for mode in [
+            Mode::FirstAndLastFrameToAudioVideo,
+            Mode::LastFrameToAudioVideo,
+            Mode::FirstFrameToAudioVideo,
+        ] {
+            let mut request = prepared_request_for_compact_quality_envelope();
+            request.mode = mode;
+            let first = matches!(
+                mode,
+                Mode::FirstFrameToAudioVideo | Mode::FirstAndLastFrameToAudioVideo
+            );
+            let last = matches!(
+                mode,
+                Mode::LastFrameToAudioVideo | Mode::FirstAndLastFrameToAudioVideo
+            );
+            let prototype = request.endpoints.remove(0);
+            if first {
+                request.endpoints.push(prototype.clone());
+            }
+            if last {
+                let mut endpoint = prototype;
+                endpoint.anchor = H3FactoryEndpointAnchor::Last;
+                request.endpoints.push(endpoint);
+            }
+            let count = request.endpoints.len() as u64;
+            let pads = REVIEWED_FL2VA_VISION_PAD_ROWS * count;
+            request.rows = H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: pads + 8 * count + 30,
+                qwen_vision_rows: pads * 4,
+                condition_visual_rows: pads,
+                condition_audio_rows: 0,
+                target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
+                target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
+                total_packed_rows: pads
+                    + 8 * count
+                    + 30
+                    + pads
+                    + REVIEWED_MAX_TARGET_VIDEO_ROWS
+                    + REVIEWED_MAX_TARGET_AUDIO_ROWS,
+            };
+            let authority = public_runtime_qualification(
+                &artifact_report(),
+                MEASURED_CANVAS,
+                MEASURED_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
+                "gpu-0",
+                0,
+                Some((8, 9)),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                None,
+                Task::Fl2va,
+                &[],
+                mode,
+            )
+            .unwrap();
+            authority.revalidate().unwrap();
+            precheck_private_h3_prepared_rows(&authority.record.envelope, &request.rows, 30)
+                .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
+            authority
+                .record
+                .envelope
+                .validate_prepared_with_adapter(&request, None)
+                .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
+            let observation = runtime_envelope_observation(&request).unwrap();
+            assert_eq!(observation.endpoint_count, count as u32);
+            assert!(authority.record.envelope.max_qwen_output_text_rows - pads - 32 >= 1_000);
+        }
+    }
+
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn paired_endpoint_grants_charge_the_extra_rows_and_keep_the_single_frame_ledger() {
+        let single = public_runtime_bounds_for_shape(MEASURED_CANVAS, MEASURED_FRAMES);
+        for mode in [Mode::FirstFrameToAudioVideo, Mode::LastFrameToAudioVideo] {
+            let derived =
+                public_fl2va_runtime_bounds_for_mode(MEASURED_CANVAS, MEASURED_FRAMES, mode)
+                    .unwrap();
+            assert_eq!(derived, single);
+        }
+        let pair = public_fl2va_runtime_bounds_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            Mode::FirstAndLastFrameToAudioVideo,
+        )
+        .unwrap();
+        assert!(pair.qwen_activation_workspace_bytes > single.qwen_activation_workspace_bytes);
+        assert!(pair.attention_workspace_device_bytes > single.attention_workspace_device_bytes);
+        assert!(pair.ffn_workspace_device_bytes > single.ffn_workspace_device_bytes);
+        assert_eq!(
+            pair.condition_vae_workspace_device_bytes,
+            single.condition_vae_workspace_device_bytes
+        );
+        assert_eq!(
+            pair.decoder_tile_workspace_device_bytes,
+            single.decoder_tile_workspace_device_bytes
+        );
+        pair.validate().unwrap();
+    }
+
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn paired_endpoint_authority_keeps_prompt_row_and_order_limits() {
+        let envelope = public_fl2va_runtime_envelope_for_mode(
+            MEASURED_CANVAS,
+            MEASURED_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            Mode::FirstAndLastFrameToAudioVideo,
+        )
+        .unwrap();
+        let mut request = prepared_request_for_compact_quality_envelope();
+        request.mode = Mode::FirstAndLastFrameToAudioVideo;
+        let mut last = request.endpoints[0].clone();
+        last.anchor = H3FactoryEndpointAnchor::Last;
+        request.endpoints.push(last);
+        request.rows = H3FactoryPreparedRowsInput {
+            qwen_output_text_rows: envelope.max_qwen_output_text_rows,
+            qwen_vision_rows: envelope.max_qwen_vision_rows,
+            condition_visual_rows: envelope.max_condition_visual_rows,
+            condition_audio_rows: 0,
+            target_video_rows: envelope.max_target_video_rows,
+            target_audio_rows: envelope.max_target_audio_rows,
+            total_packed_rows: envelope.max_total_packed_rows,
+        };
+        let overhead = 2 * REVIEWED_FL2VA_VISION_PAD_ROWS + 16;
+        let prompt_budget = envelope.max_qwen_output_text_rows - overhead;
+        precheck_private_h3_prepared_rows(&envelope, &request.rows, prompt_budget).unwrap();
+        envelope
+            .validate_prepared_with_adapter(&request, None)
+            .unwrap();
+        // The original authenticated first-only envelope remains first-only.
+        assert!(reviewed_envelope(contract::COMFY_DEFAULT_STEPS)
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+        request.rows.qwen_output_text_rows += 1;
+        request.rows.total_packed_rows += 1;
+        let error = precheck_private_h3_prepared_rows(&envelope, &request.rows, prompt_budget + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("room for {prompt_budget} prompt tokens")),
+            "{error}"
+        );
+        assert!(envelope
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+        request.rows.qwen_output_text_rows -= 1;
+        request.rows.total_packed_rows -= 1;
+        request.rows.qwen_vision_rows += 1;
+        assert!(envelope
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+        request.rows.qwen_vision_rows -= 1;
+        request.endpoints.swap(0, 1);
+        assert!(envelope
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+        assert!(runtime_envelope_observation(&request).is_err());
+        request.endpoints[0].anchor = H3FactoryEndpointAnchor::First;
+        request.endpoints[1].anchor = H3FactoryEndpointAnchor::First;
+        assert!(envelope
+            .validate_prepared_with_adapter(&request, None)
+            .is_err());
+        for mode in [Mode::ReferenceToAudioVideo, Mode::TextToAudioVideo] {
+            assert!(public_fl2va_runtime_envelope_for_mode(
+                MEASURED_CANVAS,
+                MEASURED_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
+                mode,
+            )
+            .is_err());
+        }
+    }
+
     /// The base tier mints its envelope from the REQUEST's step count, and the
     /// whole prepared-validation path agrees.
     ///
@@ -8626,6 +8944,7 @@ mod tests {
                 None,
                 Task::Fl2va,
                 &[],
+                Mode::FirstFrameToAudioVideo,
             )
         };
         // The rows a REAL request at this shape packs, so the row caps are
@@ -8739,6 +9058,7 @@ mod tests {
                 turbo,
                 Task::Fl2va,
                 &[],
+                Mode::FirstFrameToAudioVideo,
             )
         };
         let error = mint(Some(&ref2v))
@@ -11302,6 +11622,7 @@ mod tests {
             None,
             Task::Fl2va,
             &[],
+            Mode::FirstFrameToAudioVideo,
         )
         .unwrap();
         authority.revalidate().unwrap();
@@ -11392,6 +11713,7 @@ mod tests {
                 None,
                 Task::Fl2va,
                 &[],
+                Mode::FirstFrameToAudioVideo,
             )
             .is_err());
             crossed.task = "ref2va";
@@ -11409,6 +11731,7 @@ mod tests {
                 None,
                 Task::Fl2va,
                 &[],
+                Mode::FirstFrameToAudioVideo,
             )
             .is_err());
         }
@@ -11428,6 +11751,7 @@ mod tests {
             None,
             Task::Fl2va,
             &[],
+            Mode::FirstFrameToAudioVideo,
         )
         .is_err());
     }
