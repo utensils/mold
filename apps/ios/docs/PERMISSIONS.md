@@ -9,7 +9,7 @@ management without promising that a Settings toggle can repair it.
 
 | Access | Reason and request | Recovery |
 | --- | --- | --- |
-| Photos, add only | Save a picture/video, or enable Save Finished Prints to Photos | Native denial alert before downloading files; Settings also offers recovery. Auto-save never requests access or interrupts a finished render. |
+| Photos, add only | Save a picture/video, or enable Save Finished Prints to Photos | Native denial alert before downloading files; Settings also offers recovery. Existing auto-save preferences with unrequested access show Enable Photos Access in Settings. Auto-save never requests access or interrupts a finished render. |
 | Camera, video capture authorization | Take Photo or open supported QR scanner | Request before presenting capture; denied access offers Settings. The scanner retains pasted-link fallback. No microphone recording. |
 | Local Network | Browse `_mold._tcp` or connect to a nearby machine | Bonjour policy denial (`-65570`) offers Settings in Machines/Nearby, including with no machines. Other network failures describe connectivity. Browsing restarts after returning from Settings. |
 | Notifications | First submitted render, or Enable Notifications in Settings | Denied Settings section offers notification-settings recovery and refreshes on return. App notification-kind toggles remain separate preferences. |

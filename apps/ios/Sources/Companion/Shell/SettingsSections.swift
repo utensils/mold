@@ -15,15 +15,9 @@ struct SettingsSections: View {
     var body: some View {
         OfflineLibrarySection(autoSave: Binding(get: { autoSave }, set: { enabled in
             if !enabled { autoSave = false; return }
-            guard !access.requestingPhotos else { return }
-            access.requestingPhotos = true
-            Task {
-                defer { access.requestingPhotos = false }
-                access.photosStatus = await PhotosAccess.request()
-                autoSave = PhotosAccess.canSave(access.photosStatus)
-                access.recovery = PermissionRecovery.photos(access.photosStatus)
-            }
-        }), photosRecovery: PermissionRecovery.photos(access.photosStatus))
+            requestPhotos()
+        }), photosRecovery: PermissionRecovery.photos(access.photosStatus),
+        requestPhotos: photosRequestAction)
         Section {
             Toggle("Finished", isOn: $finished)
             Toggle("Didn't Finish", isOn: $failed)
@@ -59,4 +53,19 @@ struct SettingsSections: View {
         }
     }
 
+    private var photosRequestAction: (() -> Void)? {
+        guard PhotosAccess.needsRequest(autoSave: autoSave, status: access.photosStatus) else { return nil }
+        return { requestPhotos() }
+    }
+
+    private func requestPhotos() {
+        guard !access.requestingPhotos else { return }
+        access.requestingPhotos = true
+        Task {
+            defer { access.requestingPhotos = false }
+            access.photosStatus = await PhotosAccess.request()
+            autoSave = PhotosAccess.canSave(access.photosStatus)
+            access.recovery = PermissionRecovery.photos(access.photosStatus)
+        }
+    }
 }
