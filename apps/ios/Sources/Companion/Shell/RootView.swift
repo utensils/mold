@@ -62,7 +62,7 @@ struct RootView: View {
             // with the first and last rows under the scroll-edge fades.
             SettingsSheet().presentationSizing(.page)
         }
-        .printSheets()
+        .printSheets(presentsActions: router.openedPrint == nil)
         .modifier(RootLinks(router: router))
         .modifier(UndoBridge())
         .environment(router)

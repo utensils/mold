@@ -8,6 +8,8 @@ struct OfflineLibrarySection: View {
     @Environment(ThumbnailLoader.self) private var thumbnails
     @Environment(LibraryStore.self) private var library
     @Binding var autoSave: Bool
+    var photosRecovery: PermissionRecovery? = nil
+    var requestPhotos: (() -> Void)? = nil
     @AppStorage(Preference.offlineLimit) private var limitMB = OfflineLimit.standard.rawValue
     @State private var imageBytes: Int64?
     @State private var listingBytes: Int64?
@@ -18,6 +20,10 @@ struct OfflineLibrarySection: View {
     var body: some View {
         Section {
             Toggle("Save Finished Prints to Photos", isOn: $autoSave)
+            if let photosRecovery { PermissionSettingsButton(recovery: photosRecovery) }
+            if let requestPhotos {
+                Button("Enable Photos Access", action: requestPhotos)
+            }
             Picker("Offline Storage", selection: $limitMB) {
                 ForEach(OfflineLimit.allCases) { Text($0.title).tag($0.rawValue) }
             }

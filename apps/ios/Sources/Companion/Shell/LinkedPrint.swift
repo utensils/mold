@@ -24,6 +24,7 @@ struct LinkedPrint: View {
             }
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
         }
+        .printSheets()
         .task {
             // Opened from a widget at launch: its machine may not have been
             // asked yet, and an unasked machine lists nothing.

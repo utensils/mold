@@ -22,6 +22,7 @@ struct Well: View {
     @State private var showsPhotos = false
     @State private var showsFiles = false
     @State private var showsCamera = false
+    @State private var camera = CameraAccess()
     @State private var showsLibrary = false
     @State private var problem: String?
 
@@ -30,7 +31,7 @@ struct Well: View {
             Menu {
                 Button { capture(); showsPhotos = true } label: { Label("Photos", systemImage: "photo.on.rectangle") }
                 if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                    Button { capture(); showsCamera = true } label: { Label("Take Photo", systemImage: "camera") }
+                    Button { Task { if await camera.request() { capture(); showsCamera = true } } } label: { Label("Take Photo", systemImage: "camera") }
                 }
                 Button { capture(); showsFiles = true } label: { Label("Files", systemImage: "folder") }
                 Button { capture(); showsLibrary = true } label: { Label("Choose from Library…", systemImage: "photo.on.rectangle.angled") }
@@ -58,6 +59,7 @@ struct Well: View {
             take { try await PictureImport.conforming(data, name: "Dropped", accepting: accepting) }
             return true
         }
+        .permissionAlert($camera.recovery)
         .photosPicker(isPresented: $showsPhotos, selection: $photo, matching: .images)
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.image]) { result in
             if case let .success(url) = result { take { try await PictureImport.load(url, accepting: accepting) } }

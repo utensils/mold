@@ -91,11 +91,14 @@ struct PrintMenu: View {
 
 /// The sheets `PrintActions` asks for, presented once per window.
 struct PrintSheets: ViewModifier {
+    var presentsActions = true
     @Environment(PrintActions.self) private var actions
 
     func body(content: Content) -> some View {
-        @Bindable var actions = actions
-        content.sheet(item: $actions.sheet, onDismiss: { actions.shareFinished() }) { sheet in
+        let recovery = Binding(get: { presentsActions ? actions.permissionRecovery : nil },
+                               set: { actions.permissionRecovery = $0 })
+        let sheet = Binding(get: { presentsActions ? actions.sheet : nil }, set: { actions.sheet = $0 })
+        content.permissionAlert(recovery).sheet(item: sheet, onDismiss: { actions.shareFinished() }) { sheet in
             switch sheet {
             case let .share(urls): ShareSheet(items: urls).presentationDetents([.medium, .large])
             case let .tags(entries): TagsSheet(entries: entries)
@@ -107,5 +110,5 @@ struct PrintSheets: ViewModifier {
 }
 
 extension View {
-    func printSheets() -> some View { modifier(PrintSheets()) }
+    func printSheets(presentsActions: Bool = true) -> some View { modifier(PrintSheets(presentsActions: presentsActions)) }
 }

@@ -246,3 +246,13 @@ Both native apps expose the server's reference contracts. MiniMax H3 **Ref2VA** 
 Hunyuan3D multiview models offer named Front/Left/Back/Right wells from their recipe. Wan offers a first/last pair rather than arbitrary middle frames; MiniMax **FL2VA** offers separate optional first/last frames. Changing clip length updates the closing frame. Existing Qwen Edit, Qwen Image 2.1 and Flux.2 reference strips honor their source-image relation, count and pixel budgets; the last Qwen Image 2.1 reference updates the default canvas until you choose a size. SD1.5/SDXL reference weight comes from the model's own control. Model changes park unsupported attachments so they can return. Reuse restores retained typed references with fresh media authority while their original set and order stay unchanged. Changing retained slots requires reattaching the remaining originals; archived bytes never overwrite new attachments. Imported mesh texture/roundtrip workflows remain API/CLI-only.
 
 Attaching a first/start frame selects the closest supported aspect ratio from that image; adding a closing frame preserves it. Crop to fill is the default. The iOS aspect menu marks its current selection with a checkmark.
+
+## Access and saving to Photos
+
+Save to Photos requests add-only access. If access is denied, tap **Open
+Settings**, allow adding photos, then return and save again. Camera and nearby
+network failures offer the same recovery pattern; Notifications and Live
+Activities have recovery actions in app Settings. Restricted access explains
+Screen Time or device management. Photo imports use the system picker without
+requesting access to your whole library. Auto-save requests Photos access when
+you enable it, and saving videos uses PhotoKit's background callback safely.

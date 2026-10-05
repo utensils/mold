@@ -125,7 +125,7 @@ final class ActivityCoordinator {
             await library.reload(host)
             try? await Task.sleep(for: .milliseconds(500))
         }
-        if !found.isEmpty { saver.saveToPhotos(found) }
+        if !found.isEmpty { saver.saveToPhotos(found, interactive: false) }
     }
 
     // MARK: - ActivityKit

@@ -13,6 +13,8 @@ struct PairingScanView: View {
 
     @State private var phase: Phase = .scanning
     @State private var pasted = ""
+    @State private var camera = CameraAccess()
+    @Environment(\.scenePhase) private var scenePhase
 
     enum Phase: Equatable {
         case scanning
@@ -50,21 +52,27 @@ struct PairingScanView: View {
                     .disabled(pasted.isEmpty || phase != .scanning)
             }
         }
+        .permissionAlert($camera.recovery)
+        .task { if DataScannerViewController.isSupported { _ = await camera.request() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { camera.refresh() } }
         .navigationTitle("Scan a Pairing Code")
         .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder private var scanner: some View {
-        if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+        if camera.status == .authorized && DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
             QRScanner(active: phase == .scanning) { redeem($0) }
                 .accessibilityLabel("Camera viewfinder for the pairing code")
         } else {
-            EmptyState(
-                title: String(localized: "The camera isn't available"),
-                symbol: "camera",
-                message: DataScannerViewController.isSupported
-                    ? String(localized: "Allow camera access for Mold Studio in Settings, or paste the pairing link below.")
-                    : String(localized: "This device can't scan codes. Paste the pairing link below."))
+            VStack {
+                EmptyState(
+                    title: String(localized: "The camera isn't available"),
+                    symbol: "camera",
+                    message: DataScannerViewController.isSupported
+                        ? PermissionRecovery.camera(camera.status)?.message ?? String(localized: "The camera is unavailable right now. Paste the pairing link below.")
+                        : String(localized: "This device can't scan codes. Paste the pairing link below."))
+                if let recovery = PermissionRecovery.camera(camera.status) { PermissionSettingsButton(recovery: recovery) }
+            }
         }
     }
 

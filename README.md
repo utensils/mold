@@ -192,6 +192,11 @@ and the full-screen viewer keeps its media actions accessible. It is in TestFlig
 
 The native iOS companion uses concise render notifications with its app icon; tapping opens the finished print from the background or a cold launch, with notification activation completed on the main thread. Library long-press and drag previews retain their thumbnail loader, and source selection prefers a reachable machine copy; the notification icon keeps the same authored colors in light and dark appearances. Its Live Activity uses the system background material with matching semantic text, a full-width progress row, and a separate machine/queue footer. Generate Options marks the selected aspect with a checkmark; attaching the first/start frame chooses the closest supported aspect, and a closing frame preserves it. Options shows proportionate aspect icons, source-image fitting (centered Crop to fill by default), and an explicit Random seed default.
 
+The native iOS companion offers **Open Settings** recovery for denied Photos,
+camera, nearby-network, notification and Live Activity access. Photos saving uses
+add-only authorization and safely writes pictures and videos; photo imports use
+the system picker. See the [native permission audit](apps/ios/docs/PERMISSIONS.md).
+
 The native iOS Library keeps its offline notice compact and offers scrollable details with every full machine name, preserving room for saved prints at large text sizes. Decorative Library badges stay within their tiles; the full machine names remain in accessibility labels and Info.
 
 The native iOS Models screen offers visible per-model Unload and Unload All Models controls for the selected server; unloading keeps downloaded files.

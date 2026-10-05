@@ -1,0 +1,1 @@
+- **Native iOS permission recovery.** Denied Photos, camera, nearby-network, notification and Live Activity access offers a native Settings recovery action, with separate guidance for restricted access. Saving authorized videos to Photos no longer crashes in PhotoKit's background callback, and auto-save requests access only when enabled by the user.

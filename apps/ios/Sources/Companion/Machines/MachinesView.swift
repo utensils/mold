@@ -8,6 +8,7 @@ struct MachinesView: View {
     @Environment(HostStore.self) private var hosts
     @Environment(NearbyBrowser.self) private var nearby
     @Environment(AppRouter.self) private var router
+    @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .body) private var cardWidth = 320
     @State private var removing: MoldHost?
     @State private var editing: MoldHost?
@@ -23,6 +24,7 @@ struct MachinesView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .prominentAction()
+                    if nearby.permissionDenied { PermissionSettingsButton(recovery: .localNetwork) }
                 }
             } else {
                 fleet
@@ -46,11 +48,13 @@ struct MachinesView: View {
             Text("Its key is removed from this iPhone too. Its prints stay on the machine.")
         }
         .onAppear { nearby.start() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { nearby.start() } }
         .refreshable { await hosts.refreshAll() }
     }
 
     private var firstRunMessage: String {
         let explanation = String(localized: "Mold makes pictures on a computer you own. Add one to begin.")
+        if let problem = nearby.problem { return explanation + " " + problem }
         guard !nearby.machines.isEmpty else { return explanation }
         return explanation + " " + String(localized: "\(nearby.machines.count) found on this network.")
     }
@@ -115,6 +119,7 @@ struct NearbySection: View {
                 Text("Nearby").font(.headline).padding(.horizontal, 16)
                 if let problem = nearby.problem {
                     Text(problem).foregroundStyle(.secondaryText).padding(.horizontal, 16)
+                    if nearby.permissionDenied { PermissionSettingsButton(recovery: .localNetwork) }
                 }
                 ForEach(fresh) { machine in NearbyRow(machine: machine) }
             }

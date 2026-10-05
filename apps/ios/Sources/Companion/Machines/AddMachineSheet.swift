@@ -85,6 +85,7 @@ struct ChoiceRow: View {
 struct NearbyPicker: View {
     @Environment(HostStore.self) private var hosts
     @Environment(NearbyBrowser.self) private var nearby
+    @Environment(\.scenePhase) private var scenePhase
     let done: () -> Void
 
     var body: some View {
@@ -92,6 +93,7 @@ struct NearbyPicker: View {
         List {
             if let problem = nearby.problem {
                 Text(problem).foregroundStyle(.secondaryText)
+                    if nearby.permissionDenied { PermissionSettingsButton(recovery: .localNetwork) }
             } else if fresh.isEmpty {
                 Label("Looking on this network…", systemImage: "wifi")
                     .foregroundStyle(.secondaryText)
@@ -100,6 +102,7 @@ struct NearbyPicker: View {
         }
         .navigationTitle("Nearby")
         .onAppear { nearby.start() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { nearby.start() } }
     }
 }
 

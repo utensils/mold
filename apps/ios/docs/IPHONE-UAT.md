@@ -252,3 +252,25 @@ aspects remained available without the selected label. The captured menu was
 visually inspected. This test performs no inference and uses disposable media.
 Shared attachment regressions cover both Wan and H3, replacement and manual
 intent, plus the centered crop-fill default. Physical-device UAT was not run.
+
+## 2026-10-04 — permission recovery and Photos export
+
+The original Photos change callback reproduced an `EXC_BREAKPOINT` /
+`_dispatch_assert_queue_fail` on iOS 26.5 Simulator after authorizing a real
+H.264 MP4 save. The stack entered Swift's actor check in
+`PrintActions.saveToPhotos` from PhotoKit's serial queue. PhotosWriter now owns a
+nonisolated callback with immutable file descriptors; the same MP4 reached
+“Saved to Photos” without that crash. Cold Simulator Photos imports can take
+longer than 15 seconds, so the regression allows 60 seconds for completion.
+
+`LibraryViewerTests` also exercises first denial, the native recovery alert,
+Not Now, repeated denied saves, and Open Settings reaching the Settings app.
+PermissionRecoveryTests cover granted/limited/undetermined/denied/restricted
+policy and local-network error classification. PrintActionsTests distinguish
+MP4/MOV/M4V video resources from GIF/WebP/APNG/still photo resources, including
+older-host listings without `format`. The permission inventory and Apple
+references are in [PERMISSIONS.md](PERMISSIONS.md).
+
+These are Simulator observations. Physical camera capture, VisionKit QR
+scanning, Screen Time/MDM restrictions and Local Network policy changes remain
+physical-device checks. No model generation was submitted for this work.

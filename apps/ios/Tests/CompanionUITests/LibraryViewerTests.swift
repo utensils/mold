@@ -6,6 +6,64 @@ final class LibraryViewerTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testSavingVideoToPhotosDoesNotCrash() async throws {
+        try await saveToPhotos(video: true, deny: false)
+    }
+
+    @MainActor func testDeniedPhotosOffersSettingsAndCanBeCancelled() async throws {
+        try await saveToPhotos(video: false, deny: true)
+    }
+
+    @MainActor private func saveToPhotos(video: Bool, deny: Bool) async throws {
+        continueAfterFailure = false
+        let identity = UUID().uuidString
+        let machine = try FixtureMachine(galleryPrints: 3, galleryID: identity, mixedMedia: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        cleanUpFixture(machine, port: port, app: app)
+        app.resetAuthorizationStatus(for: .photos)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let address = app.textFields["machine-address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5))
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        if !app.navigationBars["All Prints"].exists { app.chooseLibraryShelf("All Prints") }
+        let print = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Photos-\(identity) \(video ? 1 : 0),")).firstMatch
+        XCTAssertTrue(print.waitForExistence(timeout: 10)); print.tap()
+        func save() {
+            app.buttons["More"].firstMatch.tap()
+            app.buttons["Save to Photos"].firstMatch.tap()
+        }
+        save()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let systemAction = deny ? springboard.alerts.buttons.matching(NSPredicate(format: "label MATCHES 'Don.t Allow'")).firstMatch
+            : springboard.alerts.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Allow'")).firstMatch
+        if systemAction.waitForExistence(timeout: 5) { systemAction.tap() }
+        if deny {
+            let alert = app.alerts["Allow Saving to Photos"]
+            XCTAssertTrue(alert.waitForExistence(timeout: 10))
+            XCTAssertTrue(alert.buttons["Open Settings"].exists)
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Photos denial offers Settings and cancellation"; shot.lifetime = .keepAlways; add(shot)
+            alert.buttons["Not Now"].tap()
+            XCTAssertTrue(alert.waitForNonExistence(timeout: 3))
+            save()
+            XCTAssertTrue(alert.waitForExistence(timeout: 5), "A denied retry must recover without another system request")
+            alert.buttons["Open Settings"].tap()
+            let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+            XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 5))
+            app.activate()
+        } else {
+            XCTAssertTrue(app.staticTexts["Saved to Photos."].waitForExistence(timeout: 60), "Saving an authorized MP4 must complete without terminating the app")
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Authorized video saved to Photos"; shot.lifetime = .keepAlways; add(shot)
+        }
+    }
+
     @MainActor func testClosingViewerKeepsLibraryScrollPlace() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(galleryPrints: 300, galleryFavorites: 30, libraryMutations: true, removePrintOnFavorite: "fixture-50.png")
