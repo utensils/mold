@@ -135,6 +135,6 @@ enum ExportDestination: String, CaseIterable, Identifiable {
     case share, folder, files, photos
     var id: Self { self }
     var title: String {
-        switch self { case .share: "Share…"; case .folder: "Save to Mold folder"; case .files: "Save to Files…"; case .photos: "Save to Photos" }
+        switch self { case .share: "Share"; case .folder: "Save to Mold folder"; case .files: "Save to Files"; case .photos: "Save to Photos" }
     }
 }

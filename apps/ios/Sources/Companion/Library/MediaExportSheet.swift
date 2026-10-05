@@ -110,8 +110,14 @@ struct MediaExportSheet: View {
                     session.geometry?.sizeMm = $0 ? nil : caps.sizeMm.default
                 })).accessibilityIdentifier("export-size-default")
                 if session.geometry?.sizeMm != nil {
-                    TextField("Longest side in mm", value: Binding(get: { session.geometry?.sizeMm ?? caps.sizeMm.default },
-                        set: { session.geometry?.sizeMm = $0 }), format: .number).keyboardType(.decimalPad).accessibilityIdentifier("export-size-mm")
+                    AdaptiveRow {
+                        Text("Longest side in mm")
+                    } value: {
+                        TextField("", value: Binding(get: { session.geometry?.sizeMm ?? caps.sizeMm.default },
+                            set: { session.geometry?.sizeMm = $0 }), format: .number)
+                            .keyboardType(.decimalPad).accessibilityLabel("Longest side in millimeters")
+                            .accessibilityIdentifier("export-size-mm")
+                    }
                 }
                 MediaExportPicker("Up axis", value: (session.geometry?.upAxis ?? .y).rawValue.uppercased(), selection: Binding(get: { session.geometry?.upAxis ?? .y }, set: { session.geometry?.upAxis = $0 }), identifier: "export-axis") {
                     ForEach(caps.upAxes, id: \.self) { Text($0.rawValue.uppercased()).tag($0) }
@@ -146,7 +152,11 @@ private struct MediaExportPicker<Selection: Hashable, Choices: View>: View {
             Menu {
                 Picker(title, selection: $selection) { choices }
             } label: {
-                Text(value).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text(value).fixedSize(horizontal: false, vertical: true)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption).accessibilityHidden(true)
+                }
+                .frame(minWidth: 44, minHeight: 44)
             }
             .accessibilityLabel("\(title), \(value)")
             .accessibilityIdentifier(identifier)

@@ -267,6 +267,21 @@ deep-linked print. The final independent review recommendation is encoder and
 route tests first, then delivery ownership, then native Forms; phases A/B follow
 that order. No code execution/UAT result is claimed by this planning review.
 
+### Implementation review
+
+Independent sub-agent reviews found three implementation issues: merged
+result/deep-link exports could use the wrong lead host, mesh defaults could
+leak into video exports, and a capability probe could outlive an equivalent
+owner-object replacement. All were corrected with targeted regressions.
+A follow-up review found no new blocking export correctness issues.
+
+The iOS 26.5 accessibility auditor emits an unnamed prediction of clipping at
+larger Dynamic Type sizes even at maximum AX5. The test handles only that exact
+prediction at AX5 on iOS 26.5, retains its diagnostics, and requires complete
+label/value coverage plus independent inspection of every retained viewport.
+Named clipping, other runtimes/text sizes and unnamed contrast remain strict.
+Final review remains conditional on the recorded visual UAT and final-head CI.
+
 ## Completion checklist
 
 - [x] Independent review incorporated with an explicit disposition of findings.

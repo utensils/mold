@@ -274,3 +274,30 @@ references are in [PERMISSIONS.md](PERMISSIONS.md).
 These are Simulator observations. Physical camera capture, VisionKit QR
 scanning, Screen Time/MDM restrictions and Local Network policy changes remain
 physical-device checks. No model generation was submitted for this work.
+
+## 2026-10-05 — media export parity
+
+Real-host conversion UAT used an isolated loopback Mold server, a disposable
+six-second MP4 and a small GLB. No inference or generation was submitted.
+The production Tauri iOS app on iPhone 17 Pro / iOS 26.5 saved three GIFs into
+its visible Mold folder. ImageIO decoded every delivered frame: Loop/Forever/0
+produced 72 frames at 80 ms; Bounce/Forever/250 produced 142 frames, with 140 at
+80 ms and the two turn frames at 330 ms; resetting with No pause (0 ms) produced
+142 frames at 80 ms. Existing exports were preserved with collision names
+`(2)` and `(3)`. Scrolling reached every option and the Export action. APNG
+selection removed GIF-specific controls and successfully opened the native
+share sheet with a PNG file.
+
+The shared browser export UI against the same real server also delivered GIF,
+APNG and animated WebP, transparent mesh GIF, STL, PLY, OBJ and ZIP. Decoded
+outputs confirmed GIF timing, APNG animation, WebP animation with duplicate-frame
+coalescing, transparent turntable alpha and geometry/archive contents. An
+older-host capability fixture omitted `gif_pause`; the visible control and
+request field disappeared while real GIF conversion still worked. Browser
+console checks reported zero errors and warnings.
+
+Native SwiftUI delivery tests use valid media from an isolated HTTP fixture,
+including real PhotoKit writes and native Share/Files presentation. Those tests
+verify client requests and delivery ownership; the fixture does not encode the
+requested GIF timing. The separate real-server output checks above establish
+encoder behavior. Simulator evidence does not establish physical-device UAT.
