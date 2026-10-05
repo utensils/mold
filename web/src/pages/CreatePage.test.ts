@@ -1,5 +1,5 @@
 import { setOriginApiKey } from "../lib/originAuth";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
 import { createPinia, setActivePinia } from "pinia";
@@ -50,6 +50,8 @@ import type {
   CreateChainJobResponse,
 } from "@studio/lib/api/chainTypes";
 import type { StreamTarget } from "../api";
+
+enableAutoUnmount(afterEach);
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 const routerReplaceMock = vi.hoisted(() =>
@@ -1632,9 +1634,15 @@ describe("CreatePage layout and behavior", () => {
       blob: async () => new Blob(["png-bytes"]),
     }));
     globalThis.fetch = fetchMock as never;
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
     const createObjectURL = vi.fn((_blob: Blob) => "blob:print-1");
     const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }),
+    );
     try {
       const wrapper = mount(CreatePage, {
         global: { stubs: actionBarStubs() },
@@ -1645,7 +1653,9 @@ describe("CreatePage layout and behavior", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(fetchMock.mock.calls[0]?.[0])).toContain(entry.filename);
       expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect(anchorClick).toHaveBeenCalledTimes(1);
     } finally {
+      anchorClick.mockRestore();
       globalThis.fetch = originalFetch;
       vi.unstubAllGlobals();
       vi.stubGlobal("prompt", vi.fn());
@@ -5702,7 +5712,10 @@ describe("CreatePage 3-D mesh prints", () => {
   it("hands the canvas a GLB object URL and the poster as its still", async () => {
     const createObjectURL = vi.fn((_blob: Blob) => "blob:mesh-1");
     const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }),
+    );
     streamJobsRef.value = [meshJob()];
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -5771,11 +5784,13 @@ describe("CreatePage 3-D mesh prints", () => {
   );
 
   it("writes the shared mesh caption under the print", async () => {
-    vi.stubGlobal("URL", {
-      ...URL,
-      createObjectURL: () => "blob:mesh-1",
-      revokeObjectURL: () => undefined,
-    });
+    vi.stubGlobal(
+      "URL",
+      Object.assign(class extends URL {}, {
+        createObjectURL: () => "blob:mesh-1",
+        revokeObjectURL: () => undefined,
+      }),
+    );
     streamJobsRef.value = [meshJob()];
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();

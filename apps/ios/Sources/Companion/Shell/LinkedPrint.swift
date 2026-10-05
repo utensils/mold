@@ -10,10 +10,14 @@ struct LinkedPrint: View {
     let id: PrintID
     @State private var looked = false
 
+    static func presentedEntry(in pool: [LibraryEntry], id: PrintID) -> LibraryEntry? {
+        pool.first { $0.everyCopy.contains { $0.id == id } }?.presented(onAnyOf: [id.host])
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if let entry = library.pool.first(where: { $0.everyCopy.contains { $0.id == id } }) {
+                if let entry = Self.presentedEntry(in: library.pool, id: id) {
                     PrintViewer(start: entry.id, entries: [entry], trashed: false)
                 } else if looked {
                     EmptyState(title: String(localized: "Not in the Library"), symbol: Destination.library.symbol,

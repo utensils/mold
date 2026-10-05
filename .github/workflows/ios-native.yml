@@ -127,6 +127,8 @@ jobs:
             classes: HiddenCollectionTests LibraryCollectionPickerTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
           - name: library_interactions
             classes: LibraryLongPressTests
+          - name: media_exports
+            classes: MediaExportUITests
     defaults:
       run:
         working-directory: apps/ios

@@ -14,10 +14,14 @@ struct ResultPager: View {
     let host: MoldHost.ID
     @State private var page = 0
 
+    static func presentedEntry(in pool: [LibraryEntry], host: MoldHost.ID, filename: String) -> LibraryEntry? {
+        pool.first { $0.everyCopy.contains { $0.hostID == host && $0.print.filename == filename } }?.presented(onAnyOf: [host])
+    }
+
     var body: some View {
         let filenames = outcome.results.compactMap(\.filename)
         let entries = filenames.map { name in
-            library.pool.first { $0.everyCopy.contains { $0.hostID == host && $0.print.filename == name } }
+            Self.presentedEntry(in: library.pool, host: host, filename: name)
         }
         VStack(spacing: 8) {
             TabView(selection: $page) {

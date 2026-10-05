@@ -711,3 +711,21 @@ its saved prompts; selecting one changes only the prompt, preserving the model,
 settings, and attached media. Loading, offline, unavailable history, and failed
 requests have distinct messages. Clear asks for confirmation and removes that
 machine's entire history, including prompts hidden by search.
+
+### Media export options
+
+A single print's Library menu, viewer More menu and generation-result More menu
+share **Export…**. A native Form offers only options the holding machine
+supports. MP4 clips convert to GIF/APNG/WebP; GLB meshes offer geometry and
+turntable formats. GIF offers Loop/Bounce, Forever/Once and extra boundary
+pause, with **0 ms** as the continuous-loop default. Pause is independent of
+FPS and hidden for unsupported hosts or Loop/Once. Geometry follows advertised
+size, up-axis and origin defaults; turntables expose views, size, FPS and
+transparent background within their frame-memory budget.
+
+Delivery choices are Share, Files and the app-visible Mold folder. Converted
+GIFs additionally offer Photos; APNG/WebP animation preservation in Photos is
+not assumed. **Save Files** also offers original files and texture sidecars.
+Loading, conversion errors and retry stay in the options sheet. Cancel remains
+explicit. The options sheet dismisses before system delivery opens; temporary
+output belongs to its delivery until completion or cancellation.

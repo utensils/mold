@@ -11,13 +11,17 @@ import UIKit
 final class PrintActions {
     enum Sheet: Identifiable {
         case share([URL])
+        case files([URL])
+        case export(MediaExportSession)
         case tags([LibraryEntry])
         case newCollection([LibraryEntry])
         case rename(LibraryEntry)
 
         var id: String {
             switch self {
-            case let .share(urls): "share-\(urls.count)"
+            case let .share(urls): "share-\(urls.first?.path ?? "")"
+            case let .files(urls): "files-\(urls.first?.path ?? "")"
+            case let .export(session): "export-\(session.id)"
             case let .tags(entries): "tags-\(entries.count)"
             case let .newCollection(entries): "collection-\(entries.count)"
             case let .rename(entry): "rename-\(entry.id.filename)"
@@ -26,10 +30,14 @@ final class PrintActions {
     }
 
     var sheet: Sheet?
+    @ObservationIgnored var presentedSheet: Sheet?
+    @ObservationIgnored var pendingDelivery: Sheet?
     /// A one-line result a person should see ("Saved to Photos"), shown in
     /// place and cleared on the next action -- never a toast.
     var status: String?
     var busy = false
+    @ObservationIgnored var activeExportID: UUID?
+    @ObservationIgnored var fileExportTask: Task<Void, Never>?
     var permissionRecovery: PermissionRecovery?
 
     @ObservationIgnored var sharedFiles: [URL] = []

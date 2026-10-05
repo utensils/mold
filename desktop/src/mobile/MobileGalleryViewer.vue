@@ -227,7 +227,7 @@ const MESH_FOLDER_DESTINATION: ExportDestination = {
  */
 const pendingMeshDestination = ref<"share" | "folder">("share");
 const exportDestinations = computed<ExportDestination[]>(() => {
-  if (!mesh.value || !nativeShell.value) return [];
+  if (!nativeShell.value) return [];
   return pendingMeshDestination.value === "folder"
     ? [MESH_FOLDER_DESTINATION, MESH_SHARE_DESTINATION]
     : [MESH_SHARE_DESTINATION, MESH_FOLDER_DESTINATION];
@@ -1225,10 +1225,28 @@ async function saveGenerationAsset(asset: GenerationAsset): Promise<void> {
  * backdrop out; the host refuses `transparent` on anything else. */
 const exportIsTurntable = ref(false);
 
+let exportProbe = 0;
+watch([() => props.item.filename, () => props.target.baseUrl, () => props.target.apiKey], () => {
+  exportProbe++;
+  exportOpen.value = false;
+  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+});
+
 async function openVideoExport(): Promise<void> {
+  const probe = ++exportProbe;
+  const filename = props.item.filename;
+  const target = { baseUrl: props.target.baseUrl, apiKey: props.target.apiKey };
+  const ownsSheet = () =>
+    probe === exportProbe &&
+    exportOpen.value &&
+    props.item.filename === filename &&
+    props.target.baseUrl === target.baseUrl &&
+    props.target.apiKey === target.apiKey;
+  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
   exportOpen.value = true;
   exportError.value = "";
   exportIsTurntable.value = Boolean(mesh.value);
+  if (!mesh.value) pendingMeshDestination.value = "share";
   if (mesh.value) {
     // A turntable's containers are the host's advertised ANIMATED mesh
     // exports; `/api/gallery/export-options` answers for clips only.
@@ -1236,14 +1254,21 @@ async function openVideoExport(): Promise<void> {
       ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
       formats: meshAnimationExports.value,
     };
+    try {
+      const caps = await apiJsonTo<VideoExportCapabilities>(target, "/api/gallery/export-options");
+      if (!ownsSheet()) return;
+      exportCapabilities.value = { ...caps, formats: meshAnimationExports.value };
+    } catch {
+      /* Advertised formats remain valid, without guessed pause support. */
+    }
     return;
   }
   try {
-    exportCapabilities.value = await apiJsonTo<VideoExportCapabilities>(
-      props.target,
-      "/api/gallery/export-options",
-    );
+    const caps = await apiJsonTo<VideoExportCapabilities>(target, "/api/gallery/export-options");
+    if (!ownsSheet()) return;
+    exportCapabilities.value = caps;
   } catch (error) {
+    if (!ownsSheet()) return;
     exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
     exportError.value =
       error instanceof Error ? error.message : "Couldn’t read export options from this host.";
@@ -1251,9 +1276,8 @@ async function openVideoExport(): Promise<void> {
 }
 
 /**
- * `destination` is the sheet's pick when it offered one (a mesh turntable on
- * a phone): `folder` writes the Mold folder, anything else shares. A clip's
- * sheet offers none and shares as before.
+ * `destination` is the phone sheet's pick for clips and turntables:
+ * `folder` writes the Mold folder, anything else shares.
  */
 async function performVideoExport(
   options: VideoExportOptions,
@@ -1769,6 +1793,7 @@ onBeforeUnmount(() => {
       :open="exportOpen"
       :filename="item.filename"
       :formats="exportCapabilities.formats"
+      :pause-control="exportCapabilities.gif_pause"
       :transparency="exportIsTurntable"
       :destinations="exportDestinations"
       :busy="exportBusy"

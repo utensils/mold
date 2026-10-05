@@ -25,13 +25,18 @@ public struct MeshTurntableOptions: Equatable, Sendable {
     public var maxDimension: Int
     /// Render the object over nothing instead of the poster's slate ramp.
     public var transparent: Bool
+    public var playback: GifPlayback
+    public var repeatMode: GifRepeat
+    public var pauseMs: Int?
 
     public init(frames: Int = 36, fps: Int = 10, maxDimension: Int = 512,
-                transparent: Bool = false) {
+                transparent: Bool = false, playback: GifPlayback = .loop,
+                repeatMode: GifRepeat = .forever, pauseMs: Int? = nil) {
         self.frames = frames
         self.fps = fps
         self.maxDimension = maxDimension
         self.transparent = transparent
+        self.playback = playback; self.repeatMode = repeatMode; self.pauseMs = pauseMs
     }
 
     /// How many bytes a frame costs.
@@ -67,7 +72,7 @@ public struct MeshTurntableOptions: Equatable, Sendable {
             fps: Swift.min(Swift.max(fps, Self.fpsBounds.lowerBound),
                            Self.fpsBounds.upperBound),
             maxDimension: edge,
-            transparent: transparent)
+            transparent: transparent, playback: playback, repeatMode: repeatMode, pauseMs: pauseMs)
     }
 
     /// What to say when the size or transparency has taken frames off the
@@ -114,7 +119,8 @@ public struct MeshExportRequest: Encodable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case format, sizeMm, upAxis, origin, frames, fps, maxDimension, transparent
+        case format, sizeMm, upAxis, origin, frames, fps, maxDimension, transparent, playback, pauseMs
+        case repeatMode = "repeat"
     }
 
     /// Absent keys, never null ones: the server distinguishes "not asked" from
@@ -133,6 +139,13 @@ public struct MeshExportRequest: Encodable, Equatable, Sendable {
             try container.encode(turntable.fps, forKey: .fps)
             try container.encode(turntable.maxDimension, forKey: .maxDimension)
             try container.encode(turntable.transparent, forKey: .transparent)
+            if format == "gif" {
+                try container.encode(turntable.playback, forKey: .playback)
+                try container.encode(turntable.repeatMode, forKey: .repeatMode)
+                if turntable.playback == .bounce || turntable.repeatMode == .forever {
+                    try container.encodeIfPresent(turntable.pauseMs, forKey: .pauseMs)
+                }
+            }
         }
     }
 }

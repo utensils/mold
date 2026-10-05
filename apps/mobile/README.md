@@ -984,3 +984,16 @@ Hosting requires an explicitly running authenticated `mold serve` and connector.
 Native macOS This Mac remains private; the GUI does not automatically open a
 tunnel. Offline/sleeping hosts remain unavailable, and interrupted requests
 are never replayed by the relay.
+
+### GIF export timing parity
+
+Clip and mesh GIF exports offer Loop/Bounce and Forever/Once. A host advertising
+`gif_pause` also offers extra boundary pause from 0–5000 ms in 10 ms steps.
+**No pause (0 ms)** keeps continuous loops moving at their selected frame rate.
+Bounce holds at the turns; Loop holds between repetitions. Loop/Once has no
+repeat boundary, so it sends no pause. APNG/WebP omit GIF playback and pause
+controls. Older hosts keep their existing export controls without a pause input.
+
+Video clips now offer both Share and Save to Mold folder, as mesh turntables do.
+Turntables default to 512 px, 10 fps and 36 views, with a frame budget based on
+size and transparency. These controls agree with the native iOS companion.

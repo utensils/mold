@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { validGifPause, turntableFrameLimit } from "@studio/lib/videoExport";
 import ErrorNotice from "./ErrorNotice.vue";
 import type {
+  GifPauseControl,
   GifPlayback,
   GifRepeat,
   VideoExportFormat,
@@ -44,6 +46,7 @@ const props = withDefaults(
      * every time.
      */
     transparency?: boolean;
+    pauseControl?: GifPauseControl | undefined;
   }>(),
   { busy: false, error: "", destinations: () => [], transparency: false },
 );
@@ -60,6 +63,41 @@ const maxDimension = ref<number | null>(720);
 const fps = ref<number | null>(12);
 const destination = ref<string>("");
 const transparent = ref(loadTurntableTransparency());
+const pauseMs = ref(0);
+const frames = ref(36);
+const pauseAvailable = computed(
+  () =>
+    validGifPause(props.pauseControl) &&
+    isGif.value &&
+    (playback.value === "bounce" || repeat.value === "forever"),
+);
+const pauseValid = computed(
+  () =>
+    !pauseAvailable.value ||
+    (typeof pauseMs.value === "number" &&
+      Number.isSafeInteger(pauseMs.value) &&
+      pauseMs.value >= props.pauseControl!.min &&
+      pauseMs.value <= props.pauseControl!.max &&
+      (pauseMs.value - props.pauseControl!.min) % props.pauseControl!.step ===
+        0),
+);
+const frameLimit = computed(() =>
+  turntableFrameLimit(maxDimension.value ?? 512, transparent.value),
+);
+watch(frameLimit, (limit) => {
+  frames.value = Math.min(frames.value, limit);
+});
+watch(
+  () => [props.open, props.transparency],
+  ([open]) => {
+    if (open) {
+      maxDimension.value = props.transparency ? 512 : 720;
+      fps.value = props.transparency ? 10 : 12;
+      frames.value = 36;
+    }
+  },
+  { immediate: true },
+);
 const isGif = computed(() => format.value === "gif");
 const offersDestinations = computed(() => props.destinations.length > 1);
 
@@ -78,6 +116,16 @@ watch(
 );
 
 function submit(): void {
+  if (
+    props.busy ||
+    !props.formats.includes(format.value) ||
+    !pauseValid.value ||
+    (props.transparency &&
+      (!Number.isInteger(frames.value) ||
+        frames.value < 8 ||
+        frames.value > frameLimit.value))
+  )
+    return;
   const options: VideoExportOptions = {
     format: format.value,
     playback: isGif.value ? playback.value : "loop",
@@ -85,7 +133,9 @@ function submit(): void {
     max_dimension: maxDimension.value,
     fps: fps.value,
   };
+  if (pauseAvailable.value) options.pause_ms = pauseMs.value;
   if (props.transparency) {
+    options.frames = frames.value;
     // Remembered either way, but sent only when it is on: an untouched
     // turntable posts the body it always did, which keeps a repeat export
     // matching the one a client already has.
@@ -125,7 +175,7 @@ function submit(): void {
       </div>
       <p class="video-export-file">{{ filename }}</p>
 
-      <fieldset>
+      <fieldset :disabled="busy">
         <legend>Format</legend>
         <div class="video-export-options">
           <label v-for="candidate in formats" :key="candidate">
@@ -141,7 +191,7 @@ function submit(): void {
       </fieldset>
 
       <template v-if="isGif">
-        <fieldset>
+        <fieldset :disabled="busy">
           <legend>Playback</legend>
           <div class="video-export-options">
             <label>
@@ -165,7 +215,7 @@ function submit(): void {
           </div>
           <p>Bounce plays forward, then reverses smoothly.</p>
         </fieldset>
-        <fieldset>
+        <fieldset :disabled="busy">
           <legend>Repeat</legend>
           <div class="video-export-options">
             <label>
@@ -190,11 +240,41 @@ function submit(): void {
         </fieldset>
       </template>
 
-      <fieldset>
+      <fieldset v-if="pauseAvailable" :disabled="busy">
+        <legend>
+          {{ playback === "bounce" ? "Pause at turns" : "Pause between loops" }}
+        </legend>
+        <input
+          v-model.number="pauseMs"
+          type="number"
+          :min="pauseControl!.min"
+          :max="pauseControl!.max"
+          :step="pauseControl!.step"
+          aria-label="Pause in milliseconds"
+          data-test="export-pause"
+        />
+        <p>Milliseconds of extra hold. 0 adds no pause.</p>
+        <button type="button" @click="pauseMs = 0">No pause (0 ms)</button>
+      </fieldset>
+      <fieldset v-if="transparency" :disabled="busy">
+        <legend>Views per turn</legend>
+        <input
+          v-model.number="frames"
+          type="number"
+          min="8"
+          :max="frameLimit"
+          step="1"
+          aria-label="Views per turn"
+        />
+        <p>At this size and background: at most {{ frameLimit }} views.</p>
+      </fieldset>
+      <fieldset :disabled="busy">
         <legend>Longest side</legend>
         <div class="video-export-options video-export-options--four">
           <label
-            v-for="choice in [null, 1080, 720, 480]"
+            v-for="choice in transparency
+              ? [1024, 720, 512, 480]
+              : [null, 1080, 720, 480]"
             :key="choice ?? 'original'"
           >
             <input
@@ -207,11 +287,11 @@ function submit(): void {
           </label>
         </div>
       </fieldset>
-      <fieldset>
+      <fieldset :disabled="busy">
         <legend>Frame rate</legend>
         <div class="video-export-options video-export-options--four">
           <label
-            v-for="choice in [null, 24, 12, 8]"
+            v-for="choice in transparency ? [24, 12, 10, 8] : [null, 24, 12, 8]"
             :key="choice ?? 'original'"
           >
             <input
@@ -225,7 +305,7 @@ function submit(): void {
         </div>
       </fieldset>
 
-      <fieldset v-if="transparency">
+      <fieldset v-if="transparency" :disabled="busy">
         <legend>Background</legend>
         <!-- A checkbox wearing the sheet's own pill, so it reads as one
              more choice rather than a stray control. -->
@@ -249,7 +329,7 @@ function submit(): void {
         </p>
       </fieldset>
 
-      <fieldset v-if="offersDestinations">
+      <fieldset v-if="offersDestinations" :disabled="busy">
         <legend>Destination</legend>
         <div class="video-export-options">
           <label v-for="choice in destinations" :key="choice.value">
@@ -281,7 +361,13 @@ function submit(): void {
         <button
           type="submit"
           class="video-export-primary"
-          :disabled="busy || formats.length === 0"
+          :disabled="
+            busy ||
+            formats.length === 0 ||
+            !pauseValid ||
+            (transparency &&
+              (!Number.isInteger(frames) || frames < 8 || frames > frameLimit))
+          "
         >
           {{ busy ? "Converting…" : "Export" }}
         </button>

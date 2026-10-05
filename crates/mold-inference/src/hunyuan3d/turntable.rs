@@ -64,6 +64,7 @@ pub struct TurntableOptions {
     /// `false` plays once and rests on the final frame. GIF only — APNG and
     /// WebP animations loop.
     pub repeat_forever: bool,
+    pub pause_ms: u32,
     /// Render the object over nothing instead of the poster's slate ramp.
     ///
     /// APNG and WebP carry the antialiased silhouette as it was rendered. GIF
@@ -80,6 +81,7 @@ impl Default for TurntableOptions {
             size: DEFAULT_SIZE,
             bounce: false,
             repeat_forever: true,
+            pause_ms: 0,
             transparent: false,
         }
     }
@@ -270,11 +272,12 @@ pub fn export_turntable_with(
     }
     let frames = render_turntable_with(mesh, appearance, options)?;
     match format {
-        OutputFormat::Gif => video_enc::encode_gif_with_options(
+        OutputFormat::Gif => video_enc::encode_gif_with_pause(
             &frames,
             options.fps,
             options.bounce,
             options.repeat_forever,
+            options.pause_ms,
         ),
         OutputFormat::Apng => video_enc::encode_apng(&frames, options.fps, None),
         OutputFormat::Webp => {
@@ -301,11 +304,12 @@ fn encode_transparent(
     use mold_core::OutputFormat;
     let frames = render_turntable_rgba_with(mesh, appearance, options)?;
     match format {
-        OutputFormat::Gif => video_enc::encode_gif_rgba_with_options(
+        OutputFormat::Gif => video_enc::encode_gif_rgba_with_pause(
             &frames,
             options.fps,
             options.bounce,
             options.repeat_forever,
+            options.pause_ms,
         ),
         OutputFormat::Apng => video_enc::encode_apng_rgba(&frames, options.fps),
         OutputFormat::Webp => {

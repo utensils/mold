@@ -510,3 +510,9 @@ Goal (set by James, 2026-09-27): implement every milestone in full, with nothing
 - Live Activities go stale while backgrounded because there is no push. The copy says so honestly. APNs would need server work and is a possible later project.
 - The phone and Mac stores can drift apart. Mitigation: the "logic moves down into MoldClient" rule, plus a MoldStores review after v1.
 - A second App Store Connect app record, and the App Review justification for `NSAllowsArbitraryLoads`, are one-time owner steps.
+
+### Media export parity
+
+See [MEDIA-EXPORT-PARITY.md](MEDIA-EXPORT-PARITY.md) for the reviewed coverage,
+wire timing contract, destination ownership and implementation/UAT checklist.
+The export coordinator is per window and shared across Library/viewer/results.
