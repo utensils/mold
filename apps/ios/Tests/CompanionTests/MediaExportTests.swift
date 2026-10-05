@@ -2,10 +2,45 @@ import CryptoKit
 import Foundation
 import MoldClient
 import MoldClientTesting
+import Photos
 import Testing
 @testable import MoldCompanion
 
 @MainActor struct MediaExportTests {
+    @Test func cancellationDuringPhotosAuthorizationCannotPublishLateDenial() async throws {
+        let (_, hosts, fake) = try await QueueStoreTests.setUp()
+        let filename = "cancel-auth-\(UUID()).mp4"
+        let print = try QueueStoreTests.decode(GalleryPrint.self,
+            "{\"filename\":\"\(filename)\",\"metadata\":{},\"timestamp\":1790000000}")
+        let bytes = Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")!
+        fake.stub("exportVideo(_:request:)", returning: bytes)
+        let actions = PrintActions(hosts: hosts)
+        var pending: CheckedContinuation<PHAuthorizationStatus, Never>?
+        defer { pending?.resume(returning: .denied) }
+        let session = MediaExportSession(entry: LibraryEntry(host: hosts.hosts[0], print: print), actions: actions,
+            requestPhotosAccess: { await withCheckedContinuation { pending = $0 } })
+        session.options = try QueueStoreTests.decode(ExportOptions.self, #"{"formats":["gif"]}"#)
+        session.loading = false; session.destination = .photos
+        actions.sheet = .export(session)
+        session.submit()
+        for _ in 0..<100 where pending == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let authorization = try #require(pending)
+        let output = VideoExportRequest.filename(filename, format: "gif")
+        let directories = try FileManager.default.contentsOfDirectory(at: FileManager.default.temporaryDirectory,
+            includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("mold-print-export-") }
+        let staged = try #require(directories.map { $0.appending(path: output) }
+            .first { FileManager.default.fileExists(atPath: $0.path) })
+        actions.cancelExports()
+        pending = nil; authorization.resume(returning: .denied)
+        for _ in 0..<100 where FileManager.default.fileExists(atPath: staged.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(actions.permissionRecovery == nil)
+        #expect(session.error == nil && actions.status == nil)
+        #expect(actions.pendingDelivery == nil && actions.activeExportID == nil && !actions.busy)
+        #expect(!FileManager.default.fileExists(atPath: staged.deletingLastPathComponent().path))
+    }
+
     @Test func deepLinkPresentsTheRequestedCopyForExport() throws {
         let print = try QueueStoreTests.decode(GalleryPrint.self, #"{"filename":"loop.mp4","metadata":{},"timestamp":1790000000}"#)
         let first = MoldHost(name: "First", baseURL: URL(string: "http://first.test")!)

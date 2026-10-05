@@ -301,3 +301,10 @@ including real PhotoKit writes and native Share/Files presentation. Those tests
 verify client requests and delivery ownership; the fixture does not encode the
 requested GIF timing. The separate real-server output checks above establish
 encoder behavior. Simulator evidence does not establish physical-device UAT.
+
+ImageIO inspection of the actual PhotoKit-persisted GIF resource confirmed all
+three fixture frames and their 100 ms delays were retained. A separate native
+unit regression suspends Photos authorization, cancels the export, then returns
+denial: no recovery alert, error/status, delivery or staged directory survives.
+It failed before the cancellation fence and passes with all 186 native unit
+tests after the fix.

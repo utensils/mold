@@ -273,7 +273,12 @@ Independent sub-agent reviews found three implementation issues: merged
 result/deep-link exports could use the wrong lead host, mesh defaults could
 leak into video exports, and a capability probe could outlive an equivalent
 owner-object replacement. All were corrected with targeted regressions.
-A follow-up review found no new blocking export correctness issues.
+A follow-up review identified a Photos authorization cancellation race:
+a denial arriving after cancellation could publish a recovery alert. A suspended
+authorization regression reproduced it; checking cancellation immediately after
+authorization returns suppresses late UI publication and releases staged files.
+The complete native unit suite passes 186 tests after the fix. Independent review
+accepted the fix and regression.
 
 The iOS 26.5 accessibility auditor emits an unnamed prediction of clipping at
 larger Dynamic Type sizes even at maximum AX5. The test handles only that exact

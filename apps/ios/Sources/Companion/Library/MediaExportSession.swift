@@ -24,8 +24,10 @@ final class MediaExportSession: Identifiable {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private weak var actions: PrintActions?
     @ObservationIgnored private var cancelled = false
-    init(entry: LibraryEntry, actions: PrintActions) {
-        self.entry = entry; self.actions = actions
+    @ObservationIgnored private let requestPhotosAccess: @MainActor () async -> PHAuthorizationStatus
+    init(entry: LibraryEntry, actions: PrintActions,
+         requestPhotosAccess: @escaping @MainActor () async -> PHAuthorizationStatus = { await PhotosAccess.request() }) {
+        self.entry = entry; self.actions = actions; self.requestPhotosAccess = requestPhotosAccess
         if kind == .mesh { maxDimension = 512; fps = 10 }
     }
     var kind: MediaExportKind? { MediaExportKind(filename: entry.print.filename, trashed: entry.print.trashedAt != nil) }
@@ -108,7 +110,8 @@ final class MediaExportSession: Identifiable {
                 guard !cancelled else { return }
                 let url = try ExportFiles.stage(data, filename: output); staged = url
                 if pickedDestination == .photos {
-                    let allowed = await PhotosAccess.request()
+                    let allowed = await requestPhotosAccess()
+                    try Task.checkCancellation()
                     guard PhotosAccess.canSave(allowed) else {
                         actions.permissionRecovery = PermissionRecovery.photos(allowed)
                         error = "Allow Photos access to save this GIF."; return
