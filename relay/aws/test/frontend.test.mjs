@@ -611,6 +611,8 @@ test("managed frontend routes via trusted origin; media and workers cannot cross
   const expiresAt = Math.floor(Date.now() / 1000) + 1000;
   const rows = new Map([
     [ROSTER, { hosts: { [a]: { expiresAt }, [b]: { expiresAt } } }],
+    [`managed-owner#${a}`, { established: true, expiresAt }],
+    [`managed-owner#${b}`, { established: true, expiresAt }],
     [
       `media#${id}#tenant#${a}`,
       {

@@ -5,6 +5,9 @@ import {
   managedConfig,
   resolveNamespace,
   ownerAllowed,
+  promoteManagedHost,
+  reserveManagedSlot,
+  OWNER_PREFIX,
 } from "../managed.mjs";
 const config = {
   domain: "phones.example.com",
@@ -16,6 +19,8 @@ function fixture() {
   let time = 100;
   const store = {
     get: async (k) => structuredClone(rows.get(k)),
+    put: async (k, v) => rows.set(k, { ...structuredClone(v), revision: 1 }),
+    remove: async (k) => rows.delete(k),
     cas: async (k, r, v) => {
       if ((rows.get(k)?.revision ?? 0) !== r) return false;
       rows.set(k, { ...structuredClone(v), revision: r + 1 });
@@ -111,8 +116,9 @@ test("enroll stores only verifier; owner renew/delete; trusted hostname and sour
       f.enroll(request("POST", "", "", `192.0.2.${i + 10}`)),
     ),
   );
-  assert.equal(results.filter((r) => r.status === 201).length, 32);
-  f.advance(30 * 86400 + 1);
+  assert.equal(results.filter((r) => r.status === 201).length, 7); // initial enrollment used one burst token
+  assert.equal(results.filter((r) => r.status === 429).length, 33);
+  f.advance(121);
   assert.equal((await f.enroll(request())).status, 201);
 });
 test("source quotas ignore spoofed forwarding headers and remain bounded", async () => {
@@ -157,4 +163,151 @@ test("disabled configuration gives actionable enrollment failure", async () => {
   assert.equal(result.status, 503);
   assert.match(result.value.error, /configure the managed gateway/);
   assert.equal(f.rows.size, 0);
+});
+
+test("unconnected reservations expire quickly and owner renew cannot prolong them", async () => {
+  const f = fixture();
+  const a = (await f.enroll(request())).value;
+  assert.equal(a.expires_at, 220);
+  f.advance(100);
+  const renewed = await f.enroll(request("POST", a.host_id, a.token));
+  assert.equal(renewed.status, 200);
+  assert.equal(renewed.value.expires_at, 220);
+  f.advance(21);
+  assert.equal(
+    await ownerAllowed(f.store, a.host_id, "Bearer " + a.token, 221),
+    false,
+  );
+  assert.equal(
+    (await f.enroll(request("POST", a.host_id, a.token))).status,
+    403,
+  );
+  assert.equal(
+    (await f.enroll(request("POST", "", "", "192.0.2.2"))).status,
+    201,
+  );
+  assert.equal(Object.keys(f.rows.get("managed-roster").hosts).length, 1);
+});
+
+test("working connector promotion retains identity, heartbeat capacity expires, owner reconnect preserves identity", async () => {
+  const f = fixture();
+  const a = (await f.enroll(request())).value;
+  assert.equal(await reserveManagedSlot(f.store, a.host_id, 100), true);
+  assert.equal(await promoteManagedHost(f.store, a.host_id, 100), true);
+  const owner = f.rows.get(OWNER_PREFIX + a.host_id);
+  assert.equal(owner.established, true);
+  assert.equal(owner.expiresAt, 100 + 30 * 86400);
+  f.advance(80);
+  assert.equal(await promoteManagedHost(f.store, a.host_id, 180), true);
+  assert.equal(f.rows.get("managed-roster").hosts[a.host_id].expiresAt, 270);
+  f.advance(91);
+  assert.equal(
+    await ownerAllowed(f.store, a.host_id, "Bearer " + a.token, 271),
+    true,
+  );
+  await assert.rejects(
+    resolveNamespace(
+      { domainName: a.host_id + "." + config.domain },
+      f.store,
+      config,
+      271,
+    ),
+  );
+  const renewed = await f.enroll(request("POST", a.host_id, a.token));
+  assert.equal(renewed.status, 200);
+  assert.equal(renewed.value.expires_at, owner.expiresAt);
+  assert.equal(f.rows.get("managed-roster").hosts[a.host_id], undefined);
+  assert.equal(await reserveManagedSlot(f.store, a.host_id, 271), true);
+  assert.equal(await promoteManagedHost(f.store, a.host_id, 271), true);
+  assert.equal(renewed.value.host_id, a.host_id);
+  assert.equal(renewed.value.token, a.token);
+});
+
+test("capacity leases stay atomic at32 and old owners reacquire without enrollment budget", async () => {
+  const f = fixture();
+  const a = (await f.enroll(request())).value;
+  await promoteManagedHost(f.store, a.host_id, 100);
+  const roster = f.rows.get("managed-roster");
+  const hosts = Object.fromEntries(
+    Array.from({ length: 32 }, (_, i) => [
+      i.toString(16).padStart(32, "0"),
+      { expiresAt: 190 },
+    ]),
+  );
+  f.rows.set("managed-roster", {
+    ...roster,
+    hosts,
+    budget: { tokens: 0, updatedAt: 100 },
+  });
+  assert.equal(await reserveManagedSlot(f.store, a.host_id, 100), false);
+  const renew = await f.enroll(request("POST", a.host_id, a.token));
+  assert.equal(renew.status, 200);
+  f.advance(91);
+  assert.equal(await reserveManagedSlot(f.store, a.host_id, 191), true);
+  assert.equal(Object.keys(f.rows.get("managed-roster").hosts).length, 1);
+});
+
+test("global cadence bounds distributed anonymous creation after initial burst", async () => {
+  const f = fixture();
+  const enrollMany = () =>
+    Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        f.enroll(request("POST", "", "", `198.51.100.${i + 1}`)),
+      ),
+    );
+  assert.equal((await enrollMany()).filter((r) => r.status === 201).length, 8);
+  f.advance(29);
+  assert.equal(
+    (await f.enroll(request("POST", "", "", "203.0.113.1"))).status,
+    429,
+  );
+  f.advance(1);
+  assert.equal(
+    (await f.enroll(request("POST", "", "", "203.0.113.1"))).status,
+    201,
+  );
+});
+
+test("concurrent reconnect owners cannot overbook32 live slots", async () => {
+  const f = fixture(),
+    expiresAt = 100 + 30 * 86400;
+  const owners = Array.from({ length: 40 }, (_, i) =>
+    i.toString(16).padStart(32, "0"),
+  );
+  for (const id of owners)
+    f.rows.set(OWNER_PREFIX + id, {
+      verifier: "a".repeat(64),
+      established: true,
+      revision: 1,
+      expiresAt,
+    });
+  const results = await Promise.all(
+    owners.map((id) => reserveManagedSlot(f.store, id, 100)),
+  );
+  assert.equal(results.filter(Boolean).length, 32);
+  assert.equal(Object.keys(f.rows.get("managed-roster").hosts).length, 32);
+});
+
+test("old inline identities migrate while long idle slots are reclaimed", async () => {
+  const { createHash } = await import("node:crypto");
+  const f = fixture(),
+    id = "a".repeat(32),
+    token = "b".repeat(43),
+    expiresAt = 100 + 30 * 86400;
+  f.rows.set("managed-roster", {
+    revision: 1,
+    hosts: {
+      [id]: {
+        verifier: createHash("sha256").update(token).digest("hex"),
+        expiresAt,
+      },
+    },
+    sources: {},
+    expiresAt,
+  });
+  assert.equal((await f.enroll(request("POST", id, token))).status, 200);
+  assert.equal(f.rows.get(OWNER_PREFIX + id).established, true);
+  assert.equal(f.rows.get(OWNER_PREFIX + id).expiresAt, expiresAt);
+  assert.equal(f.rows.get("managed-roster").hosts[id], undefined);
+  assert.equal(await reserveManagedSlot(f.store, id, 100), true);
 });

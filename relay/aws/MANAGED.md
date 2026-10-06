@@ -36,14 +36,45 @@ native one-click pairing is usable, configure the URandom Terraform deployment:
   `scripts/relay/deploy.py`; the bundler includes `managed.mjs` automatically.
   Tokens never belong in Terraform state, deployment logs, URLs or arguments.
 
-A gateway accepts at most 32 managed registrations. Leases last 30 days and are
-renewed by the Mac while enabled. Enrollment is limited to five per trusted
-source IP per hour. Source-IP verifiers are hashed and held in the same atomic
-CAS roster, with at most 1,024 entries and one-hour expiry. Every successful
-enroll, renew and delete reclaims expired host and quota entries. DynamoDB TTL
-is cleanup only; every authorization checks lease time synchronously. The
-singleton retains its own 32 live frontend slots; each managed host retains the
-same bounded stream-membership leases and existing global deployment limits.
+A gateway accepts at most **32 simultaneous capacity leases**. New anonymous
+registrations receive only a two-minute provisional slot and owner identity.
+An authenticated host WebSocket `hello` establishes the owner identity for
+30 days and changes its capacity lease to 90 seconds. Host heartbeats refresh
+that live capacity lease; frontend traffic and HTTP owner renewal cannot extend
+it. Disconnected or unused slots are reclaimed synchronously on admission.
+
+Owner verifier records are separate from the bounded capacity roster. A saved
+owner can reconnect with the same host ID and token during its 30-day identity
+lease, even after its previous capacity slot expired. Reconnect bypasses new
+registration quotas and reacquires a free slot; it still fails transiently if
+32 other hosts are active. HTTP renewal returns a valid owner's existing expiry
+without extending it. A working connector refreshes its identity lease at most
+once per day. This prevents a disconnected owner from keeping an identity alive
+using only renewal requests. Previously inline owner records migrate without
+changing IDs or secrets; old 30-day idle reservations are reclaimed.
+
+New registrations are limited to five per trusted source IP per hour **and** an
+atomic global token bucket: burst eight, replenished at one admission per
+30 seconds. Failed admission does not reset the refill clock. The global bucket
+bounds distributed anonymous creation to approximately 86,408 new identities
+per 30-day window. Source-IP verifiers are hashed and held in the same CAS roster,
+with at most 1,024 entries and one-hour expiry. DynamoDB TTL is asynchronous
+physical cleanup only; lease validity is checked synchronously. Revocation
+leaves a TTL tombstone so migration or a concurrent heartbeat cannot restore the
+owner. The active roster never exceeds 32; identity storage has a bounded
+creation rate and TTL validity, **not** an absolute all-time row-count bound for
+owners that continue reconnecting and proving liveness.
+
+This mitigation prevents anonymous idle registrations from occupying every
+capacity slot for 30 days. It does not make a finite anonymous service immune
+to denial of service: an attacker maintaining 32 authenticated live WebSockets
+can still exhaust capacity, and a distributed attacker can consume the new
+registration budget. Accounts or proof of work could raise the attack cost, but
+would add onboarding requirements and do not guarantee availability. Retain
+global infrastructure limits and monitor admission pressure before scaling the
+service. The singleton retains its separate 32 live frontend slots; each managed
+host retains the same bounded stream-membership leases and existing global
+deployment limits.
 
 ## Client contract
 
@@ -62,11 +93,14 @@ It returns HTTP 201:
 
 Persist the owner token in the platform secret store and retain the host ID and
 origin across restarts. Authenticated `POST /_mold/relay/enroll/<host_id>` renews
-and returns HTTP 200 with the same schema and owner token, a new expiry and the
-configured endpoints. The submitted token is returned unchanged after verifier
+and returns HTTP 200 with the same schema and owner token, the existing identity expiry and the
+configured endpoints. Only a working host connector extends identity retention;
+an idle HTTP renewal cannot extend either a provisional or live capacity lease. The submitted token is returned unchanged after verifier
 validation, and is never persisted as plaintext. `DELETE` on that route with
 `Authorization: Bearer <owner-token>` returns HTTP 204 and revokes the lease.
-An expired owner lease must enroll again. The enrollment endpoints work only
+The initial `expires_at` is only two minutes; after host `hello`, subsequent
+renewal responses reflect its established 30-day identity lease. An expired
+owner identity must enroll again. The enrollment endpoints work only
 on the configured central origin, never a tenant origin.
 
 The host WSS handshake sends:
@@ -96,8 +130,9 @@ Application mutations are never replayed after uncertain delivery.
 ## Verification
 
 Run `node --test relay/aws/test/*.test.mjs` with the package dependencies
-installed. The suite covers concurrent atomic enrollment capacity, source
-quotas, lease reclamation, owner renew/delete, trusted hostname selection,
+installed. The suite covers concurrent atomic capacity, source and global
+quotas, idle lease reclamation, live promotion and heartbeat expiry, stable-owner
+reconnect, owner renew/delete, legacy identity migration, trusted hostname selection,
 managed/legacy coexistence, cross-tenant credentials and frames, revoked
 sessions, upload grants, media polling and worker dispatch. These are local
 contract tests; production wildcard DNS, certificate routing, trusted context

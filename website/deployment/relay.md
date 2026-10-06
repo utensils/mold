@@ -161,9 +161,14 @@ URLs; clients do not invent addresses.
 
 Enrollment generates a random owner bearer; authenticated renewal returns the
 same submitted bearer. The gateway stores only its SHA-256 verifier. Native macOS stores the bearer in its owner-only SecretStore.
-Renewal and deletion require that host's bearer. Leases last 30 days, registration
-capacity is 32 active hosts, and enrollment permits five registrations per trusted
-source IP per hour. The source address comes from API Gateway context, never an
+Renewal and deletion require that host's bearer. Initial reservations last two
+minutes. Host hello establishes a 30-day owner identity; hello and heartbeats
+maintain a separate 90-second live slot. There are 32 simultaneous slots. New
+enrollment permits five registrations per trusted source IP per hour, with a
+global burst of eight and one new admission per 30 seconds. Saved owners
+reconnect without changing identity or consuming the new-enrollment budget.
+HTTP renewal cannot hold an idle slot. Sustained live connections can still
+exhaust a finite anonymous service. The source address comes from API Gateway context, never an
 `X-Forwarded-For` header. Host connections, stream authority, staged transfers
 and media jobs are scoped to their enrolled namespace. Existing legacy connector
 credentials and the unscoped gateway address continue to work.

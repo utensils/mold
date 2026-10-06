@@ -70,7 +70,11 @@ Production wildcard DNS/TLS and runtime/config deployment
 are prerequisites, never inferred from a successful app build. Host IDs are
 random 128-bit lowercase hex; owner tokens are separate random 256-bit bearers
 stored as SHA-256 verifiers by the gateway. Capacity, leases and source quotas
-are bounded; renew/delete require that namespace's owner token. Never trust
+are bounded. Provisional capacity lasts two minutes; host hello/heartbeat
+maintains 90-second live slots separately from 30-day established owner identity.
+HTTP renewal cannot retain idle slots; reconnect preserves a valid owner ID.
+New identities have a global burst-eight/one-per-30-seconds admission budget.
+Renew/delete require that namespace's owner token. Never trust
 X-Forwarded-For for source quotas. Host, stream, transfer and media-job authority
 must remain scoped to the enrolled namespace. Preserve legacy connector access.
 

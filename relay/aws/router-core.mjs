@@ -1,5 +1,7 @@
 import {
   activeEnrollment,
+  reserveManagedSlot,
+  promoteManagedHost,
   ownerAllowed,
   validNamespace,
   namespaceKey,
@@ -68,15 +70,15 @@ export function createRouter({
   }
   async function connect(id, headers) {
     const namespace = headers["x-mold-relay-host"] ?? "";
+    const role = headers["x-mold-relay-role"];
     if (
       namespace &&
       (!managed ||
         !validNamespace(namespace) ||
-        !(await activeEnrollment(store, namespace, now())))
+        (role !== "host" && !(await activeEnrollment(store, namespace, now()))))
     )
       return 403;
     const updateHost = (change) => updateHostIn(change, namespace);
-    const role = headers["x-mold-relay-role"];
     const expected = (await tokens())[role];
     if (
       !["host", "frontend"].includes(role) ||
@@ -86,6 +88,8 @@ export function createRouter({
     )
       return 403;
     if (role === "host") {
+      if (namespace && !(await reserveManagedSlot(store, namespace, now())))
+        return 503;
       const host = await updateHost((old) =>
         old?.expiresAt > now()
           ? null
@@ -272,6 +276,12 @@ export function createRouter({
         );
         return 403;
       }
+      if (
+        namespace &&
+        connection.role === "host" &&
+        !(await promoteManagedHost(store, namespace, now()))
+      )
+        return 403;
       for (let attempt = 0; attempt < 8; attempt++) {
         const current = await store.get(`connection#${id}`);
         if (!current || current.sid !== connection.sid) {
@@ -315,6 +325,8 @@ export function createRouter({
             : null,
         );
         if (!ready) return 503;
+        if (namespace && !(await promoteManagedHost(store, namespace, now())))
+          return 403;
       }
       await post(id, {
         a: "ready",

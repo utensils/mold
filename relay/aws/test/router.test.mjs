@@ -574,3 +574,63 @@ test("two managed hosts and legacy coexist; owner credentials, cross frames and 
     200,
   );
 });
+
+test("managed host hello and heartbeats alone maintain capacity; offline owner keeps identity and reconnects", async () => {
+  const { createManagedEnrollment, OWNER_PREFIX } =
+    await import("../managed.mjs");
+  const managed = {
+    domain: "phones.example.com",
+    origin: "https://link.example.com",
+    relayURL: "wss://ws.example.com/live",
+  };
+  const f = fixture({ managed });
+  let time = 100;
+  const enroll = createManagedEnrollment({
+    store: f.store,
+    config: managed,
+    now: () => time,
+  });
+  const enrollment = await enroll({
+    method: "POST",
+    route: "/_mold/relay/enroll",
+    headers: {},
+    sourceIP: "192.0.2.1",
+    domainName: "link.example.com",
+  });
+  const a = enrollment.value;
+  const connectOwner = (id) =>
+    f.router({
+      requestContext: { routeKey: "$connect", connectionId: id },
+      headers: {
+        authorization: "Bearer " + a.token,
+        "x-mold-relay-role": "host",
+        "x-mold-relay-host": a.host_id,
+      },
+    });
+  assert.equal((await connectOwner("h")).statusCode, 200);
+  assert.equal(
+    (await send(f.router, "h", { a: "hello", v: 2 })).statusCode,
+    200,
+  );
+  assert.equal(f.rows.get(OWNER_PREFIX + a.host_id).established, true);
+  f.advance(80);
+  time += 80;
+  assert.equal(
+    (await send(f.router, "h", { a: "heartbeat", v: 2 })).statusCode,
+    200,
+  );
+  assert.equal(f.rows.get("managed-roster").hosts[a.host_id].expiresAt, 270);
+  f.advance(91);
+  time += 91;
+  assert.equal(
+    (await send(f.router, "h", { a: "heartbeat", v: 2 })).statusCode,
+    403,
+  );
+  assert.equal(f.closed.includes("h"), true);
+  assert.equal((await connectOwner("restart")).statusCode, 200);
+  assert.equal(
+    (await send(f.router, "restart", { a: "hello", v: 2 })).statusCode,
+    200,
+  );
+  assert.equal(f.rows.get("connection#restart").namespace, a.host_id);
+});

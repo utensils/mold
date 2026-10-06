@@ -37,8 +37,10 @@ relay_url, expires_at}`. Generate a random 128-bit lowercase-hex host ID
   never invent it. Root-path origins preserve current route-proof, staged
   transfer and client URL contracts.
 - Authenticated renew and delete operate on that host ID. Enrollment is
-  bounded by atomic global registration capacity and trusted-source rate
-  limits; default capacity 32 and leases 30 days, renewed while enabled.
+  bounded by 32 simultaneous slots and trusted-source rate limits. Initial
+  reservations expire in two minutes; hello/heartbeats maintain 90-second
+  live slots separately from established 30-day owner identities. New identity
+  admission has a global burst of eight and replenishes once per 30 seconds.
   Never trust X-Forwarded-For for enrollment quotas. Delete releases capacity.
 - WSS host headers carry `x-mold-relay-host` plus that host's owner bearer;
   frontend bridges carry the namespace plus the existing internal bearer.
@@ -116,9 +118,11 @@ cancelled enrollment cleanup were fixed and covered by regression tests.
 The managed owner credential has a declared SecretStore slot; General reset
 preserves the explicit remote-access preference.
 
-Validation includes the gateway's 65 tests, connector's 27 tests, dynamic
+Validation includes the gateway's 72 tests, connector's 27 tests, dynamic
 advertisement's 6 tests, FFI's 15 tests, native Mac's 913 tests, shared client's
-1,180 tests, and a generic iOS client-package build. The native app builds with
+1,180 tests, and a generic iOS client-package build. A further regression test
+reproduced and fixed pairing during unfinished Stop Remote Access revocation.
+The native app builds with
 the connector linked. Disposable native UI UAT confirmed the unchanged Settings
 tabs and Form, the button for a running This Mac engine, and the QR sheet with
 fixture LAN/Tailscale/relay endpoints. This does not demonstrate physical-phone
