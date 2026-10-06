@@ -61,13 +61,25 @@ struct ConnectionProbeTests {
         return URLSession(configuration: configuration)
     }
 
-    @Test func publicProbeRetainsTwoSecondDeadline() async throws {
-        ConnectionProbeProtocol.expectedTimeout = 2
-        ConnectionProbeProtocol.badProof = false
-        defer { ConnectionProbeProtocol.expectedTimeout = 30 }
-        let url = try await ConnectionRoutes.select(endpoints: [ConnectionEndpoint(url: "https://deadline.example", kind: .relay)],
-            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "pairing", instanceID: "machine", session: session())
-        #expect(url.host == "deadline.example")
+    @Test func productionProbeConfigurationIsBoundedAndCredentialFree() {
+        let source = session()
+        defer { source.invalidateAndCancel() }
+        let configuration = ConnectionRoutes.probeConfiguration(from: source)
+        #expect(configuration.timeoutIntervalForResource == 2)
+        #expect(configuration.httpAdditionalHeaders == nil)
+        #expect(configuration.httpCookieStorage == nil)
+        #expect(configuration.urlCredentialStorage == nil)
+        #expect(configuration.urlCache == nil)
+        // Sanitization must not mutate the caller's session configuration.
+        #expect(source.configuration.httpAdditionalHeaders?["X-Api-Key"] as? String == "must-not-leak")
+        let body = Data("fixture".utf8)
+        let request = ConnectionRoutes.probeRequest(base: URL(string: "https://deadline.example")!, body: body)
+        #expect(request.timeoutInterval == 2)
+        #expect(request.url?.path == "/api/connection-probe")
+        #expect(request.httpMethod == "POST")
+        #expect(!request.httpShouldHandleCookies)
+        #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
+        #expect(request.httpBody == body)
     }
 
     @Test func operatorKeysNeverProbeLearnedAddresses() async {
@@ -140,7 +152,6 @@ struct ConnectionProbeTests {
 }
 
 private final class ConnectionProbeProtocol: URLProtocol {
-    nonisolated(unsafe) static var expectedTimeout: TimeInterval = 30
     nonisolated(unsafe) static var failLAN = false
     nonisolated(unsafe) static var failTailscale = false
     nonisolated(unsafe) static var badProof = false
@@ -148,7 +159,7 @@ private final class ConnectionProbeProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
     override func startLoading() {
-        #expect(request.timeoutInterval == Self.expectedTimeout)
+        #expect(request.timeoutInterval == 30)
         #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
         #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
         #expect(request.url?.path == "/api/connection-probe")
