@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for scripts/release/sync-release-pr.sh: changelog promotion, link-ref
-# rewriting, desktop version sync, and idempotency — against a fixture tree.
+# rewriting, standalone version sync, and idempotency — against a fixture tree.
 set -euo pipefail
 
 script="$(cd "$(dirname "$0")/../release" && pwd)/sync-release-pr.sh"
@@ -12,7 +12,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-mkdir -p "$tmp/desktop/src-tauri" "$tmp/apps/mobile/src-tauri"
+mkdir -p "$tmp/desktop/src-tauri" "$tmp/apps/mobile/src-tauri" "$tmp/apps/macos/rust/mold-macos-ffi"
 
 cat > "$tmp/Cargo.toml" <<'EOF'
 [workspace]
@@ -120,6 +120,28 @@ cat > "$tmp/apps/mobile/src-tauri/tauri.conf.json" <<'EOF'
 }
 EOF
 
+# The native Mac FFI root keeps its own package version, but every local
+# workspace package in its lock must follow release-plz's workspace bump.
+cat > "$tmp/apps/macos/rust/mold-macos-ffi/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "mold-ai-core"
+version = "0.14.0"
+
+[[package]]
+name = "mold-ai-server"
+version = "0.14.0"
+
+[[package]]
+name = "mold-macos-ffi"
+version = "0.29.0"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+EOF
+
 "$script" "$tmp" > /dev/null
 
 grep -q '^## \[Unreleased\]$' "$tmp/CHANGELOG.md" || fail "[Unreleased] heading missing after promotion"
@@ -153,6 +175,14 @@ awk '/^name = "serde"$/{getline; exit ($0 == "version = \"1.0.0\"") ? 0 : 1}' "$
 grep -q '^version = "0.15.0"$' "$tmp/apps/mobile/src-tauri/Cargo.toml" || fail "mobile Cargo.toml version not synced"
 awk '/^name = "mold-mobile"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/apps/mobile/src-tauri/Cargo.lock" || fail "mobile Cargo.lock version not synced"
 grep -q '"version": "0.15.0"' "$tmp/apps/mobile/src-tauri/tauri.conf.json" || fail "mobile tauri config version not synced"
+
+python3 - "$tmp/apps/macos/rust/mold-macos-ffi/Cargo.lock" <<'PYTEST'
+import pathlib
+import sys
+import tomllib
+packages = {p["name"]: p["version"] for p in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]}
+assert packages == {"mold-ai-core": "0.15.0", "mold-ai-server": "0.15.0", "mold-macos-ffi": "0.29.0", "serde": "1.0.0"}, packages
+PYTEST
 
 # Ordering: in a git checkout fragments are assembled newest-first by the
 # commit that added them, regardless of filename (CRLF is normalised away).
