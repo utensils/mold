@@ -32,13 +32,14 @@ extension GeneratePane {
         // The chain door redeems no reuse session, but the chain WIRE carries
         // the bytes per stage -- so the print's picture is fetched into the
         // draft's own well and the render goes out as an ordinary long clip
-        // that starts from it. The authority is TAKEN before the await, so a
-        // second press finds none and takes the ordinary synchronous path.
+        // that starts from it. Hold additional presses while restoring the
+        // source; keep the archive locator and fence late placement on edits.
         if case .chain = routing, let authority = reuse.pending(for: controller.draft),
-           let member = RetainedSourcePicture.member(
-               of: authority, forHydrating: outgoingProbe(on: host)) {
-            reuse.clear()
-            Task { await attachThenRun(member, of: authority, accepted: accepted) }
+           RetainedSourcePicture.member(of: authority, forHydrating: outgoingProbe(on: host)) != nil {
+            let draft = controller.draft
+            let outgoing = outgoingProbe(on: host)
+            let fence = reuse.beginSourceSubmission()
+            Task { await attachThenRun(draft, outgoing: outgoing, fence: fence, accepted: accepted) }
             return
         }
         // Whatever a chain still cannot carry -- a mask, an identity photo --
@@ -66,15 +67,12 @@ extension GeneratePane {
     /// clip without the picture it was supposed to start from is the thing
     /// this whole path exists to stop.
     func attachThenRun(
-        _ member: RetainedSourceMedia.Member, of authority: ReuseStore.Authority,
+        _ draft: RenderDraft, outgoing: GenerateRequest?, fence: Int,
         accepted: Set<String> = []
     ) async {
-        switch await RetainedSourcePicture.fetch(member, of: authority, hosts: hosts) {
-        case let .refused(sentence):
-            reuse.notice = sentence
-        case let .picture(picture):
-            RetainedSourcePicture.place(picture, named: authority.filename,
-                                        in: &controller.draft)
+        if let placed = await reuse.sourceForSubmission(in: draft, outgoing: outgoing,
+            live: { controller.draft }, fence: fence) {
+            controller.draft = placed
             startRun(accepted: accepted)
         }
     }

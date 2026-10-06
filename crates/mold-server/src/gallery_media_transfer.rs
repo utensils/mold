@@ -62,26 +62,34 @@ fn conflict() -> ApiError {
         StatusCode::CONFLICT,
     )
 }
+fn chain_stage_source(role: &str) -> bool {
+    role.strip_prefix("stage_source:").is_some_and(|index| {
+        index
+            .parse::<u32>()
+            .is_ok_and(|value| value.to_string() == index)
+    })
+}
 fn permitted_role(role: &str) -> bool {
-    matches!(
-        role,
-        "source_image"
-            | "identity_image"
-            | "identity_images"
-            | "edit_images"
-            | "references"
-            | "mask_image"
-            | "control_image"
-            | "audio_file"
-            | "audio_file_path"
-            | "source_video"
-            | "source_video_path"
-            | "extend_video"
-            | "extend_video_path"
-            | "keyframes"
-            | "matting_processed_source_image"
-            | "matting_processed_references"
-    )
+    chain_stage_source(role)
+        || matches!(
+            role,
+            "source_image"
+                | "identity_image"
+                | "identity_images"
+                | "edit_images"
+                | "references"
+                | "mask_image"
+                | "control_image"
+                | "audio_file"
+                | "audio_file_path"
+                | "source_video"
+                | "source_video_path"
+                | "extend_video"
+                | "extend_video_path"
+                | "keyframes"
+                | "matting_processed_source_image"
+                | "matting_processed_references"
+        )
 }
 fn validate_members(members: &[TransferMember]) -> Result<(), String> {
     if members.is_empty() || members.len() > MAX_MEMBERS {
@@ -100,6 +108,7 @@ fn validate_members(members: &[TransferMember]) -> Result<(), String> {
                 member.position.as_str(),
                 "front" | "left" | "back" | "right"
             ),
+            role if chain_stage_source(role) => member.position == "authored-source",
             _ => member.position == "scalar",
         };
         if !permitted_role(&member.role) || !slot {
@@ -680,6 +689,26 @@ mod tests {
         assert!(validate_members(&[oversized]).is_err());
     }
     #[test]
+    fn chain_stage_transfer_requires_canonical_roles_and_authored_positions() {
+        let mut value = member();
+        value.role = "stage_source:0".into();
+        value.position = "authored-source".into();
+        assert!(validate_members(&[value.clone()]).is_ok());
+        for role in [
+            "stage_source:-1",
+            "stage_source:01",
+            "stage_source:../0",
+            "stage_source:",
+        ] {
+            value.role = role.into();
+            assert!(validate_members(&[value.clone()]).is_err());
+        }
+        value.role = "stage_source:0".into();
+        value.position = "scalar".into();
+        assert!(validate_members(&[value]).is_err());
+    }
+
+    #[test]
     fn transfer_never_accepts_paths_or_provenance_text_as_slots() {
         let mut value = member();
         value.position = "/private/source.png".into();
@@ -943,7 +972,34 @@ mod tests {
             let mut offer = offer_for(&original, "copy.png").unwrap();
             let mut value = member();
             value.sha256 = format!("{:x}", Sha256::digest(b"abc"));
-            offer.members = vec![value];
+            offer.members = [
+                ("source_image", "scalar"),
+                ("identity_image", "scalar"),
+                ("identity_images", "item:0"),
+                ("edit_images", "item:0"),
+                ("references", "item:0"),
+                ("mask_image", "scalar"),
+                ("control_image", "scalar"),
+                ("audio_file", "scalar"),
+                ("audio_file_path", "scalar"),
+                ("source_video", "scalar"),
+                ("source_video_path", "scalar"),
+                ("extend_video", "scalar"),
+                ("extend_video_path", "scalar"),
+                ("keyframes", "item:0"),
+                ("matting_processed_source_image", "scalar"),
+                ("matting_processed_references", "front"),
+                ("stage_source:0", "authored-source"),
+                ("stage_source:1", "authored-source"),
+            ]
+            .into_iter()
+            .map(|(role, position)| {
+                let mut member = value.clone();
+                member.role = role.into();
+                member.position = position.into();
+                member
+            })
+            .collect();
             commit_transfer(&original, "copy.png", &offer, |_, m| {
                 Ok(crate::queue_media_store::SealMedia::bytes(
                     &m.role,
@@ -962,13 +1018,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(source_offer.output_sha256, target_offer.output_sha256);
+        let member_count = source_offer.members.len();
         target_offer.members = source_offer.members;
         let _ = receive(
             State(target.clone()),
             None,
             None,
             Path("copy.png".into()),
-            Body::from(framed(&target_offer, b"abc")),
+            Body::from(framed(&target_offer, &b"abc".repeat(member_count))),
         )
         .await
         .unwrap();
@@ -989,21 +1046,22 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(!resolved.corrupt);
-            assert_eq!(resolved.members.len(), 1);
-            let member = &resolved.members[0];
-            assert_eq!(
-                target
-                    .queue_journal
-                    .queue_media_lifecycle()
-                    .unwrap()
-                    .gallery_member_bytes(
-                        member.media_set.clone(),
-                        member.pin_id.clone(),
-                        member.index
-                    )
-                    .unwrap(),
-                b"abc"
-            );
+            assert_eq!(resolved.members.len(), member_count);
+            for member in &resolved.members {
+                assert_eq!(
+                    target
+                        .queue_journal
+                        .queue_media_lifecycle()
+                        .unwrap()
+                        .gallery_member_bytes(
+                            member.media_set.clone(),
+                            member.pin_id.clone(),
+                            member.index
+                        )
+                        .unwrap(),
+                    b"abc"
+                );
+            }
         })
         .await
         .unwrap();

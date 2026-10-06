@@ -9,6 +9,7 @@ import MoldClient
 extension FakeBackend {
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
         try record("retainedMediaTransferOffer")
+        if let retainedTransferOfferResponder { return try await retainedTransferOfferResponder(filename) }
         if let offer = retainedTransferOffers[filename] { return offer }
         if noRetainedMedia {
             let metadata = prints.first(where: { $0.filename == filename })?.metadata
@@ -26,8 +27,18 @@ extension FakeBackend {
         try record("importRetainedMedia")
         let offer = try await retainedMediaTransferOffer(for: filename)
         retainedTransfers.append((filename, transfer))
+        let destinationMembers = try zip(transfer.members, transfer.files).enumerated().map { index, pair in
+            let (member, file) = pair
+            let id = "destination-\(index)"
+            retainedMemberBytes[id] = try Data(contentsOf: file)
+            return RetainedSourceMedia.TransferMember(memberId: id, role: member.role,
+                position: member.position, sink: member.sink, sizeBytes: member.sizeBytes, sha256: member.sha256)
+        }
+        retainedInventories[filename] = .init(availability: .available, members: destinationMembers.map {
+            .init(memberId: $0.memberId!, role: $0.role, displayName: $0.role, sizeBytes: $0.sizeBytes)
+        })
         retainedTransferOffers[filename] = RetainedSourceMedia.TransferOffer(
-            archiveIdentitySha256: transfer.archiveIdentitySha256, members: transfer.members,
+            archiveIdentitySha256: transfer.archiveIdentitySha256, members: destinationMembers,
             outputSha256: offer.outputSha256, outputSizeBytes: offer.outputSizeBytes, metadata: offer.metadata)
     }
 
@@ -35,6 +46,7 @@ extension FakeBackend {
         -> RetainedSourceMedia.Inventory {
         try record("retainedSourceMedia")
         retainedInventoryRequests.append(filename)
+        if let retainedInventoryResponder { return try await retainedInventoryResponder(filename) }
         guard let planted = retainedInventories[filename] else { throw notPlanted() }
         return planted
     }
@@ -43,6 +55,7 @@ extension FakeBackend {
         -> Data {
         try record("retainedSourceMediaBytes")
         retainedMemberRequests.append(memberId)
+        if let retainedMemberResponder { return try await retainedMemberResponder(memberId) }
         guard let planted = retainedMemberBytes[memberId] else { throw notPlanted() }
         return planted
     }

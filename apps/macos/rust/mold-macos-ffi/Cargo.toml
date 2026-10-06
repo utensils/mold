@@ -44,6 +44,13 @@ http = "1"
 [features]
 default = []
 metal = ["mold-server/metal"]
+shipping-metal = [
+  "metal",
+  "mold-server/h3",
+  "mold-server/mesh-texture",
+  "mold-server/mesh-matting",
+  "mold-server/mesh-delight",
+]
 
 # Mirrors the root workspace's same-name compatibility patch, because this
 # standalone root owns an independent dependency graph. Every candle crate must

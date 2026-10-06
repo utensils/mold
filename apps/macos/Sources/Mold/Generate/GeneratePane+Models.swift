@@ -25,13 +25,20 @@ extension GeneratePane {
     func adoptFirstReadyModel() {
         guard controller.modelName == nil, let host else { return }
         let ready = models.ready(on: host.id)
-        if let restored = drafts.restoredModel,
+        if let restored = drafts.restoredModel ?? reuse.savedRecipe?.model,
            let model = ready.first(where: { $0.name == restored }) {
+            let savedRecipe = reuse.savedRecipe?.recipe
+            if let savedRecipe, model.generationProfile?.recipe(named: savedRecipe) == nil { return }
             drafts.adoptedRestoredModel()
             controller.adopt(model: model, on: host.id, keepingDraft: true)
+            if let savedRecipe, let recipe = model.generationProfile?.recipe(named: savedRecipe) {
+                controller.selectRecipe(recipe, in: model.generationProfile)
+            }
+            reuse.adoptRestoredBaseline(controller, model: model)
             return
         }
-        guard let first = ready.first else { return }
+        // A missing saved model must not silently turn a conditioned recipe into another render.
+        guard !reuse.restoring, let first = ready.first else { return }
         drafts.adoptedRestoredModel()
         controller.select(model: first, on: host.id)
     }

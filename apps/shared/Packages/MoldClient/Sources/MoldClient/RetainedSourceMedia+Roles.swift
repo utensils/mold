@@ -16,6 +16,7 @@ public extension RetainedSourceMedia {
     /// Every reusable conditioning role, including ordered typed references.
     static let fieldForRole: [String: Field] = [
         "source_image": .sourceImage,
+        "stage_source:0": .sourceImage,
         "identity_image": .identityImage,
         "identity_images": .identityImages,
         "edit_images": .editImages,

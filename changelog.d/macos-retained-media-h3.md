@@ -1,0 +1,4 @@
+- **Durable native references.** Keep reused native Mac references attached across prompt, shape and seed edits, retries and repeated submissions; show bounded retained image previews and verify retained recipes again after relaunch.
+- **Native Mac H3 Metal packaging.** Include the reviewed Metal MiniMax H3 runtime in shipping builds and prevent stale placement responses from another machine appearing in Generate.
+- **Native Mac shape selection.** Show proportional aspect-ratio outlines in the shape menu and readable explanations when Generate is unavailable.
+- **Durable host transfers.** Transfer retained chain stage images with every other supported input role; all stage inputs stay in the destination archive, and first-stage settings reuse restores its source picture without silently substituting later-stage inputs.

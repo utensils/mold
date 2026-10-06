@@ -5,10 +5,46 @@ import {
   retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
+  retainedSourceMediaMembersForRequest,
   relayRetainedSourceMedia,
 } from "./gallerySourceMedia";
 
 afterEach(() => vi.restoreAllMocks());
+
+it("reuses only the first chain stage and preserves its source in a relay", async () => {
+  const first = {
+    member_id: "destination-0",
+    role: "stage_source:0",
+    display_name: "first",
+    size_bytes: 3,
+  };
+  const later = {
+    ...first,
+    member_id: "destination-1",
+    role: "stage_source:1",
+  };
+  expect(retainedSourceMediaMembersForRequest([first, later], {})).toEqual([
+    first,
+  ]);
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(new Uint8Array([1, 2, 3])),
+  );
+  const request = await relayRetainedSourceMedia(
+    "copy.mp4",
+    [first],
+    {},
+    { baseUrl: "http://fixture", apiKey: null },
+  );
+  expect(request).toMatchObject({ source_image: "AQID" });
+  await expect(
+    relayRetainedSourceMedia(
+      "copy.mp4",
+      [first],
+      { source_image: "chosen" },
+      { baseUrl: "http://fixture", apiKey: null },
+    ),
+  ).rejects.toThrow("already contains source_image");
+});
 
 describe("gallery retained source media API", () => {
   it("encodes the exact gallery identity and opaque member", () => {

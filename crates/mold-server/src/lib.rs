@@ -16,6 +16,7 @@ mod durable_generation_settlement;
 pub mod gallery_authority;
 mod gallery_media_transfer;
 mod gallery_source_media;
+mod gallery_source_thumbnail;
 mod generation_assets;
 #[allow(dead_code)]
 mod h3_admission;

@@ -85,8 +85,23 @@ struct GeneratePane: View {
         .task { await controller.recoverPending() }
         .task { seedSourceImageIfRequested() }
         .onChange(of: hosts.reachability) { _, _ in adoptFirstReadyModel() }
-        .onChange(of: controller.draft) { _, _ in refreshPlacement() }
-        .onChange(of: controller.modelName) { _, _ in refreshPlacement() }
+        .onChange(of: controller.draft) { _, _ in
+            reuse.selectionChanged(model: controller.modelName, recipe: controller.recipeID, draft: controller.draft)
+            refreshPlacement()
+        }
+        .onChange(of: controller.modelName) { _, _ in
+            reuse.selectionChanged(model: controller.modelName, recipe: controller.recipeID, draft: controller.draft)
+            refreshPlacement()
+        }
+        .onChange(of: controller.recipeID) { _, _ in
+            reuse.selectionChanged(model: controller.modelName, recipe: controller.recipeID, draft: controller.draft)
+            refreshPlacement()
+        }
+        .onChange(of: host?.id) { _, _ in refreshPlacement() }
+        .task(id: RetainedRecoveryKey(model: controller.modelName, recipe: controller.recipeID,
+            reachability: hosts.reachability, instances: hosts.instanceIDs)) {
+            await reuse.recoverSaved(controller)
+        }
     }
 
     // MARK: - Canvas
@@ -163,4 +178,11 @@ struct GeneratePane: View {
             Task { await expansions.expand(controller, on: host, backend: hosts.backend(for: host)) }
         }
     }
+}
+
+private struct RetainedRecoveryKey: Equatable {
+    let model: String?
+    let recipe: String?
+    let reachability: [UUID: HostStore.Reachability]
+    let instances: [UUID: String]
 }

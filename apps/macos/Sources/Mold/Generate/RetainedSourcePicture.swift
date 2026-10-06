@@ -33,8 +33,9 @@ enum RetainedSourcePicture {
         of authority: ReuseStore.Authority, forHydrating outgoing: GenerateRequest?
     ) -> RetainedSourceMedia.Member? {
         guard let outgoing, outgoing.sourceImage == nil else { return nil }
-        return RetainedSourceMedia.members(authority.members, forHydrating: outgoing)
-            .first { $0.role == carriedRole }
+        let sources = RetainedSourceMedia.members(authority.members, forHydrating: outgoing)
+            .filter { RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }
+        return sources.count == 1 ? sources.first : nil
     }
 
     /// The picture, or the sentence to show instead.

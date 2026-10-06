@@ -46,6 +46,10 @@ final class RetainedReuse {
                 continue
             }
             authority = Authority(filename: copy.print.filename, origin: copy.hostID, members: inventory.members)
+            if let refusal = sourcePictureRefusal(in: controller.draft) {
+                notice = refusal
+                return
+            }
             // Show the source in its ordinary well, so it can be replaced,
             // fitted or removed. Other retained roles hydrate at submission.
             let outgoing = controller.modelName.flatMap {
@@ -54,7 +58,7 @@ final class RetainedReuse {
             }
             if let outgoing, controller.draft.media.sourceImage == nil,
                let member = RetainedSourceMedia.members(inventory.members, forHydrating: outgoing)
-                .first(where: { $0.role == "source_image" }) {
+                .first(where: { RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }) {
                 do {
                     if let refusal = RetainedSourceMedia.relayRefusal([member], copies: 1) { throw refusal }
                     let bytes = try await backend.retainedSourceMediaBytes(for: copy.print.filename, member: member.memberId)
@@ -92,13 +96,16 @@ final class RetainedReuse {
             }
             // A source in the well is now ordinary authored media. Removing
             // it must never revive a hidden archive attachment.
-            let pairedSource = inventory.members.contains { $0.role == "source_image" }
+            let pairedSource = inventory.members.contains { RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }
             let remaining = inventory.members.filter {
-                $0.role != "source_image" && !(pairedSource && $0.role == "mask_image")
+                RetainedSourceMedia.fieldForRole[$0.role] != .sourceImage && !(pairedSource && $0.role == "mask_image")
             }
             authority = remaining.isEmpty ? nil : Authority(filename: copy.print.filename,
                 origin: copy.hostID, members: remaining)
-            if !remaining.isEmpty {
+            if inventory.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
+                let source = inventory.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
+                notice = "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive."
+            } else if !remaining.isEmpty {
                 let files = remaining.count == 1 ? "a retained source file" : "\(remaining.count) retained source files"
                 notice = "Using \(files) from \(copy.hostName)."
             }
@@ -106,6 +113,12 @@ final class RetainedReuse {
         }
         if isCurrent(fence, draft: controller.draft), RetainedSourceMedia.disclosable(entry.print.metadata),
            let unavailable { notice = RetainedSourceMedia.disclosure(unavailable) }
+    }
+
+    func sourcePictureRefusal(in draft: RenderDraft) -> String? {
+        guard draft.media.sourceImage == nil, let authority,
+              authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 else { return nil }
+        return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
     }
 
     /// Each press hydrates a fresh request. A failed admission or another

@@ -295,6 +295,8 @@ provenance. Native Mac and
 desktop library copies also retain those sources on supported destinations.
 Native Mac mirrors accept missing archive-only job IDs and generation durations, and a short version matching the same version with a build suffix. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 
+Native Mac shipping builds include the reviewed Metal H3 runtime. Remote generation follows the selected host’s capabilities. Reused native Mac references show bounded previews and survive ordinary control edits and repeated submissions; relaunch verifies their byte-free origin locator before enabling Generate.
+
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 To install Mold's Agent Skill for supported coding agents,
 run:

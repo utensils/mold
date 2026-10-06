@@ -351,6 +351,7 @@ use crate::queue::clean_error_message;
         complete_held_queue_transfer,
         get_queue_job_preview,
         crate::queue_input_thumbnail::get,
+        crate::gallery_source_thumbnail::get,
         patch_queue_job,
         cancel_queue_job,
         retry_queue_job,
@@ -744,6 +745,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/gallery/source-media/:filename/:member_id",
             get(crate::gallery_source_media::download),
+        )
+        .route(
+            "/api/gallery/source-media/:filename/:member_id/thumbnail",
+            get(crate::gallery_source_thumbnail::get),
         )
         .route(
             "/api/gallery/assets/:filename/:asset_id",

@@ -14,15 +14,12 @@ extension ReuseStore {
 
     /// The authority, if it still describes the draft on screen.
     ///
-    /// ANY edit puts it down. The draft is the whole recipe -- the prompt,
-    /// the model, the canvas, the wells, the sampler -- so this is the
-    /// cheapest honest form of desktop's rule that a new handoff supersedes
-    /// the prior print's authority (`composer.ts:29-59`), and it is stricter
-    /// than desktop needs to be because this app shows no restored picture in
-    /// the well: nothing else would tell a person that the render they are
-    /// now composing is still conditioned on somebody else's print.
+    /// Visible typed references survive ordinary authoring edits. Hidden roles
+    /// retain whole-draft fencing; selection changes are explicitly invalidated.
     func pending(for draft: RenderDraft) -> Authority? {
-        guard let authority, restored == draft else { return nil }
+        guard let authority, let restored,
+              RetainedReferenceGuard.canReuseDraft(draft, original: restored),
+              authority.instance == nil || authority.instance == hosts.instanceID(of: authority.origin) else { return nil }
         return authority
     }
 
@@ -34,6 +31,12 @@ extension ReuseStore {
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
+        if attachingSource { return "Loading the retained source picture…" }
+        if restoring { return notice ?? "Verifying retained conditioning on its original machine…" }
+        if let authority = pending(for: draft), draft.media.sourceImage == nil,
+           authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 {
+            return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
+        }
         let references = draft.media.generationReferences
         guard references.contains(where: { $0.media.authority == "descriptor" }) else { return nil }
         if RetainedReferenceGuard.canHydrate(references: references,
@@ -42,23 +45,17 @@ extension ReuseStore {
         return "The retained references are unavailable. Replace or remove them before generating."
     }
 
-    /// The authority, CONSUMED. A handle is good for one admission and a
-    /// relay's bytes are carried by the request that took them, so the submit
-    /// that takes this is the last one to have it -- which is also what makes
-    /// a print the machine can no longer honour refuse exactly one render
-    /// instead of every one after it.
-    /// An authority that is HELD is put down either way -- taken when the
-    /// draft is still the one it came with, dropped when it is not, because a
-    /// draft that has moved on is not that print any more and an authority
-    /// nobody can see must not sit waiting for the edit to be undone.
-    ///
-    /// When nothing is held this disturbs NOTHING: a press must not bump the
-    /// fence under a probe still in the air, nor wipe a sentence nobody has
-    /// read yet.
+    /// Visible references keep their archive across submissions; each press
+    /// mints a fresh session. Legacy hidden conditioning is consumed once so
+    /// it cannot silently condition a later, unrelated draft.
     func take(for draft: RenderDraft) -> Authority? {
         guard authority != nil else { return nil }
         let taken = pending(for: draft)
-        clear()
+        // These references are visible attachments, not a one-use session.
+        // Each press mints its own session against the exact outgoing request.
+        if taken != nil, !draft.media.generationReferences.isEmpty { return taken }
+        if taken != nil { releaseSubmittedAuthority() }
+        else { clear() }
         return taken
     }
 
@@ -74,12 +71,16 @@ extension ReuseStore {
     func attachmentSentence(for draft: RenderDraft) -> String? {
         guard let authority = pending(for: draft) else { return nil }
         let remaining = authority.members.filter {
-            !($0.role == RetainedSourcePicture.carriedRole && draft.media.sourceImage != nil)
+            !(RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage && draft.media.sourceImage != nil)
         }
         guard !remaining.isEmpty else { return nil }
         let machine = hosts.host(authority.origin)?.name ?? "its machine"
         let what = remaining.count == 1
             ? "the source media" : "\(remaining.count) source files"
+        if authority.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
+            let source = authority.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
+            return "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive on \(machine)."
+        }
         return "Using \(what) from \(authority.filename) on \(machine)."
     }
 }

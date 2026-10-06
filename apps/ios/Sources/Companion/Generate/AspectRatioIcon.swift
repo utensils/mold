@@ -1,13 +1,12 @@
 import SwiftUI
 import UIKit
+import MoldClient
 
 /// Native menus flatten their label into a UIImage: draw the actual ratio
 /// there rather than handing every aspect the same SF Symbol rectangle.
 enum AspectRatioIcon {
     static func size(width: Int, height: Int, bound: CGFloat) -> CGSize {
-        let longest = CGFloat(max(1, max(width, height)))
-        return CGSize(width: CGFloat(max(1, width)) / longest * bound,
-                      height: CGFloat(max(1, height)) / longest * bound)
+        AspectRatioGeometry.size(width: width, height: height, bound: bound)
     }
 
     static func image(width: Int, height: Int) -> UIImage {

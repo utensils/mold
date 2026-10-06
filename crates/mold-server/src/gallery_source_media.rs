@@ -116,6 +116,9 @@ fn downloadable_role(role: &str) -> bool {
 }
 
 fn reusable_role(role: &str) -> bool {
+    if role.starts_with("stage_source:") {
+        return role == "stage_source:0";
+    }
     !matches!(
         role,
         "matting_processed_source_image" | "matting_processed_references"
@@ -406,7 +409,7 @@ fn selected_members(
             .ok_or_else(|| ApiError::not_found("retained source-media member was not found"))?;
         if !reusable_role(&member.member.role) {
             return Err(ApiError::with_code(
-                "processed matting media is available for download but cannot be reused as generation input",
+                "this retained media is available for download but cannot be reused as one generation input",
                 "RETAINED_MEDIA_REUSE_ROLE_UNSUPPORTED",
                 StatusCode::UNPROCESSABLE_ENTITY,
             ));
@@ -624,7 +627,12 @@ fn ensure_hydration_target_is_empty(
         .iter()
         .map(|member| member.role.as_str())
         .collect::<HashSet<_>>();
-    let conflict = (roles.contains("source_image") && request.source_image.is_some())
+    let source_count = members
+        .iter()
+        .filter(|member| matches!(member.role.as_str(), "source_image" | "stage_source:0"))
+        .count();
+    let conflict = source_count > 1
+        || (source_count > 0 && request.source_image.is_some())
         || (roles.contains("identity_image") && request.id_image.is_some())
         || (roles.contains("identity_images") && request.id_images.is_some())
         || (roles.contains("edit_images") && request.edit_images.is_some())
@@ -687,7 +695,7 @@ fn hydrate_selected_members(
     let mut keyframes = Vec::new();
     for (member, bytes) in decrypted {
         match member.role.as_str() {
-            "source_image" => request.source_image = Some(bytes),
+            "source_image" | "stage_source:0" => request.source_image = Some(bytes),
             "identity_image" => request.id_image = Some(bytes),
             "identity_images" => identity_images.push(bytes),
             "edit_images" => edit_images.push(bytes),
@@ -907,6 +915,32 @@ mod tests {
                 format!("item:{}", index - 1)
             },
         }
+    }
+
+    #[test]
+    fn first_chain_stage_restores_its_picture_without_guessing_other_stages() {
+        let mut target = request();
+        hydrate_selected_members(
+            &mut target,
+            vec![(selected("stage_source:0", 0), vec![1, 2, 3])],
+        )
+        .unwrap();
+        assert_eq!(target.source_image, Some(vec![1, 2, 3]));
+        let mut target = request();
+        assert!(hydrate_selected_members(
+            &mut target,
+            vec![(selected("stage_source:1", 0), vec![1])]
+        )
+        .is_err());
+        assert!(hydrate_selected_members(
+            &mut target,
+            vec![
+                (selected("source_image", 0), vec![1]),
+                (selected("stage_source:0", 0), vec![2])
+            ]
+        )
+        .is_err());
+        assert!(target.source_image.is_none());
     }
 
     #[test]

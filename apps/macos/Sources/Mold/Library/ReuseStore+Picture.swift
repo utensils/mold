@@ -3,6 +3,15 @@ import MoldClient
 
 // The print's own picture goes in the well, on every route.
 extension ReuseStore {
+    func sourceForSubmission(in draft: RenderDraft, outgoing: GenerateRequest?,
+                             live: () -> RenderDraft, fence: Int) async -> RenderDraft? {
+        guard isCurrent(fence) else { return nil }
+        let placed = await placePicture(in: draft, outgoing: outgoing, live: live)
+        guard isCurrent(fence) else { return nil }
+        attachingSource = false
+        return placed
+    }
+
     /// The draft with the print's picture placed in its source well, or nil
     /// when there is nothing to place: no authority, no `source_image`
     /// member, or a well already holding a picture of the person's own.

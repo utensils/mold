@@ -87,12 +87,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// `componentRows`. A store that probes a print nobody planted throws.
     nonisolated(unsafe) var retainedInventories: [String: RetainedSourceMedia.Inventory] = [:]
     nonisolated(unsafe) var retainedTransferOffers: [String: RetainedSourceMedia.TransferOffer] = [:]
+    nonisolated(unsafe) var retainedTransferOfferResponder: (@MainActor (String) async throws -> RetainedSourceMedia.TransferOffer)?
     nonisolated(unsafe) var retainedTransfers: [(String, RetainedSourceMedia.Transfer)] = []
+    nonisolated(unsafe) var retainedInventoryResponder: (@MainActor (String) async throws -> RetainedSourceMedia.Inventory)?
     let noRetainedMedia: Bool
     /// Every filename an inventory was asked for, in call order -- which is
     /// how a test pins that EVERY known copy of a print was probed.
     nonisolated(unsafe) var retainedInventoryRequests: [String] = []
     nonisolated(unsafe) var retainedMemberBytes: [String: Data] = [:]
+    nonisolated(unsafe) var retainedMemberResponder: (@MainActor (String) async throws -> Data)?
     nonisolated(unsafe) var retainedMemberRequests: [String] = []
     nonisolated(unsafe) var retainedSession: RetainedSourceMedia.ReuseSession?
     /// One planted failure per mint ATTEMPT, consumed in order. `refuses` and
@@ -410,10 +413,13 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// not merely that one happened (finding 02#5).
     nonisolated(unsafe) var placementRequests: [GenerateRequest] = []
 
+    nonisolated(unsafe) var placementResponder: (@MainActor (GenerateRequest) async throws -> PlacementPreview)?
+
     func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview {
         try record("placementPreview")
         placementCopiesRequested.append(copies)
         placementRequests.append(request)
+        if let placementResponder { return try await placementResponder(request) }
         throw notPlanted()
     }
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {

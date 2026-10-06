@@ -77,7 +77,8 @@ final class AppStores {
         landedPrints = LandedPrints(hosts: hosts)
         upscales = UpscaleStore(hosts: hosts, models: models, library: library)
         activity = ActivityStore(hosts: hosts)
-        reuse = ReuseStore(hosts: hosts)
+        reuse = ReuseStore(hosts: hosts, savedFile: SavedReuseFile())
+        reuse.restoreSaved(into: generate)
         expansions = ExpandStore()
         // NEW STORES GO HERE -- after the stores they depend on, before the
         // two below, which are built FROM the others.

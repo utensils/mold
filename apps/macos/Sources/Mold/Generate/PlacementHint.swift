@@ -5,11 +5,12 @@ import SwiftUI
 struct PlacementHint: View {
     let placement: PlacementPreview?
     let error: String?
+    var hostName: String? = nil
 
     var body: some View {
         Group {
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle")
+                Label(hostName.map { "\($0): \(error)" } ?? error, systemImage: "exclamationmark.triangle")
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(error)
@@ -25,7 +26,7 @@ struct PlacementHint: View {
                       ? "A rough estimate — this model hasn't run here recently."
                       : "Estimated from recent runs on this machine.")
             } else if let reason = placement?.reason {
-                Label(reason, systemImage: "exclamationmark.triangle")
+                Label(hostName.map { "\($0): \(reason)" } ?? reason, systemImage: "exclamationmark.triangle")
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(reason)

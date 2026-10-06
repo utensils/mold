@@ -66,6 +66,15 @@ struct RetainedSourceMediaTests {
         #expect(target.calls.isEmpty)
     }
 
+    @Test func copiedChainFirstStageRelaysItsOwnPictureAndNeverOtherStages() throws {
+        let request = GenerateRequest(prompt: "first-stage settings", model: "fixture", width: 32, height: 32, steps: 4, guidance: 1)
+        let first = RetainedSourceMedia.Member(memberId: "destination-first", role: "stage_source:0", displayName: "first", sizeBytes: 3)
+        let later = RetainedSourceMedia.Member(memberId: "destination-later", role: "stage_source:1", displayName: "later", sizeBytes: 3)
+        #expect(RetainedSourceMedia.members([first, later], forHydrating: request) == [first])
+        let relayed = try RetainedSourceMedia.relayed([(first, Data([1, 2, 3]))], into: request)
+        #expect(relayed.sourceImage == "AQID")
+    }
+
     private func captured(_ key: String) throws -> RetainedSourceMedia.Inventory {
         struct Capture: Decodable {
             let sourceImage: Case

@@ -205,6 +205,7 @@ function assertVacant(request: Record<string, unknown>, field: string): void {
 
 const REQUEST_FIELD_FOR_ROLE: Readonly<Record<string, string>> = {
   source_image: "source_image",
+  "stage_source:0": "source_image",
   identity_image: "id_image",
   identity_images: "id_images",
   edit_images: "edit_images",
@@ -262,6 +263,7 @@ export async function relayRetainedSourceMedia<TRequest extends object>(
   const roles = new Set(members.map((member) => member.role));
   for (const [role, field] of [
     ["source_image", "source_image"],
+    ["stage_source:0", "source_image"],
     ["identity_image", "id_image"],
     ["identity_images", "id_images"],
     ["edit_images", "edit_images"],
@@ -304,6 +306,7 @@ export async function relayRetainedSourceMedia<TRequest extends object>(
     request[field] = values[0];
   };
   scalar("source_image", "source_image");
+  scalar("stage_source:0", "source_image");
   scalar("identity_image", "id_image");
   scalar("mask_image", "mask_image");
   scalar("control_image", "control_image");

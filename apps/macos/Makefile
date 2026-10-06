@@ -63,7 +63,7 @@ engine: ## Build mold's Rust engine and link it into the app
 	@# Same deployment target as the app, or every object file warns.
 	@cd $(ENGINE_DIR) && MOLD_BUILD_VERSION=$(MARKETING_VERSION) \
 	  CARGO_TARGET_DIR=$(ENGINE_TARGET) CARGO_BUILD_JOBS=8 \
-	  MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release --features metal
+	  MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release --features shipping-metal
 	@# What `engine-freshness.sh` compares against on every `make build`: the
 	@# commit, and the uncommitted engine diff the build included.
 	@scripts/engine-freshness.sh --stamp $(ENGINE_LIB).commit
@@ -147,6 +147,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@scripts/tests/prune-native-nightly.sh
 	@scripts/tests/native-workflows-parse.sh
 	@scripts/tests/engine-freshness.sh
+	@bash scripts/tests/h3-engine-features.sh
 	@cd $(PACKAGES)/MoldClient && swift test
 	@cd $(PACKAGES)/MoldStyle && swift test
 	@cd $(PACKAGES)/MoldMesh && swift test

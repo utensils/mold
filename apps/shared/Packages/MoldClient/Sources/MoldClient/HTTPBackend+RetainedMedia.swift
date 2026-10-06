@@ -3,6 +3,28 @@ import Foundation
 // Reading a print's retained private conditioning media, and minting the
 // one-use handle that lets the host hydrate a request from it.
 public extension HTTPBackend {
+    func retainedSourceMediaThumbnail(for filename: String, member memberId: String) async throws -> Data {
+        let route = retainedSourceMediaPath(filename) + "/\(escaped(memberId))/thumbnail"
+        return try await retainedPreviewBytes(at: route)
+    }
+
+    func retainedSourceMediaPreviewBytes(for filename: String, member memberId: String) async throws -> Data {
+        try await retainedPreviewBytes(at: retainedSourceMediaPath(filename) + "/\(escaped(memberId))")
+    }
+
+    private func retainedPreviewBytes(at route: String) async throws -> Data {
+        let (stream, http) = try await relayBytes(request(route))
+        guard (200 ..< 300).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw MoldClientError.unauthorized }
+            throw MoldClientError.http(status: http.statusCode, code: nil, message: nil)
+        }
+        let limit = 2 * 1024 * 1024
+        guard http.expectedContentLength <= Int64(limit) else {
+            throw ResponseCeiling.Exceeded(bytes: Int(clamping: http.expectedContentLength),
+                ceiling: limit, what: "retained image preview")
+        }
+        return try await stream.collected(upTo: limit)
+    }
 
     /// What this host retained for one print.
     ///
