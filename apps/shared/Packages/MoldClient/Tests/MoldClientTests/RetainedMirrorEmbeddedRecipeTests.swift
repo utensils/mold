@@ -38,9 +38,24 @@ struct RetainedMirrorEmbeddedRecipeTests {
         #expect(EmbeddedPrintMetadata.json(in: gif, named: "output.gif", metadataCeiling: 128) == nil)
     }
 
+    @Test func oversizedUnrelatedGIFCommentDoesNotHideRecipe() {
+        var gif = Data("GIF89a".utf8)
+        for comment in [String(repeating: "x", count: 512), #"mold:parameters {"scheduler":"ddim"}"#] {
+            gif.append(contentsOf: [0x21, 0xFE])
+            let bytes = Data(comment.utf8)
+            for start in stride(from: 0, to: bytes.count, by: 255) {
+                let block = bytes[start..<min(start + 255, bytes.count)]
+                gif.append(UInt8(block.count)); gif.append(contentsOf: block)
+            }
+            gif.append(0)
+        }
+        #expect(EmbeddedPrintMetadata.json(in: gif, named: "output.gif", metadataCeiling: 128)
+            == Data(#"{"scheduler":"ddim"}"#.utf8))
+    }
+
     @Test func omittedRecipeFactsRequireExactEmbeddedOutputEvidence() async throws {
         for field in [#""scheduler":"ddim""#, #""transparent_background":true"#] {
-            for scenario in ["matching", "wrongEmbedded", "changedOutput", "conflictingArchive"] {
+            for scenario in ["matching", "borrowed", "wrongEmbedded", "changedOutput", "conflictingArchive", "changedBorrowed"] {
                 let source = FakeBackend(), target = FakeBackend()
                 let embedded = scenario == "wrongEmbedded" ? #"{"seed":42}"# : "{\"seed\":42,\(field)}"
                 let bytes = png(embedded)
@@ -54,7 +69,7 @@ struct RetainedMirrorEmbeddedRecipeTests {
                 let member = RetainedSourceMedia.TransferMember(memberId: "source", role: "source_image", position: "scalar", sizeBytes: 3,
                     sha256: SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined())
                 let offer = RetainedSourceMedia.TransferOffer(archiveIdentitySha256: String(repeating: "a", count: 64), members: [member],
-                    outputSha256: scenario == "changedOutput" ? String(repeating: "c", count: 64) : hash,
+                    outputSha256: ["changedOutput", "changedBorrowed"].contains(scenario) ? String(repeating: "c", count: 64) : hash,
                     outputSizeBytes: bytes.count, metadata: archive)
                 source.stub("retainedMediaTransferOffer(for:)", returning: offer)
                 target.stub("retainedMediaTransferOffer(for:)", returning:
@@ -66,14 +81,20 @@ struct RetainedMirrorEmbeddedRecipeTests {
                 source.stub("mediaFile(_:trashed:)", returning: file)
                 source.stub("retainedSourceMediaBytes(for:member:)", returning: input)
                 target.stub("importRetainedMedia(_:for:)", returning: ())
-                if scenario == "matching" {
+                if ["matching", "borrowed"].contains(scenario) {
                     try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: archive,
-                        from: source, to: target, as: "copy.png", expectedSourceArchiveIdentity: offer.archiveIdentitySha256)
+                        from: source, to: target, as: "copy.png", expectedSourceArchiveIdentity: offer.archiveIdentitySha256,
+                        downloadedOutput: scenario == "borrowed" ? file : nil)
                     #expect(target.count("importRetainedMedia(_:for:)") == 1)
+                    if scenario == "borrowed" {
+                        #expect(source.count("mediaFile(_:trashed:)") == 0)
+                        #expect(FileManager.default.fileExists(atPath: file.path))
+                    }
                 } else {
                     await #expect(throws: (any Error).self) {
                         try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: archive,
-                            from: source, to: target, as: "copy.png", expectedSourceArchiveIdentity: offer.archiveIdentitySha256)
+                            from: source, to: target, as: "copy.png", expectedSourceArchiveIdentity: offer.archiveIdentitySha256,
+                            downloadedOutput: scenario == "borrowed" || scenario == "changedBorrowed" ? file : nil)
                     }
                     #expect(target.count("importRetainedMedia(_:for:)") == 0)
                     #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)

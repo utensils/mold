@@ -33,14 +33,21 @@ public enum EmbeddedPrintMetadata {
                 continue
             }
             cursor += 2
-            var comment = Data()
+            var comment = Data(), heading = Data()
+            var oversized = false
             while cursor < file.count {
                 let size = Int(file[cursor]); cursor += 1
                 if size == 0 { break }
                 guard size <= file.count - cursor else { return nil }
-                if let metadataCeiling, comment.count > metadataCeiling - size { return nil }
-                comment.append(file[cursor..<(cursor + size)])
+                let needed = min(size, prefix.count - heading.count)
+                heading.append(file[cursor..<(cursor + needed)])
+                if let metadataCeiling, comment.count > metadataCeiling - size { oversized = true }
+                if !oversized { comment.append(file[cursor..<(cursor + size)]) }
                 cursor += size
+            }
+            if oversized {
+                if heading == prefix { return nil }
+                continue
             }
             if comment.starts(with: prefix),
                let json = validJSON(comment.dropFirst(prefix.count)) { return json }

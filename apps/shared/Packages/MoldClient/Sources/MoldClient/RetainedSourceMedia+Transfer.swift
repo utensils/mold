@@ -86,7 +86,7 @@ public extension RetainedSourceMedia {
     /// A mirror is complete only after its private inputs have destination authority.
     static func mirrorSources(for sourceFilename: String, metadata: OutputMetadata?,
                               from origin: any MoldBackend, to target: any MoldBackend,
-                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil) async throws {
+                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil, downloadedOutput: URL? = nil) async throws {
         try Task.checkCancellation()
         let offer: TransferOffer
         do { offer = try await origin.retainedMediaTransferOffer(for: sourceFilename) }
@@ -124,7 +124,7 @@ public extension RetainedSourceMedia {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
         guard try await mirrorRecipeMatches(destination.metadata, source: offer,
-                                            filename: sourceFilename, origin: origin) else {
+                                            filename: sourceFilename, origin: origin, downloadedOutput: downloadedOutput) else {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
         if destination.members.map(\.contentIdentity) == offer.members.map(\.contentIdentity) { return }

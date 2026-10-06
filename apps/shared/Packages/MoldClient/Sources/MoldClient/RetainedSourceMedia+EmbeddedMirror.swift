@@ -5,7 +5,7 @@ extension RetainedSourceMedia {
     /// Only the exact offered output may corroborate facts omitted from an
     /// older archive. Never use a filename or unverified embedded recipe.
     static func mirrorRecipeMatches(_ destination: OutputMetadata?, source: TransferOffer,
-                                    filename: String, origin: any MoldBackend) async throws -> Bool {
+                                    filename: String, origin: any MoldBackend, downloadedOutput: URL? = nil) async throws -> Bool {
         if mirrorMetadataMatches(destination, source.metadata) { return true }
         let suffix = URL(fileURLWithPath: filename).pathExtension.lowercased()
         guard ["png", "jpg", "jpeg", "gif"].contains(suffix),
@@ -14,8 +14,11 @@ extension RetainedSourceMedia {
         let missingScheduler = (metadata.scheduler == nil) != (destination.scheduler == nil)
         let missingTransparency = (metadata.transparentBackground == nil) != (destination.transparentBackground == nil)
         guard missingScheduler || missingTransparency else { return false }
-        let file = try await origin.mediaFile(filename, trashed: false)
-        defer { try? FileManager.default.removeItem(at: file) }
+        let file: URL
+        if let downloadedOutput { file = downloadedOutput }
+        else { file = try await origin.mediaFile(filename, trashed: false) }
+        // A supplied file is borrowed; its caller owns cleanup.
+        defer { if downloadedOutput == nil { try? FileManager.default.removeItem(at: file) } }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         var digest = SHA256(), count = 0

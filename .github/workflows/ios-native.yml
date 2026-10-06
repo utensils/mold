@@ -113,9 +113,9 @@ jobs:
       (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
     name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
     runs-on: macos-26
-    # Export UAT took 50 minutes on the hosted runner; build and result
-    # processing exhausted the one-hour limit after all 14 tests passed.
-    timeout-minutes: ${{ matrix.suite.name == 'media_exports' && 90 || 60 }}
+    # Full export suites exceeded 90 minutes on hosted runners. Keep delivery,
+    # video audits and mesh audits separate, retaining all 14 methods per appearance.
+    timeout-minutes: ${{ startsWith(matrix.suite.name, 'media_exports') && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -129,8 +129,12 @@ jobs:
             classes: HiddenCollectionTests LibraryCollectionPickerTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
           - name: library_interactions
             classes: LibraryLongPressTests
-          - name: media_exports
-            classes: MediaExportUITests
+          - name: media_exports_delivery
+            classes: MediaExportUITests/testVideoZeroPauseAndBounceFolderExports MediaExportUITests/testAPNGFolderDeliveryOmitsParkedGifControls MediaExportUITests/testMeshGeometryTurntableAndAssetFolderExports MediaExportUITests/testShareAndFilesCancellationPreserveTheViewer MediaExportUITests/testExportedGIFSavesToPhotos MediaExportUITests/testPhotosDenialKeepsOptionsAndOffersRecovery MediaExportUITests/testRefusedExportCanBeRetriedWithoutLosingChoices MediaExportUITests/testUnsupportedFormatsShowAnExplanation
+          - name: media_exports_video_audit
+            classes: MediaExportUITests/testExportSheetExtraSmall MediaExportUITests/testExportSheetLarge MediaExportUITests/testExportSheetAX5
+          - name: media_exports_mesh_audit
+            classes: MediaExportUITests/testMeshExportSheetExtraSmall MediaExportUITests/testMeshExportSheetLarge MediaExportUITests/testMeshExportSheetAX5
     defaults:
       run:
         working-directory: apps/ios

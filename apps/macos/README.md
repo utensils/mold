@@ -708,3 +708,5 @@ archive. A failed source copy is reported as incomplete. Copies can be reused
 without the original machine. Sequence settings reuse restores the first stage's
 source; the other stages remain downloadable from the retained archive. This
 single-render action does not reconstruct a complete authored sequence.
+
+Local sync reuses its staged output for embedded-recipe verification instead of downloading it twice. Borrowed files remain caller-owned and must match the source offer’s digest and size before corroboration.
