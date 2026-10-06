@@ -3,13 +3,20 @@ import Foundation
 public extension RetainedSourceMedia {
     /// Mirrors keep the exact recipe. Archive-only completion facts may be
     /// absent from embedded metadata written before the generation completed.
+    /// Alpha is an output-container fact added by imports of older prints;
+    /// it may be absent on one side when the output digest and size agree.
     /// Conflicting facts present on both sides still refuse the copy.
     static func mirrorMetadataMatches(_ first: Data?, _ second: Data?) -> Bool {
+        mirrorMetadataMatches(first, second, verifiedEmbeddedRecipe: nil)
+    }
+
+    internal static func mirrorMetadataMatches(_ first: Data?, _ second: Data?,
+                                               verifiedEmbeddedRecipe: Data?) -> Bool {
         guard let first, let second,
               var left = try? JSONSerialization.jsonObject(with: first) as? [String: Any],
               var right = try? JSONSerialization.jsonObject(with: second) as? [String: Any]
         else { return false }
-        for key in ["job_id", "generation_time_ms"] {
+        for key in ["job_id", "generation_time_ms", "has_alpha"] {
             let leftMissing = left[key] == nil || left[key] is NSNull
             let rightMissing = right[key] == nil || right[key] is NSNull
             if leftMissing || rightMissing {
@@ -22,6 +29,21 @@ public extension RetainedSourceMedia {
            a == shortVersion(a) || b == shortVersion(b) {
             left["version"] = shortVersion(a)
             right["version"] = shortVersion(b)
+        }
+        if let verifiedEmbeddedRecipe,
+           let embedded = try? JSONSerialization.jsonObject(with: verifiedEmbeddedRecipe) as? [String: Any] {
+            // Older archives can omit these generation facts even though the
+            // exact output's embedded recipe recorded them. Absence alone is
+            // insufficient: the hashed output must corroborate the other side.
+            for key in ["scheduler", "transparent_background"] {
+                let leftMissing = left[key] == nil || left[key] is NSNull
+                let rightMissing = right[key] == nil || right[key] is NSNull
+                guard leftMissing != rightMissing, let recorded = embedded[key], !(recorded is NSNull),
+                      let present = leftMissing ? right[key] : left[key],
+                      NSDictionary(dictionary: [key: recorded]).isEqual(to: [key: present]) else { continue }
+                left.removeValue(forKey: key)
+                right.removeValue(forKey: key)
+            }
         }
         return NSDictionary(dictionary: left).isEqual(to: right)
     }

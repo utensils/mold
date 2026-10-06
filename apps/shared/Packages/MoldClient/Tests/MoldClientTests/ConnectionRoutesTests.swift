@@ -61,10 +61,31 @@ struct ConnectionProbeTests {
         return URLSession(configuration: configuration)
     }
 
+    @Test func productionProbeConfigurationIsBoundedAndCredentialFree() {
+        let source = session()
+        defer { source.invalidateAndCancel() }
+        let configuration = ConnectionRoutes.probeConfiguration(from: source)
+        #expect(configuration.timeoutIntervalForResource == 2)
+        #expect(configuration.httpAdditionalHeaders == nil)
+        #expect(configuration.httpCookieStorage == nil)
+        #expect(configuration.urlCredentialStorage == nil)
+        #expect(configuration.urlCache == nil)
+        // Sanitization must not mutate the caller's session configuration.
+        #expect(source.configuration.httpAdditionalHeaders?["X-Api-Key"] as? String == "must-not-leak")
+        let body = Data("fixture".utf8)
+        let request = ConnectionRoutes.probeRequest(base: URL(string: "https://deadline.example")!, body: body)
+        #expect(request.timeoutInterval == 2)
+        #expect(request.url?.path == "/api/connection-probe")
+        #expect(request.httpMethod == "POST")
+        #expect(!request.httpShouldHandleCookies)
+        #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
+        #expect(request.httpBody == body)
+    }
+
     @Test func operatorKeysNeverProbeLearnedAddresses() async {
         await #expect(throws: MoldClientError.self) {
             _ = try await ConnectionRoutes.select(endpoints: [ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
-                                                  secret: "password", kind: "api", instanceID: "machine", session: session())
+                                                  secret: "password", kind: "api", instanceID: "machine", session: session(), probeTimeout: 30)
         }
     }
 
@@ -74,7 +95,7 @@ struct ConnectionProbeTests {
         let url = try await ConnectionRoutes.select(endpoints: [
             ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan),
             ConnectionEndpoint(url: "https://relay.example", kind: .relay)],
-            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", instanceID: "machine", session: session())
+            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api", instanceID: "machine", session: session(), probeTimeout: 30)
         #expect(url.absoluteString == "https://relay.example")
     }
 
@@ -111,7 +132,7 @@ struct ConnectionProbeTests {
             ConnectionEndpoint(url: "http://100.64.1.2:7680", kind: .tailscale),
             ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)],
             secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
-            kind: "pairing", instanceID: "machine", session: session())
+            kind: "pairing", instanceID: "machine", session: session(), probeTimeout: 30)
     }
 
     @Test func directRouteWinsAndWrongProofIsNeverAccepted() async throws {
@@ -120,12 +141,12 @@ struct ConnectionProbeTests {
         let routes = [ConnectionEndpoint(url: "https://relay.example", kind: .relay),
                       ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)]
         let url = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
-                                                     instanceID: "machine", session: session())
+                                                     instanceID: "machine", session: session(), probeTimeout: 30)
         #expect(url.host == "192.168.1.2")
         ConnectionProbeProtocol.badProof = true
         await #expect(throws: (any Error).self) {
             _ = try await ConnectionRoutes.select(endpoints: routes, secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", kind: "api",
-                                                   instanceID: "machine", session: session())
+                                                   instanceID: "machine", session: session(), probeTimeout: 30)
         }
     }
 }
@@ -138,6 +159,7 @@ private final class ConnectionProbeProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
     override func startLoading() {
+        #expect(request.timeoutInterval == 30)
         #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
         #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
         #expect(request.url?.path == "/api/connection-probe")

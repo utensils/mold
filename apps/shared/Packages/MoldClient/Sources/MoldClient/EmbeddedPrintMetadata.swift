@@ -3,24 +3,25 @@ import Foundation
 /// The recipe in the bytes is the immutable authority for a mirrored print.
 /// The gallery listing can have a newer DB recipe for the same old PNG/JPEG.
 public enum EmbeddedPrintMetadata {
-    public static func json(in url: URL, named filename: String) throws -> Data? {
+    public static func json(in url: URL, named filename: String, metadataCeiling: Int? = nil) throws -> Data? {
         let suffix = URL(fileURLWithPath: filename).pathExtension.lowercased()
         guard ["png", "jpg", "jpeg", "gif"].contains(suffix) else { return nil }
         // Mapping avoids copying a full-size picture just to inspect its
         // small metadata chunk before a file-backed upload.
-        return json(in: try Data(contentsOf: url, options: .mappedIfSafe), named: filename)
+        return json(in: try Data(contentsOf: url, options: .mappedIfSafe), named: filename, metadataCeiling: metadataCeiling)
     }
 
-    public static func json(in file: Data, named filename: String) -> Data? {
+    public static func json(in file: Data, named filename: String, metadataCeiling: Int? = nil) -> Data? {
+        if let metadataCeiling, metadataCeiling < 0 { return nil }
         switch URL(fileURLWithPath: filename).pathExtension.lowercased() {
-        case "png": return png(file)
-        case "jpg", "jpeg": return jpeg(file)
-        case "gif": return gif(file)
+        case "png": return png(file, metadataCeiling: metadataCeiling)
+        case "jpg", "jpeg": return jpeg(file, metadataCeiling: metadataCeiling)
+        case "gif": return gif(file, metadataCeiling: metadataCeiling)
         default: return nil
         }
     }
 
-    private static func gif(_ file: Data) -> Data? {
+    private static func gif(_ file: Data, metadataCeiling: Int?) -> Data? {
         guard file.starts(with: Data("GIF8".utf8)) else { return nil }
         // GIF application metadata uses a comment extension: 21 FE, followed
         // by one or more length-prefixed sub-blocks and a zero terminator.
@@ -32,13 +33,21 @@ public enum EmbeddedPrintMetadata {
                 continue
             }
             cursor += 2
-            var comment = Data()
+            var comment = Data(), heading = Data()
+            var oversized = false
             while cursor < file.count {
                 let size = Int(file[cursor]); cursor += 1
                 if size == 0 { break }
                 guard size <= file.count - cursor else { return nil }
-                comment.append(file[cursor..<(cursor + size)])
+                let needed = min(size, prefix.count - heading.count)
+                heading.append(file[cursor..<(cursor + needed)])
+                if let metadataCeiling, comment.count > metadataCeiling - size { oversized = true }
+                if !oversized { comment.append(file[cursor..<(cursor + size)]) }
                 cursor += size
+            }
+            if oversized {
+                if heading == prefix { return nil }
+                continue
             }
             if comment.starts(with: prefix),
                let json = validJSON(comment.dropFirst(prefix.count)) { return json }
@@ -50,7 +59,7 @@ public enum EmbeddedPrintMetadata {
         (try? JSONSerialization.jsonObject(with: data)) is [String: Any] ? data : nil
     }
 
-    private static func png(_ file: Data) -> Data? {
+    private static func png(_ file: Data, metadataCeiling: Int?) -> Data? {
         file.withUnsafeBytes { raw in
         let bytes = raw.bindMemory(to: UInt8.self)
         guard bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { return nil }
@@ -61,6 +70,12 @@ public enum EmbeddedPrintMetadata {
             guard length >= 0, length <= bytes.count - cursor - 12 else { return nil }
             let kind = String(bytes: bytes[(cursor + 4)..<(cursor + 8)], encoding: .ascii)
             if kind == "tEXt" || kind == "iTXt" {
+                if let metadataCeiling, length > metadataCeiling {
+                    let prefix = Array("mold:parameters\0".utf8)
+                    if bytes[(cursor + 8)..<(cursor + 8 + length)].starts(with: prefix) { return nil }
+                    cursor += length + 12
+                    continue
+                }
                 let payload = Array(bytes[(cursor + 8)..<(cursor + 8 + length)])
                 if let separator = payload.firstIndex(of: 0),
                    String(bytes: payload[..<separator], encoding: .ascii) == "mold:parameters" {
@@ -85,7 +100,7 @@ public enum EmbeddedPrintMetadata {
         }
     }
 
-    private static func jpeg(_ file: Data) -> Data? {
+    private static func jpeg(_ file: Data, metadataCeiling: Int?) -> Data? {
         file.withUnsafeBytes { raw in
         let bytes = raw.bindMemory(to: UInt8.self)
         guard bytes.starts(with: [0xFF, 0xD8]) else { return nil }
@@ -100,6 +115,12 @@ public enum EmbeddedPrintMetadata {
             let length = Int(bytes[cursor + 2]) << 8 | Int(bytes[cursor + 3])
             guard length >= 2, length <= bytes.count - cursor - 2 else { return nil }
             if marker == 0xFE {
+                if let metadataCeiling, length - 2 > metadataCeiling {
+                    let prefix = Array("mold:parameters ".utf8)
+                    if bytes[(cursor + 4)..<(cursor + 2 + length)].starts(with: prefix) { return nil }
+                    cursor += 2 + length
+                    continue
+                }
                 let comment = Data(bytes[(cursor + 4)..<(cursor + 2 + length)])
                 let prefix = Data("mold:parameters ".utf8)
                 if comment.starts(with: prefix) {

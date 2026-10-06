@@ -41,9 +41,80 @@ struct RetainedMediaTransferTests {
         #expect(source.count("retainedSourceMediaBytes(for:member:)") == 1)
     }
 
+    @Test func listingCompletionFactsDoNotInvalidateStableSourceArchive() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"hunyuan3d","seed":42,"source_image_sha256":"abc"}"#.utf8))
+        let listed = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"hunyuan3d","seed":42,"source_image_sha256":"abc","generation_time_ms":43794}"#.utf8))
+        let base = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+        source.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                members: base.members, outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: archived))
+        target.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64),
+                members: [], outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: archived))
+        source.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        target.stub("importRetainedMedia(_:for:)", returning: ())
+        try await RetainedSourceMedia.mirrorSources(for: "original.glb", metadata: listed,
+            from: source, to: target, as: "copy.glb",
+            expectedSourceArchiveIdentity: base.archiveIdentitySha256)
+        #expect(target.count("importRetainedMedia(_:for:)") == 1)
+    }
+
+    @Test func staleListingRecipeNeverReceivesRetainedInputs() async throws {
+        let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"seed":42,"source_image_sha256":"abc","future_recipe":{"enabled":true}}"#.utf8))
+        for json in [
+            #"{"seed":43,"source_image_sha256":"abc","future_recipe":{"enabled":true}}"#,
+            #"{"seed":42,"source_image_sha256":"changed","future_recipe":{"enabled":true}}"#
+        ] {
+            let source = FakeBackend(), target = FakeBackend()
+            let base = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+            source.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                    members: base.members, outputSha256: base.outputSha256,
+                    outputSizeBytes: base.outputSizeBytes, metadata: archived))
+            let listed = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(json.utf8))
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: listed,
+                    from: source, to: target, as: "copy.png",
+                    expectedSourceArchiveIdentity: base.archiveIdentitySha256)
+            }
+            #expect(target.calls.isEmpty)
+            #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+        }
+    }
+
+    @Test func identicalOutputAllowsAbsentDerivedAlphaFact() async throws {
+        let source = FakeBackend(), target = FakeBackend()
+        let archived = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"qwen-image","seed":42,"edit_image_sha256s":["abc"]}"#.utf8))
+        let local = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
+            #"{"model":"qwen-image","seed":42,"edit_image_sha256s":["abc"],"has_alpha":true}"#.utf8))
+        let base = offer(archiveIdentitySha256: "a".repeated(64), members: [member()])
+        source.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                members: base.members, outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: archived))
+        target.stub("retainedMediaTransferOffer(for:)", returning:
+            RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64),
+                members: [], outputSha256: base.outputSha256,
+                outputSizeBytes: base.outputSizeBytes, metadata: local))
+        source.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        target.stub("importRetainedMedia(_:for:)", returning: ())
+        try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: archived,
+            from: source, to: target, as: "copy.png",
+            expectedSourceArchiveIdentity: base.archiveIdentitySha256)
+        #expect(target.count("importRetainedMedia(_:for:)") == 1)
+    }
+
     @Test func mirrorCompatibilityPreservesRecipesAndConflictingProvenance() {
-        let original = Data(#"{"seed":1,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"one","generation_time_ms":8516,"future_recipe":{"enabled":true}}"#.utf8)
+        let original = Data(#"{"seed":1,"version":"0.32.0 (5b61d17 2026-09-27)","job_id":"one","generation_time_ms":8516,"has_alpha":true,"future_recipe":{"enabled":true}}"#.utf8)
         for changed in [
+            #"{"seed":1,"version":"0.32.0","has_alpha":false,"future_recipe":{"enabled":true}}"#,
             #"{"seed":2,"version":"0.32.0","future_recipe":{"enabled":true}}"#,
             #"{"seed":1,"version":"0.31.0","future_recipe":{"enabled":true}}"#,
             #"{"seed":1,"version":"0.32.0","job_id":"two","future_recipe":{"enabled":true}}"#,

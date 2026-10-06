@@ -56,18 +56,44 @@ public enum ConnectionRoutes {
         secret.range(of: "^mold_pair_[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil
     }
 
-    public static func select(
-        endpoints: [ConnectionEndpoint], secret: String, kind: String, instanceID: String,
-        session: URLSession = APISession.api
-    ) async throws -> URL {
-        guard kind != "api" || supportsAutomaticRouting(secret) else { throw MoldClientError.unauthorized }
+    static let defaultProbeTimeout: TimeInterval = 2
+
+    static func probeConfiguration(from session: URLSession,
+                                   timeout: TimeInterval = defaultProbeTimeout) -> URLSessionConfiguration {
         let configuration = session.configuration
         configuration.httpAdditionalHeaders = nil
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        configuration.timeoutIntervalForResource = 2
-        let probeSession = URLSession(configuration: configuration)
+        configuration.timeoutIntervalForResource = timeout
+        return configuration
+    }
+
+    static func probeRequest(base: URL, body: Data,
+                             timeout: TimeInterval = defaultProbeTimeout) -> URLRequest {
+        var request = URLRequest(url: base.appending(path: "api/connection-probe"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.httpShouldHandleCookies = false
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        return request
+    }
+
+    public static func select(
+        endpoints: [ConnectionEndpoint], secret: String, kind: String, instanceID: String,
+        session: URLSession = APISession.api
+    ) async throws -> URL {
+        try await select(endpoints: endpoints, secret: secret, kind: kind, instanceID: instanceID,
+                         session: session, probeTimeout: defaultProbeTimeout)
+    }
+
+    // Test fixtures use an explicit budget so hosted Simulator scheduling does
+    // not turn an in-process response into an unreachable-route assertion.
+    static func select(endpoints: [ConnectionEndpoint], secret: String, kind: String,
+                       instanceID: String, session: URLSession, probeTimeout: TimeInterval) async throws -> URL {
+        guard kind != "api" || supportsAutomaticRouting(secret) else { throw MoldClientError.unauthorized }
+        let probeSession = URLSession(configuration: probeConfiguration(from: session, timeout: probeTimeout))
         defer { probeSession.invalidateAndCancel() }
         let candidates = sanitized(endpoints)
         guard !candidates.isEmpty else { throw MoldClientError.malformedResponse }
@@ -80,12 +106,7 @@ public enum ConnectionRoutes {
             for (index, endpoint) in candidates.enumerated() {
                 group.addTask {
                     guard let base = URL(string: endpoint.url) else { return nil }
-                    var request = URLRequest(url: base.appending(path: "api/connection-probe"))
-                    request.httpMethod = "POST"
-                    request.timeoutInterval = 2
-                    request.httpShouldHandleCookies = false
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.httpBody = body
+                    let request = probeRequest(base: base, body: body, timeout: probeTimeout)
                     do {
                         let (bytes, response) = try await probeSession.bytes(for: request, delegate: RelayNoRedirect())
                         defer { bytes.task.cancel() }

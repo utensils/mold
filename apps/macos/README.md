@@ -68,7 +68,7 @@ machine that cannot transfer retained inputs explains that the copy is incomplet
 Sibling copied outputs share one retained encrypted payload. Each surviving
 library output keeps its source independently of the original machine's output.
 
-Native Mac mirrors accept missing archive-only job IDs and generation durations, and a short version matching the same version with a build suffix. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
+Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 
@@ -708,3 +708,5 @@ archive. A failed source copy is reported as incomplete. Copies can be reused
 without the original machine. Sequence settings reuse restores the first stage's
 source; the other stages remain downloadable from the retained archive. This
 single-render action does not reconstruct a complete authored sequence.
+
+Local sync reuses its staged output for embedded-recipe verification instead of downloading it twice. Borrowed files remain caller-owned and must match the source offer’s digest and size before corroboration.

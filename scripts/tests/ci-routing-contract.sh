@@ -879,17 +879,17 @@ import re
 classes = []
 for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*.swift'):
     classes.extend(re.findall(r'\bclass\s+(\w+)\s*:\s*XCTestCase', path.read_text()))
-suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
-assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
+suites = re.findall(r'classes: ([A-Za-z0-9_/ ]+)', native)
 suite_names = re.findall(r'          - name: (\w+)', native)
-assert len(suites) == 5 and len(suite_names) == 5
-assert dict(zip(suite_names, (suite.split() for suite in suites))) == {
-    'app': ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests'],
-    'references': ['ReferenceParityTests'],
-    'library': ['HiddenCollectionTests', 'LibraryCollectionPickerTests', 'LibrarySelectionTests', 'LibraryViewerTests', 'NotificationTapTests'],
-    'library_interactions': ['LibraryLongPressTests'],
-    'media_exports': ['MediaExportUITests'],
-}, 'audit suite grouping drifted'
+assert len(suites) == 7 and len(suite_names) == 7
+selectors = [name for suite in suites for name in suite.split()]
+export_class = 'MediaExportUITests'
+assert Counter(name for name in selectors if '/' not in name) == Counter(name for name in classes if name != export_class), 'audit class coverage drifted'
+export_source = Path(sys.argv[1]).parents[2] / 'apps/ios/Tests/CompanionUITests/MediaExportUITests.swift'
+methods = re.findall(r'func (test\w+)\(', export_source.read_text())
+assert Counter(name for name in selectors if '/' in name) == Counter(f'{export_class}/{name}' for name in methods), 'export method coverage drifted'
+assert len(methods) == 14
+assert set(suite_names) == {'app', 'references', 'library', 'library_interactions', 'media_exports_delivery', 'media_exports_video_audit', 'media_exports_mesh_audit'}
 check, audit = native.split('\n  audit:\n', 1)
 assert 'needs: changes' in audit
 assert "always() && !cancelled() &&" in audit

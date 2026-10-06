@@ -231,7 +231,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             try? FileManager.default.removeItem(at: existing)
             if equal {
                 try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity)
+                    from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
                 return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil)
             }
         }
@@ -243,7 +243,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             try? FileManager.default.removeItem(at: existing)
             if equal {
                 try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity)
+                    from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
                 return MirrorResult(filename: filename, alreadyLocal: true, error: nil)
             }
         }
@@ -255,7 +255,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             let imported = try await destination.importPrint(item, as: filename)
             if imported != filename { await pending?.mark(sourceKey, filename: imported) }
             try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
-                from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity)
+                from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
             return MirrorResult(filename: imported, alreadyLocal: false, error: nil)
         } catch {
             // The server may have committed the file before the response was

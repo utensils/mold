@@ -146,3 +146,5 @@ another permission request; its tap alone does not establish Photos permission.
 For selected-method UAT, verify requested method names against the test source
 and compare the executed method set/count with the intended selection.
 XCTest can silently ignore an unknown selector while other selected tests pass.
+
+Native CI splits media exports into delivery, video accessibility and mesh accessibility jobs per appearance. Method selectors cover every MediaExportUITests method exactly once; the routing contract refuses omissions and duplicates. The full local suite remains unchanged.

@@ -86,7 +86,7 @@ public extension RetainedSourceMedia {
     /// A mirror is complete only after its private inputs have destination authority.
     static func mirrorSources(for sourceFilename: String, metadata: OutputMetadata?,
                               from origin: any MoldBackend, to target: any MoldBackend,
-                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil) async throws {
+                              as targetFilename: String, expectedSourceArchiveIdentity: String? = nil, downloadedOutput: URL? = nil) async throws {
         try Task.checkCancellation()
         let offer: TransferOffer
         do { offer = try await origin.retainedMediaTransferOffer(for: sourceFilename) }
@@ -110,7 +110,7 @@ public extension RetainedSourceMedia {
         }
         try validateTransferMembers(offer.members)
         guard validTransferDigest(offer.outputSha256), offer.outputSizeBytes > 0,
-              let sourceMetadata = offer.metadata, metadata == nil || sourceMetadata == metadata else {
+              let sourceMetadata = offer.metadata, metadata == nil || mirrorMetadataMatches(sourceMetadata, metadata) else {
             throw transferIncomplete("The original print changed while copying. Try again.")
         }
         let destination: TransferOffer
@@ -120,8 +120,11 @@ public extension RetainedSourceMedia {
             throw transferIncomplete("Update the destination machine to retain this print’s source media.")
         }
         guard validTransferDigest(destination.archiveIdentitySha256) else { throw MoldClientError.malformedResponse }
-        guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes,
-              mirrorMetadataMatches(destination.metadata, sourceMetadata) else {
+        guard destination.outputSha256 == offer.outputSha256, destination.outputSizeBytes == offer.outputSizeBytes else {
+            throw transferIncomplete("The local copy has different output bytes or generation settings.")
+        }
+        guard try await mirrorRecipeMatches(destination.metadata, source: offer,
+                                            filename: sourceFilename, origin: origin, downloadedOutput: downloadedOutput) else {
             throw transferIncomplete("The local copy has different output bytes or generation settings.")
         }
         if destination.members.map(\.contentIdentity) == offer.members.map(\.contentIdentity) { return }
