@@ -38,6 +38,8 @@ extension LibraryPane {
         // is the draft the pane will show, and the authority is good only
         // while the draft still IS it.
         reuseStore.arm(generate.draft)
+        reuseStore.selectionModel = generate.modelName
+        reuseStore.selectionRecipe = generate.recipeID
         // ALWAYS ask, on every machine that lists this print. The server is
         // the only authority on what it retained -- inline source video,
         // audio and mask bytes leave no marker in the metadata at all -- and
@@ -47,6 +49,9 @@ extension LibraryPane {
         let ordered = [entry.id] + copies.filter { $0 != entry.id }
         Task {
             await reuseStore.probe(ordered, fence: fence, disclosing: metadata)
+            await reuseStore.remember(metadata, model: generate.modelName, recipe: generate.recipeID,
+                draft: generate.draft, fence: fence)
+            await reuseStore.loadPreviews(in: generate.draft)
             // Then the picture itself, into the well, so the person can see
             // what the render starts from and set its strength.
             let outgoing = hosts.host(entry.hostID).flatMap {

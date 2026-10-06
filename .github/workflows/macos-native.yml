@@ -40,6 +40,22 @@ permissions:
   contents: read
 
 jobs:
+  engine-contract:
+    name: Shipping Metal engine contract
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/macos/rust/mold-macos-ffi
+          key: macos-native-nightly
+      - name: Compile and verify H3 runtime
+        run: |
+          cargo check --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml --locked --features shipping-metal
+          cargo test --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml --locked --features shipping-metal shipping_h3_runtime
+
   check:
     name: Lint and test
     runs-on: macos-26
@@ -89,7 +105,7 @@ jobs:
   publish-macos-native-nightly:
     name: Publish nightly update
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, macos-native-nightly]
+    needs: [check, engine-contract, macos-native-nightly]
     runs-on: ubuntu-latest
     # The SAME group as `desktop.yml:584-586`, deliberately: both publishers
     # clobber assets on the one `latest` release, and `cancel-in-progress:

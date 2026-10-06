@@ -62,7 +62,7 @@ pub(crate) async fn get(
         .into_response())
 }
 
-fn render(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn render(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(bytes.len() <= MAX_SOURCE_BYTES, "source image too large");
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();

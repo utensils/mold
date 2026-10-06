@@ -18,7 +18,7 @@
 #        engine-freshness.sh --stamp <file>     (written by `make engine`)
 set -euo pipefail
 
-paths=(crates apps/macos/rust Cargo.lock)
+paths=(crates apps/macos/rust apps/macos/Makefile Cargo.lock)
 
 # The diff of the working tree against <commit>, for the engine's paths.
 digest() {

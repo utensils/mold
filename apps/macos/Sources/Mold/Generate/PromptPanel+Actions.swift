@@ -19,48 +19,62 @@ extension PromptPanel {
     }
 
     func actions(_ recipe: GenerationRecipe) -> some View {
-        HStack(spacing: 10) {
-            // workstation's own "infeasible" answer names every GPU and runs to
-            // hundreds of characters: flexible and truncating, so it takes
-            // whatever the buttons leave and never widens the capsule (the
-            // buttons are `fixedSize`, so they are never the ones squeezed).
-            PlacementHint(placement: controller.probe.placement, error: controller.probe.error)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
-            if controller.queuedCount > 0 {
-                Text("\(controller.queuedCount) more queued")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if controller.chain.active?.isPaused == true {
-                // A host restart PARKS an ephemeral chain rather than losing
-                // it: its manifest, its finished clips and its tail cache are
-                // all still there, so this continues rather than re-renders.
-                Button("Resume") {
-                    controller.chain.resume(backend: { controller.hosts.backend(for: $0) })
+        VStack(alignment: .leading, spacing: 6) {
+            if let refusal = submitRefusal {
+                Text(refusal).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("generate-submit-refusal")
+                if reuse.restoring {
+                    Button("Discard retained conditioning") {
+                        draft.media.generationReferences.removeAll { $0.media.authority == "descriptor" }
+                        reuse.clear()
+                    }.font(.caption)
                 }
+            }
+            HStack(spacing: 10) {
+                // workstation's own "infeasible" answer names every GPU and runs to
+                // hundreds of characters: flexible and truncating, so it takes
+                // whatever the buttons leave and never widens the capsule (the
+                // buttons are `fixedSize`, so they are never the ones squeezed).
+                PlacementHint(placement: controller.probe.placementHost == host?.id ? controller.probe.placement : nil,
+                              error: controller.probe.errorHost == host?.id ? controller.probe.error : nil, hostName: host?.name)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
+                if controller.queuedCount > 0 {
+                    Text("\(controller.queuedCount) more queued")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if controller.chain.active?.isPaused == true {
+                    // A host restart PARKS an ephemeral chain rather than losing
+                    // it: its manifest, its finished clips and its tail cache are
+                    // all still there, so this continues rather than re-renders.
+                    Button("Resume") {
+                        controller.chain.resume(backend: { controller.hosts.backend(for: $0) })
+                    }
+                    .controlSize(.large)
+                    .help("Continue this clip where the machine parked it")
+                }
+                if controller.run.isBusy {
+                    stopButton
+                }
+                Button(action: submit) {
+                    HStack(spacing: 6) {
+                        Text("Generate")
+                        Text("⌘↩").foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .help("Continue this clip where the machine parked it")
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(submitRefusal != nil)
+                .help(controller.run.isBusy
+                      ? "Queue another render"
+                      : (submitRefusal ?? "Render this"))
+                .fixedSize()
             }
-            if controller.run.isBusy {
-                stopButton
-            }
-            Button(action: submit) {
-                HStack(spacing: 6) {
-                    Text("Generate")
-                    Text("⌘↩").foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(submitRefusal != nil)
-            .help(controller.run.isBusy
-                  ? "Queue another render"
-                  : (submitRefusal ?? "Render this"))
-            .fixedSize()
         }
     }
 

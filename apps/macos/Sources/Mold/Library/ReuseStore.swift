@@ -36,8 +36,18 @@ final class ReuseStore {
     /// at any more, and installing it would hydrate the new render from the
     /// old print's archive.
     private var version = 0
+    var referencePreviews: [GenerationReference: String] = [:]
+    var previewFailures: Set<GenerationReference> = []
+    var selectionModel: String?
+    var selectionRecipe: String?
+    var savedRecipe: SavedReuse?
+    let savedFile: SavedReuseFile?
+    var restoring = false
 
-    init(hosts: HostStore) { self.hosts = hosts }
+    init(hosts: HostStore, savedFile: SavedReuseFile? = nil) {
+        self.hosts = hosts
+        self.savedFile = savedFile
+    }
 
     /// One print's retained media, on the ONE machine that holds it.
     struct Authority: Equatable, Sendable {
@@ -46,6 +56,7 @@ final class ReuseStore {
         /// next render is going to, which may be another one entirely.
         let origin: MoldHost.ID
         let members: [RetainedSourceMedia.Member]
+        var instance: String? = nil
     }
 
     /// Opens a reuse. Clears whatever the last one left and returns the fence
@@ -53,6 +64,13 @@ final class ReuseStore {
     @discardableResult
     func begin() -> Int {
         version += 1
+        referencePreviews = [:]
+        previewFailures = []
+        selectionModel = nil
+        selectionRecipe = nil
+        savedRecipe = nil
+        savedFile?.save(nil)
+        restoring = false
         authority = nil
         restored = nil
         notice = nil
@@ -76,14 +94,16 @@ final class ReuseStore {
     func probe(_ copies: [PrintID], fence: Int, disclosing metadata: OutputMetadata) async {
         var unavailable: (PrintID, RetainedSourceMedia.Availability)?
         for copy in copies {
-            guard isCurrent(fence) else { return }
+            guard isCurrent(fence), !Task.isCancelled else { return }
             guard let client = hosts.backend(for: copy.host) else { continue }
+            let instance = hosts.instanceID(of: copy.host)
             guard let inventory = try? await client.retainedSourceMedia(for: copy.filename)
             else { continue }
-            guard isCurrent(fence) else { return }
+            guard isCurrent(fence), !Task.isCancelled else { return }
+            guard hosts.instanceID(of: copy.host) == instance else { continue }
             if inventory.availability == .available {
                 authority = Authority(filename: copy.filename, origin: copy.host,
-                                      members: inventory.members)
+                                      members: inventory.members, instance: instance)
                 return
             }
             // Replace a held answer only with one that has something to SAY.
@@ -134,6 +154,13 @@ final class ReuseStore {
     /// Forgets the print entirely -- a new draft is not that print any more.
     func clear() {
         version += 1
+        referencePreviews = [:]
+        previewFailures = []
+        selectionModel = nil
+        selectionRecipe = nil
+        savedRecipe = nil
+        savedFile?.save(nil)
+        restoring = false
         authority = nil
         restored = nil
         notice = nil

@@ -8,6 +8,7 @@ struct GenerationReferencesGroup: View {
     let recipe: GenerationRecipe
     @Binding var draft: RenderDraft
     @Environment(GenerateController.self) var controller
+    @Environment(ReuseStore.self) var reuse
     @State var failure: String?
     @State var importing = false
     @State var importTask: Task<Void, Never>?
@@ -43,6 +44,8 @@ struct GenerationReferencesGroup: View {
                 Text(reason).font(.caption).foregroundStyle(.secondary)
             }
         }
+        .task(id: reuse.authority) { await reuse.loadPreviews(in: draft) }
+        .task(id: reuse.currentFence) { await reuse.loadPreviews(in: draft) }
         .onChange(of: recipe) { importTask?.cancel(); importing = false }
         .onDisappear { importTask?.cancel() }
     }
@@ -62,12 +65,17 @@ struct GenerationReferencesGroup: View {
             if reference.kind == "image" {
                 PictureWell(
                     rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
-                    picture: reference.media.data, size: ReferenceStrip.thumbnailSize,
+                    picture: reference.media.data ?? reuse.preview(for: reference, in: draft), size: ReferenceStrip.thumbnailSize,
                     label: "Replace image reference \(index + 1)",
                     pick: { attachPicture($0, replacing: index, expected: reference, session: session) })
             }
             Text("\(index + 1). \(reference.provenance?.name ?? reference.kind.capitalized)")
                 .lineLimit(1).truncationMode(.middle)
+            if reference.media.authority == "descriptor", reference.kind == "image", reuse.preview(for: reference, in: draft) == nil {
+                Button(reuse.previewFailures.contains(reference) ? "Retry preview" : "Load preview") {
+                    Task { await reuse.loadPreviews(in: draft) }
+                }.font(.caption)
+            }
             Spacer(minLength: 0)
             if reference.kind != "image" {
                 Button("Replace", systemImage: "arrow.triangle.2.circlepath") { choose(kind: reference.kind, replacing: index) }
@@ -89,7 +97,7 @@ struct GenerationReferencesGroup: View {
         return HStack {
             PictureWell(
                 rows: GenerateMenus.referenceAdd(canPaste: PicturePaste.hasPicture),
-                picture: index.map { draft.media.generationReferences[$0].media.data } ?? nil,
+                picture: expected.flatMap { $0.media.data ?? reuse.preview(for: $0, in: draft) },
                 size: ReferenceStrip.thumbnailSize, caption: role.rawValue.capitalized,
                 label: "\(role.rawValue.capitalized) camera view",
                 pick: { attachPicture($0, replacing: index, role: role,

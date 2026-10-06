@@ -668,3 +668,24 @@ Before importing a library copy with retained source media, This Mac must advert
 Both native apps expose the server's reference contracts. MiniMax H3 **Ref2VA** takes an ordered mixture of images, H.264 MP4 clips and mono/stereo PCM WAV audio; image references can come from Photos/Camera/Library/Share on iOS or Finder/Library/Paste on macOS, and movie/audio files use Files/Finder. Replace, remove and reorder attachments before generating. Use `image 1`, `video 1` and `audio 1` in the prompt (numbered within each media kind). Audio references need at least one visual reference. The limits are nine images, three videos, three audio files and twelve files total; each clip is 2–15 seconds, with at most 15 seconds of video and 15 seconds of audio including video soundtracks. Authenticated hosts use request-bound upload sessions; keyless hosts accept at most 32 MiB of inline reference media per render. Video clips with sound require authenticated uploads so the server can supply exact decoded soundtrack counts; on keyless hosts use a silent MP4 plus separate PCM WAV audio. Unsupported or oversized files report an error instead of silently disappearing.
 
 Hunyuan3D multiview models offer named Front/Left/Back/Right wells from their recipe. Wan offers a first/last pair rather than arbitrary middle frames; MiniMax **FL2VA** offers separate optional first/last frames. Changing clip length updates the closing frame. Existing Qwen Edit, Qwen Image 2.1 and Flux.2 reference strips honor their source-image relation, count and pixel budgets; the last Qwen Image 2.1 reference updates the default canvas until you choose a size. SD1.5/SDXL reference weight comes from the model's own control. Model changes park unsupported attachments so they can return. Reuse restores retained typed references with fresh media authority while their original set and order stay unchanged. Changing retained slots requires reattaching the remaining originals; archived bytes never overwrite new attachments. Imported mesh texture/roundtrip workflows remain API/CLI-only.
+
+### Retained recipes and Metal H3
+
+The native shipping engine uses the reviewed `shipping-metal` feature graph,
+including MiniMax H3 FL2VA and Ref2VA, MP4 and the mesh runtime features. A remote
+machine's own capabilities govern remote generation even in a remote-only Mac build.
+Metal support remains subject to the model's hardware and request memory budget.
+
+Reused ordered references show authenticated, bounded image previews. Prompt,
+shape, seed and filing edits preserve an unchanged reference set; each submission
+mints fresh media authority, including retries and repeated renders. Changing the
+retained set/order requires replacing the remaining originals before generating.
+Preview failures have a retry action and never remove the underlying attachment.
+
+Retained recipe recall stores only provenance and a byte-free origin locator.
+After relaunch, the original server instance, archive and output must be verified
+again. Missing, unreadable or changed conditioning blocks Generate with an inline
+explanation; reselect the source print, replace the attachments, or explicitly
+**Discard retained conditioning**. Original media and session credentials are not
+saved in the draft. Model/recipe changes and explicit reset supersede retained
+conditioning; ordinary navigation does not. Shape menus show proportional outlines.

@@ -37,10 +37,12 @@ struct ShapeControl: View {
                 Button {
                     choose(group)
                 } label: {
-                    if group.id == shape.aspect {
-                        Label(group.label, systemImage: "checkmark")
-                    } else {
-                        Text(group.label)
+                    Label {
+                        Text(group.label + (group.id == shape.aspect ? " ✓" : ""))
+                    } icon: {
+                        if let preset = group.presets.first {
+                            Image(nsImage: AspectRatioIcon.image(width: preset.width, height: preset.height))
+                        }
                     }
                 }
             }

@@ -35,6 +35,7 @@ extension FakeBackend {
         -> RetainedSourceMedia.Inventory {
         try record("retainedSourceMedia")
         retainedInventoryRequests.append(filename)
+        if let retainedInventoryResponder { return try await retainedInventoryResponder(filename) }
         guard let planted = retainedInventories[filename] else { throw notPlanted() }
         return planted
     }

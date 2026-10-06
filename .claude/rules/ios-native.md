@@ -103,3 +103,5 @@ and supported QR scanning request authorization contextually. Nearby permission
 recovery is only for Bonjour policy denial (-65570), never generic connectivity
 errors. Refresh Settings/scanning/discovery after activation. See
 `apps/ios/docs/PERMISSIONS.md` for the audit and hardware validation boundary.
+
+**macOS retained recipe recall.** Mac typed-reference reuse is scoped to unchanged media and pipeline, with explicit model/recipe barriers; ordinary prompt/shape/seed edits and repeated admissions keep the visible attachment. Legacy hidden roles keep whole-draft fencing. Persist only `SavedReuse` provenance/origin identities, never bytes or scoped handles. Cold launch blocks admission until instance, archive, output and reference facts are freshly verified. Reset/explicit discard supersede recall; navigation and informational notice dismissal do not. Previews use the authenticated bounded gallery-member thumbnail route; older-host fallback is limited to small stills with a verified digest. Partial retained slot edits fail closed until originals are reattached.

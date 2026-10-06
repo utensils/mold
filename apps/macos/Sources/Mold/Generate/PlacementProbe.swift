@@ -22,7 +22,9 @@ final class PlacementProbe {
     /// a machine, so an answer from another host gates nothing here.
     private(set) var placementHost: MoldHost.ID?
     private(set) var error: String?
+    private(set) var errorHost: MoldHost.ID?
 
+    @ObservationIgnored private var revision = 0
     @ObservationIgnored private var task: Task<Void, Never>?
     /// A constructor parameter rather than a constant, so a test pins the
     /// behaviour without sleeping through it.
@@ -33,7 +35,8 @@ final class PlacementProbe {
     }
 
     func refresh(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) {
-        task?.cancel()
+        invalidate()
+        let revision = self.revision
         guard let model else { return }
         let request = RenderRequest.placement(
             draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
@@ -42,7 +45,7 @@ final class PlacementProbe {
         let client = hosts.backend(for: host)
         task = Task { [weak self, debounce] in
             try? await Task.sleep(for: debounce)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self?.revision == revision else { return }
             do {
                 // Four one-output children preview as four copies of one
                 // output, not as one four-output child.
@@ -50,12 +53,13 @@ final class PlacementProbe {
                 // Re-checked AFTER the await: URLSession can complete a
                 // buffered response for a cancelled request, and writing it
                 // here would revert the hint to a superseded answer.
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self?.revision == revision else { return }
                 self?.adopt(answer, model: model, host: host.id)
             } catch is CancellationError {
                 // Superseded by a later control change, not a failed request.
             } catch {
-                self?.fail(error)
+                guard !Task.isCancelled, self?.revision == revision else { return }
+                self?.fail(error, host: host.id)
             }
         }
     }
@@ -64,19 +68,32 @@ final class PlacementProbe {
     /// Generate awaits this when a press beats the debounced probe, so the
     /// licence gate reads an answer about THIS model on THIS machine.
     func settle(draft: RenderDraft, model: String?, on host: MoldHost, hosts: HostStore) async -> Bool {
-        task?.cancel()
+        invalidate()
+        let revision = self.revision
         guard let model else { return false }
         let request = RenderRequest.placement(
             draft, model: model, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
         )
         do {
             let answer = try await hosts.backend(for: host).placementPreview(request, copies: draft.batchSize)
+            guard !Task.isCancelled, self.revision == revision else { return false }
             adopt(answer, model: model, host: host.id)
             return true
         } catch {
-            fail(error)
+            guard !Task.isCancelled, self.revision == revision else { return false }
+            fail(error, host: host.id)
             return false
         }
+    }
+
+    private func invalidate() {
+        task?.cancel()
+        revision += 1
+        placement = nil
+        placementModel = nil
+        placementHost = nil
+        error = nil
+        errorHost = nil
     }
 
     private func adopt(_ answer: PlacementPreview, model: String, host: MoldHost.ID) {
@@ -84,12 +101,14 @@ final class PlacementProbe {
         placementModel = model
         placementHost = host
         error = nil
+        errorHost = nil
     }
 
-    private func fail(_ failure: Error) {
+    private func fail(_ failure: Error, host: MoldHost.ID) {
         placement = nil
         placementModel = nil
         placementHost = nil
         error = failure.sentence
+        errorHost = host
     }
 }

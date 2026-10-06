@@ -1243,6 +1243,7 @@ mod tests {
             "/api/status",
             "/api/status/",
             "/api/queue/private-job/input-thumbnail",
+            "/api/gallery/source-media/private.png/member/thumbnail",
             "/api/shutdown",
             "/secrets.json",
             "/.env",

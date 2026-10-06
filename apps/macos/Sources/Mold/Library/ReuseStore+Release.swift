@@ -14,15 +14,12 @@ extension ReuseStore {
 
     /// The authority, if it still describes the draft on screen.
     ///
-    /// ANY edit puts it down. The draft is the whole recipe -- the prompt,
-    /// the model, the canvas, the wells, the sampler -- so this is the
-    /// cheapest honest form of desktop's rule that a new handoff supersedes
-    /// the prior print's authority (`composer.ts:29-59`), and it is stricter
-    /// than desktop needs to be because this app shows no restored picture in
-    /// the well: nothing else would tell a person that the render they are
-    /// now composing is still conditioned on somebody else's print.
+    /// Visible typed references survive ordinary authoring edits. Hidden roles
+    /// retain whole-draft fencing; selection changes are explicitly invalidated.
     func pending(for draft: RenderDraft) -> Authority? {
-        guard let authority, restored == draft else { return nil }
+        guard let authority, let restored,
+              RetainedReferenceGuard.canReuseDraft(draft, original: restored),
+              authority.instance == nil || authority.instance == hosts.instanceID(of: authority.origin) else { return nil }
         return authority
     }
 
@@ -34,6 +31,7 @@ extension ReuseStore {
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
+        if restoring { return notice ?? "Verifying retained conditioning on its original machine…" }
         let references = draft.media.generationReferences
         guard references.contains(where: { $0.media.authority == "descriptor" }) else { return nil }
         if RetainedReferenceGuard.canHydrate(references: references,
@@ -42,22 +40,15 @@ extension ReuseStore {
         return "The retained references are unavailable. Replace or remove them before generating."
     }
 
-    /// The authority, CONSUMED. A handle is good for one admission and a
-    /// relay's bytes are carried by the request that took them, so the submit
-    /// that takes this is the last one to have it -- which is also what makes
-    /// a print the machine can no longer honour refuse exactly one render
-    /// instead of every one after it.
-    /// An authority that is HELD is put down either way -- taken when the
-    /// draft is still the one it came with, dropped when it is not, because a
-    /// draft that has moved on is not that print any more and an authority
-    /// nobody can see must not sit waiting for the edit to be undone.
-    ///
-    /// When nothing is held this disturbs NOTHING: a press must not bump the
-    /// fence under a probe still in the air, nor wipe a sentence nobody has
-    /// read yet.
+    /// Visible references keep their archive across submissions; each press
+    /// mints a fresh session. Legacy hidden conditioning is consumed once so
+    /// it cannot silently condition a later, unrelated draft.
     func take(for draft: RenderDraft) -> Authority? {
         guard authority != nil else { return nil }
         let taken = pending(for: draft)
+        // These references are visible attachments, not a one-use session.
+        // Each press mints its own session against the exact outgoing request.
+        if taken != nil, !draft.media.generationReferences.isEmpty { return taken }
         clear()
         return taken
     }

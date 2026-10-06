@@ -674,3 +674,13 @@ mod tests {
         assert!(!EMBEDDED_CORS_ORIGIN.contains("://"));
     }
 }
+
+#[cfg(all(test, feature = "shipping-metal"))]
+mod shipping_tests {
+    #[test]
+    fn shipping_h3_runtime() {
+        use mold_core::minimax_h3::{capabilities, Task};
+        assert!(capabilities(Task::Fl2va).runtime_available);
+        assert!(capabilities(Task::Ref2va).runtime_available);
+    }
+}
