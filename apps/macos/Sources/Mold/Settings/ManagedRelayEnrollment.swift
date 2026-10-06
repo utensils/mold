@@ -43,7 +43,7 @@ struct ManagedRelayEnrollment: Codable, Equatable, Sendable {
 }
 
 enum ManagedRelayFailure: Error, LocalizedError {
-    case unavailable, capacity, invalidEnrollment, engineNotRunning, connector, notReady
+    case unavailable, capacity, invalidEnrollment, engineNotRunning, connector, notReady, stopping
     var errorDescription: String? {
         switch self {
         case .unavailable: "Mold proxy is unavailable. Try again shortly."
@@ -52,6 +52,7 @@ enum ManagedRelayFailure: Error, LocalizedError {
         case .engineNotRunning: "Start This Mac’s engine in Settings ▸ This Mac, then try pairing again."
         case .connector: "This Mac couldn’t start its remote connection. Try again."
         case .notReady: "This Mac hasn’t connected to Mold proxy yet. Try again."
+        case .stopping: "Remote access is stopping. Try pairing again when it finishes."
         }
     }
 }

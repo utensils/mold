@@ -22,6 +22,7 @@ final class RemotePairingStore {
     internal(set) var state: State = .off
     private(set) var enrollment: ManagedRelayEnrollment?
     private(set) var enabled = false
+    private(set) var isStopping = false
     let pairing: PairingStore
     let dependencies: Dependencies
     @ObservationIgnored private var pending: Task<MoldHost, Error>?
@@ -36,6 +37,7 @@ final class RemotePairingStore {
     }
 
     func prepare(_ host: MoldHost, renew: Bool = false) async throws -> MoldHost {
+        guard !isStopping else { throw ManagedRelayFailure.stopping }
         guard host.id == MoldEngine.localHostID, host.baseURL.host == "127.0.0.1",
               let port = host.baseURL.port, let localPort = UInt16(exactly: port) else {
             throw ManagedRelayFailure.engineNotRunning
@@ -110,6 +112,9 @@ final class RemotePairingStore {
 
     /// Withdraw transport first. A failed control request cannot leave access on.
     func disable() async {
+        guard !isStopping else { return }
+        isStopping = true
+        defer { isStopping = false }
         stopTransport()
         dependencies.saveEnabled(false)
         enabled = false

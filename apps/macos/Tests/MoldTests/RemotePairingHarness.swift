@@ -28,6 +28,8 @@ import MoldClient
     var cleanupWasCancelled: [Bool] = []
     var holdEnrollment = false
     var gate: CheckedContinuation<ManagedRelayEnrollment, Never>?
+    var holdRevocation = false
+    var revocationGate: CheckedContinuation<Void, Never>?
 
     func store() -> RemotePairingStore {
         let hosts = HostStore(hosts: [host]) { [self] _ in fake }
@@ -46,7 +48,10 @@ import MoldClient
                 calls.append("enroll"); previous = old
                 if holdEnrollment { return await withCheckedContinuation { gate = $0 } }
                 return owner
-            }, revoke: { [self] _ in calls.append("revoke"); cleanupWasCancelled.append(Task.isCancelled) },
+            }, revoke: { [self] _ in
+                calls.append("revoke"); cleanupWasCancelled.append(Task.isCancelled)
+                if holdRevocation { await withCheckedContinuation { revocationGate = $0 } }
+            },
             start: { [self] _, _ in calls.append("start"); alive = true },
             stop: { [self] in calls.append("stop"); alive = false },
             isAlive: { [self] in alive },

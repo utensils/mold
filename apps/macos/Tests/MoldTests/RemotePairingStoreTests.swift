@@ -164,4 +164,23 @@ struct RemotePairingStoreTests {
             publicUrl: owner.publicUrl, relayUrl: owner.relayUrl, expiresAt: owner.expiresAt)
         #expect(throws: ManagedRelayFailure.self) { try wrongKey.validate() }
     }
+
+    @Test func pairingCannotRaceAnUnfinishedStop() async throws {
+        let harness = RemotePairingHarness()
+        let store = harness.store()
+        _ = try await store.prepare(harness.host)
+        harness.holdRevocation = true
+        let stop = Task { await store.disable() }
+        while harness.revocationGate == nil { await Task.yield() }
+        await #expect(throws: ManagedRelayFailure.self) { try await store.prepare(harness.host) }
+        #expect(!harness.alive)
+        harness.revocationGate?.resume()
+        await stop.value
+        #expect(store.enrollment == nil)
+        #expect(!store.enabled)
+        harness.holdRevocation = false
+        _ = try await store.prepare(harness.host)
+        #expect(harness.alive)
+        #expect(store.enrollment == harness.owner)
+    }
 }

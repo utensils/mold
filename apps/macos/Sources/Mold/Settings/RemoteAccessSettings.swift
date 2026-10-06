@@ -31,7 +31,7 @@ struct RemoteAccessSettings: View {
                 Button("Pair your phone") { pairingHost = selected }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(selected == nil)
+                    .disabled(selected == nil || (selected?.id == MoldEngine.localHostID && remote.isStopping))
                     .accessibilityHint("Show a QR code to connect your phone to the selected machine")
             }
             if let host = selected {
@@ -64,6 +64,7 @@ struct RemoteAccessSettings: View {
                             .foregroundStyle(.secondary)
                         if remote.canStopRemoteAccess {
                             Button("Stop Remote Access") { Task { await remote.disable() } }
+                                .disabled(remote.isStopping)
                         }
                         if remote.enabled {
                             PairingSection(host: host, showsPairButton: false)
