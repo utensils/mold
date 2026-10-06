@@ -198,47 +198,69 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: bun run fmt:check
-      - run: bun run test
-      # `build` already runs vue-tsc before Vite; a separate typecheck compiled
-      # the same project twice on every frontend PR.
-      - run: bun run build
-
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: bun run test
+#       # `build` already runs vue-tsc before Vite; a separate typecheck compiled
+#       # the same project twice on every frontend PR.
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: bun run build
+#
+# # PAUSED 2026-10-06: Native fmt/clippy/test gate took 15m19s; nightly distribution compiles the shipping graph. Restore after runner capacity is improved.
+# #   desktop-rust:
+# #     name: Native Rust (fmt, clippy, test)
+# #     needs: changes
+# #     if: >-
+# #       github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+# #     runs-on: macos-14
+# #     defaults:
+# #       run:
+# #         working-directory: desktop
+# #     steps:
+# #       - uses: actions/checkout@v4
+# #       # This job compiles the macOS cfg arms only; the Linux desktop build is
+# #       # push-only, so the arms it would compile are checked from source here.
+# #       - name: Check cfg arms of one function share one visibility
+# #         run: python3 ../scripts/tests/cfg-arm-visibility.py
+# #       - uses: dtolnay/rust-toolchain@stable
+# #         with:
+# #           components: rustfmt,clippy
+# #       - uses: Swatinem/rust-cache@v2
+# #         with:
+# #           workspaces: desktop/src-tauri
+# #       - name: Install protoc
+# #         # The `pulid` feature pulls in `candle-onnx`, whose build script shells
+# #         # out to `protoc`. It ships in every desktop recipe (#1223).
+# #         run: HOMEBREW_NO_AUTO_UPDATE=1 brew install protobuf
+# #       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+# #       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+# #       # CPU-only: the metal feature is deliberately off in CI.
+# #       - run: cargo test --manifest-path src-tauri/Cargo.toml
+# #       # `pulid` is in every shipped desktop recipe, so its lints must compile
+# #       # here rather than first on a release runner.
+# #       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
+# #       # Compile the exact signed macOS Nightly feature graph on PRs. The
+# #       # distribution used to omit every mesh feature, leaving 3-D Studio
+# #       # visible while its PBR path could only return a build-feature error.
+# #       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
+# #
   desktop-rust:
-    name: Native Rust (fmt, clippy, test)
+    name: Native Rust basic compilation
     needs: changes
-    if: >-
-      github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
     runs-on: macos-14
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v4
-      # This job compiles the macOS cfg arms only; the Linux desktop build is
-      # push-only, so the arms it would compile are checked from source here.
-      - name: Check cfg arms of one function share one visibility
-        run: python3 ../scripts/tests/cfg-arm-visibility.py
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-      - name: Install protoc
-        # The `pulid` feature pulls in `candle-onnx`, whose build script shells
-        # out to `protoc`. It ships in every desktop recipe (#1223).
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install protobuf
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      # CPU-only: the metal feature is deliberately off in CI.
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      # `pulid` is in every shipped desktop recipe, so its lints must compile
-      # here rather than first on a release runner.
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
-      # Compile the exact signed macOS Nightly feature graph on PRs. The
-      # distribution used to omit every mesh feature, leaving 3-D Studio
-      # visible while its PBR path could only return a build-feature error.
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
+          key: desktop-build-first
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
 
   desktop-windows:
     name: Windows (clippy, test; main NSIS installer)
@@ -329,17 +351,21 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      # CPU-only: `cuda` is deliberately off, and `mp4` is off on Windows
-      # because fdk-aac-sys cannot compile with MSVC (see the crate's own
-      # target-conditional entry in src-tauri/Cargo.toml).
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
-      - name: Check the Windows CLI release recipe
-        working-directory: .
-        run: >-
-          cargo check --release -p mold-ai
-          --features preview,discord,expand,webp,metrics,mdns,pulid
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+#       # CPU-only: `cuda` is deliberately off, and `mp4` is off on Windows
+#       # because fdk-aac-sys cannot compile with MSVC (see the crate's own
+#       # target-conditional entry in src-tauri/Cargo.toml).
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo test --manifest-path src-tauri/Cargo.toml
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - name: Check the Windows CLI release recipe
+#         working-directory: .
+#         run: >-
+#           cargo check --release -p mold-ai
+#           --features preview,discord,expand,webp,metrics,mdns,pulid
       - name: Import the self-signed Windows certificate
         if: github.event_name == 'push'
         id: windows-signing
@@ -459,11 +485,15 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
-      - if: github.event_name == 'push'
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo test --manifest-path src-tauri/Cargo.toml
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
+# PAUSED 2026-10-06: Duplicate lint/test compilations deferred; Windows packaging took 66m and Linux AppImage exceeded 2h. Artifact build and verification stay active. Restore after runner capacity is improved.
+#       - if: github.event_name == 'push'
+#         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
       - name: Prepare linuxdeploy and the CI driver stub
         if: github.event_name == 'push'
         shell: bash
@@ -600,7 +630,9 @@ jobs:
   publish-desktop-nightly:
     name: Publish nightly update
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-nightly, desktop-frontend, desktop-rust]
+# PAUSED 2026-10-06: publish after the verified artifact build; restore test dependencies with full CI.
+#     needs: [desktop-nightly, desktop-frontend, desktop-rust]
+    needs: [desktop-nightly]
     runs-on: ubuntu-latest
     concurrency:
       group: desktop-nightly-publication

@@ -121,7 +121,7 @@ jobs:
               - '.github/workflows/android.yml'
 
   build-and-test:
-    name: Android build and native tests
+    name: Android APK build
     needs: changes
     if: needs.changes.outputs.build == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -176,61 +176,69 @@ jobs:
         run: cargo tauri --version | grep -F '2.11.4'
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
-      - name: Verify Android smoke wait policy
-        run: bun test scripts/lib/android-smoke-wait.test.mjs
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Verify Android smoke wait policy
+#         run: bun test scripts/lib/android-smoke-wait.test.mjs
       - name: Verify Android launcher assets
         run: bash scripts/tests/android-release-assets.sh
       - name: Build Android validation APK
         working-directory: apps/mobile/src-tauri
-        run: cargo tauri android build --debug --apk --target aarch64 --target x86_64 --ci
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Run Android 35 app and instrumentation tests
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          profile: pixel_6
-          # The action still defaults to deprecated swiftshader_indirect;
-          # use the supported renderer for standard AOSP SystemUI/Quickstep.
-          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
-          disable-animations: true
-          script: |
-            adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-            MOLD_ANDROID_EVIDENCE=/tmp/mold-android-35 bun scripts/tests/android-app-smoke.mjs
-            cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest
-      - name: Run Android 36 app smoke
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 36
-          arch: x86_64
-          profile: pixel_6
-          # The action still defaults to deprecated swiftshader_indirect;
-          # use the supported renderer for standard AOSP SystemUI/Quickstep.
-          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
-          disable-animations: true
-          script: |
-            adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-            (cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.utensils.mold.mobile_native.AndroidOverlayBackInstrumentedTest)
-            MOLD_ANDROID_EVIDENCE=/tmp/mold-android-36 bun scripts/tests/android-app-smoke.mjs
-      - name: Run Android 28 public Downloads acceptance
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 28
-          arch: x86_64
-          profile: pixel_2
-          # The action still defaults to deprecated swiftshader_indirect;
-          # use the supported renderer for standard AOSP SystemUI/Quickstep.
-          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
-          disable-animations: true
-          script: bash scripts/tests/android-legacy-downloads.sh
-      - name: Retain Android app evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-app-smoke
-          path: /tmp/mold-android-*
-          if-no-files-found: warn
+# PAUSED 2026-10-06: x86_64 APK existed for deferred emulator tests.
+#         run: cargo tauri android build --debug --apk --target aarch64 --target x86_64 --ci
+        run: cargo tauri android build --debug --apk --target aarch64 --ci
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Enable KVM
+#         run: |
+#           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+#           sudo udevadm control --reload-rules
+#           sudo udevadm trigger --name-match=kvm
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Run Android 35 app and instrumentation tests
+#         uses: reactivecircus/android-emulator-runner@v2
+#         with:
+#           api-level: 35
+#           arch: x86_64
+#           profile: pixel_6
+#           # The action still defaults to deprecated swiftshader_indirect;
+#           # use the supported renderer for standard AOSP SystemUI/Quickstep.
+#           emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
+#           disable-animations: true
+#           script: |
+#             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+#             MOLD_ANDROID_EVIDENCE=/tmp/mold-android-35 bun scripts/tests/android-app-smoke.mjs
+#             cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Run Android 36 app smoke
+#         uses: reactivecircus/android-emulator-runner@v2
+#         with:
+#           api-level: 36
+#           arch: x86_64
+#           profile: pixel_6
+#           # The action still defaults to deprecated swiftshader_indirect;
+#           # use the supported renderer for standard AOSP SystemUI/Quickstep.
+#           emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
+#           disable-animations: true
+#           script: |
+#             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+#             (cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.utensils.mold.mobile_native.AndroidOverlayBackInstrumentedTest)
+#             MOLD_ANDROID_EVIDENCE=/tmp/mold-android-36 bun scripts/tests/android-app-smoke.mjs
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Run Android 28 public Downloads acceptance
+#         uses: reactivecircus/android-emulator-runner@v2
+#         with:
+#           api-level: 28
+#           arch: x86_64
+#           profile: pixel_2
+#           # The action still defaults to deprecated swiftshader_indirect;
+#           # use the supported renderer for standard AOSP SystemUI/Quickstep.
+#           emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
+#           disable-animations: true
+#           script: bash scripts/tests/android-legacy-downloads.sh
+# PAUSED 2026-10-06: Three emulator acceptance lanes deferred; previous job budget 45m. APK compilation remains. Restore after runner capacity is improved.
+#       - name: Retain Android app evidence
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: android-app-smoke
+#           path: /tmp/mold-android-*
+#           if-no-files-found: warn

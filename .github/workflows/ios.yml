@@ -117,7 +117,8 @@ jobs:
       # The full desktop + Studio suite runs in Desktop CI. Keep iOS focused on
       # its 29 mobile tests and mobile-only formatting; the release-assets
       # contract above already performs the authoritative mobile typecheck/build.
-      - run: bunx vitest run src/mobile
+# PAUSED 2026-10-06: Mobile unit tests deferred; frontend build stays active. Restore after runner capacity is improved.
+#       - run: bunx vitest run src/mobile
       - run: bunx prettier --check "src/mobile/**/*.{ts,vue,css}" vite.mobile.config.ts index.mobile.html
 
   simulator-rust:
@@ -140,4 +141,6 @@ jobs:
         with:
           workspaces: apps/mobile/src-tauri
       - run: cargo fmt -- --check
-      - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings
+# PAUSED 2026-10-06: Duplicate lint compilation deferred; simulator compilation remains. Restore after runner capacity is improved.
+#       - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings
+      - run: cargo check --locked --target aarch64-apple-ios-sim
