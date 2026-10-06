@@ -46,6 +46,10 @@ final class RetainedReuse {
                 continue
             }
             authority = Authority(filename: copy.print.filename, origin: copy.hostID, members: inventory.members)
+            if let refusal = sourcePictureRefusal(in: controller.draft) {
+                notice = refusal
+                return
+            }
             // Show the source in its ordinary well, so it can be replaced,
             // fitted or removed. Other retained roles hydrate at submission.
             let outgoing = controller.modelName.flatMap {
@@ -109,6 +113,12 @@ final class RetainedReuse {
         }
         if isCurrent(fence, draft: controller.draft), RetainedSourceMedia.disclosable(entry.print.metadata),
            let unavailable { notice = RetainedSourceMedia.disclosure(unavailable) }
+    }
+
+    func sourcePictureRefusal(in draft: RenderDraft) -> String? {
+        guard draft.media.sourceImage == nil, let authority,
+              authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 else { return nil }
+        return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
     }
 
     /// Each press hydrates a fresh request. A failed admission or another

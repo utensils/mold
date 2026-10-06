@@ -127,6 +127,23 @@ struct GenerateControllerTests {
         #expect(generate.draft.media.sourceImageName == "original.png")
     }
 
+    @Test func conflictingChainAndOrdinarySourceNeverChooseOneSilently() async throws {
+        let (generate, fake) = try await setUp()
+        let members = ["source_image", "stage_source:0"].enumerated().map { index, role in
+            RetainedSourceMedia.Member(memberId: "m\(index)", role: role, displayName: role, sizeBytes: 3)
+        }
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: members))
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"chain.mp4","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"mp4"}"#.utf8))
+        generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.draft.media.sourceImage == nil)
+        #expect(fake.count("retainedSourceMediaBytes(for:member:)") == 0)
+        #expect(generate.blocker?.contains("multiple source pictures") == true)
+        generate.draft.media.sourceImage = "chosen"
+        #expect(generate.retainedReuse.sourcePictureRefusal(in: generate.draft) == nil)
+    }
+
     @Test func retainedSourcesSurviveRepeatedSubmissionsAndPromptEditsUntilRemoved() async throws {
         let (generate, fake) = try await setUp()
         let source = RetainedSourceMedia.Member(memberId: "source", role: "source_image", displayName: "Original.png", sizeBytes: 3)

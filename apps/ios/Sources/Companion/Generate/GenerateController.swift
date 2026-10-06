@@ -162,6 +162,7 @@ final class GenerateController {
 
     /// Why Generate cannot run right now, in words -- `nil` when it can.
     var blocker: String? {
+        if let refusal = retainedReuse.sourcePictureRefusal(in: draft) { return refusal }
         if draft.media.generationReferences.contains(where: { $0.media.authority == "descriptor" }),
            !retainedReuse.probing, !retainedReuse.canHydrateReferences(draft.media.generationReferences) {
             return String(localized: "Reattach this print’s reference media before generating.")
