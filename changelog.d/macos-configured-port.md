@@ -1,1 +1,0 @@
-- **Native Mac port selection.** Mold Studio now starts its local engine on the port selected in Settings instead of an unrelated temporary port, and reports when that port is occupied.

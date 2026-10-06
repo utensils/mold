@@ -1,1 +1,0 @@
-- **Native macOS release builds.** Keep the engine lockfile synchronized with workspace version bumps and validate the locked shipping dependency graph before release.

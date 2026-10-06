@@ -1,2 +1,0 @@
-- Fixed a macOS layout crash when switching from Models to Generate with the sidebar visible and an installed model selected.
-- Allow up to five minutes for a cold model load in the native macOS and iOS apps, so large checkpoints can finish warming before the app reports a connection timeout.

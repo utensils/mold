@@ -11,6 +11,254 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-06
+
+- **Native macOS release builds.** Keep the engine lockfile synchronized with workspace version bumps and validate the locked shipping dependency graph before release.
+- **Repair native Mac retained-media sync.** Sync All and Save Locally accept stable source archives despite listing-only completion facts and repair identical older outputs whose imports add an alpha-channel fact. Missing scheduler/transparency facts require corroboration from the verified output's embedded recipe. Exact output bytes, generation recipes, and conflicting recorded facts remain checked; unavailable original media remains reported.
+
+- **Bound native sync and export checks.** Skip oversized unrelated GIF comments without losing later retained recipes, reuse verified downloaded output during sync, and split native iOS export CI into complete bounded shards.
+- **Durable native references.** Keep reused native Mac references attached across prompt, shape and seed edits, retries and repeated submissions; show bounded retained image previews and verify retained recipes again after relaunch.
+- **Native Mac H3 Metal packaging.** Include the reviewed Metal MiniMax H3 runtime in shipping builds and prevent stale placement responses from another machine appearing in Generate.
+- **Native Mac shape selection.** Show proportional aspect-ratio outlines in the shape menu and readable explanations when Generate is unavailable.
+- **Durable host transfers.** Transfer retained chain stage images with every other supported input role; all stage inputs stay in the destination archive, and first-stage settings reuse restores its source picture without silently substituting later-stage inputs.
+- **One-click Mac phone pairing.** Settings ▸ Remote Access now offers **Pair your phone**
+  in the existing layout, with QR preparation and retry in a sheet. This Mac can
+  enroll a dedicated managed HTTPS proxy route without opening an inbound port;
+  phone clients prefer advertised LAN/Tailscale routes and fall back to the proxy.
+  Managed enrollment requires gateway configuration and wildcard DNS/TLS deployment.
+- **Media export parity.** Native iOS adds animation and mesh export controls, texture sidecars, Files/Mold-folder delivery and GIF-to-Photos saving. Native iOS and Tauri support an advertised GIF boundary pause including zero; turntable size, frame-rate and frame-budget controls use their own limits.
+- **Native iOS permission recovery.** Denied Photos, camera, nearby-network, notification and Live Activity access offers a native Settings recovery action, with separate guidance for restricted access. Saving authorized videos to Photos no longer crashes in PhotoKit's background callback, and auto-save requests access only when enabled by the user.
+- Fixed native video first-frame attachment choosing no source aspect after boundary-frame support was added; closing frames preserve the first-frame choice, and the iOS aspect menu visibly marks the current selection.
+- Accept MiniMax H3 FL2VA first/last-frame pairs and last-only requests using mode-derived admission envelopes. Paired frames retain roughly 1,000 prompt tokens and charge their additional conditioning memory instead of failing the first-frame-only limits.
+- Fixed native library sync regression coverage for identical prints whose embedded recipe omits archive completion provenance.
+- **Fix native Mac library sync.** Copy retained inputs when identical output files carry embedded metadata without archive-only completion facts; retry repairs existing copies without duplicating outputs, while changed bytes and generation settings remain refused.
+- **Native reference parity.** Mold Studio on iOS and macOS now authors ordered MiniMax H3 image/video/audio references, Hunyuan3D named camera views, and Wan/MiniMax first/last frames. Reference ordering, pixel budgets, retained-source reuse, upload sessions and placement redaction share one tested contract; iOS also honors still-reference source relations, formats, weight and canvas updates, and preserves ordinary source-image wells and From Share actions. Library reuse also restores settings and retained sources when Generate opens for the first time.
+- **macOS Queue layout.** Source thumbnails reserve their image and caption space while loading, preventing clipped or overlapping rows. Jobs without a retained source remain compact. Batch groups expand safely and keep child jobs individually selectable.
+- **Native iOS small-screen layout.** Unavailable model IDs retain their full text while fitting the Model control at large accessibility sizes. Library offline notices show a compact count and open scrollable full-name details with legible native navigation, semantic headings and a scalable pinned Done action and properly restored navigation tabs, leaving saved prints reachable when several machines are offline. Decorative Library badges fit their tiles while full machine names remain available in accessibility labels and Info.
+- Native iOS queue cards use concise model titles and open full job details with state-aware pause, resume, cancel, and held retry controls.
+- MiniMax H3 queue titles use the same short curated names as the model catalog, preserving Turbo and precision variants.
+- Searchable per-machine Prompt History directly in the native iOS composer, with prompt-only recall, clear confirmation, and explicit loading, offline, unavailable, and error states.
+- Show authenticated retained source images in the native Mac, web, desktop and Tauri mobile queues, including jobs submitted from another client. Preserve separate source and rendering-preview labels.
+- Native Mac Save Locally and Sync All, and desktop local saves and automatic mirrors, retain a print's source media on supported destinations, repair older incomplete copies, and share retained payloads across copied sibling outputs.
+- Fixed native iOS Library lag in large galleries and preserved the exact viewport when closing a print; viewer paging now loads only nearby images.
+- Deduplicate matching retained input sets across newly completed jobs, preserving per-job provenance and retaining sources until the last dependent library output is deleted.
+- Preserve exact server metadata, including large seeds, in desktop remote-library copies.
+- Refuse source-bearing local copies before output import when the destination cannot receive retained media; source-free copies remain supported.
+- **Consistent curated model names.** Manifest checkpoints use short, shared titles across apps, discovery, queues, and the CLI, while retaining their runnable IDs and upstream filenames.
+- **Native iOS retained inputs.** Use These Settings restores durable source images and paired masks, retains disclosed conditioning files across prompt edits and repeat submissions, and lets you remove them explicitly.
+- **Clearer iPhone and iPad queues.** Jobs show their prompt and actual source image separately from the rendering preview, with a readable width on larger screens.
+- **Curated model discovery.** Native iOS Discover searches manifest checkpoints by name and Hugging Face repository, shows provider logos, and installs the exact variant using the machine’s configured credentials.
+- **Visible iOS model unloading.** Models exposes per-model and server-wide unload controls, preserves downloaded files, and prevents conflicting operations on the selected server.
+- **Accessible iPad model controls.** Per-machine Models hides inherited floating tab chrome while open and restores it on Back; installed-model family headings use scalable rows that pass populated Dynamic Type audits.
+- Fixed pale Live Activity cards with white text by restoring ActivityKit’s adaptive system material, including stale render cards.
+- **Native iOS Library and notifications.** Fix the crash when holding a Library tile, retain the thumbnail loader in drag previews, keep source-image pickers open during healthy connection refreshes, and preserve the authored notification icon colors in light and dark appearances.
+- **Native iOS delivery.** Run light and dark audits in parallel, and keep native workflow edits from triggering unrelated builds while preserving TestFlight validation.
+- Fixed source-image selection from a merged Library print whose first machine is offline but another copy is reachable.
+- Added a dedicated Remote Access tab in native macOS Settings with an inline phone pairing QR code, learned connection routes and paired-device controls.
+- Added authenticated LAN, Tailscale and HTTPS relay route discovery and universal pairing: updated clients retain one machine and credential while reconnecting across networks, without replaying interrupted requests.
+- **Stable native Library selection.** iOS tile selections keep the viewport in place, with finger-sweep range selection/deselection, reversal and edge scrolling while vertical swipes keep native scrolling. A single navigation title menu replaces overlapping shelf labels. Status notices reserve space above the grid instead of covering date headings and prints. Collections hides presenting tab chrome until dismissal, keeping the iPad modal layout stable.
+- **Native Library media filters.** iOS and macOS offer All Media, Photos, Videos and 3D within the current shelf, preserving search and machine filters. Mac pointer selections keep their position while keyboard navigation still reveals offscreen tiles.
+- **Native iOS notification branding.** Live Activities use the Mold logo in every state, including completed and failed Dynamic Island notifications.
+- Added optional AWS Lambda remote access with an outbound authenticated host
+  connector and a normal HTTPS address for CLI, browser, desktop and mobile clients.
+  Large uploads and media use private staged transfers; progress streams reconnect
+  and saved generation results recover through the durable queue.
+- Authenticated servers now allow the browser shell and its assets to load before
+  API authentication; API and media permission checks remain enforced.
+- Direct relay streams now complete the WebSocket close handshake after both TCP
+  directions end, preserving final responses when heartbeat traffic is pending.
+- **Native generation and Library fixes.** Anchor the macOS Generate capsule to
+  the bottom, create a collection from selected prints, and keep context menus
+  stable during background status updates. Hidden collections now exclude every
+  copy of a print from general browsing on macOS and iOS, remain accessible
+  directly and in Recently Deleted, and have hide/show controls on iOS.
+- **A cleaner iPhone render Live Activity.** Use a compact translucent card,
+  a blue preview tile, a full-width progress row, and a quieter machine/queue
+  footer on the Lock Screen. Large text keeps the status and Stop control
+  visible with a simpler layout.
+- **iOS notification taps no longer crash.** Complete native notification activation
+  on the main thread after routing to the finished print or Queue, including cold
+  launches. Dismissing an alert leaves navigation alone.
+- **iOS render notifications.** Keep loaded prints without a false error banner when a Library refresh is cancelled. Simplify completion notifications to a short readiness message with the native Mold Studio app icon.
+- **iOS generation options.** Draw aspect icons in their actual proportions, expose source fitting with centered Crop to fill by default, fit source images and painted masks together before submission, and make the Random seed default explicit. Reset restores the crop and random seed defaults.
+- **Smoother iPhone Library browsing.** Clips play automatically in the full-screen viewer and pause when you page away; closing the viewer returns to your place in the Library grid.
+- **Clearer iPhone creation and library.** Generate now presents its controls as a readable scrolling form on iPhone, with large-text actions that fit and a visible exit from model search. Library shelves and Settings are easier to find, the gallery avoids repeated filtering and per-tile host scans, and clearing the local cache removes saved listings as well as images.
+- **Native iPhone usability.** make generation options readable at large text sizes, remove an inert Options button, restore clip and 3-D drafts correctly after launch, explain empty model searches, and keep viewer actions clear of the main tab bar.
+- **Native iPhone usability.** scale the Installed/Discover selector, distinguish unavailable model inventories from empty ones, and return to Machines after removing a machine.
+- **Native iPhone usability.** keep first-run Machines text scrollable and its Add action readable at the largest accessibility text size, including when nearby machines are found.
+- **Native iPhone usability.** add Done to print Info and preserve original media filenames/extensions when sharing, with temporary-file cleanup after the action.
+- **Native iPhone usability.** preserve saved drafts across staggered machine reconnections, make offline Generate/Queue states honest, and prevent incomplete exports when a source machine has been removed.
+- **Native iOS usability.** Keep the prompt in a stable, bounded scrolling panel as the keyboard or text size changes; wrap machine cards within the window; expose a searchable Model chooser with direct model management and select models when their lists arrive. Keep the kind selector stable across text-size changes. Video playback uses the media audio session so the silent switch does not mute clips, and native transport controls remain available in the paged viewer. Keep Models in the iPad sidebar so the floating tabs fit at large text sizes. Add `companion-dev` and `companion-build`, with a source-watching native Simulator development helper.
+- Fixed a macOS layout crash when switching from Models to Generate with the sidebar visible and an installed model selected.
+- Allow up to five minutes for a cold model load in the native macOS and iOS apps, so large checkpoints can finish warming before the app reports a connection timeout.
+- **Mac Generate and video playback.** Keep the Generate button reachable when
+  the prompt and controls exceed the window, add ⌘E to expand the prompt,
+  cycle prompt history with the arrow keys, keep model and Library controls
+  within narrow toolbar columns, show videos at their actual aspect ratio,
+  and remember one mute choice across Generate and Library playback.
+- **Native macOS nightly builds.** Release packaging can now build and sign the MoldMesh resource bundle, allowing the nightly app to publish.
+- **Matching native nightly versions.** This Mac now reports the same nightly version as its Mold Studio app bundle.
+- Pairing codes are now universal links (`https://utensils.io/mold/pair#…`), so an iPhone's own Camera opens Mold Studio Companion and asks before pairing; a phone without it gets a page that says what to install and can hand the code to the Mold app. The code rides in the link's fragment and never reaches the web. Older `mold://pair` codes still work everywhere.
+- Fixed a machine name with a space (e.g. "Studio Mac") reading as "Studio+Mac" when an iPhone scanned its pairing code.
+- Update Mold on your phone to scan the new pairing codes: older Mold and Mold Studio Companion builds only read `mold://pair` codes.
+- **Native Mac port selection.** Mold Studio now starts its local engine on the port selected in Settings instead of an unrelated temporary port, and reports when that port is occupied.
+- **Mold Studio Companion: the Library shows its thumbnails, fast, and works offline.** Thumbnails are requested only in the sizes machines serve (a larger request was refused, which left most tiles empty), and pictures are decoded off the main thread. Each machine's library and its thumbnails are kept on the device, so the grid appears at once and stays browsable when a machine is unreachable; prints you open are kept too. Settings ▸ Library sets the storage limit (1 GB by default), shows what is used, saves every thumbnail ahead of time, and empties it. Pinch now walks five tile sizes live, both ways.
+- **Mold Studio for Mac: Pair a Phone… is easy to find, and works on keyless machines.** It is now on every machine's card menu and in the Machine menu, as well as the machine's page. A machine running without an API key also offers a code (it carries only the machine's address), where before the option was hidden entirely.
+- **Mold Studio Companion, the native iPhone and iPad app.** A new SwiftUI
+  app (`apps/ios`, `io.utensils.mold.companion`, "Mold Studio" on the Home
+  Screen) that sits beside the existing iPhone app and matches the macOS
+  Mold Studio: pair with a machine by scanning the Mac's Pair a Phone… code
+  (or by address or Bonjour), browse every machine's prints as one Library
+  with favourites, tags, collections and Recently Deleted, and generate
+  stills, clips and 3-D objects with each model's own controls. The Queue
+  shows every machine's work with held jobs explained in words (Pull and
+  Retry, Move to… another machine), and Models installs, loads and removes
+  models per machine, with a licence sheet before any gated download. A
+  Live Activity follows a render on the Lock Screen and in the Dynamic
+  Island with a Stop button, notifications arrive when a render settles
+  while the app is away, widgets show recent prints and the queue, and
+  Share ▸ Mold Studio hands a photo to Generate. Every screen
+  is audited from the smallest text size to the largest accessibility size,
+  in light and dark, on iPhone and iPad
+  ([#1775](https://github.com/utensils/mold/pull/1775)).
+- **Guard: tracked files that `.gitignore` also matches now fail CI.** A test
+  fixture from #1767 had silently stopped every release-plz run; the new
+  check fails the pull request instead.
+- **Expand the Discord bot's safe remote controls.** Add quota-aware attachment
+  image upscaling and bounded catalog search, plus Manage Server-only queue,
+  download, Library, and complete framewise video-upscale controls with private replies.
+  Document every generation control and keep scripted chains and durable mesh
+  workflows in their intentional CLI/API-only scope.
+- **Qwen Image 2.1 in Mold Studio for Mac.** The native macOS app now numbers
+  up to ten ordered reference images, lets the last one set the canvas shape
+  while the size is still the model's default (rounded half-to-even on the
+  32 px grid, exactly as the engine does), sends references as the original
+  bytes so a transparent PNG is never flattened, offers a **Transparent
+  background** toggle and WebP stills wherever the recipe advertises them,
+  draws a checkerboard behind prints that carry alpha in the Library, the
+  viewer and the Generate result, restores the toggle on Use These Settings,
+  and shows the Qwen Research licence before any Qwen Image 2.1 download —
+  including one a render or a held Queue row would start
+  ([#1768](https://github.com/utensils/mold/issues/1768)).
+- **Transparent prints reach Photos intact on iPhone and Android.** Photos
+  auto-save and multi-select save now include WebP stills, which they skipped
+  before, and iPhone hands Photos the original file instead of re-encoding it,
+  so a transparent PNG or WebP keeps its alpha. An animated WebP is still never
+  saved as a photo ([#1769](https://github.com/utensils/mold/issues/1769)).
+- **Qwen Image 2.1: reference images, transparent backgrounds, LoRA, turbo,
+  quantized tiers and native 2K.** Up to 10 ordered reference images (PNG,
+  JPEG or WebP, never flattened). With no size chosen, the canvas takes the
+  last reference's upright aspect ratio (EXIF orientation applied) at
+  upstream's 1024² area, kept inside the model's size limits. A new
+  **Transparent background** toggle (`transparent_background`,
+  `mold run --transparent`, Discord `/transparent`, advertised as
+  `capabilities.transparency`) applies the model card's RGBA prompt recipe
+  inside the engine, so the stored prompt stays yours. It keeps native alpha
+  in PNG and WebP, and JPEG is refused while it is on. A render keeps an alpha
+  channel only when the toggle is on or a reference has transparent pixels,
+  so ordinary renders stay RGB and byte-identical. Prints record `has_alpha`,
+  `transparent_background` and `prefix_cache` (`retained` or `recomputed`,
+  since the two are not bit-identical). LoRA adapters now work on every tier,
+  and Qwen-Image / 2512 adapters are refused by name. New tiers: `int8-conv`,
+  `fp8` (CUDA only, refused on Metal before it downloads), and GGUF
+  `q8`–`q2`. The Viggle 6-step `qwen-image-2.1-turbo` (`bf16`, `int8-conv`,
+  `q8`) has a pinned recipe; a negative prompt sent to it, or to any other
+  recipe that hides the control, now draws a request warning instead of being
+  dropped silently. The Qwen3-VL text encoder can run from the official Q8_0
+  GGUF (`auto` picks it for a text-only prompt when BF16 does not fit; a
+  reference prompt keeps BF16, on the CPU if need be, because Q8_0 loses
+  precision on the image rows) or Q4_K_M (`MOLD_QWEN3_VARIANT=q4`, explicit
+  only). The model
+  card's seven native 2K sizes (up to 2400x1792 and 2752x1536) and six ~1 MP
+  aspect presets are offered. See the new
+  [Qwen Image 2.1](https://utensils.io/mold/models/qwen-image-21) page.
+- **Qwen Image 2.1 is 2.5x faster on CUDA at 1024² and over 6x faster at 2K.**
+  It now takes the FastStill policy like FLUX: FlashAttention, fused
+  projection/RoPE, compact modulation, fused adaLN, and a cuDNN VAE. On an
+  L40S (BF16, 40 steps) 1024² went from 38.9 s to 15.2 s, 1344x768 with
+  guidance 4 from 76.7 s to 31.0 s, 2048² from 525 s to 82.6 s, and 2752x1536
+  from 537 s to 85.9 s. `int8-conv` runs at about the BF16 speed (15.3 s) on
+  half the transformer memory. Each guidance branch keeps its prefix cache
+  whenever the card has room, so three references with guidance 4 went from
+  167.4 s to 44.2 s. Pixels change for the same seed;
+  `MOLD_ATTN=math MOLD_CONV=im2col` on the server restores v0.32's bytes
+  exactly. `MOLD_QWEN_IMAGE21_KV_CACHE` (`auto`/`on`/`off`) controls the
+  prefix cache.
+- **Qwen Image 2.1 downloads now require accepting the Qwen Research License.**
+  Every tier, turbo included, is non-commercial; earlier releases downloaded
+  the weights without asking. Accept once in the apps' licence dialog or with
+  `mold licenses accept qwen-research`. Re-pulling an installed tier is a
+  no-op that does not ask, and pulling a turbo tier no longer leaves an empty
+  model directory behind.
+- **WebP still output works for every image model.** WebP was advertised for
+  stills but failed after the render; stills now encode as real single-frame
+  WebP (lossy colour, lossless alpha). `mold run --format webp -o x.png` is
+  reported as the still mismatch it is instead of naming APNG. Transparent
+  images are no longer hidden from the Library as "solid black", and an older
+  animated WebP no longer reads as a still in `mold library show --preview`.
+- **Transparent prints show a checkerboard** in the Library, lightbox, result
+  canvas and recent prints on web, desktop and mobile. Every reference strip
+  on web, desktop and phone now draws one numbered thumbnail per picture
+  ("Image 1", "Image 2", as the prompt addresses them) with remove, reorder
+  (drag with a mouse or pen, or the keyboard-reachable ‹ › buttons) and
+  a "Sets canvas" mark on Qwen Image 2.1's last reference. MCP
+  `generate_image` gains `reference_images`, `transparent_background` and
+  `webp`, and Discord routes `reference_1`/`reference_2` by the model's
+  reference capability. `--transparent` and MCP's `transparent_background`
+  are refused with "update the server" against an older server, which would
+  otherwise render opaque without a word.
+- **A request no GPU can ever hold is refused at once instead of waiting
+  forever.** When a render needs more memory than the largest eligible card
+  could ever admit, the refusal names what it needs and what the card has,
+  instead of leaving the job queued. Qwen Image 2.1's memory admission was
+  corrected in the same pass. Its sequential plan is priced by its largest
+  phase, VAE decode included, so `int8-conv` with a reference on a 24 GB card
+  now renders rather than queueing for memory it could never get. A 2K
+  sequential render is charged its decode peak. LoRA and turbo adapter bytes
+  are charged in every phase, and a queued job prices all its references.
+  On a 46–48 GB card the text encoder stays resident for one to three
+  references (one or two with guidance and a negative prompt), saving about
+  12 s a request.
+- **Reference images are bounded and read as upstream reads them.** A
+  reference over 16,384 px a side, 100 megapixels or a 200:1 aspect ratio is
+  refused when the request is submitted, naming its position; before, a tiny
+  PNG declaring a huge size could reach a multi-gigabyte decode. A 16-bit PNG
+  is reduced to 8 bits as Pillow does (high byte), for Qwen Image 2.1
+  references, Hunyuan3D source images and views, and MiniMax H3 endpoint and
+  reference images alike, so a nearly opaque 16-bit alpha is no longer read
+  as partly transparent. Qwen Image 2.1 references
+  are also EXIF-oriented and converted from their ICC profile to sRGB.
+- **MiniMax H3's vision mergers use exact erf GELU,** as every upstream does,
+  instead of the tanh approximation. Image-conditioned H3 renders shift
+  slightly for the same seed.
+- **Fixes found along the way.** A single `/api/generate` refusal no longer
+  carries a `requests[1]:` prefix (a real batch still names its row).
+  Stopping the server during the startup artifact warm no longer hangs. The
+  MCP server answers `initialize` with the client's protocol version when it
+  supports it. The web Create page offered the "Add-on looks" (LoRA) row for
+  models that take no LoRA. `nix develop` failed on Linux with a CUDA
+  `LICENSE` collision. Qwen Image 2.1 could never park its text encoder in
+  host RAM on Linux (it read macOS-only memory probes), so a 2K render dropped
+  the transformer instead. A host-placed text encoder no longer reports
+  "No GPU detected". INT8 ConvRot renders are now charged their
+  quantized-activation workspace at admission, so a card that cannot hold it
+  is refused up front rather than running out of memory mid-render.
+- **Mold Studio is the recommended Mac download.** Releases now also attach the
+  native macOS app under the stable name `Mold-Studio-macos-arm64.dmg`, so
+  `https://github.com/utensils/mold/releases/latest/download/Mold-Studio-macos-arm64.dmg`
+  always fetches the newest signed build. The README, the website homepage,
+  installation and desktop guides, and a new **Mold Studio for Mac** guide link
+  it first; the Tauri desktop app stays the default on Windows and Linux and is
+  now the legacy Mac download for Macs that cannot run macOS 26.
+- **Simpler 3-D creation.** Retire dedicated 3-D Studio authoring from the apps;
+  ordinary 3-D generation and scripted CLI/API mesh workflows remain available.
+- **Native Mac image viewing.** Pinch to zoom and drag to pan in Generate and
+  Library, with a Fit control. Collapse the Collections list in the sidebar;
+  the app remembers the preference.
+- **Desktop quitting.** Add an explicit Quit command on Linux and Exit on
+  Windows to the File menu.
+- **Responsive native Library bulk operations.** Native macOS Studio now shows status for Library bulk operations, sends trash/restore/permanent deletion in bounded batches, lets you stop after the current batch, and reconciles partial or uncertain results instead of restoring stale rows. Bulk trash shares one durable archive commit per server chunk; gallery reads can advance between chunks or individual restore/purge items, and disconnects cannot leave blocking filesystem work outside its publication lock.
+
 ## [0.32.0] - 2026-09-25
 
 - **Mold Studio for macOS starts its engine at launch.** This Mac's engine now starts when the app opens instead of waiting for Settings ▸ This Mac ▸ Start Engine; a new "Start the engine when Mold opens" setting turns that off. The sidebar shows This Mac as Starting… until it answers.
@@ -5982,7 +6230,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/utensils/mold/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/utensils/mold/compare/v0.30.0...v0.30.1

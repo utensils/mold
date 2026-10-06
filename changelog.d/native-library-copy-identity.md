@@ -1,1 +1,0 @@
-- Fixed native library sync regression coverage for identical prints whose embedded recipe omits archive completion provenance.
