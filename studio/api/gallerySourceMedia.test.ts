@@ -33,7 +33,7 @@ it("reuses only the first chain stage and preserves its source in a relay", asyn
     "copy.mp4",
     [first],
     {},
-    { baseUrl: "http://fixture" },
+    { baseUrl: "http://fixture", apiKey: null },
   );
   expect(request).toMatchObject({ source_image: "AQID" });
   await expect(
@@ -41,7 +41,7 @@ it("reuses only the first chain stage and preserves its source in a relay", asyn
       "copy.mp4",
       [first],
       { source_image: "chosen" },
-      { baseUrl: "http://fixture" },
+      { baseUrl: "http://fixture", apiKey: null },
     ),
   ).rejects.toThrow("already contains source_image");
 });
