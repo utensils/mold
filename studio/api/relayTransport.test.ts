@@ -186,6 +186,23 @@ it("accepts only signed objects from the pinned relay S3 bucket", () => {
       validateRelayObjectUrl(url, "https://machine.example", objectOrigin),
     ).toThrow();
 });
+it("accepts namespaced signed objects while retaining bucket and reserved-prefix checks", () => {
+  const objectOrigin =
+    "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";
+  const namespace = "a".repeat(32);
+  const signed = `${objectOrigin}/_mold/objects/${namespace}/asset?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=${"a".repeat(64)}&X-Amz-Expires=900`;
+  expect(
+    validateRelayObjectUrl(signed, "https://machine.example", objectOrigin),
+  ).toBe(signed);
+  for (const unsafe of [
+    signed.replace("123456789012", "999999999999"),
+    signed.replace(`/${namespace}/asset`, "/../../api/private"),
+    signed.replace(`/${namespace}/asset`, "/%2e%2e/%2e%2e/api/private"),
+  ])
+    expect(() =>
+      validateRelayObjectUrl(unsafe, "https://machine.example", objectOrigin),
+    ).toThrow();
+});
 it("resolves a cross-origin signed object explicitly without any API headers", async () => {
   const object_origin =
     "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com";

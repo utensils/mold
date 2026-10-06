@@ -7,6 +7,7 @@ pub mod chain_job_runner;
 pub mod chain_limits;
 mod chain_source_media;
 mod connections;
+pub use connections::ConnectionAddresses;
 mod cuda_peak;
 pub(crate) mod dir_sync;
 mod durable_admission_authority;
@@ -345,7 +346,16 @@ pub async fn run_server(
     gpu_selection: GpuSelection,
     queue_size: usize,
 ) -> Result<()> {
-    run_server_inner(bind, port, models_dir, gpu_selection, queue_size, None).await
+    run_server_inner(
+        bind,
+        port,
+        models_dir,
+        gpu_selection,
+        queue_size,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Runs the server on a socket already reserved by an embedding app. The
@@ -357,6 +367,29 @@ pub async fn run_server_with_listener(
     gpu_selection: GpuSelection,
     queue_size: usize,
     listener: std::net::TcpListener,
+) -> Result<()> {
+    run_server_with_listener_and_addresses(
+        bind,
+        port,
+        models_dir,
+        gpu_selection,
+        queue_size,
+        listener,
+        None,
+    )
+    .await
+}
+
+/// Embedded hosts may own the trusted route catalog for their server lifetime.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_server_with_listener_and_addresses(
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+    queue_size: usize,
+    listener: std::net::TcpListener,
+    connection_addresses: Option<std::sync::Arc<ConnectionAddresses>>,
 ) -> Result<()> {
     listener.set_nonblocking(true)?;
     let listener = TcpListener::from_std(listener)?;
@@ -370,6 +403,7 @@ pub async fn run_server_with_listener(
         gpu_selection,
         queue_size,
         Some(listener),
+        connection_addresses,
     )
     .await
 }
@@ -381,6 +415,7 @@ async fn run_server_inner(
     gpu_selection: GpuSelection,
     queue_size: usize,
     reserved_listener: Option<TcpListener>,
+    connection_addresses: Option<std::sync::Arc<ConnectionAddresses>>,
 ) -> Result<()> {
     // Re-arm SIG_IGN for SIGPIPE. The CLI resets it to SIG_DFL in main() for
     // clean piping of short-lived commands, but for this long-running server
@@ -806,6 +841,9 @@ async fn run_server_inner(
         state.set_generation_unavailable(reason);
         state
     };
+    if let Some(addresses) = connection_addresses {
+        state.connection_addresses = addresses;
+    }
     state.scheduled_work = scheduler::ScheduledWorkHandle::for_runtime(
         scheduled_work_tx,
         dispatch_mode,

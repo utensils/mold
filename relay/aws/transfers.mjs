@@ -1,3 +1,4 @@
+import { namespaceKey, validNamespace } from "./managed.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import {
   S3Client,
@@ -105,13 +106,23 @@ export async function uploadURL(
     { expiresIn: 900, unhoistableHeaders: new Set(["x-amz-checksum-sha256"]) },
   );
 }
-export async function prepareUpload(value, headers, sid) {
+export async function prepareUpload(value, headers, sid, namespace = "") {
+  if (namespace && !validNamespace(namespace))
+    throw new Error("Invalid namespace");
   const spec = validateUpload(value),
     credential = credentialDigest(headers),
     id = randomUUID(),
-    key = `uploads/${id}`,
+    key = `uploads/${namespace ? namespace + "/" : ""}${id}`,
     expiresAt = Math.floor(Date.now() / 1000) + 900;
-  const entry = { ...spec, credential, sid, key, state: "prepared", expiresAt };
+  const entry = {
+    ...spec,
+    credential,
+    sid,
+    namespace,
+    key,
+    state: "prepared",
+    expiresAt,
+  };
   // Bound outstanding grants independently of Lambda invocation concurrency.
   for (let attempt = 0; attempt < 32; attempt++) {
     const old = await store.get("upload-admission"),
@@ -132,7 +143,7 @@ export async function prepareUpload(value, headers, sid) {
       break;
     if (attempt === 31) throw new Error("Upload admission busy");
   }
-  await store.put(`upload#${id}`, entry);
+  await store.put(namespaceKey(`upload#${id}`, namespace), entry);
   const checksum = Buffer.from(spec.sha256, "hex").toString("base64");
   const url = await uploadURL(key, checksum);
   return {
@@ -151,25 +162,31 @@ export async function claimUpload(
   sid,
   storage = store,
   now = Math.floor(Date.now() / 1000),
+  namespace = "",
 ) {
   if (!/^[a-f0-9-]{36}$/.test(id ?? ""))
     throw new Error("Invalid upload identity");
-  const entry = await storage.get(`upload#${id}`);
+  const entry = await storage.get(namespaceKey(`upload#${id}`, namespace));
   if (
     !entry ||
     entry.state !== "prepared" ||
     entry.expiresAt <= now ||
     entry.credential !== credentialDigest(headers) ||
-    entry.sid !== sid
+    entry.sid !== sid ||
+    (entry.namespace ?? "") !== namespace
   )
     throw new Error(
       "Upload is expired, consumed or belongs to another request",
     );
   if (
-    !(await storage.cas(`upload#${id}`, entry.revision, {
-      ...entry,
-      state: "consumed",
-    }))
+    !(await storage.cas(
+      namespaceKey(`upload#${id}`, namespace),
+      entry.revision,
+      {
+        ...entry,
+        state: "consumed",
+      },
+    ))
   )
     throw new Error("Upload already consumed");
   return entry;
@@ -185,8 +202,15 @@ export async function releaseUpload(id, storage = store) {
   }
   throw new Error("Upload admission release busy");
 }
-export async function consumeUpload(id, headers, sid) {
-  const entry = await claimUpload(id, headers, sid);
+export async function consumeUpload(id, headers, sid, namespace = "") {
+  const entry = await claimUpload(
+    id,
+    headers,
+    sid,
+    store,
+    Math.floor(Date.now() / 1000),
+    namespace,
+  );
   await releaseUpload(id);
   const directory = await mkdtemp(join(tmpdir(), "mold-upload-")),
     path = join(directory, "body");
@@ -233,10 +257,19 @@ export async function consumeUpload(id, headers, sid) {
     throw error;
   }
 }
-export async function objectURL(key, expiresIn = 900) {
+export async function objectURL(key, expiresIn = 900, namespace = "") {
+  if (namespace && !validNamespace(namespace))
+    throw new Error("Invalid namespace");
+  const prefix = `_mold/objects/${namespace ? namespace + "/" : ""}`;
   if (
     typeof key !== "string" ||
-    !/^_mold\/objects\/[a-f0-9-]+$/.test(key) ||
+    !key.startsWith(prefix) ||
+    !/^[a-f0-9-]+$/.test(key.slice(prefix.length))
+  )
+    throw new Error("Foreign staged object");
+  if (
+    typeof key !== "string" ||
+    !/^_mold\/objects\/(?:[a-f0-9]{32}\/)?[a-f0-9-]+$/.test(key) ||
     expiresIn <= 0 ||
     expiresIn > 900
   )
@@ -247,11 +280,13 @@ export async function objectURL(key, expiresIn = 900) {
     { expiresIn },
   );
 }
-export async function stageObject(
-  stream,
-  headers,
-  key = `_mold/objects/${randomUUID()}`,
-) {
+export async function stageObject(stream, headers, key, namespace = "") {
+  if (namespace && !validNamespace(namespace))
+    throw new Error("Invalid namespace");
+  const prefix = `_mold/objects/${namespace ? namespace + "/" : ""}`;
+  key ??= prefix + randomUUID();
+  if (!key.startsWith(prefix) || !/^[a-f0-9-]+$/.test(key.slice(prefix.length)))
+    throw new Error("Foreign staged object");
   const created = await s3.send(
     new CreateMultipartUploadCommand({
       Bucket: bucket(),

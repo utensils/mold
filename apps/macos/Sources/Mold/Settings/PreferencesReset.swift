@@ -81,6 +81,9 @@ enum PreferencesReset {
         // Its own toggle on Settings ▸ This Mac; a reset quietly turning the
         // engine back on at launch would be a change nobody asked for.
         "engineStartsAtLaunch",
+        // Remote access is an explicit permission; General reset must preserve
+        // both the user's opt-in and their decision to stop sharing this Mac.
+        "managedRemoteAccessEnabled",
         // Playback sound is a universal choice across Generate and Library.
         "videoPlaybackMuted",
     ]

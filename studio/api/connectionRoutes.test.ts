@@ -62,6 +62,66 @@ it("proves direct routes without sending secrets and prefers LAN", async () => {
     }),
   ).toBe("http://lan.test:7680");
 });
+it.each([
+  { unavailable: [], expected: "http://192.168.1.2:7680", label: "LAN" },
+  {
+    unavailable: ["192.168.1.2"],
+    expected: "http://100.64.1.2:7680",
+    label: "Tailscale",
+  },
+  {
+    unavailable: ["192.168.1.2", "100.64.1.2"],
+    expected: "https://pair-proxy.test",
+    label: "proxy",
+  },
+])(
+  "pairing chooses $label from advertised routes without sending the token",
+  async ({ unavailable, expected }) => {
+    const secret = "short-lived-pairing-token";
+    const key = sha256(new TextEncoder().encode(secret));
+    const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(String(url));
+      expect(target.pathname).toBe("/api/connection-probe");
+      expect(new Headers(init?.headers).has("x-api-key")).toBe(false);
+      expect(init?.credentials).toBe("omit");
+      expect(init?.redirect).toBe("error");
+      expect(String(init?.body)).not.toContain(secret);
+      if (unavailable.includes(target.hostname))
+        throw new TypeError("Route unavailable");
+      const body = JSON.parse(String(init?.body));
+      expect(body.kind).toBe("pairing");
+      return new Response(
+        JSON.stringify({
+          instance_id: "pairing-instance",
+          proof: bytesToHex(
+            hmac(
+              sha256,
+              key,
+              new TextEncoder().encode(
+                `mold-connection-proof-v1\npairing\n${body.nonce}\npairing-instance`,
+              ),
+            ),
+          ),
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetch);
+    expect(
+      await selectConnectionRoute({
+        // Proxy is first to prove preference is independent of advertisement order.
+        endpoints: [
+          { url: "https://pair-proxy.test", kind: "relay" },
+          { url: "http://100.64.1.2:7680", kind: "tailscale" },
+          { url: "http://192.168.1.2:7680", kind: "lan" },
+        ],
+        expectedInstanceId: "pairing-instance",
+        secret,
+        kind: "pairing",
+        secureContext: false,
+      }),
+    ).toBe(expected);
+  },
+);
 it("rejects forged identity/proof without credential fallback", async () => {
   vi.stubGlobal(
     "fetch",

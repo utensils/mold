@@ -2,14 +2,40 @@
 
 The optional relay gives an authenticated Mold machine a normal HTTPS address
 without opening an inbound port on that machine. Direct LAN and VPN addresses
-continue to work. One gateway publishes one machine; adding another machine
-requires another gateway and address.
+continue to work when the server listens on those interfaces. The legacy gateway
+address publishes one explicitly enrolled machine. Managed enrollment gives each
+machine a separate HTTPS origin and isolated host namespace on the same gateway.
 
 The host opens outbound WebSockets to the gateway. Clients continue using the
 normal HTTP API, so streaming progress, uploads, gallery media tickets, video
 ranges and pairing work through the same URL. The gateway terminates TLS and
 can see API keys and media: use a gateway you trust. This is not end-to-end
 encryption like Zephra's application relay.
+
+## Pair a phone from the native Mac app
+
+Open **Settings ▸ Remote Access** and click **Pair your phone** in the existing
+first section. Scan the QR with the native iPhone/iPad app, Tauri mobile app, or
+iPhone Camera. The code uses the existing universal-link claim flow and expires
+quickly; errors and Retry remain in the pairing sheet.
+
+For a saved machine, the app uses its existing operator connection and advertised
+routes. Phones verify the machine without sending their credential to candidate
+addresses, prefer LAN then Tailscale, and use HTTPS proxy fallback when direct
+routes do not answer. Only actual listener addresses are advertised.
+
+For **This Mac**, that click enrolls a dedicated managed HTTPS origin and starts
+an outbound connector for the app's authenticated loopback engine. The app checks
+a fresh pairing proof through that exact origin before displaying a QR. It does
+not open an inbound listener or advertise LAN/Tailscale interfaces that its
+loopback engine does not serve. Closing the sheet keeps remote access enabled;
+**Stop Remote Access** stops the connector and withdraws the advertised route.
+Saved enrollment is reused when remote access reconnects after an app restart.
+The Mac must remain awake and running; the proxy does not supply a cloud GPU.
+
+This flow requires a deployed managed gateway, including wildcard DNS and TLS.
+An app update alone does not configure or deploy that gateway. See the managed
+gateway prerequisites below; an unconfigured service reports a retryable error.
 
 ## Connect a machine
 
@@ -57,19 +83,14 @@ unavailable; the relay does not supply a cloud GPU fallback.
 | Browser              | Open the HTTPS address. Enter this machine's API key when asked; the credential stays in this browser tab's session storage. |
 | Tauri desktop        | Add the HTTPS address in Machines and supply the normal host key or pair.                                                    |
 | Tauri iOS/Android    | Add the HTTPS address manually or scan a pairing code naming that address. Keys stay in the native credential store.         |
-| Native macOS         | Add the HTTPS address in Machines; normal remote-machine operations apply.                                                   |
+| Native macOS         | Use Settings ▸ Remote Access ▸ Pair your phone for This Mac; add independently hosted HTTPS machines in Machines.            |
 | Native iPhone/iPad   | Add or pair with the HTTPS address; keys stay in Keychain.                                                                   |
 
-When minting a pairing QR, choose the public HTTPS address as the reachable
-server URL. A QR naming localhost or a private LAN address cannot work over a
-cellular connection. Use the existing per-device pairing/revocation controls;
-the relay does not change permissions.
-
-Native macOS **This Mac** remains an app-private engine. To host remote access
-on that Mac, explicitly start authenticated `mold serve` and its connector.
-This option does not automatically expose the app's private engine. CLI-only
-headless hosts can use the GPU-free standalone `mold-relay` connector binary
-with the same `connect` arguments.
+Pairing codes carry the server's actual advertised routes, including a configured
+HTTPS proxy origin when available. A code with only localhost or LAN cannot work
+over cellular. Use the existing per-device pairing/revocation controls; the relay
+does not change permissions. CLI-only headless hosts can use the GPU-free
+standalone `mold-relay` connector binary with the same `connect` arguments.
 
 ## Lambda gateway
 
@@ -84,7 +105,8 @@ API credentials still reach and are checked by the host. Anonymous host access
 must return 401 before a connector forwards requests. API Gateway and Lambda
 terminate TLS and can see credentials and media. Enrollment and internal bridge
 tokens live in SSM SecureString, outside Terraform state. Public metrics are
-blocked. One enrolled host owns an address; another requires its own deployment.
+blocked. Each managed host owns its dedicated address; the unscoped legacy
+address remains separate.
 
 The shared clients stage requests larger than 2 MiB through private S3, with a 64 MiB relay request limit. Grants bind the original method, URL, headers,
 body checksum, host session and credential, and can be consumed once. Finite
@@ -105,8 +127,8 @@ read streams reconcile their manifest and reconnect after EOF.
 Relay generation therefore requires gallery retention: `--no-save` and
 gallery-disabled generation are refused before submission. Disconnects never
 cause automatic mutation replay or a local generation fallback after an uncertain
-admission. Native This Mac remains private unless you explicitly start an
-authenticated server and connector.
+admission. Native This Mac exposes its loopback engine only after the explicit
+managed pairing setup described above.
 
 Build and deploy reviewed runtime packages with the tooling under `scripts/relay/`.
 Inspect the complete scoped Terraform plan before applying infrastructure changes.
@@ -123,12 +145,37 @@ Use `--transport direct` on its connector. Plain WS requires the explicit
 `--allow-insecure-loopback` flag. Direct streams default to a 3,600 second
 application-byte inactivity limit, configurable with `--idle-timeout-secs`.
 
-Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
-connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
-and paired-device controls. An existing pairing learns routes from a reachable
-authenticated server and keeps one machine and key when the connection changes.
-Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
-origin. The private built-in This Mac engine remains private.
+## Managed gateway prerequisites
+
+Managed phone enrollment is disabled unless the gateway configures all three:
+`PUBLIC_ORIGIN` (trusted HTTPS root origin), `MANAGED_HOST_DOMAIN` (wildcard host
+domain), and `WS_ENDPOINT` (verified WSS connector endpoint). Native macOS calls
+`POST https://mold-link.urandom.io/_mold/relay/enroll`; that trusted origin must
+serve the deployed enrollment runtime. For the bundled native app, set
+`MANAGED_HOST_DOMAIN=mold-link.urandom.io`: it validates returned machine origins
+as `https://<host_id>.mold-link.urandom.io`. Provision wildcard DNS/TLS and API Gateway
+routing for `https://<host_id>.<MANAGED_HOST_DOMAIN>`, preserving the full host
+origin through the frontend and router. Each host ID is 32 lowercase hex digits;
+URLs have no namespace path prefix. The gateway returns the public and connector
+URLs; clients do not invent addresses.
+
+Enrollment generates a random owner bearer; authenticated renewal returns the
+same submitted bearer. The gateway stores only its SHA-256 verifier. Native macOS stores the bearer in its owner-only SecretStore.
+Renewal and deletion require that host's bearer. Initial reservations last two
+minutes. Host hello establishes a 30-day owner identity; hello and heartbeats
+maintain a separate 90-second live slot. There are 32 simultaneous slots. New
+enrollment permits five registrations per trusted source IP per hour, with a
+global burst of eight and one new admission per 30 seconds. Saved owners
+reconnect without changing identity or consuming the new-enrollment budget.
+HTTP renewal cannot hold an idle slot. Sustained live connections can still
+exhaust a finite anonymous service. The source address comes from API Gateway context, never an
+`X-Forwarded-For` header. Host connections, stream authority, staged transfers
+and media jobs are scoped to their enrolled namespace. Existing legacy connector
+credentials and the unscoped gateway address continue to work.
+
+Deploy the reviewed Mold runtime and scoped URandom infrastructure configuration
+before treating managed enrollment as available. No infrastructure deployment is
+implied by the native app or gateway source changes.
 
 ## One pairing across networks
 

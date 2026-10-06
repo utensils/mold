@@ -35,6 +35,7 @@ final class AppStores {
     let catalog: CatalogStore
     let machines: MachineStore
     let pairing: PairingStore
+    let remotePairing: RemotePairingStore
     let promptHistory: PromptHistoryStore
     let modelDefaults: ConfigStore
     let adapters: LoraStore
@@ -71,6 +72,7 @@ final class AppStores {
         drafts.restore(into: generate)
         machines = MachineStore(hosts: hosts)
         pairing = PairingStore(hosts: hosts)
+        remotePairing = RemotePairingStore(pairing: pairing)
         adapters = LoraStore(hosts: hosts)
         landedPrints = LandedPrints(hosts: hosts)
         upscales = UpscaleStore(hosts: hosts, models: models, library: library)
