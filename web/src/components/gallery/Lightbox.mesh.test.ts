@@ -137,6 +137,17 @@ afterEach(() => {
 });
 
 describe("Lightbox 3-D prints", () => {
+  it("keeps export choices open when a gallery refresh preserves source identity", async () => {
+    mockCapabilities(["gif"]);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
+    await flushPromises();
+    await wrapper.setProps({ item: { ...mesh } });
+    await flushPromises();
+    expect(wrapper.find(".video-export-scrim").exists()).toBe(true);
+  });
+
   // The exports are the point of a 3-D print. They sit on the card, visible,
   // not two clicks deep behind "More actions" — the overflow keeps only the
   // material assets and the destructive entry.

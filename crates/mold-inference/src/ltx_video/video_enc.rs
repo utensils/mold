@@ -183,6 +183,19 @@ pub fn encode_gif(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
     encode_gif_with_options(frames, fps, false, true)
 }
 
+/// GIF timing precision is 10 ms; refuse ineffective one-shot loop pauses.
+pub fn validate_gif_pause(bounce: bool, repeat_forever: bool, pause_ms: u32) -> Result<()> {
+    anyhow::ensure!(
+        pause_ms <= 5000 && pause_ms.is_multiple_of(10),
+        "pause_ms must be between 0 and 5000 in 10 ms increments"
+    );
+    anyhow::ensure!(
+        pause_ms == 0 || bounce || repeat_forever,
+        "pause_ms requires looping or bounce playback"
+    );
+    Ok(())
+}
+
 /// Encode GIF frames with export-time playback controls.
 ///
 /// `bounce` appends the interior frames in reverse order so the first and last
@@ -194,6 +207,18 @@ pub fn encode_gif_with_options(
     bounce: bool,
     repeat_forever: bool,
 ) -> Result<Vec<u8>> {
+    encode_gif_with_pause(frames, fps, bounce, repeat_forever, 0)
+}
+
+/// Encode with an extra boundary pause; zero preserves the original cadence.
+pub fn encode_gif_with_pause(
+    frames: &[RgbImage],
+    fps: u32,
+    bounce: bool,
+    repeat_forever: bool,
+    pause_ms: u32,
+) -> Result<Vec<u8>> {
+    validate_gif_pause(bounce, repeat_forever, pause_ms)?;
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
     anyhow::ensure!(fps > 0, "GIF frame rate must be greater than zero");
 
@@ -212,13 +237,16 @@ pub fn encode_gif_with_options(
             })
             .context("failed to set GIF repeat")?;
 
-        let mut write_frame = |frame_img: &RgbImage| -> Result<()> {
+        let mut write_frame = |index: usize, frame_img: &RgbImage| -> Result<()> {
             let rgba: image::RgbaImage =
                 image::DynamicImage::ImageRgb8(frame_img.clone()).into_rgba8();
             let mut pixels = rgba.into_raw();
 
             let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
-            gif_frame.delay = delay_cs;
+            let boundary = (index == frames.len() - 1
+                && (repeat_forever || (bounce && frames.len() > 1)))
+                || (index == 0 && bounce && repeat_forever);
+            gif_frame.delay = delay_cs + if boundary { (pause_ms / 10) as u16 } else { 0 };
             gif_frame.dispose = gif::DisposalMethod::Any;
 
             encoder
@@ -227,13 +255,13 @@ pub fn encode_gif_with_options(
             Ok(())
         };
 
-        for frame_img in frames {
-            write_frame(frame_img)?;
+        for (index, frame_img) in frames.iter().enumerate() {
+            write_frame(index, frame_img)?;
         }
         if bounce && frames.len() > 1 {
             let reverse_start = usize::from(repeat_forever);
-            for frame_img in frames[reverse_start..frames.len() - 1].iter().rev() {
-                write_frame(frame_img)?;
+            for index in (reverse_start..frames.len() - 1).rev() {
+                write_frame(index, &frames[index])?;
             }
         }
     }
@@ -258,6 +286,18 @@ pub fn encode_gif_rgba_with_options(
     bounce: bool,
     repeat_forever: bool,
 ) -> Result<Vec<u8>> {
+    encode_gif_rgba_with_pause(frames, fps, bounce, repeat_forever, 0)
+}
+
+/// Encode with an extra boundary pause; zero preserves the original cadence.
+pub fn encode_gif_rgba_with_pause(
+    frames: &[image::RgbaImage],
+    fps: u32,
+    bounce: bool,
+    repeat_forever: bool,
+    pause_ms: u32,
+) -> Result<Vec<u8>> {
+    validate_gif_pause(bounce, repeat_forever, pause_ms)?;
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
     anyhow::ensure!(fps > 0, "GIF frame rate must be greater than zero");
 
@@ -276,7 +316,7 @@ pub fn encode_gif_rgba_with_options(
             })
             .context("failed to set GIF repeat")?;
 
-        let mut write_frame = |frame_img: &image::RgbaImage| -> Result<()> {
+        let mut write_frame = |index: usize, frame_img: &image::RgbaImage| -> Result<()> {
             let mut pixels = frame_img.as_raw().clone();
             for pixel in pixels.as_chunks_mut::<4>().0 {
                 if pixel[3] >= ALPHA_CUTOFF {
@@ -295,7 +335,10 @@ pub fn encode_gif_rgba_with_options(
                 }
             }
             let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
-            gif_frame.delay = delay_cs;
+            let boundary = (index == frames.len() - 1
+                && (repeat_forever || (bounce && frames.len() > 1)))
+                || (index == 0 && bounce && repeat_forever);
+            gif_frame.delay = delay_cs + if boundary { (pause_ms / 10) as u16 } else { 0 };
             gif_frame.dispose = gif::DisposalMethod::Background;
 
             encoder
@@ -304,13 +347,13 @@ pub fn encode_gif_rgba_with_options(
             Ok(())
         };
 
-        for frame_img in frames {
-            write_frame(frame_img)?;
+        for (index, frame_img) in frames.iter().enumerate() {
+            write_frame(index, frame_img)?;
         }
         if bounce && frames.len() > 1 {
             let reverse_start = usize::from(repeat_forever);
-            for frame_img in frames[reverse_start..frames.len() - 1].iter().rev() {
-                write_frame(frame_img)?;
+            for index in (reverse_start..frames.len() - 1).rev() {
+                write_frame(index, &frames[index])?;
             }
         }
     }
@@ -1083,6 +1126,59 @@ mod tests {
             "one-shot bounce returns all the way to the first frame"
         );
         assert_eq!(decoded.first(), decoded.last());
+    }
+
+    fn gif_delays(bytes: Vec<u8>) -> Vec<u16> {
+        let mut decoder = gif::DecodeOptions::new()
+            .read_info(std::io::Cursor::new(bytes))
+            .unwrap();
+        let mut delays = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            delays.push(frame.delay);
+        }
+        delays
+    }
+
+    #[test]
+    fn gif_pause_changes_only_boundary_delays() {
+        let frames = test_frames(16, 16, 4);
+        assert_eq!(
+            gif_delays(encode_gif_with_pause(&frames, 10, false, true, 250).unwrap()),
+            [10, 10, 10, 35]
+        );
+        assert_eq!(
+            gif_delays(encode_gif_with_pause(&frames, 10, true, true, 250).unwrap()),
+            [35, 10, 10, 35, 10, 10]
+        );
+        assert_eq!(
+            gif_delays(encode_gif_with_pause(&frames, 10, true, false, 250).unwrap()),
+            [10, 10, 10, 35, 10, 10, 10]
+        );
+        assert_eq!(
+            encode_gif_with_pause(&frames, 12, true, true, 0).unwrap(),
+            encode_gif_with_options(&frames, 12, true, true).unwrap()
+        );
+        for (bounce, forever) in [(false, true), (true, true), (true, false)] {
+            let rgba: Vec<_> = frames
+                .iter()
+                .map(|f| image::DynamicImage::ImageRgb8(f.clone()).into_rgba8())
+                .collect();
+            assert_eq!(
+                gif_delays(encode_gif_rgba_with_pause(&rgba, 10, bounce, forever, 250).unwrap()),
+                gif_delays(encode_gif_with_pause(&frames, 10, bounce, forever, 250).unwrap())
+            );
+        }
+        assert_eq!(
+            gif_delays(encode_gif_with_pause(&frames[..1], 10, true, true, 250).unwrap()),
+            [35]
+        );
+        assert_eq!(
+            gif_delays(encode_gif_with_pause(&frames[..2], 10, true, true, 250).unwrap()),
+            [35, 35]
+        );
+        assert!(encode_gif_with_pause(&frames, 10, false, false, 250).is_err());
+        assert!(encode_gif_with_pause(&frames, 10, true, true, 11).is_err());
+        assert!(encode_gif_with_pause(&frames, 10, true, true, 5010).is_err());
     }
 
     #[test]

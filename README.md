@@ -372,3 +372,13 @@ on tap, with state-aware per-job controls. Generate exposes searchable per-machi
 Prompt History with prompt-only recall.
 
 Native iOS and macOS generation controls support ordered MiniMax H3 image/video/audio references, Hunyuan3D named views, and Wan/MiniMax boundary frames. See the [native reference parity audit](docs/plans/native-reference-parity.md) and native app guides for limits and media formats.
+
+### Media export controls
+
+Native iOS and Tauri offer clip GIF exports with Loop/Bounce, Forever/Once,
+size, frame rate and, on supporting hosts, an extra boundary pause. Set the
+pause to **0 ms** to add no hold to a continuous source loop. GIF frame timing
+remains FPS-derived; a pause does not repair a discontinuity in the source.
+Native iOS also exports host-advertised mesh formats, turntables and texture
+sidecars to Share, Files or its Mold folder, with GIF delivery to Photos.
+See [native export coverage](apps/ios/docs/MEDIA-EXPORT-PARITY.md).

@@ -1,3 +1,4 @@
+import CryptoKit
 import CoreGraphics
 import ImageIO
 import Foundation
@@ -8,6 +9,10 @@ import Synchronization
 /// profiles and cannot generate or download. Optional collection and model-memory mutations
 /// update only the fixture’s own in-memory state.
 final class FixtureMachine: @unchecked Sendable {
+    let exportFixture: Bool
+    private let unsupportedExportFormats: Bool
+    private let capturedExports = Mutex<[Data]>([])
+    var exportRequests: [Data] { capturedExports.withLock { $0 } }
     private let downloadedModels = Mutex<[String]>([])
     var installedRequests: [String] { downloadedModels.withLock { $0 } }
     private let listener: NWListener
@@ -34,7 +39,9 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+        self.exportFixture = exportFixture
+        self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
         self.referenceFixture = referenceFixture
         self.removePrintOnFavorite = removePrintOnFavorite
@@ -69,9 +76,17 @@ final class FixtureMachine: @unchecked Sendable {
              "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
              "metadata": retainedMediaFixture ? ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)", "model": "flux-dev:q4"] : ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)"]] as [String: Any]
         })
+        if exportFixture, var rows = try JSONSerialization.jsonObject(with: gallery) as? [[String: Any]] {
+            for index in rows.indices where index % 3 == 2 {
+                let bytes = Self.exportImage(format: "png")
+                rows[index]["assets"] = [["asset_id": "base-color", "role": "base_color", "display_name": "base-color.png", "media_type": "image/png", "size_bytes": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]]
+            }
+            gallery = try JSONSerialization.data(withJSONObject: rows)
+        }
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: parameters)
+        if exportFixture { _ = try JSONSerialization.jsonObject(with: response("/api/capabilities")) }
     }
 
     func start() async throws -> UInt16 {
@@ -107,6 +122,9 @@ final class FixtureMachine: @unchecked Sendable {
             }
         }
     }
+
+    private var refuseExport = false
+    func refuseNextExport() { queue.sync { refuseExport = true } }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
@@ -171,12 +189,17 @@ final class FixtureMachine: @unchecked Sendable {
             }
             let captureGeneration = referenceFixture && request.first == "POST" && path == "/api/generation-batches"
             if captureGeneration { capturedGenerations.withLock { $0.append(Data(bodyText.utf8)) } }
-            let allowed = libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let export = exportFixture && request.first == "POST" && path.hasPrefix("/api/gallery/export/")
+            if export { capturedExports.withLock { $0.append(Data(bodyText.utf8)) } }
+            let exportRequest = (try? JSONSerialization.jsonObject(with: Data(bodyText.utf8))) as? [String: Any] ?? [:]
+            let allowed = export || libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
             let isTrashListing = libraryMutations && path == "/api/gallery" && String(request[1]).contains("view=trash")
-            let body = libraryMutation ? Data("{}".utf8) : isTrashListing ? Data("[]".utf8) : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
-            let status = allowed ? "200 OK" : "405 Method Not Allowed"
-            let contentType = path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
+            let refusedExport = export && refuseExport
+            if refusedExport { refuseExport = false }
+            let body = refusedExport ? Data(#"{"error":"Fixture refused this export"}"#.utf8) : export ? exportResponse(exportRequest) : libraryMutation ? Data("{}".utf8) : isTrashListing ? Data("[]".utf8) : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let status = refusedExport ? "500 Internal Server Error" : allowed ? "200 OK" : "405 Method Not Allowed"
+            let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
                 ? "image/png" : "application/json"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             reply.append(body)
@@ -227,8 +250,13 @@ final class FixtureMachine: @unchecked Sendable {
         if path.hasPrefix("/api/gallery/image/fixture-"), path.hasSuffix(".mp4") {
             return Data(base64Encoded: "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMxbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAlx0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAACAAAAAgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAHUbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABf21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAT9zdGJsAAAAv3N0c2QAAAAAAAAAAQAAAK9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAACAAIABIAAAASAAAAAAAAAABFExhdmM2My4xLjEwMSBsaWJ4MjY0AAAAAAAAAAAAAAAAGP//AAAANWF2Y0MBZAAK/+EAGGdkAAqs2UlsBEAAAAMAQAAAAwEDxIllgAEABmjr48siwP34+AAAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAAAWeAAAAAAAAAAYc3R0cwAAAAAAAAABAAAAAgAAIAAAAAAUc3RzcwAAAAAAAAABAAAAAQAAABxzdHNjAAAAAAAAAAEAAAABAAAAAgAAAAEAAAAcc3RzegAAAAAAAAAAAAAAAgAAAsIAAAANAAAAFHN0Y28AAAAAAAAAAQAAA2EAAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYzLjEuMTAxAAAACGZyZWUAAALXbWRhdAAAAp8GBf//m9xF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjUgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MiBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAABtliIQAFP/+7Np+BTcMVvn10yG94AC3K4+Aln0AAAAJQZohbEEv/rXA")!
         }
+        if exportFixture, path.hasPrefix("/api/gallery/image/"), path.hasSuffix(".glb") { return Self.fixtureFile("export-object.glb") }
+        if exportFixture, path.hasPrefix("/api/gallery/assets/") { return Self.exportImage(format: "png") }
         let json: String
         switch path {
+        case "/api/gallery/export-options":
+            if unsupportedExportFormats { return Data(#"{"formats":["glb","future-animation"]}"#.utf8) }
+            json = exportFixture ? #"{"formats":["gif","apng"],"gif_playback":["loop","bounce"],"gif_repeat":["forever","once"],"gif_pause":{"min":0,"max":5000,"step":10,"default":0}}"# : #"{"formats":["gif"]}"#
         case "/api/gallery/source-media/fixture-0.png":
             json = retainedMediaFixture
                 ? #"{"availability":"available","members":[{"member_id":"fixture-source","role":"source_image","display_name":"Original.png","size_bytes":68}]}"#
@@ -243,6 +271,7 @@ final class FixtureMachine: @unchecked Sendable {
             })
         case "/api/status": json = queueControls ? #"{"version":"0.32.0","busy":false,"uptime_secs":1,"instance_id":"queue-fixture"}"# : #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#
         case "/api/capabilities":
+            if exportFixture { return Data(#"{"max_batch_outputs":4,"mesh":{"generation":true,"formats":["glb"],"export_formats":["glb","obj","zip","stl","ply","gif","apng"],"export_geometry":{"size_mm":{"min":1,"max":10000,"default":100},"up_axes":["y","z"],"origins":["center","floor"],"defaults":{"obj":{"up_axis":"y","origin":"floor"},"stl":{"size_mm":100,"up_axis":"z","origin":"floor"},"ply":{"size_mm":100,"up_axis":"z","origin":"floor"}}}}}"#.utf8) }
             if queueControls { return Data(#"{"max_batch_outputs":4,"queue":{"can_pause_job":true,"cooperative_cancellation":true}}"#.utf8) }
             if libraryMutations { return Data(#"{"max_batch_outputs":4,"gallery":{"organize":true,"bulk_mutations":true,"trash":{"enabled":true}}}"#.utf8) }
             json = collectionFixture

@@ -520,6 +520,61 @@ describe("MobileGalleryViewer", () => {
     );
   });
 
+  it("saves a zero-pause video to the native Mold folder with timing in its reuse key", async () => {
+    apiJsonTo.mockResolvedValue({
+      formats: ["gif"],
+      gif_pause: { min: 0, max: 5000, step: 10, default: 0 },
+    });
+    invoke.mockResolvedValue({ label: "Files ▸ Mold ▸ loop.gif" });
+    const view = mountViewer({ ...image, filename: "loop.mp4", format: "mp4" });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    await view.get('input[name="export-destination"][value="folder"]').setValue(true);
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith(
+      "save_export_to_mold_folder",
+      expect.objectContaining({
+        request: expect.objectContaining({ pause_ms: 0 }),
+        reuseKey: expect.stringContaining('"pause_ms":0'),
+      }),
+    );
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toContain("Files ▸ Mold");
+  });
+
+  it("accepts export capabilities across an equivalent host target refresh", async () => {
+    let finish!: (caps: unknown) => void;
+    apiJsonTo.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const view = mountViewer({ ...image, filename: "loop.mp4", format: "mp4" });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await view.setProps({ target: { ...target } });
+    finish({ formats: ["gif"], gif_pause: { min: 0, max: 5000, step: 10, default: 0 } });
+    await flushPromises();
+    expect(view.find("[data-test='export-pause']").exists()).toBe(true);
+  });
+
+  it("discards late export capabilities when the owning print changes", async () => {
+    let finish!: (caps: unknown) => void;
+    apiJsonTo.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const view = mountViewer({ ...image, filename: "old.mp4", format: "mp4" });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await view.setProps({ item: { ...image, filename: "new.mp4", format: "mp4" } });
+    finish({ formats: ["gif"], gif_pause: { min: 0, max: 5000, step: 10, default: 0 } });
+    await flushPromises();
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+  });
+
   it("opens the native Android share sheet after the remote export completes", async () => {
     isNativeIOSRuntime.mockReturnValue(false);
     isNativeAndroidRuntime.mockReturnValue(true);
@@ -1872,7 +1927,7 @@ describe("MobileGalleryViewer mesh export", () => {
     await flushPromises();
     // The formats offered are the host's advertised ANIMATED ones only; the
     // video-only `/api/gallery/export-options` probe never runs for a mesh.
-    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery/export-options");
     expect(
       view
         .findAll("[data-test='video-export-dialog'] input[name='export-format']")
@@ -1925,10 +1980,17 @@ describe("MobileGalleryViewer mesh export", () => {
     expect(invoke).toHaveBeenCalledWith("save_export_to_mold_folder", {
       url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
       apiKey: "secret",
-      request: { format: "gif", playback: "loop", repeat: "forever", max_dimension: 720, fps: 12 },
+      request: {
+        format: "gif",
+        playback: "loop",
+        repeat: "forever",
+        max_dimension: 512,
+        fps: 10,
+        frames: 36,
+      },
       filename: "armchair 01.gif",
       reuseKey:
-        'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
+        'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":512,"fps":10,"frames":36}',
     });
     expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
     expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
@@ -2122,8 +2184,8 @@ describe("MobileGalleryViewer mesh export", () => {
     });
   });
 
-  /** A clip's export sheet is unchanged: video exports have no Mold folder. */
-  it("offers no destination choice for a video clip's export", async () => {
+  /** Clips use the same native delivery choices as turntables. */
+  it("offers the Mold folder destination for a video clip's export", async () => {
     const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
     await flushPromises();
 
@@ -2132,7 +2194,7 @@ describe("MobileGalleryViewer mesh export", () => {
 
     expect(
       view.find("[data-test='video-export-dialog'] input[name='export-destination']").exists(),
-    ).toBe(false);
+    ).toBe(true);
     expect(view.find("[data-test='gallery-viewer-mesh-save']").exists()).toBe(false);
   });
 });

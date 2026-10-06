@@ -3,6 +3,7 @@ import Foundation
 /// One finished piece of work on one host.
 public struct GalleryPrint: Codable, Hashable, Sendable {
     public let filename: String
+    public var assets: [GenerationAsset]? = nil
     public let metadata: OutputMetadata
     /// Unix seconds.
     public let timestamp: UInt64
@@ -41,7 +42,7 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case filename, metadata, timestamp, format, sizeBytes, mediaVersion
+        case filename, assets, metadata, timestamp, format, sizeBytes, mediaVersion
         case title, tags, favorite, collections, trashedAt, purgeAt, metadataSynthetic
     }
 
@@ -121,6 +122,7 @@ public extension GalleryPrint {
         let row = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             filename: try SafeFilename.validated(row.decode(String.self, forKey: .filename)),
+            assets: try row.decodeIfPresent([GenerationAsset].self, forKey: .assets),
             metadata: try row.decode(OutputMetadata.self, forKey: .metadata),
             timestamp: try row.decode(UInt64.self, forKey: .timestamp),
             format: try row.decodeIfPresent(String.self, forKey: .format),

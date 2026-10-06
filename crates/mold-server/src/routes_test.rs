@@ -16800,6 +16800,84 @@ mod tests {
         assert_eq!(&bytes[..6], b"GIF89a");
     }
 
+    #[tokio::test]
+    async fn gallery_video_export_pause_contract_and_mesh_parity() {
+        use image::AnimationDecoder;
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        let (app, _dir) =
+            gallery_export_app(&[("loop.mp4", mp4), ("object.glb", gallery_glb_fixture())]);
+        let options = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/gallery/export-options")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            options["gif_pause"],
+            serde_json::json!({"min":0,"max":5000,"step":10,"default":0})
+        );
+        for file in ["loop.mp4", "object.glb"] {
+            let mut encoded = Vec::new();
+            for pause in [None, Some(0), Some(250)] {
+                let mut body = serde_json::json!({"format":"gif","playback":"bounce","repeat":"forever","max_dimension":240,"fps":10,"frames":8});
+                if let Some(pause) = pause {
+                    body["pause_ms"] = pause.into();
+                }
+                let reply = export_gallery_file_with(&app, file, body).await;
+                assert_eq!(reply.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(reply.into_body(), 8 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&bytes))
+                    .unwrap()
+                    .into_frames()
+                    .collect_frames()
+                    .unwrap();
+                encoded.push(frames);
+            }
+            for (omitted, zero) in encoded[0].iter().zip(&encoded[1]) {
+                assert_eq!(omitted.buffer(), zero.buffer());
+                assert_eq!(omitted.delay(), zero.delay());
+            }
+            assert_eq!(encoded[0].len(), encoded[1].len());
+            assert_eq!(encoded[1].len(), encoded[2].len());
+            for (i, (plain, paused)) in encoded[1].iter().zip(&encoded[2]).enumerate() {
+                assert_eq!(plain.buffer(), paused.buffer());
+                let extra = paused.delay().numer_denom_ms().0 - plain.delay().numer_denom_ms().0;
+                assert_eq!(
+                    extra,
+                    if i == 0 || i == encoded[1].len() / 2 {
+                        250
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+        for body in [
+            serde_json::json!({"format":"gif","pause_ms":11}),
+            serde_json::json!({"format":"gif","pause_ms":5010}),
+            serde_json::json!({"format":"gif","pause_ms":250,"repeat":"once"}),
+            serde_json::json!({"format":"apng","pause_ms":0}),
+            serde_json::json!({"format":"obj","pause_ms":0}),
+        ] {
+            assert_eq!(
+                export_gallery_file_with(&app, "object.glb", body)
+                    .await
+                    .status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+    }
+
     /// A two-triangle GLB written straight into the output directory, so the
     /// export tests exercise the real reader and the real writers without
     /// running a 3-D model.

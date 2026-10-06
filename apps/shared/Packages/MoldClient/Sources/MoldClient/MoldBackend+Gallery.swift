@@ -21,6 +21,8 @@ public protocol MoldGalleryBackend: Sendable {
     func mediaFile(_ filename: String, trashed: Bool) async throws -> URL
     /// The host's rendered poster for a print, at its own size.
     func thumbnail(_ filename: String, size: Int, trashed: Bool) async throws -> Data
+    func generationAsset(_ filename: String, assetID: String) async throws -> Data
+    func export(_ filename: String, request: VideoExportRequest) async throws -> Data
     func exportOptions() async throws -> ExportOptions
     /// Converts on the machine that holds the print, so the app needs no
     /// decoder for every container mold can write.

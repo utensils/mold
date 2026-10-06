@@ -115,3 +115,9 @@ Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
 in anonymous route proofs. Plain HTTP still requires a trusted network.
+
+Gallery GUI exports on native iOS, Tauri and web support an optional GIF extra
+boundary pause through `pause_ms`; inspect the holding host's
+`/api/gallery/export-options` `gif_pause` advertisement first. Zero adds no
+pause while preserving FPS. This is an export API/GUI control, not a generation
+setting or a new CLI flag. Non-GIF requests omit it.

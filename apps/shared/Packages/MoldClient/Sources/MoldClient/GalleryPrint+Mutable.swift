@@ -27,7 +27,7 @@ public extension GalleryPrint {
 
         public func build() -> GalleryPrint {
             GalleryPrint(
-                filename: base.filename, metadata: base.metadata, timestamp: base.timestamp,
+                filename: base.filename, assets: base.assets, metadata: base.metadata, timestamp: base.timestamp,
                 format: base.format, sizeBytes: base.sizeBytes, mediaVersion: base.mediaVersion,
                 title: title, tags: tags, favorite: favorite, collections: collections,
                 trashedAt: base.trashedAt, purgeAt: base.purgeAt,

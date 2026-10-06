@@ -882,12 +882,13 @@ for path in Path(sys.argv[1]).parents[2].glob('apps/ios/Tests/CompanionUITests/*
 suites = re.findall(r'classes: ([A-Za-z0-9_ ]+)', native)
 assert Counter(name for suite in suites for name in suite.split()) == Counter(classes), 'audit shard coverage drifted'
 suite_names = re.findall(r'          - name: (\w+)', native)
-assert len(suites) == 4 and len(suite_names) == 4
+assert len(suites) == 5 and len(suite_names) == 5
 assert dict(zip(suite_names, (suite.split() for suite in suites))) == {
     'app': ['GenerationInteractionTests', 'PopulatedGenerationTests', 'ShellAccessibilityTests'],
     'references': ['ReferenceParityTests'],
     'library': ['HiddenCollectionTests', 'LibraryCollectionPickerTests', 'LibrarySelectionTests', 'LibraryViewerTests', 'NotificationTapTests'],
     'library_interactions': ['LibraryLongPressTests'],
+    'media_exports': ['MediaExportUITests'],
 }, 'audit suite grouping drifted'
 check, audit = native.split('\n  audit:\n', 1)
 assert 'needs: changes' in audit

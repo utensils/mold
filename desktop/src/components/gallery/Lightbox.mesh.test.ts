@@ -270,6 +270,24 @@ describe("Lightbox — mesh exports", () => {
     expect(options).toEqual({ format: "obj" });
   });
 
+  it("closes options and ignores a late timing probe when the holding host changes", async () => {
+    let finish!: (caps: unknown) => void;
+    apiJsonTo.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const wrapper = mountMesh(["gif"]);
+    await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
+    await flushPromises();
+    await wrapper.setProps({ target: { baseUrl: "http://other-host", apiKey: "other-key" } });
+    finish({ gif_pause: { min: 0, max: 5000, step: 10, default: 0 } });
+    await flushPromises();
+    expect(wrapper.findComponent(VideoExportDialog).props("open")).toBe(false);
+    expect(wrapper.findComponent(VideoExportDialog).props("pauseControl")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("opens the shared export sheet for an animated turntable", async () => {
     const wrapper = mountMesh(["obj", "gif", "webp"]);
     expect(wrapper.findComponent(VideoExportDialog).props("open")).toBe(false);
@@ -279,8 +297,8 @@ describe("Lightbox — mesh exports", () => {
     expect(dialog.props("open")).toBe(true);
     // Only the containers this host advertises — the sheet never invents one.
     expect(dialog.props("formats")).toEqual(["gif", "webp"]);
-    // And no capability probe: the host already told us on connect.
-    expect(apiJsonTo).not.toHaveBeenCalled();
+    // Formats remain mesh-authoritative; timing is additive on the export options route.
+    expect(apiJsonTo).toHaveBeenCalledWith(expect.anything(), "/api/gallery/export-options");
 
     dialog.vm.$emit("export", {
       format: "gif",

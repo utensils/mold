@@ -98,3 +98,24 @@ describe("video export wire helpers", () => {
     ).resolves.toBe("cancelled");
   });
 });
+
+import { validGifPause, turntableFrameLimit } from "./videoExport";
+describe("export timing capability validation", () => {
+  it("keeps explicit zero and refuses malformed advertisements", () => {
+    expect(validGifPause({ min: 0, max: 5000, step: 10, default: 0 })).toBe(
+      true,
+    );
+    expect(validGifPause(undefined)).toBe(false);
+    expect(validGifPause({ min: 0, max: 5000, step: 0, default: 0 })).toBe(
+      false,
+    );
+    expect(validGifPause({ min: 10, max: 0, step: 10, default: 0 })).toBe(
+      false,
+    );
+  });
+  it("shares the mesh frame buffer budget including transparency", () => {
+    expect(turntableFrameLimit(2048, false)).toBe(21);
+    expect(turntableFrameLimit(2048, true)).toBe(16);
+    expect(turntableFrameLimit(512, true)).toBe(180);
+  });
+});
