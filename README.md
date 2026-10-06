@@ -293,7 +293,7 @@ any referencing library output exists, including in the trash. Matching retained
 input sets from newly completed jobs share storage while keeping per-job
 provenance. Native Mac and
 desktop library copies also retain those sources on supported destinations.
-Native Mac mirrors accept missing archive-only job IDs and generation durations, and a short version matching the same version with a build suffix. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
+Native Mac mirrors accept missing archive-only job IDs and generation durations, a short version matching the same version with a build suffix, and an alpha-channel fact derived from identical output bytes when absent on the source. The same compatibility check compares the gallery listing with its stable source archive, so completion bookkeeping does not falsely report a changed print. When an older archive omits scheduler or transparency settings, the source output is downloaded and its digest verified before its embedded recipe can corroborate those fields. Output bytes and all generation settings must still match; conflicting recorded provenance is refused. Retrying Sync All repairs retained inputs on compatible existing copies without duplicating their outputs.
 
 Native Mac shipping builds include the reviewed Metal H3 runtime. Remote generation follows the selected host’s capabilities. Reused native Mac references show bounded previews and survive ordinary control edits and repeated submissions; relaunch verifies their byte-free origin locator before enabling Generate.
 
