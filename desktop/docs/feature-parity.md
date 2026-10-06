@@ -489,3 +489,16 @@ further visual refinements and physical-device acceptance remain tracked in
 intentionally absent.
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
+
+### GIF pause and native iOS media delivery
+
+The shared animation sheet and native iOS offer a capability-gated **Pause
+between loops** / **Pause at turns**. `pause_ms` is 0–5000 in 10 ms increments,
+default 0: extra dwell, never a zero frame delay. Repeating loops hold their
+last frame; bounce holds both turn endpoints when repeating and only its far
+endpoint when played once. Loop/Once has no pause control. APNG/WebP omit it.
+Mesh turntables use their own size/FPS presets and expose views within the
+256 MiB RGB/RGBA budget. Tauri phone clip exports offer Share and Mold-folder
+destinations, as turntables already did. Native iOS adds the advertised mesh
+formats, geometry controls, turntables, originals and texture assets, with
+Share/Files/Mold-folder delivery and conservative GIF-to-Photos support.

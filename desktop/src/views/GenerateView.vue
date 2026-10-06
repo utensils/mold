@@ -2343,9 +2343,12 @@ function canvasMenu(): MenuEntry[] {
   ];
 }
 
+let videoExportProbe = 0;
 async function openGeneratedVideoExport(candidate: Job): Promise<void> {
+  const probe = ++videoExportProbe;
   if (!candidate.result?.filename) return;
   videoExportJob.value = candidate;
+  videoExportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
   videoExportError.value = "";
   const target = generation.targetForJob(candidate.clientId);
   if (!target) {
@@ -2354,11 +2357,11 @@ async function openGeneratedVideoExport(candidate: Job): Promise<void> {
   }
   try {
     const { apiJsonTo } = await import("../lib/api/client");
-    videoExportCapabilities.value = await apiJsonTo<VideoExportCapabilities>(
-      target,
-      "/api/gallery/export-options",
-    );
+    const caps = await apiJsonTo<VideoExportCapabilities>(target, "/api/gallery/export-options");
+    if (probe !== videoExportProbe || videoExportJob.value?.clientId !== candidate.clientId) return;
+    videoExportCapabilities.value = caps;
   } catch (error) {
+    if (probe !== videoExportProbe || videoExportJob.value?.clientId !== candidate.clientId) return;
     videoExportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
     videoExportError.value = error instanceof Error ? error.message : String(error);
   }
@@ -4882,6 +4885,7 @@ onBeforeUnmount(() => {
       :open="true"
       :filename="videoExportJob.result.filename"
       :formats="videoExportCapabilities.formats"
+      :pause-control="videoExportCapabilities.gif_pause"
       :busy="videoExportBusy"
       :error="videoExportError"
       @close="videoExportJob = null"

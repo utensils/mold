@@ -600,3 +600,165 @@ test("anonymous connection proof rejects malformed oversized and credential-bear
   }
   assert.equal(calls, 0);
 });
+
+test("managed frontend routes via trusted origin; media and workers cannot cross namespaces", async () => {
+  const { ROSTER } = await import("../managed.mjs");
+  const a = "a".repeat(32),
+    b = "b".repeat(32),
+    id = "00000000-0000-4000-8000-000000000000",
+    headers = { "x-api-key": "fixture" };
+  const { credentialDigest } = await import("../transfers.mjs");
+  const expiresAt = Math.floor(Date.now() / 1000) + 1000;
+  const rows = new Map([
+    [ROSTER, { hosts: { [a]: { expiresAt }, [b]: { expiresAt } } }],
+    [`managed-owner#${a}`, { established: true, expiresAt }],
+    [`managed-owner#${b}`, { established: true, expiresAt }],
+    [
+      `media#${id}#tenant#${a}`,
+      {
+        state: "pending",
+        revision: 1,
+        namespace: a,
+        sid: "same",
+        credential: credentialDigest(headers),
+        expiresAt,
+      },
+    ],
+  ]);
+  let calls = 0;
+  const namespaces = [];
+  const f = createFrontend({
+    managed: {
+      domain: "phones.example.com",
+      origin: "https://link.example.com",
+      relayURL: "wss://ws.example.com/live",
+    },
+    store: {
+      get: async (k) => rows.get(k),
+      cas: async () => {
+        calls++;
+        return true;
+      },
+      put: async () => {},
+    },
+    request: async (request) => {
+      calls++;
+      namespaces.push(request.namespace);
+      return {
+        response: response("ok", { "content-length": "2" }),
+        sid: "same",
+        close() {},
+      };
+    },
+  });
+  const scoped = (path, ns, extra = {}) => ({
+    ...event(path, "GET", "", headers),
+    requestContext: {
+      domainName: ns + ".phones.example.com",
+      identity: { sourceIp: "192.0.2.1" },
+    },
+    ...extra,
+  });
+  let out = writer();
+  await f(
+    scoped("/api/status", a, {
+      headers: {
+        ...headers,
+        host: b + ".phones.example.com",
+        "x-mold-relay-host": b,
+      },
+    }),
+    out,
+  );
+  assert.equal(out.status, 200);
+  assert.deepEqual(namespaces, [a]);
+  out = writer();
+  await f(scoped("/_mold/relay/media/" + id, b), out);
+  assert.equal(out.status, 503);
+  out = writer();
+  await f(
+    {
+      kind: "stage",
+      id,
+      sid: "same",
+      namespace: b,
+      request: { namespace: a, path: "/api/gallery/image/a", headers },
+    },
+    out,
+  );
+  assert.equal(calls, 1);
+  out = writer();
+  await f(scoped("/api/status", "c".repeat(32)), out);
+  assert.equal(out.status, 503);
+  assert.equal(calls, 1);
+});
+
+test("frontend exposes central enrollment without engine credentials and prevents tenant enrollment", async () => {
+  const rows = new Map();
+  const storage = {
+    get: async (k) => structuredClone(rows.get(k)),
+    cas: async (k, r, v) => {
+      if ((rows.get(k)?.revision ?? 0) !== r) return false;
+      rows.set(k, { ...structuredClone(v), revision: r + 1 });
+      return true;
+    },
+  };
+  const managed = {
+    domain: "phones.example.com",
+    origin: "https://link.example.com",
+    relayURL: "wss://ws.example.com/live",
+  };
+  const f = createFrontend({
+    managed,
+    store: storage,
+    request: async () => {
+      throw new Error("must not forward enrollment");
+    },
+  });
+  const e = {
+    ...event("/_mold/relay/enroll", "POST"),
+    requestContext: {
+      domainName: "link.example.com",
+      identity: { sourceIp: "192.0.2.1" },
+    },
+  };
+  let out = writer();
+  await f(e, out);
+  assert.equal(out.status, 201);
+  const record = JSON.parse(out.value());
+  out = writer();
+  await f(
+    {
+      ...e,
+      path: "/_mold/relay/enroll/" + record.host_id,
+      headers: { authorization: "Bearer " + record.token },
+    },
+    out,
+  );
+  assert.equal(out.status, 200);
+  assert.equal(JSON.parse(out.value()).token, record.token);
+  out = writer();
+  await f(
+    {
+      ...e,
+      requestContext: {
+        ...e.requestContext,
+        domainName: record.host_id + "." + managed.domain,
+      },
+    },
+    out,
+  );
+  assert.equal(out.status, 404);
+  out = writer();
+  await f(
+    {
+      ...e,
+      httpMethod: "DELETE",
+      path: "/_mold/relay/enroll/" + record.host_id,
+      headers: { authorization: "Bearer " + record.token },
+    },
+    out,
+  );
+  assert.equal(out.status, 204);
+  assert.equal(out.value(), "");
+});

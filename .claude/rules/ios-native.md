@@ -54,7 +54,7 @@ paths:
 
 **Live Activity layout.** Keep the Lock Screen card within 160 pt including padding; `ActivityCard` offers a compact fallback before clipping status or Stop. The step figure and machine name are separate labels (strip only the exact legacy machine suffix in `ActivityCardContent`, without changing the ActivityKit wire payload). Preserve the stale refresh message, terminal print deep link, and 44 pt Stop target. `--live-activity-fixture` is Debug-only UAT, never a render or a distribution feature.
 
-**UI test reports.** `make uitest` makes one full pass, then retries only identified failed methods once in a fresh `xcodebuild` process. Read public `xcresulttool get test-results tests` JSON; incomplete/unsupported failures never fall back to rerunning a complete target. Before accepting a retry, require exactly every requested method to appear as Passed in its result bundle. Preserve original and retry logs/result bundles under `build/UITestResults`, uploaded even on failure. CI partitions all XCTestCase classes into four groups (app, references, Library and Library interactions), each in light and dark; keep GenerationInteractionTests and PopulatedGenerationTests with ShellAccessibilityTests because Shell audits use the persisted machine fixture. Local `make uitest` defaults to the complete target and both appearances. The Git audit classifier only skips app audits for explicit Widget Swift/inert documentation/static routing or branding paths. App/shared/UI-test/build inputs, unknown paths, dispatch, and unavailable or stale-base diffs require full audits. The classifier job must succeed and explicitly emit `audit=false` to skip; classifier failure keeps the workflow red and runs all audits. Lint/unit/shared-package checks always run and compile Widgets. Widget-only changes require separate Lock Screen/Dynamic Island appearance UAT because app audits do not render extensions. The routing contract checks class coverage, while `scripts/tests/ios-uitest-runner.sh` and `scripts/tests/ios-uitest-retry.py` exercise bounded retries, exact selections, and failure propagation.
+**UI test reports.** `make uitest` makes one full pass, then retries only identified failed methods once in a fresh `xcodebuild` process. Read public `xcresulttool get test-results tests` JSON; incomplete/unsupported failures never fall back to rerunning a complete target. Before accepting a retry, require exactly every requested method to appear as Passed in its result bundle. Preserve original and retry logs/result bundles under `build/UITestResults`, uploaded even on failure. CI partitions all XCTestCase classes into five groups (app, references, Library, Library interactions and media exports), each in light and dark; keep GenerationInteractionTests and PopulatedGenerationTests with ShellAccessibilityTests because Shell audits use the persisted machine fixture. Local `make uitest` defaults to the complete target and both appearances. The Git audit classifier only skips app audits for explicit Widget Swift/inert documentation/static routing or branding paths. App/shared/UI-test/build inputs, unknown paths, dispatch, and unavailable or stale-base diffs require full audits. The classifier job must succeed and explicitly emit `audit=false` to skip; classifier failure keeps the workflow red and runs all audits. Lint/unit/shared-package checks always run and compile Widgets. Widget-only changes require separate Lock Screen/Dynamic Island appearance UAT because app audits do not render extensions. The routing contract checks class coverage, while `scripts/tests/ios-uitest-runner.sh` and `scripts/tests/ios-uitest-retry.py` exercise bounded retries, exact selections, and failure propagation.
 
 **Library selection and media filters.** Hide the presenting tab chrome while the Collections modal is open and restore automatic visibility on dismissal; this keeps iPad modal layout stable during Dynamic Type audits without dropping audit types. A one-finger horizontal start in Select mode acquires a UIKit range-selection pan; vertical starts remain native scrolling/refresh. Apply a baseline range, choosing select/deselect from the start tile, so reversal restores untouched selections. Cancel edge-scroll work on end, disable and coordinator destruction. `LibraryMediaFilter` in MoldClient applies the same kind tokens for both native apps without dropping other search tokens. The Mac toolbar offers the filter and preserves Command/Shift selection and external media drags; visible pointer selections must not recenter the grid.
 
@@ -105,3 +105,44 @@ errors. Refresh Settings/scanning/discovery after activation. See
 `apps/ios/docs/PERMISSIONS.md` for the audit and hardware validation boundary.
 
 **macOS retained recipe recall.** Mac typed-reference reuse is scoped to unchanged media and pipeline, with explicit model/recipe barriers; ordinary prompt/shape/seed edits and repeated admissions keep the visible attachment. Legacy hidden roles keep whole-draft fencing. Persist only `SavedReuse` provenance/origin identities, never bytes or scoped handles. Cold launch blocks admission until instance, archive, output and reference facts are freshly verified. Reset/explicit discard supersede recall; navigation and informational notice dismissal do not. Previews use the authenticated bounded gallery-member thumbnail route; older-host fallback is limited to small stills with a verified digest. Partial retained slot edits fail closed until originals are reattached.
+
+**Export parity.** `MediaExportSession` captures the displayed print copy; generation results promote their rendering-host copy before opening actions. Every capability read, conversion and sidecar download uses that captured identity. Video request fields live in MoldClient; GIF `pause_ms` is extra boundary dwell and explicit zero is retained only when `gif_pause` is advertised and valid. Park/omit pause for non-GIF and Loop/Once. Mesh defaults and frame budgets use the shared authorities. `PrintSheets` releases only the dismissed delivery's files; pending delivery survives options dismissal. Documents/Mold contains user-owned exports only, with collision-safe names; private state stays in Application Support/Keychain. Texture sidecars verify digest and size before delivery. PhotoKit export destinations are conservative: GIF only for converted animation, with APNG/WebP routed to Files/Share.
+
+Conversion/delivery failures remain visible beside Export, while loading and
+unsupported-format explanations stay at the top. Audit text detection in every
+settled export viewport before predictive clipping/Dynamic Type resize the Form.
+Files-cancellation UAT follows the native picker to Cancel/Close and requires
+its navigation bar to disappear before reopening export.
+
+The export Form uses an opaque native navigation background to keep scrolled
+text from bleeding behind its title and Cancel action.
+Export audit scrolling uses the visible Form gutter and a held slow drag to
+avoid skipping AX5 rows through momentum. Require complete label/value coverage
+and keep all settled audit types strict. Only at maximum AX5, before recording a viewport, use
+bounded measured gutter motion to settle text just crossing the navigation edge
+when currently visible controls can remain fully contained. Requery the exact
+text occurrence and original control IDs, keep gestures on screen, and fail
+layout drift or displaced controls. Nonmoving adjustments with unchanged
+geometry and unaffordable adjustments still face the strict audit.
+The exact unnamed iOS 26.5 text-clipping prediction "Text of this element may
+be clipped at larger Dynamic Type sizes." has retained inconsistent red/green
+diagnostics at reviewed Large/XXXL sizes and at maximum AX5. Only those three
+categories may use that specific disposition. Independently inspect every
+retained actual-size GIF/geometry viewport in both appearances before accepting
+UAT; frame containment alone does not detect internal truncation. Named clipping,
+other descriptions, sizes, runtimes and audit types remain failures. Keep the
+original red bundles and do not count a top-only lazy Form audit as full coverage.
+Match the shell suite's bounded
+framework-timeout recovery: retry only accessibilityAudit/-56 once, preserve
+the first diagnostics, verify unchanged layout with fresh scope, and never
+retry actual findings or accept a second timeout. Capture the immutable
+viewport baseline with the existing inventory rather than repeatedly querying
+the entire hierarchy. Hosted media-export jobs allow 90 minutes for the full
+suite, build and report processing; other audit groups retain 60 minutes.
+Photos export UAT scopes SpringBoard permission actions to Mold Studio's Photos
+alert, requires that alert to dismiss, and waits up to 60 seconds for cold
+authorization and PhotoKit completion. A generic Allow button can belong to
+another permission request; its tap alone does not establish Photos permission.
+For selected-method UAT, verify requested method names against the test source
+and compare the executed method set/count with the intended selection.
+XCTest can silently ignore an unknown selector while other selected tests pass.

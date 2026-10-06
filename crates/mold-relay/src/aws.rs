@@ -312,6 +312,44 @@ pub async fn connect(
     shutdown: CancellationToken,
     options: RelayOptions,
 ) -> Result<()> {
+    connect_managed(
+        endpoint,
+        target,
+        token,
+        None,
+        allow_loopback_ws,
+        shutdown,
+        options,
+    )
+    .await
+}
+
+/// Managed enrollment uses an isolated host namespace; legacy callers omit it.
+pub fn validate_host_namespace(host_id: &str) -> Result<()> {
+    if host_id.len() != 32
+        || !host_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!("invalid relay host namespace");
+    }
+    Ok(())
+}
+
+/// One cancellable outbound session with an optional managed namespace.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_managed(
+    endpoint: &str,
+    target: SocketAddr,
+    token: String,
+    host_id: Option<String>,
+    allow_loopback_ws: bool,
+    shutdown: CancellationToken,
+    options: RelayOptions,
+) -> Result<()> {
+    if let Some(host_id) = host_id.as_deref() {
+        validate_host_namespace(host_id)?;
+    }
     ensure_tls_provider();
     let endpoint = validate_aws_endpoint(endpoint, allow_loopback_ws)?;
     let token = validate_token(&token)?;
@@ -322,7 +360,7 @@ pub async fn connect(
     loop {
         diagnostic("connecting");
         let started = tokio::time::Instant::now();
-        let result = tokio::select! {_ = shutdown.cancelled()=>return Ok(()),result=session(&endpoint,target,&token,shutdown.clone(),options)=>result};
+        let result = tokio::select! {_ = shutdown.cancelled()=>return Ok(()),result=session(&endpoint,target,&token,host_id.as_deref(),shutdown.clone(),options)=>result};
         if result
             .as_ref()
             .err()
@@ -426,17 +464,33 @@ where
     }
 }
 
+fn host_request(
+    endpoint: &url::Url,
+    token: &str,
+    host_id: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = ws_request(endpoint, token)?;
+    if let Some(host_id) = host_id {
+        validate_host_namespace(host_id)?;
+        request
+            .headers_mut()
+            .insert("x-mold-relay-host", host_id.parse()?);
+    }
+    request
+        .headers_mut()
+        .insert("x-mold-relay-role", "host".parse()?);
+    Ok(request)
+}
+
 async fn session(
     endpoint: &url::Url,
     target: SocketAddr,
     token: &str,
+    host_id: Option<&str>,
     shutdown: CancellationToken,
     options: RelayOptions,
 ) -> Result<()> {
-    let mut request = ws_request(endpoint, token)?;
-    request
-        .headers_mut()
-        .insert("x-mold-relay-role", "host".parse()?);
+    let request = host_request(endpoint, token, host_id)?;
     let (socket,_)=tokio::time::timeout(ATTACH,connect_async_with_config(request,Some(websocket_config()),false)).await.context("AWS relay connection timed out")?.map_err(|e| {
         if let tokio_tungstenite::tungstenite::Error::Http(response)=&e {
             if std::env::var_os("MOLD_RELAY_DIAGNOSTICS").is_some(){eprintln!("mold-relay: handshake_http_status={}", response.status().as_u16());}
@@ -665,6 +719,28 @@ async fn request_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_namespace_is_only_attached_to_managed_handshakes() {
+        let endpoint = url::Url::parse("wss://relay.example.com/ws").unwrap();
+        let token = "a".repeat(64);
+        let host = "b".repeat(32);
+        let managed = host_request(&endpoint, &token, Some(&host)).unwrap();
+        assert_eq!(managed.headers()["x-mold-relay-host"], host);
+        assert_eq!(managed.headers()["x-mold-relay-role"], "host");
+        assert!(host_request(&endpoint, &token, None)
+            .unwrap()
+            .headers()
+            .get("x-mold-relay-host")
+            .is_none());
+    }
+    #[test]
+    fn managed_namespace_rejects_ambiguous_host_ids() {
+        assert!(validate_host_namespace("0123456789abcdef0123456789abcdef").is_ok());
+        for invalid in ["", "legacy", "0123456789ABCDEF0123456789ABCDEF", "a\r\nb"] {
+            assert!(validate_host_namespace(invalid).is_err());
+        }
+    }
+
     use super::*;
     fn bytes(value: &[u8]) -> Payload {
         Payload {
@@ -750,6 +826,13 @@ mod tests {
     }
     #[tokio::test]
     async fn aws_request_reorders_without_replay_and_logical_eof_retains_http_response() {
+        aws_forwarding_fixture(None).await;
+    }
+    #[tokio::test]
+    async fn managed_aws_handshake_and_http_forwarding_keep_namespace() {
+        aws_forwarding_fixture(Some("0123456789abcdef0123456789abcdef")).await;
+    }
+    async fn aws_forwarding_fixture(host_id: Option<&'static str>) {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_addr = target.local_addr().unwrap();
         let cancel = CancellationToken::new();
@@ -786,7 +869,7 @@ mod tests {
         let endpoint = format!("ws://{}/production", gateway.local_addr().unwrap());
         let (done_tx, done_rx) = oneshot::channel();
         let done_tx = Arc::new(Mutex::new(Some(done_tx)));
-        let app=Router::new().route("/production",get(move|headers:HeaderMap,ws:WebSocketUpgrade|{let done_tx=done_tx.clone();async move{assert_eq!(headers["x-mold-relay-role"],"host");ws.on_upgrade(move|mut socket|async move{
+        let app=Router::new().route("/production",get(move|headers:HeaderMap,ws:WebSocketUpgrade|{let done_tx=done_tx.clone();async move{assert_eq!(headers["x-mold-relay-role"],"host");assert_eq!(headers.get("x-mold-relay-host").and_then(|h|h.to_str().ok()),host_id);ws.on_upgrade(move|mut socket|async move{
             let Some(Ok(AxMessage::Text(text)))=socket.recv().await else{panic!("missing hello")};assert_eq!(Frame::parse(&text).unwrap().a,"hello");
             let mut ready=Frame::new("ready","epoch","host");ready.role=Some("host".into());
             // Send ready directly as text (the v2 envelope is not v1 Wire).
@@ -815,10 +898,11 @@ mod tests {
         });
         let signal = cancel.clone();
         let connector = tokio::spawn(async move {
-            connect(
+            connect_managed(
                 &endpoint,
                 target_addr,
                 "0123456789012345678901234567890123456789".into(),
+                host_id.map(str::to_owned),
                 true,
                 signal,
                 RelayOptions::default(),

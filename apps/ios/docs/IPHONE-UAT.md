@@ -6,22 +6,22 @@ physical speaker output, camera pairing, or device-only extension delivery.
 
 ## Findings and implementation plan
 
-| Finding | Reproduction | Improvement | Verification |
-| --- | --- | --- | --- |
-| First-run Machines clips its explanation and action at AX5 | Open Machines with no saved hosts, largest text and nearby discovery | Keep discovery count in the scrolling explanation; wrap Add; reserve opaque space above tabs for the action | First-run iPhone UAT |
-| More Options becomes unreadable at AX5 | Select an installed picture model, set largest accessibility text, open Options | Give Shape, Steps, Batch and Length separate form rows; wrap values; remove the inert More Options button inside its own sheet | Populated iPhone UI regression and exploratory UAT |
-| Seed choice ignores large text and loses its label | In the same sheet, scroll to Look | Use a labeled system menu for Repeat this look | AX5 UAT |
-| Clip and 3-D drafts reopen as Still picture | Choose either kind, background, terminate, relaunch before model profiles arrive | Restore kind from the saved recipe once profiles arrive, preserving valid authored options and reconciling audio capabilities | Failing-then-passing cold-start controller tests and relaunch UAT |
-| Empty model search gives no feedback | Search installed models for an unmatched word | Explain that no models match and allow clearing the search | Populated UI regression and UAT |
-| Models pane chooser ignores large text | Open Installed/Discover at AX5 | Use a labeled system menu that scales with the text | iPhone UAT |
-| Offline inventory falsely claims zero installed | Add an unreachable local test machine, open its detail and Models | Distinguish an unread inventory from a confirmed empty one; omit unknown counts | Model-store regression and UAT |
-| Removing a machine leaves a dead detail page | Remove the temporary machine from its detail | Return to Machines after removal | iPhone UAT |
-| Info has no explicit dismissal action | Open Info at its large detent | Add a standard Done button | Viewer UAT |
-| Shared video has an extensionless temporary filename | Share an existing clip | Preserve each original filename in an owned export directory; clean it after sharing/copying/saving | Failing-then-passing sharing test and system share-sheet UAT |
-| Slow machine responses replace the saved model | Restore a clip while another machine answers first | Keep the saved choice pending; explicit kind/model choice cancels restoration | Two-host failing-then-passing controller regressions |
-| Offline Generate and Queue claim missing models or an empty queue | Open both tabs with only unreachable machines | Explain unavailable data and direct the user to Machines; invalidate failed queue reads | Controller/queue tests and SE UAT |
-| A removed machine silently drops a selected export | Remove a source machine before an export begins | Abort the entire export and clean staged files, preserving entry/file alignment | Export regression |
-| Viewer actions are covered by the main tabs | Open an existing print, try Info at the bottom | Hide the main tab bar while the viewer is open, preserving its own controls and back navigation | Viewer UAT on iPhone |
+| Finding                                                           | Reproduction                                                                     | Improvement                                                                                                                    | Verification                                                      |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| First-run Machines clips its explanation and action at AX5        | Open Machines with no saved hosts, largest text and nearby discovery             | Keep discovery count in the scrolling explanation; wrap Add; reserve opaque space above tabs for the action                    | First-run iPhone UAT                                              |
+| More Options becomes unreadable at AX5                            | Select an installed picture model, set largest accessibility text, open Options  | Give Shape, Steps, Batch and Length separate form rows; wrap values; remove the inert More Options button inside its own sheet | Populated iPhone UI regression and exploratory UAT                |
+| Seed choice ignores large text and loses its label                | In the same sheet, scroll to Look                                                | Use a labeled system menu for Repeat this look                                                                                 | AX5 UAT                                                           |
+| Clip and 3-D drafts reopen as Still picture                       | Choose either kind, background, terminate, relaunch before model profiles arrive | Restore kind from the saved recipe once profiles arrive, preserving valid authored options and reconciling audio capabilities  | Failing-then-passing cold-start controller tests and relaunch UAT |
+| Empty model search gives no feedback                              | Search installed models for an unmatched word                                    | Explain that no models match and allow clearing the search                                                                     | Populated UI regression and UAT                                   |
+| Models pane chooser ignores large text                            | Open Installed/Discover at AX5                                                   | Use a labeled system menu that scales with the text                                                                            | iPhone UAT                                                        |
+| Offline inventory falsely claims zero installed                   | Add an unreachable local test machine, open its detail and Models                | Distinguish an unread inventory from a confirmed empty one; omit unknown counts                                                | Model-store regression and UAT                                    |
+| Removing a machine leaves a dead detail page                      | Remove the temporary machine from its detail                                     | Return to Machines after removal                                                                                               | iPhone UAT                                                        |
+| Info has no explicit dismissal action                             | Open Info at its large detent                                                    | Add a standard Done button                                                                                                     | Viewer UAT                                                        |
+| Shared video has an extensionless temporary filename              | Share an existing clip                                                           | Preserve each original filename in an owned export directory; clean it after sharing/copying/saving                            | Failing-then-passing sharing test and system share-sheet UAT      |
+| Slow machine responses replace the saved model                    | Restore a clip while another machine answers first                               | Keep the saved choice pending; explicit kind/model choice cancels restoration                                                  | Two-host failing-then-passing controller regressions              |
+| Offline Generate and Queue claim missing models or an empty queue | Open both tabs with only unreachable machines                                    | Explain unavailable data and direct the user to Machines; invalidate failed queue reads                                        | Controller/queue tests and SE UAT                                 |
+| A removed machine silently drops a selected export                | Remove a source machine before an export begins                                  | Abort the entire export and clean staged files, preserving entry/file alignment                                                | Export regression                                                 |
+| Viewer actions are covered by the main tabs                       | Open an existing print, try Info at the bottom                                   | Hide the main tab bar while the viewer is open, preserving its own controls and back navigation                                | Viewer UAT on iPhone                                              |
 
 ## Verification record
 
@@ -274,3 +274,182 @@ references are in [PERMISSIONS.md](PERMISSIONS.md).
 These are Simulator observations. Physical camera capture, VisionKit QR
 scanning, Screen Time/MDM restrictions and Local Network policy changes remain
 physical-device checks. No model generation was submitted for this work.
+
+## 2026-10-05 — media export parity
+
+Real-host conversion UAT used an isolated loopback Mold server, a disposable
+six-second MP4 and a small GLB. No inference or generation was submitted.
+The production Tauri iOS app on iPhone 17 Pro / iOS 26.5 saved three GIFs into
+its visible Mold folder. ImageIO decoded every delivered frame: Loop/Forever/0
+produced 72 frames at 80 ms; Bounce/Forever/250 produced 142 frames, with 140 at
+80 ms and the two turn frames at 330 ms; resetting with No pause (0 ms) produced
+142 frames at 80 ms. Existing exports were preserved with collision names
+`(2)` and `(3)`. Scrolling reached every option and the Export action. APNG
+selection removed GIF-specific controls and successfully opened the native
+share sheet with a PNG file.
+
+The shared browser export UI against the same real server also delivered GIF,
+APNG and animated WebP, transparent mesh GIF, STL, PLY, OBJ and ZIP. Decoded
+outputs confirmed GIF timing, APNG animation, WebP animation with duplicate-frame
+coalescing, transparent turntable alpha and geometry/archive contents. An
+older-host capability fixture omitted `gif_pause`; the visible control and
+request field disappeared while real GIF conversion still worked. Browser
+console checks reported zero errors and warnings.
+
+The native SwiftUI app also exported through that real server on the isolated
+iPhone 17 Pro Simulator. ImageIO decoded every saved frame: Loop/Forever/0
+produced 72 frames at 80 ms; Bounce/Forever/250 produced 142 frames with 140 at
+80 ms and two at 330 ms. APNG retained 72 frames at 83 ms. Animated WebP retained
+64 frames: 56 at 83 ms and eight coalesced duplicate-frame pairs at 166 ms,
+preserving the encoder's 5976 ms duration. The native container checks accepted
+the actual outputs and saved them with their correct extensions into
+Documents/Mold; repeated GIF delivery preserved the first file as `(2)`.
+The native Files picker opened inside Mold Studio; navigating through On My
+iPhone to Browse exposed its system Close action, which cancelled delivery and
+returned to the existing viewer.
+
+Native SwiftUI delivery tests use valid media from an isolated HTTP fixture,
+including real PhotoKit writes and native Share/Files presentation. Those tests
+verify client requests and delivery ownership; the fixture does not encode the
+requested GIF timing. The separate real-server output checks above establish
+encoder behavior. Simulator evidence does not establish physical-device UAT.
+
+ImageIO inspection of the actual PhotoKit-persisted GIF resource confirmed all
+three fixture frames and their 100 ms delays were retained. A separate native
+unit regression suspends Photos authorization, cancels the export, then returns
+denial: no recovery alert, error/status, delivery or staged directory survives.
+It failed before the cancellation fence. Original download cancellation also
+reproduced a false machine-failure banner, and two immediate delivery actions
+reproduced lost task ownership. Deferred-response tests verify that cancellation
+stays silent, late responses clean their files, and a cancelled old asset cannot
+release a newer original export. All 189 native unit tests in 36 suites pass;
+independent review accepted these fixes.
+
+At PR head `41999d9618`, hosted dark-mode export UAT completed all 14 tests in
+2990.836 seconds. The job was cancelled at its one-hour limit during subsequent
+result processing, so that cancelled check is not treated as a passing CI gate.
+The media-export group now has a scoped 90-minute budget for tests, build and
+report processing. Other accessibility groups retain their existing budget.
+The hosted light-mode run also exposed an unscoped permission-button lookup:
+it tapped a SpringBoard Allow action, but Mold Studio's Photos alert was still
+present at teardown after the save assertion failed. The corrected helper
+identifies the app's Photos alert, waits for a hittable action, verifies exact
+prompt dismissal and waits for actual save completion. Small-iPhone light-mode
+Allow/save passed in 85.605 seconds and Deny/recovery in 89.111 seconds.
+The light-mode positive-to-zero Bounce sequence also passed, capturing exactly
+three requests. Final wider UAT and CI results remain pending.
+
+Small-iPhone AX5 diagnostics also isolated an iOS 26.5 contrast-auditor timeout
+to a viewport with Frame rate starting at y=96.5 beneath a navigation boundary
+at y=100. A fresh-launch first contrast call reproduced the timeout there;
+another fresh launch with that text fully visible at y=116 passed. The audit
+helper uses bounded, measured gutter motion before inventory at maximum AX5 to settle
+boundary-crossing text when visible controls can remain fully contained.
+All contrast checks and cumulative full-text/control coverage remain strict.
+The opaque native navigation background and full-width Export label address
+visible text bleed and touch-target alignment; neither resolved that timeout
+in its isolated trial. The corrected small-iPhone light video AX5 method passed
+in 265.980 seconds, with all 21 viewport captures and manifests independently
+inspected. In its final viewport, the measured text position moved from y=96.5
+to y=106, fully below the y=100 navigation boundary. The gesture requested
+19.5 points; observed movement was 9.5 points. No audit-timeout retry was needed
+there. Every label and selected value became fully readable, the full-width
+button's accessibility center lay within its visible fill, and no navigation
+text bleed or internal truncation was found. Remaining matrix validation is
+pending.
+
+The same-source small-iPhone light mesh AX5 method passed in 414.427 seconds
+on its isolated retry. The original attempt failed during Library fixture
+setup before opening export; its failure diagnostics are retained separately.
+Independent inspection covered all 29 GIF and 11 geometry viewports, plus their
+frame manifests and full-resolution hint/transparent-toggle/bottom captures.
+GIF showed 512 px, 10 fps, 36 frames, transparency off and zero pause; geometry
+showed STL, 100 mm, Z and Floor. Every label/value became readable without
+internal truncation or navigation bleed. Origin measured y=106 after the
+requested 19.5-point nudge, and the full-width Export row remained fully inside
+the viewport with its accessibility center within the blue fill.
+
+On that same source, all four affected delivery methods passed in both light
+and dark appearances on the small iPhone: Photos Allow/save, Deny/recovery,
+the three-request Bounce pause reset, and Share/Files cancellation. Exact
+executed-method manifests verify four distinct methods per appearance.
+
+The remaining small-iPhone light audit batch passed video ExtraSmall and mesh
+Large. Video Large failed an unnamed prediction of clipping at larger Dynamic
+Type sizes; mesh ExtraSmall failed the optional boundary adjustment's control
+preservation guard. An unchanged-source isolated retry reproduced both failures.
+Both result bundles, attachments and exact four-original/two-retry selection
+manifests are retained under
+`Reviewed-Final-66fe3f4c7d/small/light/remaining-a11y` in the external UAT evidence.
+Independent inspection confirmed that the ExtraSmall adjustment moved back too
+far and hid Destination, so that optional adjustment is now limited to AX5.
+Its focused mesh ExtraSmall validation passed in 213.345 seconds, with exact
+one-method selection verified and closed evidence retained under
+`SE-AX5-Only-Settle-XS-Focus`. The Large prediction remains a strict
+failure pending isolated top-versus-bottom diagnostics; no clipping exception
+was broadened, and the wider matrix is paused until these failures are resolved.
+
+A fresh initial-top Large strict clipping diagnostic passed in 49.358 seconds
+without any excluded findings. This does not establish equivalent coverage of
+the lazy Form's lower rows. Independent review requested a full materializing
+sweep followed by a verified return to top and the unchanged strict clipping
+audit before considering an audit-placement correction.
+That materialized-all-rows diagnostic failed too: full label/control coverage
+completed and Format was verified back at the top, but the unchanged strict
+clipping audit reported five unnamed predictions. Audit relocation is therefore
+rejected. Actual intermediate XXXL and AX1 layouts are the next diagnostic;
+clear AX5 layouts do not prove the horizontal-to-stacked transition fits.
+
+Actual AX1 full-sweep UAT passed in 185.716 seconds, including the unchanged
+strict clipping audit. Actual XXXL completed all control/text coverage, then
+failed the same unnamed future-size prediction.
+Its unchanged-source isolated retry passed in 163.428 seconds with the strict
+clipping rule and no exemption; the original failure remains retained. Independent full-resolution
+review inspected all 11 AX1 and eight XXXL viewport captures and their inventories:
+every title, current value, hint and control became readable, including horizontal
+size/frame-rate rows and the stacked transition. A further independent review of
+all seven Large-video viewports in each original/retry run (14 captures) and
+nine Large-mesh captures found no clipping, overlap or truncated glyphs.
+The reviewer accepted a bounded disposition for that exact unnamed iOS 26.5
+future-size prediction at explicitly reviewed Large/XXXL sizes, preserving
+diagnostics and mandatory full-viewport visual inspection. Named clipping and
+other runtime/type/description findings remain strict. Original red bundles
+remain failed evidence. Final-source Large-video and mesh ExtraSmall focused
+UAT passed with exact two-method selection verified; Large passed in 155.354
+seconds without reporting the known prediction or exercising its disposition.
+Closed results and captures are retained under
+`SE-Final-Reviewed-Disposition-Focus`. Wider local matrix validation remains
+pending.
+
+The user subsequently authorized skipping hosted CI, cancelling this PR's jobs,
+and merging after local review and UAT. The remaining Android, native iOS and
+Docker workflows were requested to cancel on head `66fe3f4c7`; cancelled checks
+are not reported as passing. Local UAT and final independent review remain the
+merge gate.
+
+On frozen source `5590e5f315`, the remaining small-iPhone dark batch completed
+exact ten-method coverage. Nine original methods passed; mesh AX5 stopped
+making scroll progress in geometry. The unchanged-source failed-only retry
+passed in 652.444 seconds with complete GIF and geometry coverage. The cause of
+the original unchanged viewport is undetermined; neither a toggle interception
+nor a product defect was established. Both bundles and exact original/retry
+selection records are retained under
+`Reviewed-Final-5590e5f315/small/dark/remaining-ten`.
+Independent review inspected all 71 original target viewport images and all 41
+successful retry images (29 GIF and 12 geometry), plus their visible inventories.
+Every label/value/control became readable, with no internal clipping or navigation
+bleed. The successful retry is acceptance evidence; the original remains failed.
+The regular-phone light/dark and iPad light/dark stages, plus two supplemental
+small-phone light standard-size methods, remain pending.
+
+The user subsequently authorized merging PR #1808 immediately, accepting a
+follow-up PR rather than waiting for the outstanding UAT matrix. At that point,
+regular-phone light had four completed accessibility passes, one unresolved
+AX5-video failure (`export boundary settling displaced export-pause`), and its
+Large mesh method was still running. The failed-only retry had not completed.
+Regular-phone dark six accessibility cases, iPad fourteen cases in each
+appearance, and small-phone light video ExtraSmall plus mesh Large remained
+pending. Full final-matrix UAT and its independent review are therefore not
+claimed complete. Existing unit, encoder, real-host, delivery and independently
+reviewed visual evidence above remains valid with its recorded source provenance.
+The unresolved scroll-audit failure has not been established as a product defect.

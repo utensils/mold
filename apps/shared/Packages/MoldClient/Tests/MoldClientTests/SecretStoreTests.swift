@@ -32,6 +32,32 @@ struct SecretStoreTests {
         #expect(try store.value(for: name) == nil)
     }
 
+    @Test func declaredManagedRelayOwnerSlotPersistsWithoutReplacingEngineKey() throws {
+        let (store, dir) = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try store.set("engine-key", for: SecretStore.localEngineKeyName)
+        try store.set("relay-owner-record", for: SecretStore.managedRelayOwnerName)
+
+        let cold = SecretStore(directory: dir)
+        #expect(try cold.value(for: SecretStore.managedRelayOwnerName) == "relay-owner-record")
+        #expect(try cold.value(for: SecretStore.localEngineKeyName) == "engine-key")
+        try cold.clear(SecretStore.managedRelayOwnerName)
+        let afterClear = SecretStore(directory: dir)
+        #expect(try afterClear.value(for: SecretStore.managedRelayOwnerName) == nil)
+        #expect(try afterClear.value(for: SecretStore.localEngineKeyName) == "engine-key")
+    }
+
+    @Test(arguments: ["managedRelayEnrollment", "managed-relay-owner.evil", "managed-relay-owner/other", "managed-relay-owner "])
+    func managedRelayOwnerSlotRejectsUndeclaredLookalikes(name: String) throws {
+        let (store, dir) = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try store.set("kept", for: SecretStore.managedRelayOwnerName)
+        #expect(throws: SecretStoreError.self) { try store.value(for: name) }
+        #expect(throws: SecretStoreError.self) { try store.set("wrong", for: name) }
+        #expect(throws: SecretStoreError.self) { try store.clear(name) }
+        #expect(try SecretStore(directory: dir).value(for: SecretStore.managedRelayOwnerName) == "kept")
+    }
+
     @Test func rejectsUnknownNames() throws {
         let (store, _) = try scratch()
         #expect(throws: SecretStoreError.self) { try store.value(for: "ssh-private-key") }

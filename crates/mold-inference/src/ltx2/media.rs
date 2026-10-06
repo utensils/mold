@@ -737,6 +737,7 @@ pub fn export_animation(
     gif_repeat_forever: bool,
     target_fps: Option<u32>,
     max_dimension: Option<u32>,
+    pause_ms: u32,
 ) -> Result<Vec<u8>> {
     let video = decode_video_bounded(
         input_mp4,
@@ -745,11 +746,12 @@ pub fn export_animation(
         Some(MAX_ANIMATION_EXPORT_RGB_BYTES),
     )?;
     match output_format {
-        OutputFormat::Gif => video_enc::encode_gif_with_options(
+        OutputFormat::Gif => video_enc::encode_gif_with_pause(
             &video.frames,
             video.metadata.fps,
             gif_bounce,
             gif_repeat_forever,
+            pause_ms,
         ),
         OutputFormat::Apng => {
             anyhow::ensure!(

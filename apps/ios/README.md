@@ -256,3 +256,21 @@ Activities have recovery actions in app Settings. Restricted access explains
 Screen Time or device management. Photo imports use the system picker without
 requesting access to your whole library. Auto-save requests Photos access when
 you enable it, and saving videos uses PhotoKit's background callback safely.
+
+## Exporting media
+
+Library and result menus offer **Export…** for live MP4 clips and GLB meshes.
+The holding machine advertises the formats: GIF/APNG and, where compiled,
+WebP for clips; geometry files and animated turntables for meshes. GIF controls
+include Loop/Bounce, Forever/Once and an extra pause in milliseconds. **0 ms**
+adds no hold and is the choice for a continuous source loop. Frame rate remains
+independent. Older hosts do not show the pause control.
+
+Exports can be shared, saved through Files or copied into **On My iPhone/iPad ▸
+Mold Studio ▸ Mold**. GIF exports can also be saved to Photos; APNG/WebP use
+Share/Files because animation preservation in Photos is not promised. The
+original print is unchanged. Texture sidecars appear under **Save Files**;
+original media uses the same file destinations. Turntables expose frame count,
+size, FPS and transparency; geometry controls follow the host's per-format
+size/up-axis/origin defaults. Persistent filenames gain a numbered suffix on
+collision. Temporary files stay alive until system delivery finishes.

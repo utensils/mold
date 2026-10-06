@@ -158,3 +158,12 @@ extension FakeBackend {
     public func framewiseUpscale(id: String) async throws -> VideoUpscaleJob { try await respond("framewiseUpscale(id:)", [id]) }
     public func transitionFramewiseUpscale(id: String, to transition: FramewiseTransition) async throws -> VideoUpscaleJob { try await respond("transitionFramewiseUpscale(id:to:)", [id, transition]) }
 }
+
+public extension FakeBackend {
+    func export(_ filename: String, request: VideoExportRequest) async throws -> Data {
+        try await respond("exportVideo(_:request:)", [filename, request])
+    }
+    func generationAsset(_ filename: String, assetID: String) async throws -> Data {
+        try await respond("generationAsset(_:assetID:)", [filename, assetID])
+    }
+}

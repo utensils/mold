@@ -106,8 +106,16 @@ For a direct local-development gateway:
 mold relay serve
 ```
 
-One gateway publishes one machine. The proxy can see credentials/media; do not
-claim end-to-end encryption, automatic GUI hosting or a cloud GPU fallback.
+Legacy gateway access publishes one explicitly enrolled machine. Managed
+enrollment isolates machines behind dedicated HTTPS root origins. Native macOS
+Settings ▸ Remote Access ▸ **Pair your phone** prepares This Mac’s outbound
+connector and verifies its managed proxy route before displaying a QR; gateway
+configuration and wildcard DNS/TLS deployment must be in place first. The engine
+stays authenticated on loopback. Stop Remote Access withdraws the route.
+Phone clients prefer advertised LAN, then Tailscale, then HTTPS proxy routes
+after credential-free instance proof; never invent routes a listener cannot serve.
+The proxy can see credentials/media; do not claim end-to-end encryption or a
+cloud GPU fallback.
 Use `MOLD_RELAY_DIAGNOSTICS=1` for safe connection/reconnect categories.
 See the deployment guide for safe TLS, streaming and metrics routing.
 
@@ -115,3 +123,9 @@ Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
 Probes expose a stable digest tag, so arbitrary operator keys never participate
 in anonymous route proofs. Plain HTTP still requires a trusted network.
+
+Gallery GUI exports on native iOS, Tauri and web support an optional GIF extra
+boundary pause through `pause_ms`; inspect the holding host's
+`/api/gallery/export-options` `gif_pause` advertisement first. Zero adds no
+pause while preserving FPS. This is an export API/GUI control, not a generation
+setting or a new CLI flag. Non-GIF requests omit it.

@@ -526,14 +526,24 @@ async function saveGenerationAsset(asset: GenerationAsset) {
   }
 }
 
-/** The turntable sheet needs no capability probe: the advertised containers
- * arrived with the host's own capabilities on connect. */
+/** Containers come from mesh capabilities; timing is read from the same host. */
 /** True while the open export sheet is a mesh TURNTABLE rather than a video
  * re-encode. Only a turntable is rendered here, so only it can leave its
  * backdrop out; the host refuses `transparent` on anything else. */
 const exportIsTurntable = ref(false);
 
-function openMeshAnimationExport() {
+let exportProbe = 0;
+watch([() => props.item.filename, () => props.target?.baseUrl, () => props.target?.apiKey], () => {
+  exportProbe++;
+  exportOpen.value = false;
+  meshGeometryOpen.value = false;
+  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+});
+
+async function openMeshAnimationExport() {
+  const probe = ++exportProbe;
+  const target = props.target;
+  const formats = [...meshAnimationExports.value];
   exportError.value = "";
   exportIsTurntable.value = true;
   exportCapabilities.value = {
@@ -541,18 +551,34 @@ function openMeshAnimationExport() {
     formats: meshAnimationExports.value,
   };
   exportOpen.value = true;
+  try {
+    const { apiJson, apiJsonTo } = await import("../../lib/api/client");
+    const caps = target
+      ? await apiJsonTo<VideoExportCapabilities>(target, "/api/gallery/export-options")
+      : await apiJson<VideoExportCapabilities>("/api/gallery/export-options");
+    if (probe !== exportProbe || !exportOpen.value) return;
+    exportCapabilities.value = { ...caps, formats };
+  } catch {
+    /* Older hosts still support their advertised turntable formats, without pause. */
+  }
 }
 
 async function openVideoExport() {
+  const probe = ++exportProbe;
+  const target = props.target;
+  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
   exportOpen.value = true;
   exportError.value = "";
   exportIsTurntable.value = false;
   try {
     const { apiJson, apiJsonTo } = await import("../../lib/api/client");
-    exportCapabilities.value = props.target
-      ? await apiJsonTo<VideoExportCapabilities>(props.target, "/api/gallery/export-options")
+    const caps = target
+      ? await apiJsonTo<VideoExportCapabilities>(target, "/api/gallery/export-options")
       : await apiJson<VideoExportCapabilities>("/api/gallery/export-options");
+    if (probe !== exportProbe || !exportOpen.value) return;
+    exportCapabilities.value = caps;
   } catch (error) {
+    if (probe !== exportProbe || !exportOpen.value) return;
     exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
     exportError.value =
       error instanceof Error ? error.message : "Couldn’t read export options from this host.";
@@ -1109,6 +1135,7 @@ async function performVideoExport(options: VideoExportOptions) {
       :open="exportOpen"
       :filename="item.filename"
       :formats="exportCapabilities.formats"
+      :pause-control="exportCapabilities.gif_pause"
       :transparency="exportIsTurntable"
       :busy="exportBusy"
       :error="exportError"

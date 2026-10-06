@@ -357,12 +357,15 @@ Native iOS and macOS Libraries offer All Media, Photos, Videos and 3D filters
 within each shelf. iOS Select supports finger sweeps across a range, including
 edge scrolling, and keeps the viewport stable when selecting.
 
-Native macOS **Settings ▸ Remote Access**, beside Machines, shows the
-connection address, learned LAN/Tailscale/relay routes, an inline pairing QR
-and paired-device controls. An existing pairing learns routes from a reachable
-authenticated server and keeps one machine and key when the connection changes.
-Configure `MOLD_PUBLIC_URL` on the server to advertise its public HTTPS relay
-origin. The private built-in This Mac engine remains private.
+Native macOS **Settings ▸ Remote Access**, beside Machines, offers **Pair your
+phone** in the existing first section, alongside the connection address and
+paired-device controls. Scan its QR in the native iOS app or Tauri mobile app.
+Saved machines advertise only routes their listener actually serves: phone
+clients prefer LAN, then Tailscale, with HTTPS proxy fallback after an
+instance-bound credential-free proof. This Mac's loopback listener advertises
+only its prepared managed HTTPS origin. An existing paired machine keeps its
+identity and credential as routes change. For an independently hosted server,
+configure `MOLD_PUBLIC_URL` to advertise its actual public HTTPS relay origin.
 
 Automatic roaming requires a server-minted paired credential. Operator API keys
 remain tied to the explicitly saved address; pair once to enable route learning.
@@ -374,3 +377,13 @@ on tap, with state-aware per-job controls. Generate exposes searchable per-machi
 Prompt History with prompt-only recall.
 
 Native iOS and macOS generation controls support ordered MiniMax H3 image/video/audio references, Hunyuan3D named views, and Wan/MiniMax boundary frames. See the [native reference parity audit](docs/plans/native-reference-parity.md) and native app guides for limits and media formats.
+
+### Media export controls
+
+Native iOS and Tauri offer clip GIF exports with Loop/Bounce, Forever/Once,
+size, frame rate and, on supporting hosts, an extra boundary pause. Set the
+pause to **0 ms** to add no hold to a continuous source loop. GIF frame timing
+remains FPS-derived; a pause does not repair a discontinuity in the source.
+Native iOS also exports host-advertised mesh formats, turntables and texture
+sidecars to Share, Files or its Mold folder, with GIF delivery to Photos.
+See [native export coverage](apps/ios/docs/MEDIA-EXPORT-PARITY.md).

@@ -401,3 +401,13 @@ delight is available when the host includes `mesh-delight`. A host without the
 paint feature keeps Text to 3-D available for geometry and hides the PBR toggle
 instead of submitting a request that the host must reject. Official signed
 macOS desktop builds include the complete mesh feature set.
+
+### GIF pauses and native iOS delivery
+
+On supporting machines, GIF clip and turntable export sheets include an extra
+boundary pause. **0 ms** adds no hold; Bounce and Loop remain independent of
+frame rate. Repeating bounce pauses at both turns, one-shot bounce at its far
+turn, and a repeating loop at its last frame. Native iOS offers the same media
+formats and mesh geometry controls, plus Share, Files and its Mold folder;
+converted GIFs can also go to Photos. Original files and downloadable texture
+maps appear under Save Files. APNG/WebP use Share/Files to preserve the file.

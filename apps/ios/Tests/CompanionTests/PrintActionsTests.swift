@@ -7,6 +7,64 @@ import Testing
 
 @MainActor
 struct PrintActionsTests {
+    @MainActor private final class DeferredOriginalDownload {
+        var continuation: CheckedContinuation<URL, any Error>?
+        func request() async throws -> URL {
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        }
+    }
+
+    @Test func immediateRepeatedOriginalDeliveryKeepsTheActiveDownloadCancellable() async throws {
+        let (_, hosts, fake) = try await QueueStoreTests.setUp()
+        let print = try QueueStoreTests.decode(GalleryPrint.self,
+            #"{"filename":"loop.mp4","metadata":{},"timestamp":1790000000}"#)
+        let actions = PrintActions(hosts: hosts)
+        let pending = DeferredOriginalDownload()
+        defer { pending.continuation?.resume(throwing: CancellationError()) }
+        fake.stub("mediaFile(_:trashed:)") { _ in try await pending.request() }
+        let entry = LibraryEntry(host: hosts.hosts[0], print: print)
+        actions.deliverOriginal(entry, destination: .share)
+        let first = try #require(actions.fileExportTask)
+        #expect(actions.busy)
+        actions.deliverOriginal(entry, destination: .share)
+        let tracked = try #require(actions.fileExportTask)
+        for _ in 0..<100 where pending.continuation == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let download = try #require(pending.continuation)
+        let source = FileManager.default.temporaryDirectory.appending(path: "original-\(UUID())")
+        try Data("fixture original".utf8).write(to: source)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            if case let .share(urls) = actions.sheet { PrintActions.removeFiles(urls) }
+        }
+        actions.cancelExports()
+        pending.continuation = nil; download.resume(returning: source)
+        await first.value; await tracked.value
+        #expect(fake.count("mediaFile(_:trashed:)") == 1)
+        #expect(actions.sheet == nil && actions.pendingDelivery == nil && actions.status == nil)
+        #expect(hosts.failures.isEmpty && !actions.busy)
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @Test func cancelledOriginalDeliveryDoesNotPublishAMachineFailure() async throws {
+        let (_, hosts, fake) = try await QueueStoreTests.setUp()
+        let print = try QueueStoreTests.decode(GalleryPrint.self,
+            #"{"filename":"loop.mp4","metadata":{},"timestamp":1790000000}"#)
+        let actions = PrintActions(hosts: hosts)
+        let pending = DeferredOriginalDownload()
+        defer { pending.continuation?.resume(throwing: CancellationError()) }
+        fake.stub("mediaFile(_:trashed:)") { _ in try await pending.request() }
+        actions.deliverOriginal(LibraryEntry(host: hosts.hosts[0], print: print), destination: .share)
+        let operation = try #require(actions.fileExportTask)
+        for _ in 0..<100 where pending.continuation == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let download = try #require(pending.continuation)
+        actions.cancelExports()
+        pending.continuation = nil; download.resume(throwing: URLError(.cancelled))
+        await operation.value
+        #expect(hosts.failures.isEmpty)
+        #expect(actions.sheet == nil && actions.pendingDelivery == nil && actions.status == nil)
+        #expect(!actions.busy && actions.fileExportTask == nil)
+    }
+
     @Test(arguments: [("dawn.mp4", Optional<String>.none, true), ("dawn.mp4", "mp4", true),
                       ("camera.mov", nil, true), ("camera.m4v", nil, true),
                       ("loop.gif", nil, false), ("loop.gif", "gif", false),

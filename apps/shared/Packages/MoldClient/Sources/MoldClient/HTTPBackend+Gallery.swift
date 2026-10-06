@@ -132,3 +132,19 @@ public extension HTTPBackend {
         return try await bytes(for: request)
     }
 }
+
+public extension HTTPBackend {
+    func export(_ filename: String, request body: VideoExportRequest) async throws -> Data {
+        var request = self.request("/api/gallery/export/\(escaped(filename))")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try MoldJSON.encoder.encode(body)
+        request.timeoutInterval = 300
+        return try await bytes(for: request)
+    }
+    func generationAsset(_ filename: String, assetID: String) async throws -> Data {
+        var request = self.request("/api/gallery/assets/\(escaped(filename))/\(escaped(assetID))")
+        request.timeoutInterval = 300
+        return try await bytes(for: request)
+    }
+}

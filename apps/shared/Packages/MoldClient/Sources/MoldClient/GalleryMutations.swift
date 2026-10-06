@@ -128,6 +128,11 @@ public struct TagCount: Codable, Hashable, Sendable, Identifiable {
 /// tell a turntable's options from a transcode's (review 03-L1).
 public struct ExportOptions: Codable, Hashable, Sendable {
     public let formats: [String]
+    public var gifPlayback: [String]? = nil
+    public var gifRepeat: [String]? = nil
+    public var gifPause: GifPauseControl? = nil
+    public var playbackChoices: [GifPlayback] { (gifPlayback ?? ["loop", "bounce"]).compactMap(GifPlayback.init(rawValue:)) }
+    public var repeatChoices: [GifRepeat] { (gifRepeat ?? ["forever", "once"]).compactMap(GifRepeat.init(rawValue:)) }
 
     /// What a clip can be turned into: the animated containers only, which is
     /// a fact about clips rather than about one host.
@@ -151,5 +156,16 @@ public struct CollectionChange: Encodable, Sendable {
         self.name = name
         self.coverFilename = coverFilename
         self.hidden = hidden
+    }
+}
+
+public extension ExportOptions {
+    init(from decoder: any Decoder) throws {
+        enum Keys: String, CodingKey { case formats, gifPlayback, gifRepeat, gifPause }
+        let row = try decoder.container(keyedBy: Keys.self)
+        self.init(formats: try row.decode([String].self, forKey: .formats),
+                  gifPlayback: try row.decodeIfPresent([String].self, forKey: .gifPlayback),
+                  gifRepeat: try row.decodeIfPresent([String].self, forKey: .gifRepeat),
+                  gifPause: try? row.decodeIfPresent(GifPauseControl.self, forKey: .gifPause))
     }
 }

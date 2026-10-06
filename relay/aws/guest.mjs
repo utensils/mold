@@ -1,14 +1,18 @@
+import { validNamespace } from "./managed.mjs";
 import WebSocket from "ws";
 import http from "node:http";
 import { pipeline } from "node:stream/promises";
 import { RelayDuplex } from "./wire.mjs";
 import { parameter } from "./aws-store.mjs";
 export async function createGuest({
+  namespace = "",
   deadlineMs = 840000,
   token: providedToken,
   url = process.env.WS_ENDPOINT,
   allowInsecureLoopback = false,
 } = {}) {
+  if (namespace && !validNamespace(namespace))
+    throw new Error("Invalid namespace");
   const endpoint = new URL(url);
   if (
     endpoint.protocol !== "wss:" &&
@@ -25,6 +29,7 @@ export async function createGuest({
     headers: {
       authorization: `Bearer ${token}`,
       "x-mold-relay-role": "frontend",
+      ...(namespace ? { "x-mold-relay-host": namespace } : {}),
     },
     maxPayload: 24576,
     perMessageDeflate: false,
@@ -135,12 +140,14 @@ export function cleanHeaders(headers, { response = false } = {}) {
         !forbidden.has(name.toLowerCase()) &&
         !name.toLowerCase().startsWith("x-forwarded-") &&
         !name.toLowerCase().startsWith("x-mold-viewer-") &&
+        !name.toLowerCase().startsWith("x-mold-relay-") &&
         (!response || name.toLowerCase() !== "x-mold-relay-object"),
     ),
   );
 }
 export async function openRequest(
   {
+    namespace = "",
     method = "GET",
     path,
     headers = {},
@@ -158,7 +165,7 @@ export async function openRequest(
   )
     throw new Error("Forbidden relay path");
   if (!/^[A-Z]+$/.test(method)) throw new Error("Invalid request method");
-  const guest = await guestFactory();
+  const guest = await guestFactory({ namespace });
   const prepared = {
     ...cleanHeaders(headers),
     "content-length": String(size),

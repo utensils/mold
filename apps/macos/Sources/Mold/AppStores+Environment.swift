@@ -25,6 +25,7 @@ extension View {
             .environment(stores.catalog)
             .environment(stores.machines)
             .environment(stores.pairing)
+            .environment(stores.remotePairing)
             .environment(stores.promptHistory)
             .environment(stores.modelDefaults)
             .environment(stores.adapters)
@@ -45,6 +46,7 @@ extension View {
         self
             .environment(stores.hosts)
             .environment(stores.pairing)
+            .environment(stores.remotePairing)
             .environment(stores.engine)
             .environment(stores.materializer)
             // Settings ▸ Empty Now empties BOTH caches.

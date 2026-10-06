@@ -138,3 +138,50 @@ test("consumed grants release admission without losing concurrent leases", async
   await releaseUpload("consumed", storage);
   assert.deepEqual(row.leases, { other: 100, concurrent: 100 });
 });
+
+test("upload grants deny a different namespace even with same credentials and epoch", async () => {
+  const a = "a".repeat(32),
+    b = "b".repeat(32),
+    id = "00000000-0000-4000-8000-000000000000";
+  const headers = { "x-api-key": "fixture" };
+  let consumed = false;
+  const storage = {
+    get: async (key) =>
+      key === `upload#${id}#tenant#${a}`
+        ? {
+            ...good,
+            namespace: a,
+            credential: credentialDigest(headers),
+            sid: "epoch",
+            state: "prepared",
+            revision: 1,
+            expiresAt: 100,
+          }
+        : undefined,
+    cas: async () => {
+      consumed = true;
+      return true;
+    },
+  };
+  await assert.rejects(claimUpload(id, headers, "epoch", storage, 1, b));
+  assert.equal(consumed, false);
+  await assert.rejects(claimUpload(id, headers, "epoch", storage, 1, ""));
+  assert.equal(consumed, false);
+  assert.equal(
+    (await claimUpload(id, headers, "epoch", storage, 1, a)).namespace,
+    a,
+  );
+});
+
+test("signed response objects and staging reject another tenant prefix before S3 access", async () => {
+  const { objectURL, stageObject } = await import("../transfers.mjs");
+  const a = "a".repeat(32),
+    b = "b".repeat(32),
+    key = `_mold/objects/${a}/00000000-0000-4000-8000-000000000000`;
+  await assert.rejects(objectURL(key, 900, b), /Foreign staged object/);
+  await assert.rejects(objectURL(key, 900, ""), /Foreign staged object/);
+  await assert.rejects(
+    stageObject(undefined, {}, key, b),
+    /Foreign staged object/,
+  );
+});

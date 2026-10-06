@@ -53,6 +53,22 @@ struct PrintMenu: View {
                     Label("Save to Photos", systemImage: "square.and.arrow.down")
                 }
             }
+            if single, let entry = entries.first {
+                if MediaExportKind(filename: entry.print.filename, trashed: trashed) != nil {
+                    Button { actions.openExport(entry) } label: { Label("Export…", systemImage: "square.and.arrow.up.on.square") }
+                }
+                Menu {
+                    Button("Save to Files…") { actions.deliverOriginal(entry, destination: .files) }
+                    Button("Save to Mold folder") { actions.deliverOriginal(entry, destination: .folder) }
+                    ForEach(entry.print.assets ?? []) { asset in
+                        Menu(asset.displayName) {
+                            Button("Share…") { actions.deliverAsset(asset, entry: entry, destination: .share) }
+                            Button("Save to Files…") { actions.deliverAsset(asset, entry: entry, destination: .files) }
+                            Button("Save to Mold folder") { actions.deliverAsset(asset, entry: entry, destination: .folder) }
+                        }
+                    }
+                } label: { Label("Save Files", systemImage: "folder") }
+            }
             if single, let entry = entries.first, entry.print.kind == .picture {
                 Button { actions.copy(entry) } label: { Label("Copy", systemImage: "doc.on.doc") }
             }
@@ -95,16 +111,25 @@ struct PrintSheets: ViewModifier {
     @Environment(PrintActions.self) private var actions
 
     func body(content: Content) -> some View {
-        let recovery = Binding(get: { presentsActions ? actions.permissionRecovery : nil },
+        let recovery = Binding(get: {
+            if case .export = actions.sheet { return nil as PermissionRecovery? }
+            return presentsActions ? actions.permissionRecovery : nil
+        },
                                set: { actions.permissionRecovery = $0 })
         let sheet = Binding(get: { presentsActions ? actions.sheet : nil }, set: { actions.sheet = $0 })
-        content.permissionAlert(recovery).sheet(item: sheet, onDismiss: { actions.shareFinished() }) { sheet in
-            switch sheet {
+        content.permissionAlert(recovery).sheet(item: sheet, onDismiss: { actions.presentationDismissed() }) { sheet in
+            Group { switch sheet {
             case let .share(urls): ShareSheet(items: urls).presentationDetents([.medium, .large])
+            case let .export(session): MediaExportSheet(session: session)
+            case let .files(urls): ExportDocumentPicker(urls: urls) { saved in
+                if saved { actions.status = "Saved to Files." }
+                actions.sheet = nil
+            }
             case let .tags(entries): TagsSheet(entries: entries)
             case let .newCollection(entries): NewCollectionSheet(entries: entries)
             case let .rename(entry): RenameSheet(entry: entry)
-            }
+            } }.onAppear { actions.presentedSheet = sheet }
+
         }
     }
 }

@@ -15,12 +15,16 @@ export interface VideoExportOptions {
    * ignoring it.
    */
   transparent?: boolean;
+  pause_ms?: number;
+  frames?: number;
 }
 
 export interface VideoExportCapabilities {
-  formats: VideoExportFormat[];
+  /** The shared route advertises animation and geometry containers. */
+  formats: string[];
   gif_playback: GifPlayback[];
   gif_repeat: GifRepeat[];
+  gif_pause?: GifPauseControl;
 }
 
 export const DEFAULT_VIDEO_EXPORT_CAPABILITIES: VideoExportCapabilities = {
@@ -82,4 +86,43 @@ export async function shareVideoExport(
 
   downloadVideoExport(blob, filename);
   return "saved";
+}
+
+/** Extra dwell only; GIF frame cadence remains positive and FPS-derived. */
+export interface GifPauseControl {
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+}
+export function validGifPause(
+  value: GifPauseControl | undefined,
+): value is GifPauseControl {
+  return (
+    !!value &&
+    [value.min, value.max, value.step, value.default].every(
+      Number.isSafeInteger,
+    ) &&
+    value.min >= 0 &&
+    value.max <= 5000 &&
+    value.max >= value.min &&
+    value.step > 0 &&
+    value.step % 10 === 0 &&
+    value.min % 10 === 0 &&
+    value.default >= value.min &&
+    value.default <= value.max &&
+    (value.default - value.min) % value.step === 0
+  );
+}
+export function turntableFrameLimit(
+  edge: number,
+  transparent: boolean,
+): number {
+  return Math.max(
+    8,
+    Math.min(
+      180,
+      Math.floor((256 * 1024 * 1024) / (edge * edge * (transparent ? 4 : 3))),
+    ),
+  );
 }

@@ -329,7 +329,11 @@ async function downloadGenerationAsset(asset: GenerationAsset) {
  * backdrop out; the host refuses `transparent` on anything else. */
 const exportIsTurntable = ref(false);
 
-function openMeshAnimationExport() {
+let exportProbe = 0;
+
+async function openMeshAnimationExport() {
+  const probe = ++exportProbe;
+  const formats = [...meshAnimationExports.value];
   menuOpen.value = false;
   exportError.value = "";
   exportIsTurntable.value = true;
@@ -338,6 +342,15 @@ function openMeshAnimationExport() {
     formats: meshAnimationExports.value,
   };
   exportOpen.value = true;
+  try {
+    const caps = (await (
+      await exportFetch("/api/gallery/export-options")
+    ).json()) as VideoExportCapabilities;
+    if (probe !== exportProbe || !exportOpen.value) return;
+    exportCapabilities.value = { ...caps, formats };
+  } catch {
+    /* Older hosts have no additive pause capability. */
+  }
 }
 
 /*
@@ -353,6 +366,20 @@ const hostEntry = computed(() => {
   const origin = originHost();
   return id ? getHost(id) : origin.apiKey ? origin : null;
 });
+watch(
+  [
+    () => props.item?.filename,
+    () => hostEntry.value?.id,
+    () => hostEntry.value?.url,
+  ],
+  () => {
+    exportProbe++;
+    exportOpen.value = false;
+    meshGeometryOpen.value = false;
+    exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+  },
+);
+
 const hostLabel = computed(() => {
   const item = props.item as { hostLabel?: string } | null;
   const hostId = (props.item as { hostId?: string } | null)?.hostId;
@@ -684,14 +711,19 @@ async function exportFetch(
 }
 
 async function openVideoExport() {
+  const probe = ++exportProbe;
+  exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
   exportOpen.value = true;
   exportError.value = "";
   exportIsTurntable.value = false;
   try {
-    exportCapabilities.value = (await (
+    const caps = (await (
       await exportFetch("/api/gallery/export-options")
     ).json()) as VideoExportCapabilities;
+    if (probe !== exportProbe || !exportOpen.value) return;
+    exportCapabilities.value = caps;
   } catch (error) {
+    if (probe !== exportProbe || !exportOpen.value) return;
     exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
     exportError.value =
       error instanceof Error
@@ -1496,6 +1528,7 @@ async function performVideoExport(options: VideoExportOptions) {
         :open="exportOpen"
         :filename="item.filename"
         :formats="exportCapabilities.formats"
+        :pause-control="exportCapabilities.gif_pause"
         :transparency="exportIsTurntable"
         :busy="exportBusy"
         :error="exportError"

@@ -9635,6 +9635,8 @@ pub(crate) struct GalleryExportRequest {
     pub(crate) playback: GalleryGifPlayback,
     #[serde(default)]
     pub(crate) repeat: GalleryGifRepeat,
+    /// Extra GIF boundary dwell; absent and zero keep ordinary frame cadence.
+    pub(crate) pause_ms: Option<u32>,
     /// Optional decoded-frame cap. The longest side is resized to this many
     /// pixels while decoding, before frames enter the animation buffer. For
     /// a mesh turntable it is the rendered frame edge (default 512, at most
@@ -9670,10 +9672,19 @@ pub(crate) struct GalleryExportRequest {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct GalleryGifPauseControl {
+    min: u32,
+    max: u32,
+    step: u32,
+    default: u32,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct GalleryExportOptionsResponse {
     pub(crate) formats: Vec<&'static str>,
     pub(crate) gif_playback: [&'static str; 2],
     pub(crate) gif_repeat: [&'static str; 2],
+    pub(crate) gif_pause: GalleryGifPauseControl,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -10023,6 +10034,12 @@ async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
         formats,
         gif_playback: ["loop", "bounce"],
         gif_repeat: ["forever", "once"],
+        gif_pause: GalleryGifPauseControl {
+            min: 0,
+            max: 5000,
+            step: 10,
+            default: 0,
+        },
     })
 }
 
@@ -10086,6 +10103,19 @@ async fn export_gallery_media(
         ));
     }
 
+    if let Some(pause) = request.pause_ms {
+        if !matches!(request.format, GalleryExportFormat::Gif) {
+            return Err(ApiError::validation(
+                "pause_ms is only supported for GIF exports",
+            ));
+        }
+        mold_inference::ltx_video::video_enc::validate_gif_pause(
+            matches!(request.playback, GalleryGifPlayback::Bounce),
+            matches!(request.repeat, GalleryGifRepeat::Forever),
+            pause,
+        )
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    }
     let source = output_dir.join(&clean_name);
     if !tokio::fs::metadata(&source)
         .await
@@ -10171,6 +10201,7 @@ async fn export_gallery_media(
     }
     let target_fps = request.fps;
     let max_dimension = request.max_dimension;
+    let pause_ms = request.pause_ms.unwrap_or(0);
     let bytes = tokio::task::spawn_blocking(move || {
         mold_inference::ltx2::media::export_animation(
             &source,
@@ -10179,6 +10210,7 @@ async fn export_gallery_media(
             repeat_forever,
             target_fps,
             max_dimension,
+            pause_ms,
         )
     })
     .await
@@ -10324,6 +10356,7 @@ pub(crate) fn turntable_options_for(
         size: request.max_dimension.unwrap_or(DEFAULT_SIZE),
         bounce,
         repeat_forever: matches!(request.repeat, GalleryGifRepeat::Forever),
+        pause_ms: request.pause_ms.unwrap_or(0),
         transparent: request.transparent.unwrap_or(false),
     };
     // Refused here, before the file is even read, so the budget is a
