@@ -426,3 +426,30 @@ and merging after local review and UAT. The remaining Android, native iOS and
 Docker workflows were requested to cancel on head `66fe3f4c7`; cancelled checks
 are not reported as passing. Local UAT and final independent review remain the
 merge gate.
+
+On frozen source `5590e5f315`, the remaining small-iPhone dark batch completed
+exact ten-method coverage. Nine original methods passed; mesh AX5 stopped
+making scroll progress in geometry. The unchanged-source failed-only retry
+passed in 652.444 seconds with complete GIF and geometry coverage. The cause of
+the original unchanged viewport is undetermined; neither a toggle interception
+nor a product defect was established. Both bundles and exact original/retry
+selection records are retained under
+`Reviewed-Final-5590e5f315/small/dark/remaining-ten`.
+Independent review inspected all 71 original target viewport images and all 41
+successful retry images (29 GIF and 12 geometry), plus their visible inventories.
+Every label/value/control became readable, with no internal clipping or navigation
+bleed. The successful retry is acceptance evidence; the original remains failed.
+The regular-phone light/dark and iPad light/dark stages, plus two supplemental
+small-phone light standard-size methods, remain pending.
+
+The user subsequently authorized merging PR #1808 immediately, accepting a
+follow-up PR rather than waiting for the outstanding UAT matrix. At that point,
+regular-phone light had four completed accessibility passes, one unresolved
+AX5-video failure (`export boundary settling displaced export-pause`), and its
+Large mesh method was still running. The failed-only retry had not completed.
+Regular-phone dark six accessibility cases, iPad fourteen cases in each
+appearance, and small-phone light video ExtraSmall plus mesh Large remained
+pending. Full final-matrix UAT and its independent review are therefore not
+claimed complete. Existing unit, encoder, real-host, delivery and independently
+reviewed visual evidence above remains valid with its recorded source provenance.
+The unresolved scroll-audit failure has not been established as a product defect.

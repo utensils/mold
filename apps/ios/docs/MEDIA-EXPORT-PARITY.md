@@ -1,8 +1,9 @@
 # Native iOS media export parity
 
-Status: implemented; independent code review fixes incorporated; full Simulator
-UAT and final CI verification in progress. The checklist below separates
-implemented behavior from completed validation.
+Status: implemented; independent code review fixes incorporated. The user
+explicitly authorized merging with incomplete Simulator UAT and cancelled hosted
+CI, accepting follow-up work. The checklist below separates implemented behavior
+from completed validation; unchecked validation items remain incomplete.
 Audited against commit `3ba145d9e` on 2026-10-05. “Tally” and “Towery” are
 interpreted as the Tauri app (desktop and its iPhone shell).
 
@@ -20,24 +21,24 @@ in the input. Bounce is an independent choice, not a prerequisite for GIF.
 
 ## Evidence and gaps
 
-| Capability | Tauri today | Native iOS today | Coverage |
-| --- | --- | --- | --- |
-| Share original | Native share sheet | Native share sheet | Preserve |
-| Save original still/video to Photos | Available | Available, with permission recovery | Preserve |
-| Copy still | Available | Available | Preserve |
-| MP4 → GIF/APNG/WebP | Export options sheet; WebP depends on host build | No conversion action | Add |
-| GIF Loop/Bounce | Available | No control | Add native parity |
-| GIF Forever/Once | Available | No control | Add native parity |
-| Longest side: Original/1080/720/480 | Available | No control | Add native parity |
-| FPS: Original/24/12/8 | Available | No control | Add native parity |
-| Extra GIF boundary pause, including zero | No wire field or control | No control | Add to encoder, server and both clients |
-| Mesh OBJ/ZIP/STL/PLY conversion | Host-advertised formats; geometry controls | Original GLB sharing only | Add |
-| Mesh physical size, up axis, origin | Capability-driven | Shared Swift types exist; no iOS UI | Reuse shared types and add native UI |
-| Mesh GIF/APNG/WebP turntable | Export sheet; loop/bounce, repeat, size, FPS; transparent background | No action | Add |
-| Turntable frames/budget guidance | Host supports it; Tauri sheet has no frames control and uses video size/FPS presets | Shared Swift budget policy exists; no iOS UI | Fix type-specific limits and offer shared coverage |
-| Save exported file into an app-visible Mold folder | Tauri phone offers this for meshes/turntables; clip conversion currently shares only | No dedicated export destination | Add native Mold folder and Files destination; provide consistent clip/mesh destination choices |
-| Download generation sidecar assets | Viewer offers host-provided assets | No sidecar download action | Add capability/data-driven asset actions |
-| Entry points | Gallery viewer; desktop generation results | Library tile/menu, viewer and generation result menu lack export | One native action coordinator across all three |
+| Capability                                         | Tauri today                                                                          | Native iOS today                                                 | Coverage                                                                                       |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Share original                                     | Native share sheet                                                                   | Native share sheet                                               | Preserve                                                                                       |
+| Save original still/video to Photos                | Available                                                                            | Available, with permission recovery                              | Preserve                                                                                       |
+| Copy still                                         | Available                                                                            | Available                                                        | Preserve                                                                                       |
+| MP4 → GIF/APNG/WebP                                | Export options sheet; WebP depends on host build                                     | No conversion action                                             | Add                                                                                            |
+| GIF Loop/Bounce                                    | Available                                                                            | No control                                                       | Add native parity                                                                              |
+| GIF Forever/Once                                   | Available                                                                            | No control                                                       | Add native parity                                                                              |
+| Longest side: Original/1080/720/480                | Available                                                                            | No control                                                       | Add native parity                                                                              |
+| FPS: Original/24/12/8                              | Available                                                                            | No control                                                       | Add native parity                                                                              |
+| Extra GIF boundary pause, including zero           | No wire field or control                                                             | No control                                                       | Add to encoder, server and both clients                                                        |
+| Mesh OBJ/ZIP/STL/PLY conversion                    | Host-advertised formats; geometry controls                                           | Original GLB sharing only                                        | Add                                                                                            |
+| Mesh physical size, up axis, origin                | Capability-driven                                                                    | Shared Swift types exist; no iOS UI                              | Reuse shared types and add native UI                                                           |
+| Mesh GIF/APNG/WebP turntable                       | Export sheet; loop/bounce, repeat, size, FPS; transparent background                 | No action                                                        | Add                                                                                            |
+| Turntable frames/budget guidance                   | Host supports it; Tauri sheet has no frames control and uses video size/FPS presets  | Shared Swift budget policy exists; no iOS UI                     | Fix type-specific limits and offer shared coverage                                             |
+| Save exported file into an app-visible Mold folder | Tauri phone offers this for meshes/turntables; clip conversion currently shares only | No dedicated export destination                                  | Add native Mold folder and Files destination; provide consistent clip/mesh destination choices |
+| Download generation sidecar assets                 | Viewer offers host-provided assets                                                   | No sidecar download action                                       | Add capability/data-driven asset actions                                                       |
+| Entry points                                       | Gallery viewer; desktop generation results                                           | Library tile/menu, viewer and generation result menu lack export | One native action coordinator across all three                                                 |
 
 Sources:
 
@@ -237,7 +238,7 @@ frame removal or retiming in a parity patch.
 - Decode delivered GIF bytes and assert frame order/timing; visual playback
   alone is insufficient to prove zero extra dwell.
 - Run focused Rust and Vue tests, shared Swift tests, native iOS unit/UI tests,
-   iOS lint and macOS lint/build compatibility for changed shared code. Do not
+  iOS lint and macOS lint/build compatibility for changed shared code. Do not
   launch the macOS host-app tests locally.
 - Update `apps/ios/docs/DESIGN.md`, `PLAN.md`, `IPHONE-UAT.md`, owning README,
   `.claude/rules/ios-native.md`, export API/website docs, Tauri parity docs and
@@ -253,13 +254,13 @@ The requested sub-agent independently checked the draft against the repository.
 It found no blocking flaw in the GIF boundary timing semantics and rated the
 plan ready after five amendments, all incorporated above:
 
-| Priority | Finding | Disposition and required regression |
-| --- | --- | --- |
-| P1 | App-visible folder was conditional | Make Documents/Mold explicit, include originals/sidecars, distinguish persistent user files from staged files |
-| P1 | Dismissal could delete the pending share output | Operation-scoped presentation/file ownership; test dismiss-then-share, Files cancel, stale completion and scene teardown |
-| P2 | Merged result lead may differ from rendering host | Promote original render copy before capability read; two-host fixture with pause supported on only one host |
-| P2 | Sidecar wire/transport work understated | Add typed asset descriptor and authenticated route; test snapshot round trips, missing/unsafe names, encoded components, unknown roles and old hosts |
-| P2 | Pause stepper impractical; inactive values ambiguous | Numeric entry/slider/zero preset, parked-value omission, Loop/Once rejection and malformed/range-change tests |
+| Priority | Finding                                              | Disposition and required regression                                                                                                                  |
+| -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1       | App-visible folder was conditional                   | Make Documents/Mold explicit, include originals/sidecars, distinguish persistent user files from staged files                                        |
+| P1       | Dismissal could delete the pending share output      | Operation-scoped presentation/file ownership; test dismiss-then-share, Files cancel, stale completion and scene teardown                             |
+| P2       | Merged result lead may differ from rendering host    | Promote original render copy before capability read; two-host fixture with pause supported on only one host                                          |
+| P2       | Sidecar wire/transport work understated              | Add typed asset descriptor and authenticated route; test snapshot round trips, missing/unsafe names, encoded components, unknown roles and old hosts |
+| P2       | Pause stepper impractical; inactive values ambiguous | Numeric entry/slider/zero preset, parked-value omission, Loop/Once rejection and malformed/range-change tests                                        |
 
 The presentation regression suite must exercise both `RootView`'s normal
 `PrintSheets` owner and `LinkedPrint`'s viewer owner, including export from a
@@ -302,7 +303,9 @@ Named clipping, other runtimes/text sizes and unnamed contrast remain strict.
 Strict text detection runs in every settled viewport before predictive clipping
 and Dynamic Type sweeps resize the lazy Form; unnamed text-detection failures
 remain failures.
-Final review remains conditional on the recorded visual UAT and final-head CI.
+Independent implementation reviews are complete. The final full-matrix review
+remains incomplete. The user explicitly authorized merging now, with outstanding
+UAT findings eligible for a follow-up PR; cancelled CI is not a passing check.
 
 ## Completion checklist
 
