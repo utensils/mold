@@ -52,6 +52,38 @@ struct SavedReuseTests {
         #expect(store.referenceRefusal(for: controller.draft) == nil)
     }
 
+    @Test func submittingSourceOnlyKeepsItsRestartLocatorUntilExplicitDiscard() async throws {
+        let (_, controller, backend, host) = try fixture()
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = SavedReuseFile(directory: directory)
+        let store = ReuseStore(hosts: controller.hosts, savedFile: file)
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"fixture","model":"fixture","seed":1,"steps":4,"guidance":0,"width":32,"height":32,"version":"fixture","source_image_name":"source.png"}"#.utf8))
+        backend.retainedTransferOffers["clip.mp4"] = .init(archiveIdentitySha256: "archive", members: [], outputSha256: "output", outputSizeBytes: 4, metadata: metadata)
+        backend.retainedInventories["clip.mp4"] = .init(availability: .available, members: [
+            .init(memberId: "source", role: "source_image", displayName: "source.png", sizeBytes: 3)
+        ])
+        backend.retainedMemberBytes["source"] = Data([1, 2, 3])
+        controller.draft = RenderDraft(reusing: metadata)
+        RetainedSourcePicture.place("AQID", named: "source.png", in: &controller.draft)
+        store.arm(controller.draft)
+        await store.probe([.init(host: host.id, filename: "clip.mp4")], fence: store.currentFence, disclosing: metadata)
+        await store.remember(metadata, model: "fixture", recipe: nil, draft: controller.draft, fence: store.currentFence)
+        #expect(store.take(for: controller.draft) != nil)
+        #expect(store.pending(for: controller.draft) == nil)
+        #expect(file.load() != nil)
+        store.selectionChanged(model: "fixture", recipe: nil, draft: controller.draft)
+        #expect(file.load()?.invalidated == false)
+        let restarted = ReuseStore(hosts: controller.hosts, savedFile: file)
+        restarted.restoreSaved(into: controller)
+        #expect(controller.draft.media.sourceImage == nil)
+        await restarted.recoverSaved(controller)
+        #expect(!restarted.restoring)
+        #expect(controller.draft.media.sourceImage == "AQID")
+        restarted.clear()
+        #expect(file.load() == nil)
+    }
+
     @Test func replacingServerDuringInventoryCannotUnblockSavedReferences() async throws {
         let (store, controller, backend, host) = try fixture()
         var finish: CheckedContinuation<RetainedSourceMedia.Inventory, Error>?
@@ -64,6 +96,62 @@ struct SavedReuseTests {
         await recovering.value
         #expect(store.restoring)
         #expect(store.referenceRefusal(for: controller.draft) != nil)
+    }
+
+    @Test func submissionDuringLocatorEnrichmentStillRecordsImmutableIdentity() async throws {
+        let (store, controller, backend, host) = try fixture()
+        store.restoring = false
+        let metadata = try #require(store.savedRecipe).metadata
+        controller.draft.media.generationReferences = []
+        store.savedRecipe = nil
+        store.arm(controller.draft)
+        await store.probe([.init(host: host.id, filename: "clip.mp4")], fence: store.currentFence, disclosing: metadata)
+        let offer = try #require(backend.retainedTransferOffers["clip.mp4"])
+        var finish: CheckedContinuation<RetainedSourceMedia.TransferOffer, Error>?
+        backend.retainedTransferOfferResponder = { _ in try await withCheckedThrowingContinuation { finish = $0 } }
+        let remembering = Task { await store.remember(metadata, model: "fixture", recipe: nil,
+            draft: controller.draft, fence: store.currentFence) }
+        await settle { finish != nil }
+        #expect(store.take(for: controller.draft) != nil)
+        try #require(finish).resume(returning: offer)
+        await remembering.value
+        #expect(store.savedRecipe?.archive == "archive")
+        #expect(store.savedRecipe?.output == "output")
+    }
+
+    @Test func chainSourcePreparationBlocksAnotherPressWithoutDiscardingLocator() async throws {
+        let (store, controller, backend, host) = try fixture()
+        store.restoring = false
+        let saved = try #require(store.savedRecipe)
+        let inventory = try #require(backend.retainedInventories["clip.mp4"])
+        backend.retainedInventories["clip.mp4"] = .init(availability: .available,
+            members: inventory.members + [.init(memberId: "source", role: "source_image", displayName: "source", sizeBytes: 3)])
+        backend.retainedMemberBytes["source"] = Data([1, 2, 3])
+        store.arm(controller.draft)
+        await store.probe([.init(host: host.id, filename: "clip.mp4")], fence: store.currentFence, disclosing: saved.metadata)
+        var finish: CheckedContinuation<Data, Error>?
+        var calls = 0
+        backend.retainedMemberResponder = { _ in
+            calls += 1
+            if calls == 1 { return try await withCheckedThrowingContinuation { finish = $0 } }
+            return Data([1, 2, 3])
+        }
+        let original = controller.draft
+        let outgoing = RenderRequest.one(original, model: "fixture")
+        let background = Task { await store.placePicture(in: original, outgoing: outgoing, live: { controller.draft }) }
+        await settle { finish != nil }
+        let fence = store.beginSourceSubmission()
+        #expect(store.referenceRefusal(for: controller.draft) == "Loading the retained source picture…")
+        let placed = await store.sourceForSubmission(in: controller.draft, outgoing: outgoing,
+            live: { controller.draft }, fence: fence)
+        #expect(placed?.media.sourceImage == "AQID")
+        #expect(!store.attachingSource)
+        #expect(store.savedRecipe == saved)
+        #expect(store.pending(for: try #require(placed)) != nil)
+        controller.draft = try #require(placed)
+        try #require(finish).resume(returning: Data([9]))
+        #expect(await background.value == nil)
+        #expect(controller.draft.media.sourceImage == "AQID")
     }
 
     @Test func editedMediaBeforeRememberIsPersistedAsInvalidated() async throws {

@@ -5,6 +5,7 @@ extension ReuseStore {
     func remember(_ metadata: OutputMetadata, model: String?, recipe: String?, draft: RenderDraft, fence: Int) async {
         guard let authority, isCurrent(fence), let restored,
               authority.instance == hosts.instanceID(of: authority.origin) else { return }
+        let locatorFence = locatorVersion
         var saved = SavedReuse(origin: authority.origin, instance: authority.instance,
             filename: authority.filename, model: model, recipe: recipe, metadata: metadata,
             invalidated: !RetainedReferenceGuard.canReuseDraft(draft, original: restored))
@@ -12,7 +13,7 @@ extension ReuseStore {
         savedFile?.save(saved)
         if let backend = hosts.backend(for: authority.origin),
            let offer = try? await backend.retainedMediaTransferOffer(for: authority.filename),
-           isCurrent(fence), savedRecipe == saved,
+           locatorVersion == locatorFence, savedRecipe == saved,
            hosts.instanceID(of: authority.origin) == saved.instance {
             saved.archive = offer.archiveIdentitySha256
             saved.output = offer.outputSha256

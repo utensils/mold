@@ -9,6 +9,7 @@ import MoldClient
 extension FakeBackend {
     func retainedMediaTransferOffer(for filename: String) async throws -> RetainedSourceMedia.TransferOffer {
         try record("retainedMediaTransferOffer")
+        if let retainedTransferOfferResponder { return try await retainedTransferOfferResponder(filename) }
         if let offer = retainedTransferOffers[filename] { return offer }
         if noRetainedMedia {
             let metadata = prints.first(where: { $0.filename == filename })?.metadata
@@ -54,6 +55,7 @@ extension FakeBackend {
         -> Data {
         try record("retainedSourceMediaBytes")
         retainedMemberRequests.append(memberId)
+        if let retainedMemberResponder { return try await retainedMemberResponder(memberId) }
         guard let planted = retainedMemberBytes[memberId] else { throw notPlanted() }
         return planted
     }

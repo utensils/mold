@@ -36,6 +36,9 @@ final class ReuseStore {
     /// at any more, and installing it would hydrate the new render from the
     /// old print's archive.
     private var version = 0
+    /// Submission releases live work; only reselection/discard replaces this identity.
+    private(set) var locatorVersion = 0
+    var attachingSource = false
     var referencePreviews: [GenerationReference: String] = [:]
     var previewFailures: Set<GenerationReference> = []
     var selectionModel: String?
@@ -64,6 +67,8 @@ final class ReuseStore {
     @discardableResult
     func begin() -> Int {
         version += 1
+        locatorVersion += 1
+        attachingSource = false
         referencePreviews = [:]
         previewFailures = []
         selectionModel = nil
@@ -154,6 +159,8 @@ final class ReuseStore {
     /// Forgets the print entirely -- a new draft is not that print any more.
     func clear() {
         version += 1
+        locatorVersion += 1
+        attachingSource = false
         referencePreviews = [:]
         previewFailures = []
         selectionModel = nil
@@ -164,5 +171,22 @@ final class ReuseStore {
         authority = nil
         restored = nil
         notice = nil
+    }
+
+    /// Consume hidden live authority without deleting the restart locator.
+    /// The baseline still fences edits until explicit discard or reselection.
+    func releaseSubmittedAuthority() {
+        version += 1
+        referencePreviews = [:]
+        previewFailures = []
+        authority = nil
+        notice = nil
+    }
+
+    /// Supersede any background picture placement without replacing its locator.
+    func beginSourceSubmission() -> Int {
+        version += 1
+        attachingSource = true
+        return currentFence
     }
 }

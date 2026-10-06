@@ -31,6 +31,7 @@ extension ReuseStore {
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
+        if attachingSource { return "Loading the retained source picture…" }
         if restoring { return notice ?? "Verifying retained conditioning on its original machine…" }
         if let authority = pending(for: draft), draft.media.sourceImage == nil,
            authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 {
@@ -53,7 +54,8 @@ extension ReuseStore {
         // These references are visible attachments, not a one-use session.
         // Each press mints its own session against the exact outgoing request.
         if taken != nil, !draft.media.generationReferences.isEmpty { return taken }
-        clear()
+        if taken != nil { releaseSubmittedAuthority() }
+        else { clear() }
         return taken
     }
 
