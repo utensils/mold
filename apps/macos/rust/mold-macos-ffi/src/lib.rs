@@ -13,7 +13,12 @@
 
 use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::Arc;
+mod relay;
+pub use relay::{
+    mold_relay_is_alive, mold_relay_set_public_origin, mold_relay_start, mold_relay_stop,
+};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -55,6 +60,14 @@ const EMBEDDED_CORS_ORIGIN: &str = "mold-embedded-engine no browser origin";
 
 static ENGINE: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();
 static RESERVED_LISTENER: Mutex<Option<std::net::TcpListener>> = Mutex::new(None);
+static ENGINE_PORT: AtomicU16 = AtomicU16::new(0);
+static CONNECTION_ADDRESSES: OnceLock<Arc<mold_server::ConnectionAddresses>> = OnceLock::new();
+fn connection_addresses() -> Arc<mold_server::ConnectionAddresses> {
+    CONNECTION_ADDRESSES
+        .get_or_init(|| Arc::new(mold_server::ConnectionAddresses::default()))
+        .clone()
+}
+
 static ALIVE: AtomicBool = AtomicBool::new(false);
 static BOOTSTRAPPED: AtomicBool = AtomicBool::new(false);
 
@@ -74,6 +87,8 @@ struct AliveGuard;
 impl Drop for AliveGuard {
     fn drop(&mut self) {
         ALIVE.store(false, Ordering::SeqCst);
+        ENGINE_PORT.store(0, Ordering::SeqCst);
+        relay::cancel_for_engine_exit();
     }
 }
 
@@ -261,6 +276,7 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
     // this flag, and in the window between the spawn returning and the thread
     // being scheduled the old placement made `join` see a dead engine and fall
     // straight into an UNBOUNDED `handle.join()` (review 05-M9).
+    ENGINE_PORT.store(port, Ordering::SeqCst);
     ALIVE.store(true, Ordering::SeqCst);
 
     let handle = std::thread::Builder::new()
@@ -280,13 +296,14 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
                         return;
                     }
                 };
-                let result = runtime.block_on(mold_server::run_server_with_listener(
+                let result = runtime.block_on(mold_server::run_server_with_listener_and_addresses(
                     &bind,
                     port,
                     models,
                     gpu_selection,
                     queue_size,
                     listener,
+                    Some(connection_addresses()),
                 ));
                 if let Err(error) = result {
                     // Through tracing, which `bootstrap` has pointed at a
@@ -309,6 +326,8 @@ unsafe fn start(bind: *const c_char, port: u16, models_dir: *const c_char) -> i3
         }
         Err(error) => {
             ALIVE.store(false, Ordering::SeqCst);
+            ENGINE_PORT.store(0, Ordering::SeqCst);
+            relay::cancel_for_engine_exit();
             tracing::error!(%error, "the mold engine thread could not be spawned");
             1
         }
@@ -672,5 +691,42 @@ mod tests {
         assert_ne!(EMBEDDED_CORS_ORIGIN, "*");
         assert_ne!(EMBEDDED_CORS_ORIGIN, "null");
         assert!(!EMBEDDED_CORS_ORIGIN.contains("://"));
+    }
+}
+
+#[cfg(test)]
+mod managed_relay_tests {
+    #[test]
+    fn embedded_relay_rejects_invalid_configuration() {
+        use std::ffi::CString;
+        let endpoint = CString::new("wss://relay.example.com/ws").unwrap();
+        let token = CString::new("a".repeat(64)).unwrap();
+        let host = CString::new("b".repeat(32)).unwrap();
+        let origin = CString::new("https://host.example.com").unwrap();
+        unsafe {
+            assert_ne!(
+                super::mold_relay_start(
+                    endpoint.as_ptr(),
+                    token.as_ptr(),
+                    host.as_ptr(),
+                    0,
+                    origin.as_ptr()
+                ),
+                0
+            );
+            assert_ne!(
+                super::mold_relay_start(
+                    std::ptr::null(),
+                    token.as_ptr(),
+                    host.as_ptr(),
+                    7680,
+                    origin.as_ptr()
+                ),
+                0
+            );
+            assert_ne!(super::mold_relay_set_public_origin(endpoint.as_ptr()), 0);
+        }
+        assert!(!super::mold_relay_is_alive());
+        assert_eq!(super::mold_relay_stop(), 0);
     }
 }

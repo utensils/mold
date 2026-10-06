@@ -1,3 +1,10 @@
+import {
+  activeEnrollment,
+  ownerAllowed,
+  validNamespace,
+  namespaceKey,
+  managedConfig,
+} from "./managed.mjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 export const FRAME_LIMIT = 24 * 1024;
 export function failureCategory(error) {
@@ -37,26 +44,45 @@ export function validFrame(f) {
 export function createRouter({
   store,
   tokens,
+  managed = managedConfig(),
   post,
   close,
   checkConnection,
   now = () => Math.floor(Date.now() / 1000),
 }) {
-  async function updateHost(change) {
+  async function updateHostIn(change, namespace = "") {
     for (let attempt = 0; attempt < 64; attempt++) {
-      const old = await store.get("host");
+      const old = await store.get(namespaceKey("host", namespace));
       const next = change(old);
       if (!next) return false;
-      if (await store.cas("host", old?.revision ?? 0, next)) return next;
+      if (
+        await store.cas(
+          namespaceKey("host", namespace),
+          old?.revision ?? 0,
+          next,
+        )
+      )
+        return next;
     }
     return false;
   }
   async function connect(id, headers) {
+    const namespace = headers["x-mold-relay-host"] ?? "";
+    if (
+      namespace &&
+      (!managed ||
+        !validNamespace(namespace) ||
+        !(await activeEnrollment(store, namespace, now())))
+    )
+      return 403;
+    const updateHost = (change) => updateHostIn(change, namespace);
     const role = headers["x-mold-relay-role"];
     const expected = (await tokens())[role];
     if (
       !["host", "frontend"].includes(role) ||
-      !equal(headers.authorization, `Bearer ${expected}`)
+      !(role === "host" && namespace
+        ? await ownerAllowed(store, namespace, headers.authorization, now())
+        : equal(headers.authorization, `Bearer ${expected}`))
     )
       return 403;
     if (role === "host") {
@@ -74,13 +100,14 @@ export function createRouter({
       if (!host) return 409;
       await store.put(`connection#${id}`, {
         role,
+        namespace,
         sid: host.sid,
         expiresAt: now() + LIVE,
       });
       return 200;
     }
     // Only legacy records lacking the field may migrate from a proven hello.
-    const legacy = await store.get("host");
+    const legacy = await store.get(namespaceKey("host", namespace));
     if (legacy && legacy.ready === undefined && legacy.expiresAt > now()) {
       const owner = await store.get(`connection#${legacy.connectionId}`);
       if (
@@ -114,6 +141,7 @@ export function createRouter({
     try {
       await store.put(`connection#${id}`, {
         role,
+        namespace,
         sid: host.sid,
         expiresAt: now() + LIVE,
       });
@@ -133,6 +161,8 @@ export function createRouter({
     if (expectedSid && connection?.sid !== expectedSid) return;
     await store.remove(`connection#${id}`);
     if (!connection) return;
+    const namespace = connection.namespace ?? "";
+    const updateHost = (change) => updateHostIn(change, namespace);
     let affected;
     const removed = await updateHost((old) => {
       if (old?.sid !== connection.sid) return null;
@@ -176,7 +206,18 @@ export function createRouter({
       return 400;
     }
     let connection = await store.get(`connection#${id}`);
-    let host = await store.get("host");
+    const namespace = connection?.namespace ?? "";
+    if (namespace && !(await activeEnrollment(store, namespace, now())))
+      return 403;
+    if (
+      (frame.namespace !== undefined && frame.namespace !== namespace) ||
+      (frame.host_id !== undefined && frame.host_id !== namespace) ||
+      (frame["x-mold-relay-host"] !== undefined &&
+        frame["x-mold-relay-host"] !== namespace)
+    )
+      return 403;
+    const updateHost = (change) => updateHostIn(change, namespace);
+    let host = await store.get(namespaceKey("host", namespace));
     const invalidMembership = () =>
       !connection ||
       !host ||
@@ -186,7 +227,7 @@ export function createRouter({
     if (invalidMembership()) {
       // Sequential reads can straddle a concurrent renewal; confirm before closing.
       connection = await store.get(`connection#${id}`);
-      host = await store.get("host");
+      host = await store.get(namespaceKey("host", namespace));
     }
     if (
       !connection ||
@@ -323,6 +364,7 @@ export function createRouter({
       const guest = await store.get(`connection#${frame.rid}`);
       if (
         guest?.role !== "frontend" ||
+        (guest.namespace ?? "") !== namespace ||
         guest.sid !== host.sid ||
         guest.expiresAt <= now()
       )
@@ -339,7 +381,14 @@ export function createRouter({
       }
       target = host.connectionId;
     }
-    const { from: ignored, to: ignoredTo, ...safe } = frame;
+    const {
+      from: ignored,
+      to: ignoredTo,
+      namespace: ignoredNamespace,
+      host_id: ignoredHost,
+      "x-mold-relay-host": ignoredHeader,
+      ...safe
+    } = frame;
     const forwarded = { ...safe, from: id };
     const postStarted = Date.now();
     try {

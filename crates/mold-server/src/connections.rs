@@ -18,8 +18,20 @@ pub(crate) struct ConnectionEndpoint {
 #[derive(Default)]
 pub struct ConnectionAddresses {
     configuration: RwLock<Option<(SocketAddr, Option<String>)>>,
+    managed_relay_origin: RwLock<Option<String>>,
 }
 impl ConnectionAddresses {
+    /// App-owned enrollment may advertise or withdraw a credential-free HTTPS
+    /// origin without changing process environment or the bound listener.
+    pub fn set_managed_relay_origin(&self, origin: Option<&str>) -> anyhow::Result<()> {
+        let validated = origin.map(validate_public_url).transpose()?;
+        *self
+            .managed_relay_origin
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = validated;
+        Ok(())
+    }
+
     pub(crate) fn configure(
         &self,
         bound: SocketAddr,
@@ -46,7 +58,25 @@ impl ConnectionAddresses {
             .into_iter()
             .map(|i| i.ip())
             .collect::<Vec<_>>();
-        advertised_endpoints(bound, &interfaces, public.as_deref())
+        let managed = self
+            .managed_relay_origin
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut endpoints = advertised_endpoints(bound, &interfaces, public.as_deref());
+        if let Some(url) = managed {
+            if !endpoints.iter().any(|endpoint| endpoint.url == url) {
+                endpoints.insert(
+                    0,
+                    ConnectionEndpoint {
+                        url,
+                        kind: "relay".into(),
+                    },
+                );
+                endpoints.truncate(8);
+            }
+        }
+        endpoints
     }
 }
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -225,6 +255,42 @@ pub(crate) async fn probe(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn managed_origin_updates_the_shared_catalog_and_withdraws() {
+        let addresses = ConnectionAddresses::default();
+        addresses
+            .configure("127.0.0.1:7680".parse().unwrap(), None)
+            .unwrap();
+        addresses
+            .set_managed_relay_origin(Some("https://host.example.com"))
+            .unwrap();
+        assert_eq!(addresses.endpoints()[0].url, "https://host.example.com");
+        assert!(addresses
+            .set_managed_relay_origin(Some("http://host.example.com"))
+            .is_err());
+        assert_eq!(addresses.endpoints().len(), 1);
+        addresses.set_managed_relay_origin(None).unwrap();
+        assert!(addresses.endpoints().is_empty());
+    }
+
+    #[test]
+    fn managed_withdrawal_preserves_explicit_operator_origin() {
+        let addresses = std::sync::Arc::new(ConnectionAddresses::default());
+        let consumer = addresses.clone();
+        addresses
+            .configure(
+                "127.0.0.1:7680".parse().unwrap(),
+                Some("https://operator.example.com"),
+            )
+            .unwrap();
+        addresses
+            .set_managed_relay_origin(Some("https://managed.example.com"))
+            .unwrap();
+        assert_eq!(consumer.endpoints().len(), 2);
+        addresses.set_managed_relay_origin(None).unwrap();
+        assert_eq!(consumer.endpoints()[0].url, "https://operator.example.com");
+    }
+
     use super::*;
     use sha2::Digest;
     #[tokio::test]

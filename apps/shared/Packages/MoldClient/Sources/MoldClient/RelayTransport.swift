@@ -60,7 +60,10 @@ enum RelayTransport {
     }
     static func objectURL(_ value: String, origin: URL, objectOrigin: String? = nil) throws -> URL {
         guard let url = URL(string: value), url.scheme == "https", url.port == nil || url.port == 443,
-            url.user == nil, url.password == nil, url.fragment == nil, url.path.hasPrefix("/_mold/objects/")
+            url.user == nil, url.password == nil, url.fragment == nil, url.path.hasPrefix("/_mold/objects/"),
+            // Foundation keeps dot segments in URL.path, but decodes %2e.
+            // Reject them before a transport can normalize outside the prefix.
+            !url.path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
         else { throw MoldClientError.malformedResponse }
         if !HostAddress.sameOrigin(url, origin) {
             guard let expected = objectOrigin, let identity = s3Identity(url),

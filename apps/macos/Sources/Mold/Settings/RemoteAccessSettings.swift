@@ -5,8 +5,9 @@ import SwiftUI
 struct RemoteAccessSettings: View {
     @Environment(HostStore.self) private var hosts
     @Environment(PairingStore.self) private var pairing
+    @Environment(RemotePairingStore.self) private var remote
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) private var selectedMachine = ""
-    @State private var showingCode = false
+    @State private var pairingHost: MoldHost?
 
     static func canPair(_ host: MoldHost) -> Bool {
         guard MoldEngine.isPairable(host) else { return false }
@@ -27,6 +28,11 @@ struct RemoteAccessSettings: View {
                 } else {
                     SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
                 }
+                Button("Pair your phone") { pairingHost = selected }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(selected == nil)
+                    .accessibilityHint("Show a QR code to connect your phone to the selected machine")
             }
             if let host = selected {
                 Section("Connection Address") {
@@ -51,16 +57,19 @@ struct RemoteAccessSettings: View {
                     Link("Set Up Remote Access", destination: URL(string: "https://utensils.io/mold/deployment/relay")!)
                 }
                 if Self.canPair(host) {
-                    Section("Phone Pairing") {
-                        if showingCode {
-                            PairingSheet(host: host, showsDone: false).id(host.id)
-                                .frame(maxWidth: .infinity)
-                            Button("Hide Code") { showingCode = false }
-                        } else {
-                            Button("Show Pairing Code") { showingCode = true }
-                        }
-                    }
                     PairingSection(host: host, showsPairButton: false)
+                } else if host.id == MoldEngine.localHostID {
+                    Section("This Mac") {
+                        Text("Pair your phone to connect through Mold proxy. This Mac’s engine stays on a private local address.")
+                            .foregroundStyle(.secondary)
+                        if remote.canStopRemoteAccess {
+                            Button("Stop Remote Access") { Task { await remote.disable() } }
+                        }
+                        if remote.enabled {
+                            PairingSection(host: host, showsPairButton: false)
+                        }
+                        if case let .failed(reason) = remote.state { Text(reason).foregroundStyle(.secondary) }
+                    }
                 } else {
                     Section("This Mac") {
                         Text("This Mac’s built-in engine is private and uses a loopback address. To share a machine, set up an authenticated server and relay, then add its public address in Machines.")
@@ -70,9 +79,10 @@ struct RemoteAccessSettings: View {
             }
         }
         .formStyle(.grouped)
-        .onChange(of: selected?.id) { showingCode = false }
+        .sheet(item: $pairingHost) { PhonePairingSheet(host: $0) }
+        .onChange(of: selected?.id) { pairingHost = nil }
         .task(id: selected?.id) {
-            guard let host = selected, Self.canPair(host) else { return }
+            guard let host = selected else { return }
             await pairing.load(on: host.id)
         }
     }

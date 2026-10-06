@@ -78,6 +78,42 @@ struct ConnectionProbeTests {
         #expect(url.absoluteString == "https://relay.example")
     }
 
+    @Test func pairingPrefersLANWhenAllAdvertisedRoutesAnswer() async throws {
+        ConnectionProbeProtocol.failLAN = false
+        ConnectionProbeProtocol.failTailscale = false
+        ConnectionProbeProtocol.badProof = false
+        let route = try await selectPairingRoute(relay: "https://lan-preferred.example")
+        #expect(route.absoluteString == "http://192.168.1.2:7680")
+    }
+
+    @Test func pairingUsesTailscaleWhenLANIsUnavailable() async throws {
+        ConnectionProbeProtocol.failLAN = true
+        ConnectionProbeProtocol.failTailscale = false
+        ConnectionProbeProtocol.badProof = false
+        let route = try await selectPairingRoute(relay: "https://tailscale-preferred.example")
+        #expect(route.absoluteString == "http://100.64.1.2:7680")
+    }
+
+    @Test func pairingUsesProxyWhenBothDirectRoutesAreUnavailable() async throws {
+        ConnectionProbeProtocol.failLAN = true
+        ConnectionProbeProtocol.failTailscale = true
+        ConnectionProbeProtocol.badProof = false
+        defer { ConnectionProbeProtocol.failTailscale = false }
+        let route = try await selectPairingRoute(relay: "https://proxy-fallback.example")
+        #expect(route.absoluteString == "https://proxy-fallback.example")
+    }
+
+    private func selectPairingRoute(relay: String) async throws -> URL {
+        // Deliberately advertise proxy first: selection must use route kind,
+        // not QR payload order. Each test gets a separate route-memory key.
+        try await ConnectionRoutes.select(endpoints: [
+            ConnectionEndpoint(url: relay, kind: .relay),
+            ConnectionEndpoint(url: "http://100.64.1.2:7680", kind: .tailscale),
+            ConnectionEndpoint(url: "http://192.168.1.2:7680", kind: .lan)],
+            secret: "mold_pair_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+            kind: "pairing", instanceID: "machine", session: session())
+    }
+
     @Test func directRouteWinsAndWrongProofIsNeverAccepted() async throws {
         ConnectionProbeProtocol.failLAN = false
         ConnectionProbeProtocol.badProof = false
@@ -96,6 +132,7 @@ struct ConnectionProbeTests {
 
 private final class ConnectionProbeProtocol: URLProtocol {
     nonisolated(unsafe) static var failLAN = false
+    nonisolated(unsafe) static var failTailscale = false
     nonisolated(unsafe) static var badProof = false
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -104,7 +141,8 @@ private final class ConnectionProbeProtocol: URLProtocol {
         #expect(request.value(forHTTPHeaderField: "X-Api-Key") == nil)
         #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
         #expect(request.url?.path == "/api/connection-probe")
-        if Self.failLAN && request.url?.host == "192.168.1.2" {
+        if (Self.failLAN && request.url?.host == "192.168.1.2")
+            || (Self.failTailscale && request.url?.host == "100.64.1.2") {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
             return
         }

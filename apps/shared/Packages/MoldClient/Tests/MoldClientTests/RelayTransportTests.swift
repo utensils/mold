@@ -261,6 +261,23 @@ struct RelayTransportTests {
             }
         }
     }
+    @Test func namespacedSignedObjectsRetainBucketAndReservedPathChecks() throws {
+        let origin = URL(string: "https://relay.example")!
+        let objectOrigin = "https://mold-relay-123456789012-us-east-1.s3.dualstack.us-east-1.amazonaws.com"
+        let namespace = String(repeating: "a", count: 32)
+        let signed = objectOrigin + "/_mold/objects/\(namespace)/asset?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature="
+            + String(repeating: "a", count: 64) + "&X-Amz-Expires=900"
+        #expect(try RelayTransport.objectURL(signed, origin: origin, objectOrigin: objectOrigin).absoluteString == signed)
+        for unsafe in [
+            signed.replacingOccurrences(of: "123456789012", with: "999999999999"),
+            signed.replacingOccurrences(of: "/\(namespace)/asset", with: "/../../api/private"),
+            signed.replacingOccurrences(of: "/\(namespace)/asset", with: "/%2e%2e/%2e%2e/api/private"),
+        ] {
+            #expect(throws: (any Error).self) {
+                try RelayTransport.objectURL(unsafe, origin: origin, objectOrigin: objectOrigin)
+            }
+        }
+    }
     @Test func HTTPSRequestTargetsPreserveEncodingAndRepeatedQueries() async throws {
         RelayTransportStub.requests = []
         _ = try await backend().send(

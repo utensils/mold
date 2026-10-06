@@ -13,12 +13,14 @@ import Synchronization
 /// and the next save deleted every one of them (review 05-H5).
 ///
 /// The document is `{"<name>": "<value>"}` and nothing else. Names are
-/// constrained to the two this app has, so the store can never be pointed at
+/// constrained to declared slots, so the store can never be pointed at
 /// another file or grow a slot nobody declared.
 public final class SecretStore: Sendable {
     /// The key the in-process engine is started with, and that "This Mac"
     /// then presents back to it.
     public static let localEngineKeyName = "local-engine-api-key"
+    /// Owner credential for this Mac's opt-in managed relay enrollment.
+    public static let managedRelayOwnerName = "managed-relay-owner"
     /// One machine's key. The suffix is that host's UUID -- the same identity
     /// `StoredHost` writes to preferences, so the two files join on it.
     public static func remoteAPIKeyName(for host: UUID) -> String {
@@ -130,7 +132,7 @@ public final class SecretStore: Sendable {
     /// the per-host prefix with a suffix of ASCII letters, digits, `-`, `_`
     /// and `.` -- which is what keeps a name from ever being a path.
     static func check(_ name: String) throws {
-        if name == localEngineKeyName { return }
+        if name == localEngineKeyName || name == managedRelayOwnerName { return }
         guard name.hasPrefix(perHostPrefix) else {
             throw SecretStoreError.unknownName(name)
         }
@@ -142,4 +144,3 @@ public final class SecretStore: Sendable {
         guard !suffix.isEmpty, allowed else { throw SecretStoreError.unknownName(name) }
     }
 }
-

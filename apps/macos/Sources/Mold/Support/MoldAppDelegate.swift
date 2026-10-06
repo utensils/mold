@@ -11,6 +11,7 @@ import UserNotifications
 final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the composition root, which owns all of them.
     var engine: MoldEngine?
+    var remotePairing: RemotePairingStore?
     var materializer: PrintMaterializer?
     var thumbnails: ThumbnailCache?
     var landedPrints: LandedPrints?
@@ -68,6 +69,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        remotePairing?.shutdown()
         // The caches are disposable and local, so they go first and without
         // ceremony: whatever they hold can be fetched again. BOTH of them --
         // the thumbnails are a second on-disk copy of somebody's library, and

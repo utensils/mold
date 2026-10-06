@@ -20,4 +20,13 @@ bool mold_engine_join(uint64_t timeout_ms);
 // -1 unknown, -2 a live writer whose lease body could not be read.
 int64_t mold_engine_home_writer_pid(void);
 
+// Opt-in managed outbound relay; all strings are copied during the call.
+// Returns 0 on success. Duplicate starts and invalid configuration return nonzero.
+int32_t mold_relay_start(const char *endpoint, const char *token, const char *host_id,
+                         uint16_t local_port, const char *public_origin);
+int32_t mold_relay_stop(void);
+bool mold_relay_is_alive(void);
+// NULL withdraws the managed route. Publication follows native readiness proof.
+int32_t mold_relay_set_public_origin(const char *origin);
+
 #endif

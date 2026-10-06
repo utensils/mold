@@ -1,3 +1,11 @@
+import {
+  managedConfig,
+  createManagedEnrollment,
+  resolveNamespace,
+  namespaceKey,
+  validNamespace,
+  activeEnrollment,
+} from "./managed.mjs";
 import { failureCategory } from "./router-core.mjs";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
@@ -76,6 +84,7 @@ const cors = {
 export function createFrontend(dependencies = {}) {
   const deps = {
     store,
+    managed: managedConfig(),
     request: openRequest,
     prepareUpload,
     consumeUpload,
@@ -98,6 +107,10 @@ export function createFrontend(dependencies = {}) {
       ),
     ...dependencies,
   };
+  const enrollment = createManagedEnrollment({
+    store: deps.store,
+    config: deps.managed,
+  });
   const output = (raw, status, headers) => {
     if (
       headers?.["cache-control"] &&
@@ -140,9 +153,13 @@ export function createFrontend(dependencies = {}) {
     out.end(status === 204 ? undefined : JSON.stringify(value));
     return out;
   };
-  async function authenticated(headers) {
+  async function authenticated(headers, namespace = "") {
     credentialDigest(headers);
-    const result = await deps.request({ path: "/api/status", headers });
+    const result = await deps.request({
+      path: "/api/status",
+      headers,
+      namespace,
+    });
     try {
       let bytes = 0;
       for await (const chunk of result.response) {
@@ -157,11 +174,12 @@ export function createFrontend(dependencies = {}) {
     }
   }
   async function createMedia(request) {
-    const sid = await authenticated(request.headers);
+    const sid = await authenticated(request.headers, request.namespace);
     const id = randomUUID(),
       expiresAt = Math.floor(Date.now() / 1000) + 900;
-    await deps.store.put(`media#${id}`, {
+    await deps.store.put(namespaceKey(`media#${id}`, request.namespace), {
       state: "pending",
+      namespace: request.namespace,
       createdAt: Math.floor(Date.now() / 1000),
       credential: credentialDigest(request.headers),
       sid,
@@ -169,27 +187,50 @@ export function createFrontend(dependencies = {}) {
     });
     await deps.invoke({
       kind: "stage",
+      namespace: request.namespace,
       id,
       sid,
-      request: { method: "GET", path: request.path, headers: request.headers },
+      request: {
+        method: "GET",
+        path: request.path,
+        headers: request.headers,
+        namespace: request.namespace,
+      },
     });
     return { relay: { id, state: "pending" }, expires_at: expiresAt };
   }
   async function stageWorker(event) {
-    const job = await deps.store.get(`media#${event.id}`);
+    const namespace = event.namespace ?? "";
+    if (
+      namespace &&
+      (!validNamespace(namespace) ||
+        !(await activeEnrollment(deps.store, namespace)))
+    )
+      return;
+    if ((event.request?.namespace ?? "") !== namespace) return;
+    const job = await deps.store.get(
+      namespaceKey(`media#${event.id}`, namespace),
+    );
     if (
       !job ||
       job.state !== "pending" ||
       job.expiresAt <= Math.floor(Date.now() / 1000) ||
-      job.sid !== event.sid
+      job.sid !== event.sid ||
+      (job.namespace ?? "") !== namespace ||
+      ((namespace || job.credential) &&
+        job.credential !== credentialDigest(event.request.headers ?? {}))
     )
       return;
     if (
-      !(await deps.store.cas(`media#${event.id}`, job.revision, {
-        ...job,
-        state: "working",
-        workingAt: Math.floor(Date.now() / 1000),
-      }))
+      !(await deps.store.cas(
+        namespaceKey(`media#${event.id}`, namespace),
+        job.revision,
+        {
+          ...job,
+          state: "working",
+          workingAt: Math.floor(Date.now() / 1000),
+        },
+      ))
     )
       return;
     let result,
@@ -209,9 +250,11 @@ export function createFrontend(dependencies = {}) {
       const object = await deps.stage(
         result.response,
         cleanHeaders(result.response.headers, { response: true }),
+        undefined,
+        namespace,
       );
       const { url: unusedURL, ...facts } = object;
-      await deps.store.put(`media#${event.id}`, {
+      await deps.store.put(namespaceKey(`media#${event.id}`, namespace), {
         ...job,
         state: "ready",
         ...facts,
@@ -223,7 +266,10 @@ export function createFrontend(dependencies = {}) {
         phase,
         failureCategory(error),
       );
-      await deps.store.put(`media#${event.id}`, { ...job, state: "failed" });
+      await deps.store.put(namespaceKey(`media#${event.id}`, namespace), {
+        ...job,
+        state: "failed",
+      });
     } finally {
       result?.close();
     }
@@ -240,6 +286,25 @@ export function createFrontend(dependencies = {}) {
     let mutationMayHaveExecuted = false;
     try {
       const request = normalizeEvent(event);
+      if (
+        request.route === "/_mold/relay/enroll" ||
+        request.route.startsWith("/_mold/relay/enroll/")
+      ) {
+        const response = await enrollment({
+          ...request,
+          domainName: event.requestContext?.domainName,
+          sourceIP:
+            event.requestContext?.http?.sourceIp ??
+            event.requestContext?.identity?.sourceIp,
+        });
+        json(raw, response.status, response.value);
+        return;
+      }
+      request.namespace = await resolveNamespace(
+        { domainName: event.requestContext?.domainName },
+        deps.store,
+        deps.managed,
+      );
       if (request.method === "OPTIONS") {
         const requested =
           request.headers["access-control-request-headers"] ??
@@ -332,7 +397,7 @@ export function createFrontend(dependencies = {}) {
         request.route === "/_mold/relay/uploads" &&
         request.method === "POST"
       ) {
-        const sid = await authenticated(request.headers);
+        const sid = await authenticated(request.headers, request.namespace);
         json(
           raw,
           200,
@@ -340,6 +405,7 @@ export function createFrontend(dependencies = {}) {
             JSON.parse(request.body.toString()),
             request.headers,
             sid,
+            request.namespace,
           ),
         );
         return;
@@ -348,14 +414,16 @@ export function createFrontend(dependencies = {}) {
         request.route === "/_mold/relay/request" &&
         request.method === "POST"
       ) {
-        const sid = await authenticated(request.headers),
+        const sid = await authenticated(request.headers, request.namespace),
           entry = await deps.consumeUpload(
             JSON.parse(request.body.toString()).id,
             request.headers,
             sid,
+            request.namespace,
           );
         cleanup = entry.cleanup;
         result = await deps.request({
+          namespace: request.namespace,
           method: entry.method,
           onForwardAttempt: () => {
             mutationMayHaveExecuted = !["GET", "HEAD", "OPTIONS"].includes(
@@ -395,9 +463,12 @@ export function createFrontend(dependencies = {}) {
         const id = request.route.slice("/_mold/relay/media/".length);
         if (!/^[a-f0-9-]{36}$/.test(id))
           throw new Error("Invalid media identity");
-        const job = await deps.store.get(`media#${id}`);
+        const job = await deps.store.get(
+          namespaceKey(`media#${id}`, request.namespace),
+        );
         if (
           !job ||
+          (job.namespace ?? "") !== request.namespace ||
           job.expiresAt <= Math.floor(Date.now() / 1000) ||
           job.credential !== credentialDigest(request.headers)
         )
@@ -428,6 +499,7 @@ export function createFrontend(dependencies = {}) {
                       job.expiresAt - Math.floor(Date.now() / 1000),
                     ),
                   ),
+                  request.namespace,
                 ),
                 expires_at: job.expires_at,
               }
@@ -517,7 +589,12 @@ export function createFrontend(dependencies = {}) {
         !eventStream &&
         (!Number.isFinite(length) || length > OBJECT_THRESHOLD)
       ) {
-        const object = await deps.stage(response, headers);
+        const object = await deps.stage(
+          response,
+          headers,
+          undefined,
+          request.namespace,
+        );
         json(
           raw,
           200,

@@ -26,6 +26,7 @@ function fixture(options = {}) {
   };
   return {
     rows,
+    store,
     delivered,
     closed,
     advance(n) {
@@ -33,6 +34,7 @@ function fixture(options = {}) {
     },
     router: createRouter({
       store,
+      managed: options.managed,
       now: () => now,
       tokens: async () => ({ host: "host-test", frontend: "frontend-test" }),
       post: async (id, frame) => {
@@ -472,4 +474,103 @@ test("confirmed host gone cannot evict a replacement epoch", async () => {
   assert.equal(f.rows.get("host").sid, "replacement");
   assert.equal(f.rows.get("host").expiresAt, 190);
   assert.equal(f.rows.has("connection#new"), true);
+});
+
+test("two managed hosts and legacy coexist; owner credentials, cross frames and revoke fail closed", async () => {
+  const { createManagedEnrollment } = await import("../managed.mjs");
+  const config = {
+    domain: "phones.example.com",
+    origin: "https://link.example.com",
+    relayURL: "wss://ws.example.com/live",
+  };
+  const f = fixture({ managed: config });
+  const enroll = createManagedEnrollment({
+    store: f.store,
+    config,
+    now: () => 100,
+  });
+  const register = async (ip) =>
+    (
+      await enroll({
+        method: "POST",
+        route: "/_mold/relay/enroll",
+        headers: {},
+        sourceIP: ip,
+        domainName: "link.example.com",
+      })
+    ).value;
+  const a = await register("192.0.2.1"),
+    b = await register("192.0.2.2");
+  const scopedConnect = (id, role, token, namespace) =>
+    f.router({
+      requestContext: { routeKey: "$connect", connectionId: id },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-mold-relay-role": role,
+        "x-mold-relay-host": namespace,
+      },
+    });
+  assert.equal(
+    (await scopedConnect("wrong", "host", a.token, b.host_id)).statusCode,
+    403,
+  );
+  for (const [host, token, namespace] of [
+    ["ha", a.token, a.host_id],
+    ["hb", b.token, b.host_id],
+    ["legacy", "host-test", undefined],
+  ]) {
+    assert.equal(
+      (await scopedConnect(host, "host", token, namespace)).statusCode,
+      200,
+    );
+    await send(f.router, host, { a: "hello", v: 2 });
+    assert.equal(
+      (await scopedConnect(host + "g", "frontend", "frontend-test", namespace))
+        .statusCode,
+      200,
+    );
+    await send(f.router, host + "g", { a: "hello", v: 2 });
+  }
+  const before = f.delivered.length,
+    sid = f.rows.get(`host#tenant#${a.host_id}`).sid;
+  assert.equal(
+    (
+      await send(f.router, "hag", {
+        a: "data",
+        v: 2,
+        sid,
+        rid: "hag",
+        seq: 0,
+        d: "YQ==",
+        namespace: b.host_id,
+      })
+    ).statusCode,
+    403,
+  );
+  assert.equal(f.delivered.length, before);
+  await send(f.router, "ha", {
+    a: "data",
+    v: 2,
+    sid,
+    rid: "hbg",
+    seq: 0,
+    d: "YQ==",
+  });
+  assert.equal(f.delivered.at(-1).id, "ha");
+  assert.equal(f.delivered.at(-1).a, "cancel");
+  await enroll({
+    method: "DELETE",
+    route: "/_mold/relay/enroll/" + a.host_id,
+    headers: { authorization: "Bearer " + a.token },
+    sourceIP: "192.0.2.1",
+    domainName: "link.example.com",
+  });
+  assert.equal(
+    (await send(f.router, "ha", { a: "heartbeat", v: 2 })).statusCode,
+    403,
+  );
+  assert.equal(
+    (await send(f.router, "hb", { a: "heartbeat", v: 2 })).statusCode,
+    200,
+  );
 });

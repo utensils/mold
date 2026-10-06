@@ -57,6 +57,8 @@ struct MoldApp: App {
     /// the cache. It is made by SwiftUI, so this is where the two meet.
     private func handOverToTheDelegate() {
         delegate.engine = stores.engine
+        delegate.remotePairing = stores.remotePairing
+        stores.remotePairing.followEngine(stores.engine)
         delegate.materializer = stores.materializer
         delegate.thumbnails = stores.thumbnails
         delegate.landedPrints = stores.landedPrints

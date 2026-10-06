@@ -2,8 +2,8 @@ import Foundation
 import MoldClient
 
 /// Mobile pairing, per machine -- for a KEYED host this app holds an
-/// operator key for (design fact 7, decision 12). This Mac's own engine is
-/// keyless and never appears here; `LocalEngineSettings` says why.
+/// operator key for. This Mac's authenticated engine also uses this store
+/// after the person opts into an outbound remote connection.
 ///
 /// One store, not folded into `MachineStore`: pairing is its own wire
 /// surface (`MoldConfigBackend`, beside `config()` and `configProfiles()`),
@@ -28,6 +28,7 @@ final class PairingStore {
     /// nothing. Not `private(set)`, same reason as `authority` above.
     internal(set) var session: PairingSession?
     internal(set) var sessionHost: MoldHost.ID?
+    @ObservationIgnored private var sessionGeneration = 0
     /// Why a code could not be started for that machine, in words -- what
     /// the sheet shows instead of waiting forever.
     internal(set) var sessionFailure: [MoldHost.ID: String] = [:]
@@ -69,17 +70,28 @@ final class PairingStore {
     /// Code press means the old code is dead even if nobody rescans it.
     func createSession(on host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: "start a pairing session") else { return }
-        guard let client = hosts.backend(for: host) else { return }
+        sessionGeneration += 1
+        let generation = sessionGeneration
+        session = nil
+        sessionHost = nil
         sessionFailure[host] = nil
+        guard let client = hosts.backend(for: host) else {
+            sessionFailure[host] = "This machine is no longer available. Try pairing again."
+            return
+        }
         do {
-            session = try await client.pairingSession()
+            let answer = try await client.pairingSession()
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
+            session = answer
             sessionHost = host
             hosts.succeeded(on: host, doing: "start a pairing session")
         } catch let MoldClientError.http(status, code, _)
             where status == 403 && code == "PAIRING_OPERATOR_REQUIRED" {
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
             authority[host] = .paired
             sessionFailure[host] = Self.operatorRequired
         } catch {
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
             sessionFailure[host] = error.failureSentence
             hosts.report(error, on: host, doing: "start a pairing session")
         }
