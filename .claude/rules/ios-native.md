@@ -28,6 +28,12 @@ paths:
 
 **TestFlight.** `testflight-ios-native.yml` uploads after `iOS native app` passes on main, gated on the repository variable `COMPANION_TESTFLIGHT=true` -- it skips with a notice until the owner creates the App Store Connect record (no API exists for that). It is NOT part of the release tag gate.
 
+Root `Cargo.toml` changes trigger the native pipeline because its workspace
+version supplies the marketing version. They run lint/unit builds without
+repeating unchanged Swift UI audits; mixed UI changes still require the matrix.
+Library audit settling allows 15 seconds for hosted AX snapshots while retaining
+exact frame equality and all containment checks.
+
 **Commands.** `make -C apps/ios gen|build|test|uitest|lint` (devshell: `companion-*`); pass `BUILD=/Volumes/ExternalStorage/...` locally to keep DerivedData off the internal disk. Simulator tests do not touch the desktop. Never run the MAC app's `make test` locally unasked: its host-app bundle launches Mold Studio on the user's desktop; CI (`macos-native.yml`) runs it. CI for this app: `.github/workflows/ios-native.yml`.
 
 **Development loop.** `nix develop -c companion-dev` (`scripts/companion.sh dev`) watches iOS and shared Swift sources and rebuilds/relaunches after edits. `companion-run` launches once; `companion-build` builds only. All helpers accept `SIM=<UDID>` and `BUILD=<directory>`. Generated projects/build output are excluded from the watch set. `scripts/tests/companion-helper.sh` checks argument forwarding from outside the repository.
@@ -116,7 +122,8 @@ its navigation bar to disappear before reopening export.
 
 The export Form uses an opaque native navigation background to keep scrolled
 text from bleeding behind its title and Cancel action.
-Export audit scrolling uses the visible Form gutter and a held slow drag to
+Export audit scrolling uses the visible leading Form gutter, opposite UIKit's
+trailing scroll-indicator hit region, and a held slow drag to
 avoid skipping AX5 rows through momentum. Require complete label/value coverage
 and keep all settled audit types strict. Only at maximum AX5, before recording a viewport, use
 bounded measured gutter motion to settle text just crossing the navigation edge

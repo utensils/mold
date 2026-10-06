@@ -19,6 +19,7 @@ on:
       - "scripts/tests/ios-uitest-retry.py"
       - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
+      - "Cargo.toml"
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
       - "crates/mold-server/src/auth.rs"
@@ -33,6 +34,7 @@ on:
       - "scripts/tests/ios-uitest-retry.py"
       - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
+      - "Cargo.toml"
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
       - "crates/mold-server/src/auth.rs"

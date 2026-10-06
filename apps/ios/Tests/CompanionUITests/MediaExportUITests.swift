@@ -301,7 +301,9 @@ final class MediaExportUITests: XCTestCase {
                 evidence(app, "Export boundary before settling \(attempt)")
                 print("EXPORT BOUNDARY SETTLE \(crossing.0) \(crossing.1) viewport \(visible) shift \(shift) slack \(slack)")
                 let origin = app.coordinate(withNormalizedOffset: .zero)
-                let x = visible.maxX - 10 - app.frame.minX
+                // The trailing gutter overlaps UIKit's scroll-indicator hit
+                // region. Dragging its thumb amplifies this measured shift.
+                let x = visible.minX + 10 - app.frame.minX
                 let y = visible.minY + visible.height * 0.6 - app.frame.minY
                 origin.withOffset(CGVector(dx: x, dy: y))
                     .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: y + shift)),
@@ -450,11 +452,12 @@ final class MediaExportUITests: XCTestCase {
             // Release at rest: a fast drag can coast past a tall AX5 row's
             // fully visible interval on the narrow SE viewport.
             // Begin in the Form gutter, outside Menu labels which can consume
-            // a held drag. Use the on-screen viewport rather than Form bounds.
+            // a held drag, and opposite UIKit's trailing scroll indicator.
+            // Use the on-screen viewport rather than Form bounds.
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            let start = origin.withOffset(CGVector(dx: visible.maxX - 10 - app.frame.minX,
+            let start = origin.withOffset(CGVector(dx: visible.minX + 10 - app.frame.minX,
                                                    dy: visible.minY + visible.height * 0.8 - app.frame.minY))
-            let end = origin.withOffset(CGVector(dx: visible.maxX - 10 - app.frame.minX,
+            let end = origin.withOffset(CGVector(dx: visible.minX + 10 - app.frame.minX,
                                                  dy: visible.minY + visible.height * 0.6 - app.frame.minY))
             print("EXPORT SCROLL GEOMETRY form \(form.frame) viewport \(visible) start \(start.screenPoint) end \(end.screenPoint)")
             start
