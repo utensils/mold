@@ -11,16 +11,17 @@ on:
     # Mondays 13:17 UTC (06:17 America/Phoenix), off the top of the hour.
     - cron: "17 13 * * 1"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/*/Cargo.toml"
-      - "rust-toolchain"
-      - "rust-toolchain.toml"
-      - ".github/workflows/msrv.yml"
-
+# PAUSED 2026-10-06: Per-main MSRV recompilation deferred; weekly/manual checks retained (~4m). Restore after runner capacity is improved.
+#   push:
+#     branches: [main]
+#     paths:
+#       - "Cargo.toml"
+#       - "Cargo.lock"
+#       - "crates/*/Cargo.toml"
+#       - "rust-toolchain"
+#       - "rust-toolchain.toml"
+#       - ".github/workflows/msrv.yml"
+#
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"

@@ -60,6 +60,15 @@ class AuditScope(unittest.TestCase):
                 self.assertTrue(module.requires_audit(self.root, 'pull_request', self.base, head))
                 self.git('reset', '--hard', self.base)
 
+    def test_workspace_version_triggers_native_delivery_without_ui_audits(self):
+        head = self.change('Cargo.toml')
+        for event in ['pull_request', 'push']:
+            self.assertFalse(module.requires_audit(self.root, event, self.base, head))
+        workflow = (ROOT / '.github/workflows/ios-native.yml').read_text()
+        push, pull_request = workflow.split('  pull_request:', 1)
+        self.assertIn('- "Cargo.toml"', push)
+        self.assertIn('- "Cargo.toml"', pull_request.split('  workflow_dispatch:', 1)[0])
+
     def test_mixed_widget_and_app_changes_require_full_audit(self):
         head = self.change('apps/ios/Sources/Widgets/GenerationLiveActivity.swift',
                            'apps/ios/Sources/App/Library.swift')

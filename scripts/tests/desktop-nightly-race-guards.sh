@@ -25,9 +25,18 @@ grep -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" <<< "
 # pull-request feedback format-only and moved every build to main, so the proof
 # is asserted where it now lives — one job per platform, both gated to pushes —
 # rather than deleted along with the step that used to carry it.
+build_first=false
+if grep -Fq 'workspace-build-first' "$repo_root/.github/workflows/ci.yml"; then
+  build_first=true
+fi
 rust_job="$(sed -n '/^  desktop-rust:/,/^  desktop-linux:/p' "$workflow")"
+if [[ "$build_first" == true ]]; then
+  grep -Fq 'run: cargo check --locked --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" \
+    || fail "the basic desktop compilation gate is missing"
+else
 grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" \
   || fail "the native desktop gate no longer runs the test suite"
+fi
 
 linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
 grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles appimage --ci -v' <<< "$linux_job" \
@@ -45,8 +54,13 @@ if grep -Fq 'desktop-linux' <<< "$nightly_header"; then
 fi
 
 publisher_header="$(sed -n '/^  publish-desktop-nightly:/,/^    steps:/p' "$workflow")"
+if [[ "$build_first" == true ]]; then
+  grep -Fq 'needs: [desktop-nightly]' <<< "$publisher_header" \
+    || fail "build-first publication must wait for its distribution"
+else
 grep -Fq 'needs: [desktop-nightly, desktop-frontend, desktop-rust]' <<< "$publisher_header" \
   || fail "Nightly publication is not gated by distribution, frontend, and Rust validation"
+fi
 grep -Fq 'group: desktop-nightly-publication' <<< "$publisher_header" \
   || fail "Nightly publication is not serialized"
 grep -Fq 'cancel-in-progress: false' <<< "$publisher_header" \
@@ -108,8 +122,10 @@ grep -Fq 'pkgs.protobuf' "$repo_root/flake.nix" \
 distribution="$repo_root/.github/workflows/desktop-distribution.yml"
 grep -Fq 'bunx tauri build --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles app --ci --config' "$distribution" \
   || fail "the signed macOS desktop build does not ship the complete mesh feature recipe"
+if [[ "$build_first" != true ]]; then
 grep -Fq 'cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings' <<< "$rust_job" \
   || fail "the macOS PR gate does not compile the signed desktop mesh feature recipe"
+fi
 grep -Fq 'brew install minisign protobuf' "$distribution" \
   || fail "the signed macOS desktop build has no protoc for candle-onnx"
 

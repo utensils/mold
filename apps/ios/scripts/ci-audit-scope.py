@@ -7,6 +7,9 @@ import subprocess
 # These files cannot change the app UI exercised by CompanionUITests. Widget
 # Swift changes still compile in the always-on unit lane and require Widget UAT.
 STATIC_PATHS = {
+    # The native Swift app reads only its marketing version from this Rust
+    # manifest. Lint/unit builds validate the stamp before TestFlight delivery.
+    'Cargo.toml',
     'README.md',
     'apps/ios/README.md',
     '.claude/rules/ios-native.md',

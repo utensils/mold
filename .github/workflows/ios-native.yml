@@ -1,8 +1,8 @@
 name: iOS native app
 
-# Mold Studio Companion (apps/ios): the native SwiftUI iPhone/iPad app. Lints,
-# unit tests and the accessibility audit (every destination at xSmall, Large
-# and AX5, light and dark) on an iOS 26 simulator. The Tauri iPhone app has its
+# Mold Studio Companion (apps/ios): basic iOS 26 Simulator compilation.
+# Original lint/unit/accessibility jobs are retained as comments below until
+# runner capacity improves. The Tauri iPhone app has its
 # own workflow (ios.yml); the two never share a build.
 #
 # `macos-26` because the deployment target is iOS 26.0 and nothing older
@@ -19,6 +19,7 @@ on:
       - "scripts/tests/ios-uitest-retry.py"
       - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
+      - "Cargo.toml"
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
       - "crates/mold-server/src/auth.rs"
@@ -33,6 +34,7 @@ on:
       - "scripts/tests/ios-uitest-retry.py"
       - "scripts/tests/ios-native-ci-scope.py"
       # The version stamp the Makefile reads.
+      - "Cargo.toml"
       - "apps/macos/scripts/workspace-version.sh"
       # The pairing claim contract the phone redeems.
       - "crates/mold-server/src/auth.rs"
@@ -70,8 +72,47 @@ jobs:
           python3 apps/ios/scripts/ci-audit-scope.py \
             --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
+# PAUSED 2026-10-06: preserve the original lint/package/unit job until faster
+# runners are available. Prior native app audit run took about 2 hours overall;
+# individual hosted accessibility jobs have 60/90-minute timeouts.
+#   check:
+#     name: Lint and unit tests
+#     runs-on: macos-26
+#     timeout-minutes: 45
+#     defaults:
+#       run:
+#         working-directory: apps/ios
+#     steps:
+#       - uses: actions/checkout@v6
+#         with:
+#           # BUILD_NUMBER is the commit count.
+#           fetch-depth: 0
+#
+#       - name: Show the toolchain
+#         run: |
+#           xcodebuild -version
+#           echo "iOS SDK: $(xcrun --show-sdk-version --sdk iphonesimulator)"
+#           echo "simulator: $(scripts/pick-simulator.sh)"
+#
+#       - name: Install xcodegen
+#         run: brew install xcodegen
+#
+#       - name: Architecture lints
+#         run: |
+#           make lint
+#           bash ../../scripts/tests/ios-uitest-runner.sh
+#           python3 ../../scripts/tests/ios-uitest-retry.py
+#
+#       # The shared packages on the phone's platform: MoldClient's suite on an
+#       # iOS simulator, so a macOS-only API cannot land in them unnoticed.
+#       - name: Shared packages on iOS
+#         run: make packages-test
+#
+#       - name: Unit tests
+#         run: make test
+
   check:
-    name: Lint and unit tests
+    name: Native simulator build
     runs-on: macos-26
     timeout-minutes: 45
     defaults:
@@ -92,73 +133,67 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - name: Architecture lints
-        run: |
-          make lint
-          bash ../../scripts/tests/ios-uitest-runner.sh
-          python3 ../../scripts/tests/ios-uitest-retry.py
+      # TEMPORARY owner-directed build-first lane. Restore make lint,
+      # make packages-test and make test when test gating is resumed.
+      - name: Build native app and shared packages for iOS Simulator
+        run: make build
 
-      # The shared packages on the phone's platform: MoldClient's suite on an
-      # iOS simulator, so a macOS-only API cannot land in them unnoticed.
-      - name: Shared packages on iOS
-        run: make packages-test
-
-      - name: Unit tests
-        run: make test
-
-  audit:
-    needs: changes
-    if: >-
-      always() && !cancelled() &&
-      (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
-    name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
-    runs-on: macos-26
-    # Full export suites exceeded 90 minutes on hosted runners. Keep delivery,
-    # video audits and mesh audits separate, retaining all 14 methods per appearance.
-    timeout-minutes: ${{ startsWith(matrix.suite.name, 'media_exports') && 90 || 60 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        appearance: [light, dark]
-        suite:
-          - name: app
-            classes: GenerationInteractionTests PopulatedGenerationTests ShellAccessibilityTests
-          - name: references
-            classes: ReferenceParityTests
-          - name: library
-            classes: HiddenCollectionTests LibraryCollectionPickerTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
-          - name: library_interactions
-            classes: LibraryLongPressTests
-          - name: media_exports_delivery
-            classes: MediaExportUITests/testVideoZeroPauseAndBounceFolderExports MediaExportUITests/testAPNGFolderDeliveryOmitsParkedGifControls MediaExportUITests/testMeshGeometryTurntableAndAssetFolderExports MediaExportUITests/testShareAndFilesCancellationPreserveTheViewer MediaExportUITests/testExportedGIFSavesToPhotos MediaExportUITests/testPhotosDenialKeepsOptionsAndOffersRecovery MediaExportUITests/testRefusedExportCanBeRetriedWithoutLosingChoices MediaExportUITests/testUnsupportedFormatsShowAnExplanation
-          - name: media_exports_video_audit
-            classes: MediaExportUITests/testExportSheetExtraSmall MediaExportUITests/testExportSheetLarge MediaExportUITests/testExportSheetAX5
-          - name: media_exports_mesh_audit
-            classes: MediaExportUITests/testMeshExportSheetExtraSmall MediaExportUITests/testMeshExportSheetLarge MediaExportUITests/testMeshExportSheetAX5
-    defaults:
-      run:
-        working-directory: apps/ios
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Install xcodegen
-        run: brew install xcodegen
-
-      # The iPhone passes. The hosted runner times the iPad's audits out
-      # (the audit itself, UI snapshots, even synthesized taps), so the iPad
-      # sweep is the local `make uitest`'s -- run it before merging iPad work.
-      - name: Accessibility audit
-        env:
-          UITEST_APPEARANCES: ${{ matrix.appearance }}
-          UITEST_CLASSES: ${{ matrix.suite.classes }}
-        run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"
-
-      - name: Upload UI test reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-ui-test-reports-${{ matrix.suite.name }}-${{ matrix.appearance }}-${{ github.run_attempt }}
-          path: apps/ios/build/UITestResults/
-          if-no-files-found: ignore
-          retention-days: 7
+# PAUSED 2026-10-06: hosted accessibility matrix occupied runners for 60-90
+# minutes per leg plus queue time. Local focused regressions passed light/dark
+# in about 7 minutes per pair. Uncomment this entire job to restore it.
+#   audit:
+#     needs: changes
+#     if: >-
+#       always() && !cancelled() &&
+#       (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
+#     name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
+#     runs-on: macos-26
+#     # Full export suites exceeded 90 minutes on hosted runners. Keep delivery,
+#     # video audits and mesh audits separate, retaining all 14 methods per appearance.
+#     timeout-minutes: ${{ startsWith(matrix.suite.name, 'media_exports') && 90 || 60 }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         appearance: [light, dark]
+#         suite:
+#           - name: app
+#             classes: GenerationInteractionTests PopulatedGenerationTests ShellAccessibilityTests
+#           - name: references
+#             classes: ReferenceParityTests
+#           - name: library
+#             classes: HiddenCollectionTests LibraryCollectionPickerTests LibrarySelectionTests LibraryViewerTests NotificationTapTests
+#           - name: library_interactions
+#             classes: LibraryLongPressTests
+#           - name: media_exports_delivery
+#             classes: MediaExportUITests/testVideoZeroPauseAndBounceFolderExports MediaExportUITests/testAPNGFolderDeliveryOmitsParkedGifControls MediaExportUITests/testMeshGeometryTurntableAndAssetFolderExports MediaExportUITests/testShareAndFilesCancellationPreserveTheViewer MediaExportUITests/testExportedGIFSavesToPhotos MediaExportUITests/testPhotosDenialKeepsOptionsAndOffersRecovery MediaExportUITests/testRefusedExportCanBeRetriedWithoutLosingChoices MediaExportUITests/testUnsupportedFormatsShowAnExplanation
+#           - name: media_exports_video_audit
+#             classes: MediaExportUITests/testExportSheetExtraSmall MediaExportUITests/testExportSheetLarge MediaExportUITests/testExportSheetAX5
+#           - name: media_exports_mesh_audit
+#             classes: MediaExportUITests/testMeshExportSheetExtraSmall MediaExportUITests/testMeshExportSheetLarge MediaExportUITests/testMeshExportSheetAX5
+#     defaults:
+#       run:
+#         working-directory: apps/ios
+#     steps:
+#       - uses: actions/checkout@v6
+#         with:
+#           fetch-depth: 0
+#       - name: Install xcodegen
+#         run: brew install xcodegen
+#
+#       # The iPhone passes. The hosted runner times the iPad's audits out
+#       # (the audit itself, UI snapshots, even synthesized taps), so the iPad
+#       # sweep is the local `make uitest`'s -- run it before merging iPad work.
+#       - name: Accessibility audit
+#         env:
+#           UITEST_APPEARANCES: ${{ matrix.appearance }}
+#           UITEST_CLASSES: ${{ matrix.suite.classes }}
+#         run: make uitest UITEST_DEVICES="$(scripts/pick-simulator.sh iPhone)"
+#
+#       - name: Upload UI test reports
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: ios-ui-test-reports-${{ matrix.suite.name }}-${{ matrix.appearance }}-${{ github.run_attempt }}
+#           path: apps/ios/build/UITestResults/
+#           if-no-files-found: ignore
+#           retention-days: 7

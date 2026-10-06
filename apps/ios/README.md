@@ -89,17 +89,26 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 | `make lint`               | Architecture lints (shared ones via `../shared/scripts/swift-lint.sh`)                                                                                                                                                                                                   |
 
 UI tests make one complete pass, then retry only identified failed methods once
+<!-- Temporary owner-directed build-first delivery, 2026-10-06: hosted
+accessibility matrix disabled; local tests remain available and CI compiles the
+native app/shared packages for Simulator instead of running test/lint lanes. -->
 in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSON
 and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
 and result bundles remain under `build/UITestResults/`, uploaded even on failure.
+Export audit drags use the leading Form gutter to avoid UIKit's trailing
+scroll-indicator hit region. Library transitions allow 15 seconds for two
+identical frame observations on hosted runners; geometry assertions remain strict.
 CI splits all test classes into app, references, Library and Library interaction groups, each in light and dark,
 while unit/shared-package tests run independently. App UI, shared code, UI tests,
 build inputs, and unknown paths require the full audit matrix. Widget Swift,
 inert docs, and named static routing/branding contracts can skip app audits;
 the always-on lint/unit lane still builds Widgets. Widget changes need their
 own Lock Screen/Dynamic Island UAT in light and dark, since app audits never
-render those surfaces. Dispatch and unavailable Git diffs default to full audits. `make uitest` locally still
+render those surfaces. Workspace `Cargo.toml` changes trigger lint/unit builds and
+native TestFlight delivery; the manifest supplies the marketing version and
+cannot change Swift UI. Mixed UI changes still require audits. Dispatch and
+unavailable Git diffs default to full audits. `make uitest` locally still
 runs the full target in both appearances; `UITEST_CLASSES` and
 `UITEST_APPEARANCES` select a focused run. Run
 `bash scripts/tests/ios-uitest-runner.sh` and

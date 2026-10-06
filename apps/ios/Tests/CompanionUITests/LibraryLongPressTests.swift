@@ -372,7 +372,10 @@ final class LibraryLongPressTests: XCTestCase {
             defer { previous = current }
             return element.exists && current == previous
         }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [stable], timeout: 5), .completed)
+        // Hosted AX snapshots can take several seconds while selection
+        // rebuilds the tile. Allow two observations without relaxing the
+        // requirement that its frame is exactly unchanged.
+        XCTAssertEqual(XCTWaiter.wait(for: [stable], timeout: 15), .completed)
     }
 
     @MainActor private func auditSelect(_ app: XCUIApplication, stage: String) throws {

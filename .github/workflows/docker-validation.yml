@@ -1,31 +1,32 @@
 name: Docker validation
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'Dockerfile'
-      - '.dockerignore'
-      - '.cargo/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/**'
-      - 'package.json'
-      - 'bun.lock'
-      - 'studio/**'
-      - 'ui/**'
-      - 'web/**'
-      - 'desktop/package.json'
-      # Only inputs copied into or executed by the image, not unrelated CI scripts.
-      # Workflow edits retain static actionlint/routing proof and main candidate builds.
-      - 'relay/aws/package.json'
-      - 'docker/**'
-      - 'scripts/seal-cuda-ptx-manifest.py'
-      - 'scripts/probe-cuda-embedded-ptx.py'
-      - 'scripts/verify-h3-release-exclusion.sh'
-  push:
-    # The tag gate needs an exact-SHA result even for changelog-only repairs.
-    branches: [main]
+# PAUSED 2026-10-06: Automatic duplicate Docker validation deferred: six-target candidate exceeded 2h, per-target budget 120m. Manual dispatch and tagged publication remain. Restore after runner capacity is improved.
+#   pull_request:
+#     branches: [main]
+#     paths:
+#       - 'Dockerfile'
+#       - '.dockerignore'
+#       - '.cargo/**'
+#       - 'Cargo.toml'
+#       - 'Cargo.lock'
+#       - 'crates/**'
+#       - 'package.json'
+#       - 'bun.lock'
+#       - 'studio/**'
+#       - 'ui/**'
+#       - 'web/**'
+#       - 'desktop/package.json'
+#       # Only inputs copied into or executed by the image, not unrelated CI scripts.
+#       # Workflow edits retain static actionlint/routing proof and main candidate builds.
+#       - 'relay/aws/package.json'
+#       - 'docker/**'
+#       - 'scripts/seal-cuda-ptx-manifest.py'
+#       - 'scripts/probe-cuda-embedded-ptx.py'
+#       - 'scripts/verify-h3-release-exclusion.sh'
+#   push:
+#     # The tag gate needs an exact-SHA result even for changelog-only repairs.
+#     branches: [main]
   workflow_dispatch:
 
 permissions:

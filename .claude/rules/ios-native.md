@@ -6,6 +6,13 @@ paths:
 
 # Mold Studio Companion (apps/ios) and the shared Swift packages (apps/shared)
 
+**Temporary build-first delivery (2026-10-06, owner request).** Hosted native
+accessibility CI is physically commented out in `ios-native.yml`; its matrix and
+local audits remain available unchanged. The CI lane compiles the native app
+and shared packages for iOS Simulator; TestFlight separately archives and signs
+for devices. Restore the commented lint/unit/package and audit job blocks when the
+owner resumes test gating.
+
 **What it is.** The native SwiftUI iPhone/iPad app: `io.utensils.mold.companion`, Home Screen label "Mold Studio", iOS 26+, remote-only. It is the macOS Mold Studio app's (`apps/macos`) little sibling and installs BESIDE the Tauri iPhone app (`apps/mobile`, `com.utensils.mold`), never replacing it. `apps/ios/docs/DESIGN.md` is the binding spec, `apps/ios/docs/PLAN.md` the milestone plan. Follow the Mac app, never the Tauri app's idioms (custom tab bars, toasts, fixed px sizes).
 
 **Shared code.** `apps/shared/Packages/MoldClient` (wire + transport, Foundation only; `lint-layers` bans SwiftUI/AppKit/UIKit), `MoldStyle` (tokens) and `MoldMesh` (the Metal mesh renderer; its shaders load from the resource bundle's `default.metallib` in Xcode builds -- Xcode compiles a package `.metal` even when declared `.copy` -- and from the copied source under `swift build`, which never compiles it; `MeshMetalStack.shaderLibrary` tries both, and `swift test` plus `make packages-test` cover one each) serve BOTH apps; `platforms` declares macOS 26 and iOS 26. A change there must keep `make -C apps/macos lint` green and compile for iOS (`xcodebuild -scheme MoldClient -destination 'generic/platform=iOS Simulator' build` inside the package). Mac-only API goes behind `#if os(macOS)` (as `MoldHome` is). Credentials go through `CredentialStore`, keyed by host UUID: the Mac's `SecretStore` file on macOS, the Keychain on iOS; an empty key is a clear. Decision logic longer than ~10 lines that both apps need lands in MoldClient with its test, not twice in two app targets.
@@ -27,6 +34,12 @@ paths:
 **Queue and Models.** Reorders go through `QueueOrder` (the machine's queued-only index), transfers through `TransferPlan`, held rows through `QueueHold`; downloads are reduced by MoldClient's `DownloadBoard`, which the Mac's `DownloadStore` also uses -- change it there, with its test, never in one app.
 
 **TestFlight.** `testflight-ios-native.yml` uploads after `iOS native app` passes on main, gated on the repository variable `COMPANION_TESTFLIGHT=true` -- it skips with a notice until the owner creates the App Store Connect record (no API exists for that). It is NOT part of the release tag gate.
+
+Root `Cargo.toml` changes trigger the native pipeline because its workspace
+version supplies the marketing version. They run lint/unit builds without
+repeating unchanged Swift UI audits; mixed UI changes still require the matrix.
+Library audit settling allows 15 seconds for hosted AX snapshots while retaining
+exact frame equality and all containment checks.
 
 **Commands.** `make -C apps/ios gen|build|test|uitest|lint` (devshell: `companion-*`); pass `BUILD=/Volumes/ExternalStorage/...` locally to keep DerivedData off the internal disk. Simulator tests do not touch the desktop. Never run the MAC app's `make test` locally unasked: its host-app bundle launches Mold Studio on the user's desktop; CI (`macos-native.yml`) runs it. CI for this app: `.github/workflows/ios-native.yml`.
 
@@ -116,7 +129,8 @@ its navigation bar to disappear before reopening export.
 
 The export Form uses an opaque native navigation background to keep scrolled
 text from bleeding behind its title and Cancel action.
-Export audit scrolling uses the visible Form gutter and a held slow drag to
+Export audit scrolling uses the visible leading Form gutter, opposite UIKit's
+trailing scroll-indicator hit region, and a held slow drag to
 avoid skipping AX5 rows through momentum. Require complete label/value coverage
 and keep all settled audit types strict. Only at maximum AX5, before recording a viewport, use
 bounded measured gutter motion to settle text just crossing the navigation edge

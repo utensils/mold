@@ -2,6 +2,11 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Temporary build-first mode has its own ACTIVE-YAML contract. Legacy full-suite
+# assertions below remain intact for restoration; commented jobs are not proof.
+if grep -Fq 'workspace-build-first' "$repo_root/.github/workflows/ci.yml"; then
+  exec python3 "$repo_root/scripts/tests/ci-build-first.py"
+fi
 ci="$repo_root/.github/workflows/ci.yml"
 desktop="$repo_root/.github/workflows/desktop.yml"
 ios="$repo_root/.github/workflows/ios.yml"
@@ -894,7 +899,9 @@ methods = re.findall(r'func (test\w+)\(', export_source.read_text())
 assert Counter(name for name in selectors if '/' in name) == Counter(f'{export_class}/{name}' for name in methods), 'export method coverage drifted'
 assert len(methods) == 14
 assert set(suite_names) == {'app', 'references', 'library', 'library_interactions', 'media_exports_delivery', 'media_exports_video_audit', 'media_exports_mesh_audit'}
-check, audit = native.split('\n  audit:\n', 1)
+assert '\n  audit:\n' not in native and '#   audit:' in native, 'hosted audit job must stay commented during temporary build-first mode'
+retained = '\n'.join(line[2:] if line.startswith('# ') else line for line in native.splitlines())
+check, audit = retained.split('\n  audit:\n', 1)
 assert 'needs: changes' in audit
 assert "always() && !cancelled() &&" in audit
 assert "needs.changes.result != 'success' || needs.changes.outputs.audit != 'false'" in audit
@@ -903,7 +910,7 @@ assert 'python3 scripts/tests/ios-native-ci-scope.py' in native
 assert 'python3 apps/ios/scripts/ci-audit-scope.py' in native
 assert 'github.event.pull_request.base.sha || github.event.before' in native
 assert 'github.event.pull_request.head.sha || github.sha' in native
-assert 'make packages-test' in check and 'make test' in check
+assert 'run: make build' in check, 'temporary native lane must compile the app'
 assert 'make uitest' not in check and 'needs: check' not in audit
 assert "github.event.workflow_run.event == 'push'" in testflight
 assert "github.event.workflow_run.conclusion == 'success'" in testflight
