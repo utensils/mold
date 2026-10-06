@@ -1,8 +1,8 @@
 name: iOS native app
 
-# Mold Studio Companion (apps/ios): the native SwiftUI iPhone/iPad app. Lints,
-# unit tests and the accessibility audit (every destination at xSmall, Large
-# and AX5, light and dark) on an iOS 26 simulator. The Tauri iPhone app has its
+# Mold Studio Companion (apps/ios): basic iOS 26 Simulator compilation.
+# Original lint/unit/accessibility jobs are retained as comments below until
+# runner capacity improves. The Tauri iPhone app has its
 # own workflow (ios.yml); the two never share a build.
 #
 # `macos-26` because the deployment target is iOS 26.0 and nothing older

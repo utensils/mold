@@ -263,7 +263,7 @@ jobs:
 
 
   desktop-windows:
-    name: Windows (clippy, test; main NSIS installer)
+    name: Windows NSIS installer
     needs: changes
     # Native PR feedback comes from the macOS job. Run the Windows-specific
     # toolchain, signing contracts, and installer only after merge or when the
@@ -419,7 +419,7 @@ jobs:
           retention-days: 14
 
   desktop-linux:
-    name: Linux (clippy, test; main AppImage)
+    name: Linux CUDA AppImage
     needs: changes
     # Native PR feedback runs on macOS above. Main adds the stronger CUDA
     # AppImage build and launch without duplicating it on every PR revision.

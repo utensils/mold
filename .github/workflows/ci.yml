@@ -786,7 +786,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace-build-first
-      - uses: raven-actions/actionlint@v2
+      - uses: docker://rhysd/actionlint:1.7.12
       - name: Validate temporary CI routing and dependency identity
         run: |
           python3 scripts/tests/ci-build-first.py

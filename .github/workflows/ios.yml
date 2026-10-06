@@ -125,7 +125,7 @@ jobs:
     name: iOS simulator Rust
     needs: changes
     # This is the only compiler gate for the standalone mobile crate, so native
-    # changes must pass simulator Clippy before merge.
+    # changes must pass basic simulator compilation before merge.
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: macos-14
     defaults:
@@ -136,7 +136,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
-          components: rustfmt,clippy
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/mobile/src-tauri

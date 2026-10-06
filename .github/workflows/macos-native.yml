@@ -60,7 +60,7 @@ jobs:
 #           cargo test --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml --locked --features shipping-metal shipping_h3_runtime
 #
   check:
-    name: Lint and test
+    name: Native app basic build
     runs-on: macos-26
     timeout-minutes: 45
     defaults:
