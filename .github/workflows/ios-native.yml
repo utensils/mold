@@ -73,7 +73,7 @@ jobs:
             --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
   check:
-    name: Lint and unit tests
+    name: Native simulator build
     runs-on: macos-26
     timeout-minutes: 45
     defaults:
@@ -94,19 +94,10 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - name: Architecture lints
-        run: |
-          make lint
-          bash ../../scripts/tests/ios-uitest-runner.sh
-          python3 ../../scripts/tests/ios-uitest-retry.py
-
-      # The shared packages on the phone's platform: MoldClient's suite on an
-      # iOS simulator, so a macOS-only API cannot land in them unnoticed.
-      - name: Shared packages on iOS
-        run: make packages-test
-
-      - name: Unit tests
-        run: make test
+      # TEMPORARY owner-directed build-first lane. Restore make lint,
+      # make packages-test and make test when test gating is resumed.
+      - name: Build native app and shared packages for iOS Simulator
+        run: make build
 
   audit:
     needs: changes

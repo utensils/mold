@@ -8,8 +8,10 @@ paths:
 
 **Temporary build-first delivery (2026-10-06, owner request).** Hosted native
 accessibility CI is disabled with `false &&` in `ios-native.yml`; its matrix and
-local audits remain available unchanged. Lint, shared-package tests and app unit
-builds remain enabled. Restore the condition when the owner resumes audit gating.
+local audits remain available unchanged. The CI lane compiles the native app
+and shared packages for iOS Simulator; TestFlight separately archives and signs
+for devices. Restore lint/unit/package tests and the audit condition when the
+owner resumes test gating.
 
 **What it is.** The native SwiftUI iPhone/iPad app: `io.utensils.mold.companion`, Home Screen label "Mold Studio", iOS 26+, remote-only. It is the macOS Mold Studio app's (`apps/macos`) little sibling and installs BESIDE the Tauri iPhone app (`apps/mobile`, `com.utensils.mold`), never replacing it. `apps/ios/docs/DESIGN.md` is the binding spec, `apps/ios/docs/PLAN.md` the milestone plan. Follow the Mac app, never the Tauri app's idioms (custom tab bars, toasts, fixed px sizes).
 

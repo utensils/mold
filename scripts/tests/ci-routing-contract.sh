@@ -903,7 +903,7 @@ assert 'python3 scripts/tests/ios-native-ci-scope.py' in native
 assert 'python3 apps/ios/scripts/ci-audit-scope.py' in native
 assert 'github.event.pull_request.base.sha || github.event.before' in native
 assert 'github.event.pull_request.head.sha || github.sha' in native
-assert 'make packages-test' in check and 'make test' in check
+assert 'run: make build' in check, 'temporary native lane must compile the app'
 assert 'make uitest' not in check and 'needs: check' not in audit
 assert "github.event.workflow_run.event == 'push'" in testflight
 assert "github.event.workflow_run.conclusion == 'success'" in testflight

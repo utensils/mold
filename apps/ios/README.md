@@ -90,7 +90,8 @@ Xcode must be installed and selected; the devshell provides XcodeGen and Python.
 
 UI tests make one complete pass, then retry only identified failed methods once
 <!-- Temporary owner-directed build-first delivery, 2026-10-06: hosted
-accessibility matrix disabled; local UI audits and build checks remain enabled. -->
+accessibility matrix disabled; local tests remain available and CI compiles the
+native app/shared packages for Simulator instead of running test/lint lanes. -->
 in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSON
 and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
