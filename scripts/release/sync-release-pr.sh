@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs on the release-plz release-PR branch after release-plz has bumped the
-# workspace version. Finishes the two things release-plz cannot do here:
+# workspace version. Finishes the things release-plz cannot do here:
 #
 #   1. CHANGELOG.md is hand-maintained (Keep a Changelog). Every PR ships its
 #      note as a fragment in changelog.d/<slug>.md (one file per PR, so two
@@ -10,6 +10,7 @@
 #      bottom of the file.
 #   2. The Tauri desktop and mobile apps are standalone cargo roots, so mirror
 #      the workspace version into their manifests, locks, and configs.
+#      The native Mac FFI lock also resolves versioned workspace path deps.
 #
 # Idempotent: a second run on an already-synced tree changes nothing.
 #
@@ -154,3 +155,15 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 
 echo "ios: synced to $version"
+
+# --- 4. Native Mac engine workspace path-dependency versions ---------------
+# Preserve the independent FFI package version and all external resolutions.
+# This is the same deterministic version-only lock sync used by desktop above.
+awk -v ver="$version" '
+  /^name = "mold-ai-/ { print; sync = 1; next }
+  sync && /^version = / { print "version = \"" ver "\""; sync = 0; next }
+  { print }
+' apps/macos/rust/mold-macos-ffi/Cargo.lock > apps/macos/rust/mold-macos-ffi/Cargo.lock.tmp \
+  && mv apps/macos/rust/mold-macos-ffi/Cargo.lock.tmp apps/macos/rust/mold-macos-ffi/Cargo.lock
+
+echo "macos engine: synced workspace path dependencies to $version"

@@ -511,7 +511,7 @@ jobs:
             }
             ((changed_count += 1))
             case "$path" in
-              CHANGELOG.md|Cargo.toml|Cargo.lock|desktop/package.json|desktop/src-tauri/Cargo.toml|desktop/src-tauri/Cargo.lock|apps/mobile/src-tauri/Cargo.toml|apps/mobile/src-tauri/Cargo.lock|apps/mobile/src-tauri/tauri.conf.json)
+              CHANGELOG.md|Cargo.toml|Cargo.lock|desktop/package.json|desktop/src-tauri/Cargo.toml|desktop/src-tauri/Cargo.lock|apps/mobile/src-tauri/Cargo.toml|apps/mobile/src-tauri/Cargo.lock|apps/mobile/src-tauri/tauri.conf.json|apps/macos/rust/mold-macos-ffi/Cargo.lock)
                 ;;
               crates/*/Cargo.toml)
                 [[ "$path" =~ ^crates/[^/]+/Cargo\.toml$ ]] || {
@@ -539,6 +539,9 @@ jobs:
             --manifest-path desktop/src-tauri/Cargo.toml >/dev/null
           cargo metadata --locked --no-deps --format-version 1 \
             --manifest-path apps/mobile/src-tauri/Cargo.toml >/dev/null
+          # Resolve the shipping graph: --no-deps does not detect a stale lock.
+          cargo metadata --locked --format-version 1 --features shipping-metal \
+            --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml >/dev/null
       - uses: DeterminateSystems/determinate-nix-action@v3
         if: needs.changes.outputs.release == 'true'
       - name: Validate workflow syntax

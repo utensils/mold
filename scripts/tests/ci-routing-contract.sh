@@ -313,7 +313,9 @@ for contract in \
   '[[ "$status" == M ]]' \
   'cargo metadata --locked --no-deps --format-version 1' \
   '--manifest-path desktop/src-tauri/Cargo.toml' \
-  '--manifest-path apps/mobile/src-tauri/Cargo.toml'; do
+  '--manifest-path apps/mobile/src-tauri/Cargo.toml' \
+  'cargo metadata --locked --format-version 1 --features shipping-metal' \
+  '--manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml'; do
   grep -Fq -- "$contract" <<< "$release_job" \
     || fail "release gate is missing: $contract"
 done
@@ -329,7 +331,7 @@ release_change_allowed() {
   fi
   [[ "$status" == M ]] || return 1
   case "$path" in
-    CHANGELOG.md|Cargo.toml|Cargo.lock|desktop/package.json|desktop/src-tauri/Cargo.toml|desktop/src-tauri/Cargo.lock|apps/mobile/src-tauri/Cargo.toml|apps/mobile/src-tauri/Cargo.lock|apps/mobile/src-tauri/tauri.conf.json)
+    CHANGELOG.md|Cargo.toml|Cargo.lock|desktop/package.json|desktop/src-tauri/Cargo.toml|desktop/src-tauri/Cargo.lock|apps/mobile/src-tauri/Cargo.toml|apps/mobile/src-tauri/Cargo.lock|apps/mobile/src-tauri/tauri.conf.json|apps/macos/rust/mold-macos-ffi/Cargo.lock)
       return 0
       ;;
     crates/*/Cargo.toml)
@@ -340,6 +342,8 @@ release_change_allowed() {
       ;;
   esac
 }
+release_change_allowed M apps/macos/rust/mold-macos-ffi/Cargo.lock \
+  || fail "trusted release policy rejects native Mac engine lock synchronization"
 release_change_allowed M Cargo.toml \
   || fail "trusted release policy rejects a normal metadata modification"
 release_change_allowed M crates/new/Cargo.toml \
