@@ -6,6 +6,11 @@ paths:
 
 # Mold Studio Companion (apps/ios) and the shared Swift packages (apps/shared)
 
+**Temporary build-first delivery (2026-10-06, owner request).** Hosted native
+accessibility CI is disabled with `false &&` in `ios-native.yml`; its matrix and
+local audits remain available unchanged. Lint, shared-package tests and app unit
+builds remain enabled. Restore the condition when the owner resumes audit gating.
+
 **What it is.** The native SwiftUI iPhone/iPad app: `io.utensils.mold.companion`, Home Screen label "Mold Studio", iOS 26+, remote-only. It is the macOS Mold Studio app's (`apps/macos`) little sibling and installs BESIDE the Tauri iPhone app (`apps/mobile`, `com.utensils.mold`), never replacing it. `apps/ios/docs/DESIGN.md` is the binding spec, `apps/ios/docs/PLAN.md` the milestone plan. Follow the Mac app, never the Tauri app's idioms (custom tab bars, toasts, fixed px sizes).
 
 **Shared code.** `apps/shared/Packages/MoldClient` (wire + transport, Foundation only; `lint-layers` bans SwiftUI/AppKit/UIKit), `MoldStyle` (tokens) and `MoldMesh` (the Metal mesh renderer; its shaders load from the resource bundle's `default.metallib` in Xcode builds -- Xcode compiles a package `.metal` even when declared `.copy` -- and from the copied source under `swift build`, which never compiles it; `MeshMetalStack.shaderLibrary` tries both, and `swift test` plus `make packages-test` cover one each) serve BOTH apps; `platforms` declares macOS 26 and iOS 26. A change there must keep `make -C apps/macos lint` green and compile for iOS (`xcodebuild -scheme MoldClient -destination 'generic/platform=iOS Simulator' build` inside the package). Mac-only API goes behind `#if os(macOS)` (as `MoldHome` is). Credentials go through `CredentialStore`, keyed by host UUID: the Mac's `SecretStore` file on macOS, the Keychain on iOS; an empty key is a clear. Decision logic longer than ~10 lines that both apps need lands in MoldClient with its test, not twice in two app targets.

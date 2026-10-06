@@ -110,8 +110,10 @@ jobs:
 
   audit:
     needs: changes
+    # TEMPORARY: owner requested build-first delivery after hours of hosted
+    # accessibility runs. Remove false && to restore the unchanged matrix.
     if: >-
-      always() && !cancelled() &&
+      false && always() && !cancelled() &&
       (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
     name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
     runs-on: macos-26
