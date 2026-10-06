@@ -31,7 +31,10 @@ struct MediaExportSheet: View {
                             Text(error).foregroundStyle(.secondaryText)
                                 .accessibilityIdentifier("export-error")
                         }
-                        Button(session.converting ? "Converting…" : "Export") { session.submit() }
+                        Button { session.submit() } label: {
+                            Text(session.converting ? "Converting…" : "Export")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
                             .prominentAction().disabled(!session.valid)
                             .accessibilityIdentifier("export-submit")
                     }
@@ -41,6 +44,8 @@ struct MediaExportSheet: View {
             .disabled(session.converting)
             .navigationTitle("Export Media")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { session.cancel(); actions.sheet = nil }

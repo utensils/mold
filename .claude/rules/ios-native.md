@@ -111,3 +111,28 @@ unsupported-format explanations stay at the top. Audit text detection in every
 settled export viewport before predictive clipping/Dynamic Type resize the Form.
 Files-cancellation UAT follows the native picker to Cancel/Close and requires
 its navigation bar to disappear before reopening export.
+
+The export Form uses an opaque native navigation background to keep scrolled
+text from bleeding behind its title and Cancel action.
+Export audit scrolling uses the visible Form gutter and a held slow drag to
+avoid skipping AX5 rows through momentum. Require complete label/value coverage
+and keep all settled audit types strict. Before recording a viewport, use
+bounded measured gutter motion to settle text just crossing the navigation edge
+when currently visible controls can remain fully contained. Requery the exact
+text occurrence and original control IDs, keep gestures on screen, and fail
+layout drift or displaced controls. Nonmoving adjustments with unchanged
+geometry and unaffordable adjustments still face the strict audit.
+Match the shell suite's bounded
+framework-timeout recovery: retry only accessibilityAudit/-56 once, preserve
+the first diagnostics, verify unchanged layout with fresh scope, and never
+retry actual findings or accept a second timeout. Capture the immutable
+viewport baseline with the existing inventory rather than repeatedly querying
+the entire hierarchy. Hosted media-export jobs allow 90 minutes for the full
+suite, build and report processing; other audit groups retain 60 minutes.
+Photos export UAT scopes SpringBoard permission actions to Mold Studio's Photos
+alert, requires that alert to dismiss, and waits up to 60 seconds for cold
+authorization and PhotoKit completion. A generic Allow button can belong to
+another permission request; its tap alone does not establish Photos permission.
+For selected-method UAT, verify requested method names against the test source
+and compare the executed method set/count with the intended selection.
+XCTest can silently ignore an unknown selector while other selected tests pass.

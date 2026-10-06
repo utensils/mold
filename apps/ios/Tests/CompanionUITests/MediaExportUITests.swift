@@ -158,14 +158,31 @@ final class MediaExportUITests: XCTestCase {
         }
         throw ExportUATFailure.missingControl("native Files cancellation after bounded parent navigation")
     }
+    @MainActor private func answerPhotosPermission(allow: Bool) throws {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let alert = springboard.alerts.containing(NSPredicate(format: "elementType == %d AND label CONTAINS[c] 'Mold Studio' AND label CONTAINS[c] 'Photos'", XCUIElement.ElementType.staticText.rawValue)).firstMatch
+        let button = alert.buttons.matching(NSPredicate(format: allow ? "label BEGINSWITH 'Allow'" : "label MATCHES 'Don.t Allow'")).firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in alert.exists && button.exists && button.isHittable }, object: nil)
+        guard XCTWaiter.wait(for: [ready], timeout: 60) == .completed else {
+            evidence(springboard, "Photos permission prompt unavailable")
+            throw ExportUATFailure.missingControl("scoped Mold Studio Photos permission action")
+        }
+        evidence(springboard, "Mold Studio Photos permission \(allow ? "Allow" : "Deny")")
+        button.tap()
+        guard alert.waitForNonExistence(timeout: 60) else {
+            evidence(springboard, "Photos permission prompt remained after action")
+            throw ExportUATFailure.missingControl("scoped Photos permission prompt dismissal")
+        }
+    }
     @MainActor func testExportedGIFSavesToPhotos() async throws {
         let (app, _, identity) = try await fixture()
         try open(1, identity: identity, app: app); try export(app)
         choose("export-destination", "Save to Photos", app: app); submit(app)
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let allow = springboard.alerts.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Allow'")).firstMatch
-        if allow.waitForExistence(timeout: 5) { allow.tap() }
-        XCTAssertTrue(app.staticTexts["Saved to Photos."].waitForExistence(timeout: 20))
+        try answerPhotosPermission(allow: true)
+        guard app.staticTexts["Saved to Photos."].waitForExistence(timeout: 60) else {
+            evidence(app, "GIF PhotoKit save success was not observed")
+            throw ExportUATFailure.missingControl("actual Saved to Photos status")
+        }
         evidence(app, "Animated GIF saved through PhotoKit")
     }
 
@@ -173,9 +190,7 @@ final class MediaExportUITests: XCTestCase {
         let (app, _, identity) = try await fixture()
         try open(1, identity: identity, app: app); try export(app)
         choose("export-destination", "Save to Photos", app: app); submit(app)
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let deny = springboard.alerts.buttons.matching(NSPredicate(format: "label MATCHES 'Don.t Allow'")).firstMatch
-        XCTAssertTrue(deny.waitForExistence(timeout: 10)); deny.tap()
+        try answerPhotosPermission(allow: false)
         let recovery = app.alerts["Allow Saving to Photos"]
         XCTAssertTrue(recovery.waitForExistence(timeout: 10))
         XCTAssertTrue(recovery.buttons["Open Settings"].exists)
@@ -248,6 +263,8 @@ final class MediaExportUITests: XCTestCase {
             expectedLabels.merge(["Geometry": 1, "Longest side in mm": 1, "Up axis": 1, "Origin": 1]) { _, new in new }
         }
         var coveredLabels: [String: Set<Int>] = [:]
+        var previousVisibleRows: String?
+        var unchangedViewports = 0
         // Every form control must be fully visible during a contrast pass.
         // Offscreen rows are excluded only while scrolling to audit them in full.
         func viewport() -> CGRect {
@@ -255,7 +272,57 @@ final class MediaExportUITests: XCTestCase {
             let top = max(frame.minY, app.navigationBars["Export Media"].frame.maxY)
             return CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, frame.maxY - top))
         }
+        func settleBoundary() throws {
+            for attempt in 0...3 {
+                let visible = viewport()
+                let texts = form.staticTexts.allElementsBoundByIndex.map { ($0.label, $0.frame) }
+                guard let crossing = texts.filter({ !$0.0.isEmpty && $0.1.width > 0 && $0.1.height > 0 && $0.1.minY >= visible.minY - 24 && $0.1.minY < visible.minY && $0.1.maxY > visible.minY })
+                    .max(by: { $0.1.minY < $1.1.minY }) else { return }
+                guard attempt < 3 else {
+                    evidence(app, "Export boundary settling exhausted")
+                    throw ExportUATFailure.missingControl("export boundary settling exceeded its bound")
+                }
+                let matches = form.staticTexts.matching(NSPredicate(format: "label == %@", crossing.0)).allElementsBoundByIndex
+                guard let occurrence = matches.firstIndex(where: { $0.frame == crossing.1 }) else { throw ExportUATFailure.missingControl("export boundary text identity") }
+                let containedControls = required.compactMap { id -> (String, CGRect)? in
+                    let control = form.descendants(matching: .any)[id].firstMatch
+                    guard control.exists else { return nil }
+                    let frame = control.frame
+                    return frame.width > 0 && frame.height > 0 && visible.contains(frame) ? (id, frame) : nil
+                }
+                let shift = visible.minY + 16 - crossing.1.minY
+                let slack = visible.maxY - (containedControls.map { $0.1.maxY }.max() ?? visible.minY)
+                // Move only when the actual currently contained controls retain
+                // their full viewport. Other rows still receive strict audits.
+                guard shift <= slack, shift < visible.height * 0.4 else { return }
+                evidence(app, "Export boundary before settling \(attempt)")
+                print("EXPORT BOUNDARY SETTLE \(crossing.0) \(crossing.1) viewport \(visible) shift \(shift) slack \(slack)")
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                let x = visible.maxX - 10 - app.frame.minX
+                let y = visible.minY + visible.height * 0.6 - app.frame.minY
+                origin.withOffset(CGVector(dx: x, dy: y))
+                    .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: y + shift)),
+                           withVelocity: .slow, thenHoldForDuration: 0.3)
+                let after = viewport()
+                let matching = form.staticTexts.matching(NSPredicate(format: "label == %@", crossing.0)).allElementsBoundByIndex
+                guard after == visible, matching.indices.contains(occurrence), matching[occurrence].label == crossing.0 else {
+                    evidence(app, "Export boundary settling changed layout identity")
+                    throw ExportUATFailure.missingControl("export boundary settling changed layout for \(crossing.0)")
+                }
+                for (id, _) in containedControls {
+                    let control = form.descendants(matching: .any)[id].firstMatch
+                    guard control.exists, after.contains(control.frame) else {
+                        evidence(app, "Export boundary settling displaced a control")
+                        throw ExportUATFailure.missingControl("export boundary settling displaced \(id)")
+                    }
+                }
+                // Optional normalization must not turn an immovable native
+                // heading into a finding. Audit the unchanged viewport strictly.
+                guard matching[occurrence].frame.minY > crossing.1.minY + 0.5 else { return }
+            }
+        }
         for pass in 0..<32 {
+            try settleBoundary()
             let visible = viewport()
             for id in required where !covered.contains(id) {
                 let control = form.descendants(matching: .any)[id].firstMatch
@@ -271,18 +338,25 @@ final class MediaExportUITests: XCTestCase {
             var occurrences: [String: Int] = [:]
             var labelOccurrences: [String: Int] = [:]
             var manifest: [String] = []
+            var layoutRows: [String] = []
+            var movementRows: [String] = []
             for element in elements {
                 let label = element.label
                 guard !label.isEmpty else { continue }
                 let type = element.elementType
+                let identifier = element.identifier
                 guard [.staticText, .button, .textField, .slider, .switch, .stepper].contains(type)
-                    || element.identifier.hasPrefix("export-") else { continue }
-                let identity = "\(type.rawValue)|\(element.identifier)|\(label)"
+                    || identifier.hasPrefix("export-") else { continue }
+                let identity = "\(type.rawValue)|\(identifier)|\(label)"
                 let occurrence = occurrences[identity, default: 0]
                 occurrences[identity] = occurrence + 1
                 let key = "\(identity)|\(occurrence)"
                 discoveredText.insert(key)
                 let frame = element.frame
+                if frame.width > 0 && frame.height > 0 && visible.intersects(frame) {
+                    layoutRows.append("\(identity)|\(frame)")
+                    if type == .staticText { movementRows.append("\(label):\(frame.minY.rounded()):\(frame.height.rounded())") }
+                }
                 let fullyVisible = frame.width > 0 && frame.height > 0 && visible.contains(frame)
                 if fullyVisible { coveredText.insert(key) }
                 if type == .staticText {
@@ -299,25 +373,91 @@ final class MediaExportUITests: XCTestCase {
             // Clipping/Dynamic Type audits resize and reset a lazy Form's
             // scroll position. Finish settled pixel and text-detection passes before resizing it,
             // matching ShellAccessibilityTests' ordering.
-            try app.performAccessibilityAudit(for: [.contrast, .elementDetection, .hitRegion, .sufficientElementDescription]) { issue in
-                guard let element = issue.element else {
-                    let report = XCTAttachment(string: issue.compactDescription + ": " + issue.detailedDescription + "\n" + app.debugDescription)
-                    report.name = "Unnamed export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
-                    print("EXPORT AUDIT unnamed: \(issue.compactDescription): \(issue.detailedDescription)")
-                    return false
+            // The combined pixel audit exceeds XCTest's private deadline on
+            // narrow AX5 viewports. Keep every audit strict, one type at a time.
+            let settledAudits: [(String, XCUIAccessibilityAuditType)] = [
+                ("contrast", .contrast), ("elementDetection", .elementDetection),
+                ("hitRegion", .hitRegion), ("sufficientElementDescription", .sufficientElementDescription)
+            ]
+            let before = "\(form.frame)|\(visible)|\(app.navigationBars["Export Media"].frame)|" + layoutRows.sorted().joined(separator: "\n")
+            for (name, type) in settledAudits {
+                var auditElements = elements
+                var auditNavigation = navigation
+                var auditViewport = visible
+                var unhandledFinding = false
+                func layoutSignature() -> String {
+                    var rows: [String] = []
+                    for element in auditElements {
+                        let label = element.label
+                        guard !label.isEmpty else { continue }
+                        let kind = element.elementType
+                        let identifier = element.identifier
+                        guard [.staticText, .button, .textField, .slider, .switch, .stepper].contains(kind)
+                            || identifier.hasPrefix("export-") else { continue }
+                        let frame = element.frame
+                        if frame.width > 0 && frame.height > 0 && auditViewport.intersects(frame) {
+                            rows.append("\(kind.rawValue)|\(identifier)|\(label)|\(frame)")
+                        }
+                    }
+                    return "\(form.frame)|\(auditViewport)|\(app.navigationBars["Export Media"].frame)|" + rows.sorted().joined(separator: "\n")
                 }
-                if !navigation.contains(element) && (!elements.contains(element) || !visible.contains(element.frame)) { return true }
-                let report = XCTAttachment(string: "\(issue.compactDescription): \(element.elementType) '\(element.label)' [\(element.identifier)] at \(element.frame)\n\(issue.detailedDescription)\n\(app.debugDescription)")
-                report.name = "Visible export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
-                print("EXPORT AUDIT: \(issue.compactDescription): '\(element.label)' [\(element.identifier)] \(issue.detailedDescription)")
-                return false
+                func runAudit() throws {
+                    print("EXPORT SETTLED AUDIT \(name) viewport \(pass) \(size)")
+                    try app.performAccessibilityAudit(for: type) { issue in
+                        guard let element = issue.element else {
+                            unhandledFinding = true
+                            let report = XCTAttachment(string: issue.compactDescription + ": " + issue.detailedDescription + "\n" + app.debugDescription)
+                            report.name = "Unnamed export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
+                            print("EXPORT AUDIT unnamed: \(issue.compactDescription): \(issue.detailedDescription)")
+                            return false
+                        }
+                        if !auditNavigation.contains(element) && (!auditElements.contains(element) || !auditViewport.contains(element.frame)) { return true }
+                        unhandledFinding = true
+                        let report = XCTAttachment(string: "\(issue.compactDescription): \(element.elementType) '\(element.label)' [\(element.identifier)] at \(element.frame)\n\(issue.detailedDescription)\n\(app.debugDescription)")
+                        report.name = "Visible export accessibility failure"; report.lifetime = .keepAlways; self.add(report)
+                        print("EXPORT AUDIT: \(issue.compactDescription): '\(element.label)' [\(element.identifier)] \(issue.detailedDescription)")
+                        return false
+                    }
+                }
+                do { try runAudit() }
+                catch {
+                    let failure = error as NSError
+                    // Match ShellAccessibilityTests: retry an unfinished framework
+                    // audit once. Actual findings and all other errors stay strict.
+                    guard !unhandledFinding, failure.domain == "com.apple.xcode.xctest.accessibilityAudit", failure.code == -56 else { throw error }
+                    let report = XCTAttachment(string: "\(name) viewport \(pass) at \(size): \(failure)\nBefore: \(before)\n\(app.debugDescription)")
+                    report.name = "Export audit first timeout"; report.lifetime = .keepAlways; add(report)
+                    evidence(app, "Export audit first timeout \(name) viewport \(pass) at \(size)")
+                    auditElements = form.descendants(matching: .any).allElementsBoundByIndex
+                    auditNavigation = app.navigationBars["Export Media"].descendants(matching: .any).allElementsBoundByIndex
+                    auditViewport = viewport()
+                    guard layoutSignature() == before else { throw ExportUATFailure.missingControl("export layout changed after audit timeout: \(name) viewport \(pass)") }
+                    print("EXPORT AUDIT RETRY \(name) viewport \(pass) \(size)")
+                    try runAudit()
+                }
             }
             let labelsComplete = expectedLabels.allSatisfy { label, count in coveredLabels[label, default: []].count >= count }
             if covered.count == required.count && coveredText == discoveredText && labelsComplete { break }
-            // Overlapping viewports prevent a tall Dynamic Type row from
-            // being skipped between full-screen flicks.
-            form.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
-                .press(forDuration: 0.05, thenDragTo: form.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)))
+            let visibleRows = movementRows.sorted().joined(separator: "|")
+            unchangedViewports = !visibleRows.isEmpty && visibleRows == previousVisibleRows ? unchangedViewports + 1 : 0
+            previousVisibleRows = visibleRows
+            guard unchangedViewports < 2 else {
+                throw ExportUATFailure.missingControl("native export scroll made no progress: \(visibleRows)")
+            }
+            // Release at rest: a fast drag can coast past a tall AX5 row's
+            // fully visible interval on the narrow SE viewport.
+            // Begin in the Form gutter, outside Menu labels which can consume
+            // a held drag. Use the on-screen viewport rather than Form bounds.
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: visible.maxX - 10 - app.frame.minX,
+                                                   dy: visible.minY + visible.height * 0.8 - app.frame.minY))
+            let end = origin.withOffset(CGVector(dx: visible.maxX - 10 - app.frame.minX,
+                                                 dy: visible.minY + visible.height * 0.6 - app.frame.minY))
+            print("EXPORT SCROLL GEOMETRY form \(form.frame) viewport \(visible) start \(start.screenPoint) end \(end.screenPoint)")
+            start
+                .press(forDuration: 0.1,
+                       thenDragTo: end,
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         XCTAssertEqual(covered, Set(required), "Every export control must fit and be audited")
         guard covered == Set(required) else { throw ExportUATFailure.missingControl(required.filter { !covered.contains($0) }.joined(separator: ", ")) }

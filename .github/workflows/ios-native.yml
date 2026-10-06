@@ -113,7 +113,9 @@ jobs:
       (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
     name: Accessibility audit (${{ matrix.suite.name }}, ${{ matrix.appearance }})
     runs-on: macos-26
-    timeout-minutes: 60
+    # Export UAT took 50 minutes on the hosted runner; build and result
+    # processing exhausted the one-hour limit after all 14 tests passed.
+    timeout-minutes: ${{ matrix.suite.name == 'media_exports' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:

@@ -324,3 +324,47 @@ reproduced lost task ownership. Deferred-response tests verify that cancellation
 stays silent, late responses clean their files, and a cancelled old asset cannot
 release a newer original export. All 189 native unit tests in 36 suites pass;
 independent review accepted these fixes.
+
+At PR head `41999d9618`, hosted dark-mode export UAT completed all 14 tests in
+2990.836 seconds. The job was cancelled at its one-hour limit during subsequent
+result processing, so that cancelled check is not treated as a passing CI gate.
+The media-export group now has a scoped 90-minute budget for tests, build and
+report processing. Other accessibility groups retain their existing budget.
+The hosted light-mode run also exposed an unscoped permission-button lookup:
+it tapped a SpringBoard Allow action, but Mold Studio's Photos alert was still
+present at teardown after the save assertion failed. The corrected helper
+identifies the app's Photos alert, waits for a hittable action, verifies exact
+prompt dismissal and waits for actual save completion. Small-iPhone light-mode
+Allow/save passed in 85.605 seconds and Deny/recovery in 89.111 seconds.
+The light-mode positive-to-zero Bounce sequence also passed, capturing exactly
+three requests. Final wider UAT and CI results remain pending.
+
+Small-iPhone AX5 diagnostics also isolated an iOS 26.5 contrast-auditor timeout
+to a viewport with Frame rate starting at y=96.5 beneath a navigation boundary
+at y=100. A fresh-launch first contrast call reproduced the timeout there;
+another fresh launch with that text fully visible at y=116 passed. The audit
+helper now uses bounded, measured gutter motion before inventory to settle
+boundary-crossing text when visible controls can remain fully contained.
+All contrast checks and cumulative full-text/control coverage remain strict.
+The opaque native navigation background and full-width Export label address
+visible text bleed and touch-target alignment; neither resolved that timeout
+in its isolated trial. The corrected small-iPhone light video AX5 method passed
+in 265.980 seconds, with all 21 viewport captures and manifests independently
+inspected. In its final viewport, the measured text position moved from y=96.5
+to y=106, fully below the y=100 navigation boundary. The gesture requested
+19.5 points; observed movement was 9.5 points. No audit-timeout retry was needed
+there. Every label and selected value became fully readable, the full-width
+button's accessibility center lay within its visible fill, and no navigation
+text bleed or internal truncation was found. Remaining matrix validation is
+pending.
+
+The same-source small-iPhone light mesh AX5 method passed in 414.427 seconds
+on its isolated retry. The original attempt failed during Library fixture
+setup before opening export; its failure diagnostics are retained separately.
+Independent inspection covered all 29 GIF and 11 geometry viewports, plus their
+frame manifests and full-resolution hint/transparent-toggle/bottom captures.
+GIF showed 512 px, 10 fps, 36 frames, transparency off and zero pause; geometry
+showed STL, 100 mm, Z and Floor. Every label/value became readable without
+internal truncation or navigation bleed. Origin measured y=106 after the
+requested 19.5-point nudge, and the full-width Export row remained fully inside
+the viewport with its accessibility center within the blue fill.
