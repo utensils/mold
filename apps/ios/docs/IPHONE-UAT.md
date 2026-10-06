@@ -6,22 +6,22 @@ physical speaker output, camera pairing, or device-only extension delivery.
 
 ## Findings and implementation plan
 
-| Finding | Reproduction | Improvement | Verification |
-| --- | --- | --- | --- |
-| First-run Machines clips its explanation and action at AX5 | Open Machines with no saved hosts, largest text and nearby discovery | Keep discovery count in the scrolling explanation; wrap Add; reserve opaque space above tabs for the action | First-run iPhone UAT |
-| More Options becomes unreadable at AX5 | Select an installed picture model, set largest accessibility text, open Options | Give Shape, Steps, Batch and Length separate form rows; wrap values; remove the inert More Options button inside its own sheet | Populated iPhone UI regression and exploratory UAT |
-| Seed choice ignores large text and loses its label | In the same sheet, scroll to Look | Use a labeled system menu for Repeat this look | AX5 UAT |
-| Clip and 3-D drafts reopen as Still picture | Choose either kind, background, terminate, relaunch before model profiles arrive | Restore kind from the saved recipe once profiles arrive, preserving valid authored options and reconciling audio capabilities | Failing-then-passing cold-start controller tests and relaunch UAT |
-| Empty model search gives no feedback | Search installed models for an unmatched word | Explain that no models match and allow clearing the search | Populated UI regression and UAT |
-| Models pane chooser ignores large text | Open Installed/Discover at AX5 | Use a labeled system menu that scales with the text | iPhone UAT |
-| Offline inventory falsely claims zero installed | Add an unreachable local test machine, open its detail and Models | Distinguish an unread inventory from a confirmed empty one; omit unknown counts | Model-store regression and UAT |
-| Removing a machine leaves a dead detail page | Remove the temporary machine from its detail | Return to Machines after removal | iPhone UAT |
-| Info has no explicit dismissal action | Open Info at its large detent | Add a standard Done button | Viewer UAT |
-| Shared video has an extensionless temporary filename | Share an existing clip | Preserve each original filename in an owned export directory; clean it after sharing/copying/saving | Failing-then-passing sharing test and system share-sheet UAT |
-| Slow machine responses replace the saved model | Restore a clip while another machine answers first | Keep the saved choice pending; explicit kind/model choice cancels restoration | Two-host failing-then-passing controller regressions |
-| Offline Generate and Queue claim missing models or an empty queue | Open both tabs with only unreachable machines | Explain unavailable data and direct the user to Machines; invalidate failed queue reads | Controller/queue tests and SE UAT |
-| A removed machine silently drops a selected export | Remove a source machine before an export begins | Abort the entire export and clean staged files, preserving entry/file alignment | Export regression |
-| Viewer actions are covered by the main tabs | Open an existing print, try Info at the bottom | Hide the main tab bar while the viewer is open, preserving its own controls and back navigation | Viewer UAT on iPhone |
+| Finding                                                           | Reproduction                                                                     | Improvement                                                                                                                    | Verification                                                      |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| First-run Machines clips its explanation and action at AX5        | Open Machines with no saved hosts, largest text and nearby discovery             | Keep discovery count in the scrolling explanation; wrap Add; reserve opaque space above tabs for the action                    | First-run iPhone UAT                                              |
+| More Options becomes unreadable at AX5                            | Select an installed picture model, set largest accessibility text, open Options  | Give Shape, Steps, Batch and Length separate form rows; wrap values; remove the inert More Options button inside its own sheet | Populated iPhone UI regression and exploratory UAT                |
+| Seed choice ignores large text and loses its label                | In the same sheet, scroll to Look                                                | Use a labeled system menu for Repeat this look                                                                                 | AX5 UAT                                                           |
+| Clip and 3-D drafts reopen as Still picture                       | Choose either kind, background, terminate, relaunch before model profiles arrive | Restore kind from the saved recipe once profiles arrive, preserving valid authored options and reconciling audio capabilities  | Failing-then-passing cold-start controller tests and relaunch UAT |
+| Empty model search gives no feedback                              | Search installed models for an unmatched word                                    | Explain that no models match and allow clearing the search                                                                     | Populated UI regression and UAT                                   |
+| Models pane chooser ignores large text                            | Open Installed/Discover at AX5                                                   | Use a labeled system menu that scales with the text                                                                            | iPhone UAT                                                        |
+| Offline inventory falsely claims zero installed                   | Add an unreachable local test machine, open its detail and Models                | Distinguish an unread inventory from a confirmed empty one; omit unknown counts                                                | Model-store regression and UAT                                    |
+| Removing a machine leaves a dead detail page                      | Remove the temporary machine from its detail                                     | Return to Machines after removal                                                                                               | iPhone UAT                                                        |
+| Info has no explicit dismissal action                             | Open Info at its large detent                                                    | Add a standard Done button                                                                                                     | Viewer UAT                                                        |
+| Shared video has an extensionless temporary filename              | Share an existing clip                                                           | Preserve each original filename in an owned export directory; clean it after sharing/copying/saving                            | Failing-then-passing sharing test and system share-sheet UAT      |
+| Slow machine responses replace the saved model                    | Restore a clip while another machine answers first                               | Keep the saved choice pending; explicit kind/model choice cancels restoration                                                  | Two-host failing-then-passing controller regressions              |
+| Offline Generate and Queue claim missing models or an empty queue | Open both tabs with only unreachable machines                                    | Explain unavailable data and direct the user to Machines; invalidate failed queue reads                                        | Controller/queue tests and SE UAT                                 |
+| A removed machine silently drops a selected export                | Remove a source machine before an export begins                                  | Abort the entire export and clean staged files, preserving entry/file alignment                                                | Export regression                                                 |
+| Viewer actions are covered by the main tabs                       | Open an existing print, try Info at the bottom                                   | Hide the main tab bar while the viewer is open, preserving its own controls and back navigation                                | Viewer UAT on iPhone                                              |
 
 ## Verification record
 
@@ -343,7 +343,7 @@ Small-iPhone AX5 diagnostics also isolated an iOS 26.5 contrast-auditor timeout
 to a viewport with Frame rate starting at y=96.5 beneath a navigation boundary
 at y=100. A fresh-launch first contrast call reproduced the timeout there;
 another fresh launch with that text fully visible at y=116 passed. The audit
-helper now uses bounded, measured gutter motion before inventory to settle
+helper uses bounded, measured gutter motion before inventory at maximum AX5 to settle
 boundary-crossing text when visible controls can remain fully contained.
 All contrast checks and cumulative full-text/control coverage remain strict.
 The opaque native navigation background and full-width Export label address
@@ -368,3 +368,61 @@ showed STL, 100 mm, Z and Floor. Every label/value became readable without
 internal truncation or navigation bleed. Origin measured y=106 after the
 requested 19.5-point nudge, and the full-width Export row remained fully inside
 the viewport with its accessibility center within the blue fill.
+
+On that same source, all four affected delivery methods passed in both light
+and dark appearances on the small iPhone: Photos Allow/save, Deny/recovery,
+the three-request Bounce pause reset, and Share/Files cancellation. Exact
+executed-method manifests verify four distinct methods per appearance.
+
+The remaining small-iPhone light audit batch passed video ExtraSmall and mesh
+Large. Video Large failed an unnamed prediction of clipping at larger Dynamic
+Type sizes; mesh ExtraSmall failed the optional boundary adjustment's control
+preservation guard. An unchanged-source isolated retry reproduced both failures.
+Both result bundles, attachments and exact four-original/two-retry selection
+manifests are retained under
+`Reviewed-Final-66fe3f4c7d/small/light/remaining-a11y` in the external UAT evidence.
+Independent inspection confirmed that the ExtraSmall adjustment moved back too
+far and hid Destination, so that optional adjustment is now limited to AX5.
+Its focused mesh ExtraSmall validation passed in 213.345 seconds, with exact
+one-method selection verified and closed evidence retained under
+`SE-AX5-Only-Settle-XS-Focus`. The Large prediction remains a strict
+failure pending isolated top-versus-bottom diagnostics; no clipping exception
+was broadened, and the wider matrix is paused until these failures are resolved.
+
+A fresh initial-top Large strict clipping diagnostic passed in 49.358 seconds
+without any excluded findings. This does not establish equivalent coverage of
+the lazy Form's lower rows. Independent review requested a full materializing
+sweep followed by a verified return to top and the unchanged strict clipping
+audit before considering an audit-placement correction.
+That materialized-all-rows diagnostic failed too: full label/control coverage
+completed and Format was verified back at the top, but the unchanged strict
+clipping audit reported five unnamed predictions. Audit relocation is therefore
+rejected. Actual intermediate XXXL and AX1 layouts are the next diagnostic;
+clear AX5 layouts do not prove the horizontal-to-stacked transition fits.
+
+Actual AX1 full-sweep UAT passed in 185.716 seconds, including the unchanged
+strict clipping audit. Actual XXXL completed all control/text coverage, then
+failed the same unnamed future-size prediction.
+Its unchanged-source isolated retry passed in 163.428 seconds with the strict
+clipping rule and no exemption; the original failure remains retained. Independent full-resolution
+review inspected all 11 AX1 and eight XXXL viewport captures and their inventories:
+every title, current value, hint and control became readable, including horizontal
+size/frame-rate rows and the stacked transition. A further independent review of
+all seven Large-video viewports in each original/retry run (14 captures) and
+nine Large-mesh captures found no clipping, overlap or truncated glyphs.
+The reviewer accepted a bounded disposition for that exact unnamed iOS 26.5
+future-size prediction at explicitly reviewed Large/XXXL sizes, preserving
+diagnostics and mandatory full-viewport visual inspection. Named clipping and
+other runtime/type/description findings remain strict. Original red bundles
+remain failed evidence. Final-source Large-video and mesh ExtraSmall focused
+UAT passed with exact two-method selection verified; Large passed in 155.354
+seconds without reporting the known prediction or exercising its disposition.
+Closed results and captures are retained under
+`SE-Final-Reviewed-Disposition-Focus`. Wider local matrix validation remains
+pending.
+
+The user subsequently authorized skipping hosted CI, cancelling this PR's jobs,
+and merging after local review and UAT. The remaining Android, native iOS and
+Docker workflows were requested to cancel on head `66fe3f4c7`; cancelled checks
+are not reported as passing. Local UAT and final independent review remain the
+merge gate.

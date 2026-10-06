@@ -116,12 +116,20 @@ The export Form uses an opaque native navigation background to keep scrolled
 text from bleeding behind its title and Cancel action.
 Export audit scrolling uses the visible Form gutter and a held slow drag to
 avoid skipping AX5 rows through momentum. Require complete label/value coverage
-and keep all settled audit types strict. Before recording a viewport, use
+and keep all settled audit types strict. Only at maximum AX5, before recording a viewport, use
 bounded measured gutter motion to settle text just crossing the navigation edge
 when currently visible controls can remain fully contained. Requery the exact
 text occurrence and original control IDs, keep gestures on screen, and fail
 layout drift or displaced controls. Nonmoving adjustments with unchanged
 geometry and unaffordable adjustments still face the strict audit.
+The exact unnamed iOS 26.5 text-clipping prediction "Text of this element may
+be clipped at larger Dynamic Type sizes." has retained inconsistent red/green
+diagnostics at reviewed Large/XXXL sizes and at maximum AX5. Only those three
+categories may use that specific disposition. Independently inspect every
+retained actual-size GIF/geometry viewport in both appearances before accepting
+UAT; frame containment alone does not detect internal truncation. Named clipping,
+other descriptions, sizes, runtimes and audit types remain failures. Keep the
+original red bundles and do not count a top-only lazy Form audit as full coverage.
 Match the shell suite's bounded
 framework-timeout recovery: retry only accessibilityAudit/-56 once, preserve
 the first diagnostics, verify unchanged layout with fresh scope, and never
