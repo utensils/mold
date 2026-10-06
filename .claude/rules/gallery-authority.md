@@ -162,3 +162,10 @@ Before importing a source-bearing copy, clients check destination readiness. Win
 Native Mac mirror compatibility keeps exact output digests, sizes and recipes. Embedded metadata may omit archive-only `job_id` and `generation_time_ms`, or carry the same version without its `(revision date)` suffix. Only those differences are accepted; conflicting facts present on both sides and unknown recipe fields remain significant. Existing-copy matching uses the same contract before byte comparison, so retries repair inputs without duplicate outputs.
 
 Retained image previews use authenticated `GET /api/gallery/source-media/:filename/:member_id/thumbnail`. Resolve exact publication-owned members, bound original/decode memory and concurrent rendering, return a 320-pixel PNG with private/no-store headers, and never accept paths or provenance filenames as byte authority. Client response reads are bounded to 2 MiB. Preview bytes stay separate from descriptor/session authority.
+
+Canonical chain `stage_source:<index>` / `authored-source` entries are portable
+retained media. Preserve every stage during gallery host transfer. A single
+GenerateRequest may hydrate only `stage_source:0` as source_image, never later
+stages; reject duplicate logical source targets. Full sequence replay remains a
+separate authoring workflow. All-model transfer regressions must cover every
+accepted binary role and destination reads after origin output/pin deletion.

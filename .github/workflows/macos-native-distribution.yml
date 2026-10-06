@@ -80,8 +80,8 @@ jobs:
         with:
           workspaces: apps/macos/rust/mold-macos-ffi
           key: macos-native-${{ inputs.channel }}
-      - name: Install xcodegen
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+      - name: Install build dependencies
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen protobuf
 
       - name: Resolve channel version and artifact names
         id: release

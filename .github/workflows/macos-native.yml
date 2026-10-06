@@ -51,6 +51,8 @@ jobs:
         with:
           workspaces: apps/macos/rust/mold-macos-ffi
           key: macos-native-nightly
+      - name: Install engine build dependency
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install protobuf
       - name: Compile and verify H3 runtime
         run: |
           cargo check --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml --locked --features shipping-metal

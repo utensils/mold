@@ -12,3 +12,11 @@ Validated on Apple Silicon with macOS 26 and Xcode 26 on 2026-10-05.
 Independent implementation review found and corrected late persistence after media edits, origin identity changes during retained inventory/recovery, and an overly large older-server preview streaming ceiling. Regressions cover those boundaries, successful descriptor recovery, and legacy adoption's initial media baseline.
 
 This verifies packaging and client behavior. It is not a new H3 numerical or hardware generation qualification. The screenshot's exact historical remote engine warning was not reproducible; remote placement messages now carry the target machine name and cannot be replaced by a late answer from another target.
+
+## All-model host transfer audit
+
+The queue's request-media extraction contract covers every accepted attachment field independently of model family, including typed image/named-image/video/audio/mesh references. Existing archive transfer verifies member bytes, digests, role/position/sink, output identity and recipe before binding a destination-owned archive. Save All covers picture, animated image, video, audio and mesh outputs; selected Save Locally remains the existing picture-only action.
+
+The audit found a chain exception: `stage_source:<index>` was retained but rejected by transfer validation. Canonical authored-stage roles now transfer with their stage positions, including later stages. Single-render settings reuse restores only stage 0; complete authored-sequence reconstruction remains outside this action's existing semantics. Conflicting source-image and stage-0 authority is rejected. Matting derivatives remain durable without being applied twice.
+
+Added a real server round-trip regression covering all 16 standard media roles plus two chain stages, deleting the original output and pins before reading every destination member. Added a native Save All video regression with four ordered references, removing the original host before destination reuse. Model weights and machine-local adapters are separate dependencies and are explicitly refused by portable queue transfer rather than silently stripped.

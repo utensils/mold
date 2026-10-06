@@ -23,8 +23,8 @@ nonisolated struct SavedReuseFile: Sendable {
     var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
     func load() -> SavedReuse? {
         guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              size <= 1024 * 1024, let data = try? Data(contentsOf: url),
-              let saved = try? MoldJSON.localDecoder.decode(SavedReuse.self, from: data) else { return nil }
+              size <= 1024 * 1024, let text = try? String(contentsOf: url, encoding: .utf8),
+              let saved = try? MoldJSON.localDecoder.decode(SavedReuse.self, from: Data(text.utf8)) else { return nil }
         return saved
     }
     func save(_ saved: SavedReuse?) {

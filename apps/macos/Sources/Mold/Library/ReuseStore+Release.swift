@@ -32,6 +32,10 @@ extension ReuseStore {
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
         if restoring { return notice ?? "Verifying retained conditioning on its original machine…" }
+        if let authority = pending(for: draft), draft.media.sourceImage == nil,
+           authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 {
+            return "This archive has multiple source pictures for one input. Attach the picture to use before generating."
+        }
         let references = draft.media.generationReferences
         guard references.contains(where: { $0.media.authority == "descriptor" }) else { return nil }
         if RetainedReferenceGuard.canHydrate(references: references,
@@ -65,12 +69,16 @@ extension ReuseStore {
     func attachmentSentence(for draft: RenderDraft) -> String? {
         guard let authority = pending(for: draft) else { return nil }
         let remaining = authority.members.filter {
-            !($0.role == RetainedSourcePicture.carriedRole && draft.media.sourceImage != nil)
+            !(RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage && draft.media.sourceImage != nil)
         }
         guard !remaining.isEmpty else { return nil }
         let machine = hosts.host(authority.origin)?.name ?? "its machine"
         let what = remaining.count == 1
             ? "the source media" : "\(remaining.count) source files"
+        if authority.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
+            let source = authority.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
+            return "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive on \(machine)."
+        }
         return "Using \(what) from \(authority.filename) on \(machine)."
     }
 }

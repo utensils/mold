@@ -100,7 +100,7 @@ mod tests {
         let result = validate_preview_request(None, None, "../fixture.png");
         assert_eq!(
             result.err().unwrap().into_response().status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::UNPROCESSABLE_ENTITY
         );
     }
 }

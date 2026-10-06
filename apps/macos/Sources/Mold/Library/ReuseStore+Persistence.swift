@@ -93,7 +93,7 @@ extension ReuseStore {
             }
             guard isCurrent(fence), savedRecipe == saved,
                   hosts.instanceID(of: saved.origin) == instance else { return }
-            if authority?.members.contains(where: { $0.role == "source_image" }) == true,
+            if authority?.members.contains(where: { $0.role == "source_image" || $0.role == "stage_source:0" }) == true,
                controller.draft.media.sourceImage == nil { return }
             restoring = false
             notice = nil

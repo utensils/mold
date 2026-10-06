@@ -128,7 +128,7 @@ struct SavedReuseTests {
         let document = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "docs/generated/generation-profiles-v1.json"))) as! [String: Any]
         let profiles = document["profiles"] as! [[String: Any]]
         let entry = try #require(profiles.first { String(describing: $0["models"] ?? "").contains("minimax-h3-ref2va:") })
-        let body: [String: Any] = ["name": "fixture", "family": "minimax-h3", "generation_profile": entry["profile"]!]
+        let body: [String: Any] = ["name": "fixture", "description": "Fixture", "family": "minimax-h3", "generation_profile": entry["profile"]!]
         let model = try MoldJSON.decoder.decode(Model.self, from: JSONSerialization.data(withJSONObject: body))
         controller.adopt(model: model, on: host.id, keepingDraft: true)
         store.adoptRestoredBaseline(controller, model: model)

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MoldClient
 import Testing
 
@@ -105,6 +106,57 @@ struct LibraryLocalSaveTests {
         #expect(target.retainedTransfers.first?.0 == print.filename)
         #expect(target.retainedTransfers.first?.1.members.first?.role == "source_image")
         #expect(library.localSaveFailures.isEmpty)
+    }
+
+
+    @Test func copiedH3ReferencesRemainReusableWithoutTheOriginalHost() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("h3-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        target.capabilityBlock = try MoldJSON.decoder.decode(Capabilities.self, from: Data(#"{"retained_media_transfer":{"protocol_version":1}}"#.utf8))
+        let members = (0..<4).map { index in
+            let bytes = Data([UInt8(index)])
+            source.retainedMemberBytes["original-\(index)"] = bytes
+            return RetainedSourceMedia.TransferMember(memberId: "original-\(index)", role: "references", position: "item:\(index)", sizeBytes: bytes.count,
+                sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        }
+        let references: [[String: Any]] = members.map {
+            ["kind": "image", "mime_type": "image/png", "sha256": $0.sha256, "width": 32, "height": 32]
+        }
+        let metadata: [String: Any] = ["prompt": "fixture", "model": "minimax-h3-ref2va:fixture", "version": "fixture", "references": references]
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject:
+            ["filename": "h3-copy.mp4", "timestamp": 1000, "size_bytes": 3, "media_version": "1000:3", "metadata": metadata]))
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        let offer = retainedOffer(metadata: print.metadata)
+        source.retainedTransferOffers[print.filename] = .init(archiveIdentitySha256: offer.archiveIdentitySha256,
+            members: members, outputSha256: offer.outputSha256, outputSizeBytes: offer.outputSizeBytes, metadata: print.metadata)
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(library.localSaveFailures.isEmpty)
+        #expect(target.retainedTransfers.count == 1)
+        #expect(target.retainedTransfers.first?.1.members.map(\.position) == members.map(\.position))
+        hosts.hosts = [local]
+        let sourceCalls = source.calls.count
+        let store = ReuseStore(hosts: hosts)
+        let draft = RenderDraft(reusing: print.metadata)
+        store.arm(draft)
+        await store.probe([.init(host: local.id, filename: print.filename)], fence: store.currentFence, disclosing: print.metadata)
+        #expect(store.referenceRefusal(for: draft) == nil)
+        let authority = try #require(store.take(for: draft))
+        #expect(authority.origin == local.id)
+        #expect(authority.members.map(\.memberId) == (0..<4).map { "destination-\($0)" })
+        target.retainedSession = try MoldJSON.decoder.decode(RetainedSourceMedia.ReuseSession.self, from: Data(#"{"instance_id":"destination","expires_at":100,"request_sha256":"digest","session_handle":"fixture-session"}"#.utf8))
+        var request = GenerateRequest(prompt: "changed", model: "minimax-h3-ref2va:fixture", width: 32, height: 32, steps: 4, guidance: 0)
+        request.references = draft.media.generationReferences
+        let admission = try await RetainedSourceMedia.hydrated(.init(requests: [request]), filename: authority.filename,
+            members: authority.members, sameHost: true, origin: target, target: target)
+        #expect(admission.retainedMediaSession == "fixture-session")
+        #expect(target.retainedSessionRequests.first?.members == authority.members.map(\.memberId))
+        #expect(source.calls.count == sourceCalls)
     }
 
     @Test func cachedSyncRepairsMissingSourcesWithoutDownloadingOutputAgain() async {

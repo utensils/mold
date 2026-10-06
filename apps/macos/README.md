@@ -689,3 +689,12 @@ explanation; reselect the source print, replace the attachments, or explicitly
 **Discard retained conditioning**. Original media and session credentials are not
 saved in the draft. Model/recipe changes and explicit reset supersede retained
 conditioning; ordinary navigation does not. Shape menus show proportional outlines.
+
+**Save All to This Mac** carries the private retained input archive with every
+supported output type, regardless of model family. Source, identity, mask,
+control, edit and typed reference images, audio/video, boundary/keyframes,
+continuation media and chain stage images stay attached to the destination
+archive. A failed source copy is reported as incomplete. Copies can be reused
+without the original machine. Sequence settings reuse restores the first stage's
+source; the other stages remain downloadable from the retained archive. This
+single-render action does not reconstruct a complete authored sequence.
