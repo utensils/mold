@@ -1,1 +1,0 @@
-- Accept MiniMax H3 FL2VA first/last-frame pairs and last-only requests using mode-derived admission envelopes. Paired frames retain roughly 1,000 prompt tokens and charge their additional conditioning memory instead of failing the first-frame-only limits.

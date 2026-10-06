@@ -1,1 +1,0 @@
-- **Mold Studio for Mac: Pair a Phone… is easy to find, and works on keyless machines.** It is now on every machine's card menu and in the Machine menu, as well as the machine's page. A machine running without an API key also offers a code (it carries only the machine's address), where before the option was hidden entirely.

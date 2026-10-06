@@ -1,1 +1,0 @@
-- **Media export parity.** Native iOS adds animation and mesh export controls, texture sidecars, Files/Mold-folder delivery and GIF-to-Photos saving. Native iOS and Tauri support an advertised GIF boundary pause including zero; turntable size, frame-rate and frame-budget controls use their own limits.
