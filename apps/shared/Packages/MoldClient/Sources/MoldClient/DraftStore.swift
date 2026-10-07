@@ -14,6 +14,7 @@ import Foundation
 /// back on.
 public nonisolated struct DraftStore: Sendable {
     let url: URL
+    let writes = DraftWriteGate()
 
     public init(directory: URL = SecretStore.applicationSupport()) {
         url = directory.appending(path: "generate-draft.json")
@@ -41,28 +42,42 @@ public nonisolated struct DraftStore: Sendable {
         return descriptor
     }
 
-    /// Writes it, atomically. A failure is not worth a sentence: the draft is
-    /// on screen, nothing has been lost yet, and the next change tries again.
-    public func save(_ descriptor: DraftDescriptor) {
-        guard let data = try? MoldJSON.localEncoder.encode(descriptor) else { return }
-        let directory = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let temporary = directory.appending(path: "generate-draft.\(UUID().uuidString).tmp")
-        guard (try? data.write(to: temporary)) != nil else {
-            try? FileManager.default.removeItem(at: temporary)
-            return
-        }
-        // `rename(2)`, not `moveItem`: atomic, replaces, and leaves no window
-        // in which the file on disk is half a draft.
-        guard rename(temporary.path(percentEncoded: false),
-                     url.path(percentEncoded: false)) == 0 else {
-            try? FileManager.default.removeItem(at: temporary)
-            return
+    /// Reserve before scheduling a debounced write, so a detached older write
+    /// cannot overwrite a later edit or the synchronous quit flush.
+    public func reserveWrite() -> UInt64 { writes.reserve() }
+
+    /// Inputs commit before the descriptor that names them. Old/scalar-only
+    /// callers keep their existing behavior; Mac supplies the input snapshot.
+    @discardableResult
+    public func save(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil,
+                     revision: UInt64? = nil) -> Bool {
+        let revision = revision ?? reserveWrite()
+        return writes.writer.withLock {
+            guard writes.isCurrent(revision) else { return false }
+            do {
+                var saved = descriptor
+                let previous = load()?.localInputsSHA256
+                if let inputs { saved.localInputsSHA256 = try saveInputs(inputs) }
+                let data = try MoldJSON.localEncoder.encode(saved)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let committed = try writes.commit(revision) { try writePrivate(data, to: url) }
+                if committed {
+                    pruneInputs(keeping: Set([saved.localInputsSHA256, previous].compactMap { $0 }))
+                }
+                return committed
+            } catch { return false }
         }
     }
 
     public func clear() {
-        try? FileManager.default.removeItem(at: url)
+        let revision = reserveWrite()
+        writes.writer.withLock {
+            _ = try? writes.commit(revision) {
+                try? FileManager.default.removeItem(at: url)
+                try? FileManager.default.removeItem(at: inputsDirectory)
+                writes.inputs = nil
+            }
+        }
     }
 
     /// Moves an unreadable document aside, exactly once -- the FIRST failure

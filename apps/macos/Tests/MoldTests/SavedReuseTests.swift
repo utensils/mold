@@ -24,7 +24,9 @@ struct SavedReuseTests {
         #expect(controller.draft.media.generationReferences.count == 1)
         #expect(store.referenceRefusal(for: controller.draft) != nil)
         #expect(store.authority == nil)
+        store.savedInputBaseline = controller.draft
         store.clear()
+        #expect(store.savedInputBaseline == nil)
         #expect(file.load() == nil)
     }
     private func fixture() throws -> (ReuseStore, GenerateController, FakeBackend, MoldHost) {

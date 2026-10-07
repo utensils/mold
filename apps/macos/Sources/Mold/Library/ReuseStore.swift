@@ -44,6 +44,7 @@ final class ReuseStore {
     var selectionModel: String?
     var selectionRecipe: String?
     var savedRecipe: SavedReuse?
+    var savedInputBaseline: RenderDraft?
     let savedFile: SavedReuseFile?
     var restoring = false
 
@@ -74,6 +75,7 @@ final class ReuseStore {
         selectionModel = nil
         selectionRecipe = nil
         savedRecipe = nil
+        savedInputBaseline = nil
         savedFile?.save(nil)
         restoring = false
         authority = nil
@@ -166,6 +168,7 @@ final class ReuseStore {
         selectionModel = nil
         selectionRecipe = nil
         savedRecipe = nil
+        savedInputBaseline = nil
         savedFile?.save(nil)
         restoring = false
         authority = nil

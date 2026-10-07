@@ -696,9 +696,21 @@ Retained recipe recall stores only provenance and a byte-free origin locator.
 After relaunch, the original server instance, archive and output must be verified
 again. Missing, unreadable or changed conditioning blocks Generate with an inline
 explanation; reselect the source print, replace the attachments, or explicitly
-**Discard retained conditioning**. Original media and session credentials are not
-saved in the draft. Model/recipe changes and explicit reset supersede retained
-conditioning; ordinary navigation does not. Shape menus show proportional outlines.
+**Discard retained conditioning**. Upload sessions and retained-source permissions
+are never saved as reusable authority. Model/recipe changes and explicit reset
+supersede retained conditioning; ordinary navigation does not. Shape menus show
+proportional outlines.
+
+The Mac draft also saves local authoring inputs in private app storage alongside
+the prompt and scalar settings. Attached images, masks, references, audio/video,
+first/last frames and parked inputs survive relaunch. Saving these files does not
+bypass verification of unresolved retained references on their original machine.
+A save failure displays a notice to keep Mold open. Missing or corrupt saved
+inputs block Generate: reattach the files you need, then choose **Use current
+inputs** to replace the unavailable saved inputs with the current draft. This
+cannot recover local files already lost before this persistence support; a
+Library print with retained originals can still supply them through **Use These
+Settings**.
 
 **Save All to This Mac** carries the private retained input archive with every
 supported output type, regardless of model family. Source, identity, mask,

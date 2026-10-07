@@ -7,6 +7,7 @@ import SwiftUI
 struct PersistedDraft: ViewModifier {
     let controller: GenerateController
     let drafts: DraftPersistence
+    @Environment(ReuseStore.self) var reuse
 
     func body(content: Content) -> some View {
         content
@@ -14,23 +15,29 @@ struct PersistedDraft: ViewModifier {
             // The MODEL and the machine are part of what was being authored,
             // so a change to either is a change worth writing -- and the
             // draft's own value covers everything else.
-            .onChange(of: descriptor) { _, next in drafts.schedule(next) }
+            .onChange(of: descriptor) { _, next in drafts.schedule(next, inputs: inputs) }
+            .onChange(of: inputs) { _, next in drafts.schedule(descriptor, inputs: next) }
+            .onChange(of: drafts.recoveryRefusal) { _, _ in drafts.schedule(descriptor, inputs: inputs) }
             // A quit does not wait for a debounce -- and `onDisappear` is NOT
             // a quit hook: on macOS it is not reliably delivered for the key
             // window's content on Cmd-Q, so the last word of a prompt typed
             // and immediately quit on was lost inside the 400 ms debounce.
             // `willTerminate` is the one that always arrives; `onDisappear`
             // stays for the ordinary case of the pane going away.
-            .onDisappear { drafts.flush(descriptor) }
+            .onDisappear { drafts.flush(descriptor, inputs: inputs) }
             .onReceive(NotificationCenter.default.publisher(
                 for: NSApplication.willTerminateNotification)) { _ in
-                drafts.flush(descriptor)
+                drafts.flush(descriptor, inputs: inputs)
             }
     }
 
     private var descriptor: DraftDescriptor {
         DraftDescriptor(controller.draft, model: controller.modelName,
                         family: controller.modelFamily, recipeID: controller.recipeID)
+    }
+
+    private var inputs: DraftInputSnapshot {
+        DraftInputSnapshot(controller.draft.media, retainedReuseFingerprint: reuse.persistenceFingerprint(for: controller.draft, model: controller.modelName, recipe: controller.recipeID))
     }
 
     /// Puts the last draft back, ONCE, and only over an untouched pane.
