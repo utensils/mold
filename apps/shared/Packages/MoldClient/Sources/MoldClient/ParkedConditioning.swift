@@ -10,7 +10,7 @@ import Foundation
 /// reason a source image deserves less care than a face. See
 /// `DraftMedia+Park.swift` for the reconciliation rule this struct exists
 /// to hold state for.
-public struct ParkedConditioning: Hashable, Sendable {
+public struct ParkedConditioning: Codable, Hashable, Sendable {
     public var sourceImage: String?
     public var sourceImageName: String?
     /// The unfitted copy, parked with the picture it belongs to.

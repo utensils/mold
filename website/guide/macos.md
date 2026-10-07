@@ -129,7 +129,11 @@ Hunyuan3D multiview models offer named Front/Left/Back/Right wells from their re
 
 Reused ordered image references have authenticated previews. Prompt, shape and seed changes preserve the unchanged reference set, and each render gets fresh authority. If retained slots are reordered, removed or replaced, attach the remaining originals before generating. Preview failures offer Retry and do not discard the references. Shape menus show the actual aspect outline.
 
-The app stores a byte-free origin locator for retained recipes. After relaunch it verifies the original machine instance, archive and output before enabling Generate. If verification fails, reconnect and reselect the source print, replace the attachments, or explicitly discard retained conditioning. Ordinary inline media and session handles are not persisted. Native shipping builds include the reviewed Metal H3 engine; remote generation uses the selected host's capabilities.
+The app stores a byte-free origin locator for retained recipes. After relaunch it verifies the original machine instance, archive and output before enabling Generate. If verification fails, reconnect and reselect the source print, replace the attachments, or explicitly discard retained conditioning. Upload sessions and retained-source permissions are never saved as reusable authority.
+
+Local authoring inputs are saved privately with your prompt and scalar settings. Attached images, masks, references, audio/video, first/last frames and parked inputs survive relaunch. Unresolved retained references still require verification on their original machine. A save failure asks you to keep Mold open; missing or corrupt saved inputs block Generate until you reattach the files you need and choose **Use current inputs**. Previously lost local attachments cannot be recovered by this change, though **Use These Settings** can recover originals retained with a Library print.
+
+Native shipping builds include the reviewed Metal H3 engine; remote generation uses the selected host's capabilities.
 
 **Save All to This Mac** copies retained inputs with every supported output type, independently of model family. The destination owns the source, identity, mask/control, edit/typed references, audio/video, keyframes, continuation and chain stage media, so reuse does not need the original machine. Incomplete source transfers are reported as failures. Reusing sequence settings restores the first stage's source; later stages remain in the copied archive. Rebuilding the complete authored sequence remains a separate workflow.
 

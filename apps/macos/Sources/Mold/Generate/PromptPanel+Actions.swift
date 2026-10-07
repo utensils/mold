@@ -20,6 +20,14 @@ extension PromptPanel {
 
     func actions(_ recipe: GenerationRecipe) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let notice = drafts.saveNotice {
+                Text(notice).font(.caption).fixedSize(horizontal: false, vertical: true)
+                if drafts.recoveryRefusal != nil {
+                    Button("Use current inputs") { drafts.discardUnavailableInputs() }
+                        .font(.caption)
+                        .help("Save the prompt, settings and currently attached files. Stop restoring the missing files; results may differ.")
+                }
+            }
             if let message = controller.submissionFeedback.message {
                 HStack(alignment: .top, spacing: 8) {
                     if controller.submissionFeedback.isPending {
@@ -110,6 +118,7 @@ extension PromptPanel {
     /// computed for the caption under the slider and then only discovered
     /// after the press, as a failure on the canvas.
     private var submitRefusal: String? {
+        if let refusal = drafts.recoveryRefusal { return refusal }
         if let refusal = reuse.referenceRefusal(for: draft) { return refusal }
         guard let recipe else { return nil }
         let retainedFields = model.map {

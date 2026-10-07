@@ -15,6 +15,10 @@ extension GeneratePane {
     /// `licenceSettled` skips the licence gate once the machine could not
     /// answer the fresh probe it asked for (`GeneratePane+Licence.swift`).
     func startRun(accepted: Set<String>, licenceSettled: Bool = false) {
+        if let refusal = drafts.recoveryRefusal {
+            controller.submissionFeedback.begin(refusal, phase: .refused)
+            return
+        }
         guard let host else {
             controller.submissionFeedback.begin("Choose a connected machine before generating.", phase: .refused)
             return

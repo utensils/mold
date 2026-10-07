@@ -13,6 +13,28 @@ struct DraftPersistenceTests {
         return url
     }
 
+    @Test func nativeBoundaryInputsSurviveRestart() throws {
+        let directory = temporary()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DraftStore(directory: directory)
+        var draft = RenderDraft()
+        draft.prompt = "a saved clip"
+        draft.seed = 1940547235
+        draft.media.sourceImage = Data([1, 2, 3]).base64EncodedString()
+        draft.media.sourceImageOriginal = draft.media.sourceImage
+        draft.media.sourceImageName = "first.png"
+        draft.media.keyframes = [.init(frame: 120, image: Data([4, 5, 6]).base64EncodedString(), name: "last.png")]
+        store.save(DraftDescriptor(draft, model: "h3-fl2va", family: "minimax-h3", recipeID: nil), inputs: DraftInputSnapshot(draft.media))
+        var restored = RenderDraft()
+        let descriptor = try #require(store.load())
+        descriptor.apply(to: &restored)
+        try #require(try store.loadInputs(for: descriptor)).apply(to: &restored.media)
+        #expect(restored.media.sourceImage == draft.media.sourceImage)
+        #expect(restored.media.sourceImageOriginal == draft.media.sourceImageOriginal)
+        #expect(restored.media.keyframes == draft.media.keyframes)
+        #expect(restored.seed == draft.seed)
+    }
+
     /// A draft holding EVERY byte-bearing root this app has. The persisted
     /// document must contain none of them.
     private func loadedDraft() -> RenderDraft {

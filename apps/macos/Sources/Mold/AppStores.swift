@@ -78,7 +78,7 @@ final class AppStores {
         upscales = UpscaleStore(hosts: hosts, models: models, library: library)
         activity = ActivityStore(hosts: hosts)
         reuse = ReuseStore(hosts: hosts, savedFile: SavedReuseFile())
-        reuse.restoreSaved(into: generate)
+        reuse.restoreSaved(into: generate, preserving: drafts.restoredInputs, model: drafts.restoredModel)
         expansions = ExpandStore()
         // NEW STORES GO HERE -- after the stores they depend on, before the
         // two below, which are built FROM the others.

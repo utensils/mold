@@ -28,6 +28,7 @@ struct PromptPanel: View {
     /// Not `private`: `PromptPanel+Actions`, an extension in another file,
     /// reads the run and the queue depth to build the trailing button group.
     @Environment(ReuseStore.self) var reuse
+    @Environment(DraftPersistence.self) var drafts
     @Environment(GenerateController.self) var controller
     @Environment(ExpandStore.self) private var expansions
     @Environment(PromptHistoryStore.self) private var history

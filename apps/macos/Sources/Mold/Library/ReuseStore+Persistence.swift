@@ -22,19 +22,28 @@ extension ReuseStore {
         }
     }
 
-    func restoreSaved(into controller: GenerateController) {
-        guard let saved = savedFile?.load() else {
-            if savedFile?.exists == true {
+    func restoreSaved(into controller: GenerateController, preserving inputs: DraftInputSnapshot? = nil, model: String? = nil) {
+        guard var saved = savedFile?.load() else {
+            if savedFile?.exists == true || inputs?.retainedReuseFingerprint != nil {
                 restoring = true
                 notice = "The saved links to the original input files could not be read. Use the source print’s settings again, or stop restoring its inputs."
             }
             return
         }
+        if let inputs {
+            if !saved.acceptsSnapshot(inputs, model: model, recipe: controller.recipeID) {
+                saved.invalidated = true
+            }
+            // Keep explicit local attachments visible. This baseline is not
+            // authority: origin verification below still gates every reuse.
+            savedInputBaseline = controller.draft
+        } else {
+            controller.draft.media = RenderDraft(reusing: saved.metadata).media
+        }
         savedRecipe = saved
         selectionModel = saved.model
         selectionRecipe = saved.recipe
         restoring = true
-        controller.draft.media = RenderDraft(reusing: saved.metadata).media
         if saved.invalidated || saved.version != 1 {
             notice = "Use the source print’s settings again, or attach replacement input files before generating."
         }
@@ -44,10 +53,11 @@ extension ReuseStore {
     /// Reconcile the saved media through that same model before comparing it.
     func adoptRestoredBaseline(_ controller: GenerateController, model: Model) {
         guard restoring, var saved = savedRecipe, !saved.invalidated else { return }
-        var expected = RenderDraft(reusing: saved.metadata)
+        var expected = savedInputBaseline ?? RenderDraft(reusing: saved.metadata)
         let recipe = saved.recipe.flatMap { model.generationProfile?.recipe(named: $0) } ?? model.defaultRecipe
         if let recipe { expected = expected.adopting(recipe, isNewModel: false, for: model) }
         if expected.media == controller.draft.media {
+            if savedInputBaseline != nil { savedInputBaseline = controller.draft }
             arm(controller.draft)
         } else {
             saved.invalidated = true
@@ -106,13 +116,27 @@ extension ReuseStore {
         }
     }
 
+    /// Capture validity synchronously with the snapshot, not after an
+    /// onChange callback eventually marks the locator invalid. In particular,
+    /// a media edit immediately followed by Quit cannot bind old hidden roles
+    /// or reordered descriptor slots to the new local draft.
+    func persistenceFingerprint(for draft: RenderDraft, model: String?, recipe: String?) -> String? {
+        guard let saved = savedRecipe else { return nil }
+        let original = restored ?? savedInputBaseline ?? RenderDraft(reusing: saved.metadata)
+        guard !saved.invalidated, saved.model == model, saved.recipe == recipe,
+              RetainedReferenceGuard.canReuseDraft(draft, original: original) else {
+            return "invalidated"
+        }
+        return saved.fingerprint
+    }
+
     func selectionChanged(model: String?, recipe: String?, draft: RenderDraft) {
         // Initial model adoption is part of restoring this same saved recipe.
         if let selectionModel, selectionModel != model || selectionRecipe != recipe {
             clear()
         }
         guard var saved = savedRecipe else { return }
-        let original = restored ?? RenderDraft(reusing: saved.metadata)
+        let original = restored ?? savedInputBaseline ?? RenderDraft(reusing: saved.metadata)
         let stillMatches = restored == nil && restoring
             ? draft.media == original.media
             : RetainedReferenceGuard.canReuseDraft(draft, original: original)

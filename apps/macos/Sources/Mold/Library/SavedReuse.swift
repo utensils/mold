@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MoldClient
 
 /// Byte-free recall information. It grants no authority until the origin is checked again.
@@ -13,6 +14,25 @@ nonisolated struct SavedReuse: Codable, Equatable {
     var archive: String?
     var output: String?
     var invalidated = false
+
+    /// A matching locator alone cannot authorize reordered or changed remote
+    /// descriptor slots. Locally held inline media remains explicit input.
+    func acceptsSnapshot(_ inputs: DraftInputSnapshot, model: String?, recipe: String?) -> Bool {
+        guard version == 1, !invalidated, self.model == model, self.recipe == recipe,
+              inputs.retainedReuseFingerprint == fingerprint else { return false }
+        let references = inputs.active.generationReferences
+        return !references.contains { $0.media.authority == "descriptor" }
+            || references == RenderDraft(reusing: metadata).media.generationReferences
+    }
+
+    /// Binds a local input snapshot to this exact byte-free recall context.
+    var fingerprint: String? {
+        guard let value = try? MoldJSON.localEncoder.encode(self),
+              let object = try? JSONSerialization.jsonObject(with: value),
+              let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
+        return SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
+    }
+
 }
 
 nonisolated struct SavedReuseFile: Sendable {

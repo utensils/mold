@@ -21,6 +21,10 @@ final class DraftPersistence {
     /// ordinary path. `nil` once it has been adopted, or when there was no
     /// draft to restore.
     private(set) var restoredModel: String?
+    private(set) var restoredInputs: DraftInputSnapshot?
+    private(set) var saveNotice: String?
+    private(set) var recoveryRefusal: String?
+    private var failedInputDigest: String?
 
     init(store: DraftStore = DraftStore(), delay: Duration = .milliseconds(400)) {
         self.store = store
@@ -30,13 +34,19 @@ final class DraftPersistence {
     /// Schedules a write. A newer change supersedes an older one outright --
     /// the file only ever needs to hold the LATEST draft, so a queue of
     /// snapshots would be work nobody reads.
-    func schedule(_ descriptor: DraftDescriptor) {
+    func schedule(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil) {
         task?.cancel()
+        let revision = store.reserveWrite()
+        let (descriptor, inputs) = preservingUnreadableInputs(descriptor, inputs: inputs)
         task = Task { [store, delay] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             // Off the main actor: this touches the disk.
-            await Task.detached(priority: .utility) { store.save(descriptor) }.value
+            let saved = await Task.detached(priority: .utility) {
+                store.save(descriptor, inputs: inputs, revision: revision)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.saveNotice = saved ? self.recoveryRefusal : "This draft could not be saved. Keep Mold open; check disk space and the size of attached files before quitting."
         }
     }
 
@@ -48,6 +58,14 @@ final class DraftPersistence {
         hasRestored = true
         let descriptor = store.load()
         restoredModel = descriptor?.model
+        if let descriptor {
+            do { restoredInputs = try store.loadInputs(for: descriptor) }
+            catch {
+                failedInputDigest = descriptor.localInputsSHA256
+                recoveryRefusal = "Some saved input files could not be restored. Reattach any files you need, then choose Use current inputs to save this draft."
+                saveNotice = recoveryRefusal
+            }
+        }
         return descriptor
     }
 
@@ -58,9 +76,25 @@ final class DraftPersistence {
 
     /// Writes the pending change NOW, for a quit that will not wait for a
     /// debounce. Synchronous on purpose: there is no later.
-    func flush(_ descriptor: DraftDescriptor) {
+    func flush(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot? = nil) {
         task?.cancel()
         task = nil
-        store.save(descriptor)
+        let (descriptor, inputs) = preservingUnreadableInputs(descriptor, inputs: inputs)
+        let saved = store.save(descriptor, inputs: inputs)
+        saveNotice = saved ? recoveryRefusal : "This draft could not be saved. Keep Mold open; check disk space and the size of attached files before quitting."
+    }
+
+    func discardUnavailableInputs() {
+        failedInputDigest = nil
+        recoveryRefusal = nil
+        saveNotice = nil
+    }
+
+    private func preservingUnreadableInputs(_ descriptor: DraftDescriptor, inputs: DraftInputSnapshot?)
+        -> (DraftDescriptor, DraftInputSnapshot?) {
+        guard let failedInputDigest else { return (descriptor, inputs) }
+        var preserved = descriptor
+        preserved.localInputsSHA256 = failedInputDigest
+        return (preserved, nil)
     }
 }

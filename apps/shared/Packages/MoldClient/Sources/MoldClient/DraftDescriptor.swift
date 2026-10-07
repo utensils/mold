@@ -7,8 +7,8 @@ import Foundation
 /// source picture, the references, the mask, the identity photographs, the
 /// control picture, the conditioning audio, the source and extend video, and
 /// every keyframe image. Studio keeps their descriptors because its bytes
-/// live in IndexedDB under the draft id; this app has no such store, so it
-/// keeps NOTHING about them. A restored draft that named a picture it could
+/// live in IndexedDB under the draft id; native Mac stores its local bytes in a separate private snapshot,
+/// bound here by its digest. Scalar-only callers keep nothing about them. A restored draft that named a picture it could
 /// not produce would be a draft claiming media it no longer has.
 ///
 /// `CodingKeys` is spelled out and this is read and written with
@@ -26,6 +26,9 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     /// gone simply does not match anything, and the rest of the draft still
     /// restores. The MACHINE is deliberately not here: `MachineChoiceStore`
     /// already persists it, and a second copy would be a second authority.
+    /// Digest of the separately stored private input snapshot. Absent in
+    /// older/scalar-only drafts; it never contains bytes or upload authority.
+    public var localInputsSHA256: String?
     public var model: String?
     public var family: String?
     public var recipeID: String?
@@ -76,7 +79,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var skipStep: Int?
 
     enum CodingKeys: String, CodingKey {
-        case version, model, family, recipeID, prompt, negativePrompt, width, height
+        case version, localInputsSHA256, model, family, recipeID, prompt, negativePrompt, width, height
         case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline
         case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
              collectionName, autoTagTitle
