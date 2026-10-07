@@ -11,6 +11,87 @@ struct RetainedMediaTransferTests {
             metadata: try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8)))
     }
 
+    @Test func legacySourceBearingOutputsCanBeVerifiedRepeatedlyWithoutInventingInputs() async throws {
+        for json in [#"{"source_image_sha256":"abc"}"#,
+                     #"{"model":"real-esrgan-x4plus-fp16","source_image_sha256":"abc","edit_image_sha256s":["def"]}"#] {
+            let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(json.utf8))
+            let source = FakeBackend(), target = FakeBackend()
+            let base = offer(archiveIdentitySha256: "a".repeated(64), members: [])
+            source.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                    members: [], outputSha256: base.outputSha256, outputSizeBytes: 3, metadata: metadata))
+            source.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy))
+            for localMembers in [[], [member().contentIdentity]] {
+                target.stub("retainedMediaTransferOffer(for:)", returning:
+                    RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64),
+                        members: localMembers, outputSha256: base.outputSha256, outputSizeBytes: 3, metadata: metadata))
+                for _ in 0..<2 {
+                    let captured = try await RetainedSourceMedia.preflightMirror(for: "old.png", metadata: metadata, from: source, to: target)
+                    #expect(captured == base.archiveIdentitySha256)
+                    let result = try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: nil,
+                        from: source, to: target, as: "copy.png", expectedSourceArchiveIdentity: captured)
+                    #expect(result == .legacyInputsUnavailable)
+                }
+            }
+            #expect(target.count("retainedMediaTransferOffer(for:)") == 4)
+            #expect(target.count("importRetainedMedia(_:for:)") == 0)
+            #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+        }
+    }
+
+    @Test func emptySourceOfferRequiresExplicitCleanLegacyInventory() async throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"source_image_sha256":"abc"}"#.utf8))
+        for availability in [RetainedSourceMedia.Availability.available, .unavailableMissingOrCorrupt, .unavailableAuth, .unknown] {
+            let source = FakeBackend(), target = FakeBackend()
+            source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))
+            source.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: availability))
+            await #expect(throws: (any Error).self) {
+                _ = try await RetainedSourceMedia.preflightMirror(for: "old.png", metadata: metadata, from: source, to: target)
+            }
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: metadata, from: source, to: target, as: "copy.png")
+            }
+            #expect(target.calls.isEmpty)
+        }
+        for status in [401, 403, 500] {
+            let source = FakeBackend(), target = FakeBackend()
+            source.stub("retainedMediaTransferOffer(for:)", returning: offer(archiveIdentitySha256: "a".repeated(64), members: []))
+            source.stub("retainedSourceMedia(for:)", throwing: MoldClientError.http(status: status, code: nil, message: nil))
+            await #expect(throws: (any Error).self) {
+                _ = try await RetainedSourceMedia.preflightMirror(for: "old.png", metadata: metadata, from: source, to: target)
+            }
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: metadata, from: source, to: target, as: "copy.png")
+            }
+            #expect(target.calls.isEmpty)
+        }
+    }
+
+    @Test func legacyOutputStillRequiresCapturedIdentityListingRecipeAndExactDestination() async throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"source_image_sha256":"abc","seed":1}"#.utf8))
+        let changed = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"source_image_sha256":"abc","seed":2}"#.utf8))
+        for conflict in ["identity", "listing", "digest", "size", "recipe", "malformedDigest", "missingRecipe"] {
+            let source = FakeBackend(), target = FakeBackend()
+            let base = offer(archiveIdentitySha256: "a".repeated(64), members: [])
+            source.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: base.archiveIdentitySha256,
+                    members: [], outputSha256: conflict == "malformedDigest" ? "bad" : base.outputSha256,
+                    outputSizeBytes: 3, metadata: conflict == "missingRecipe" ? nil : metadata))
+            source.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy))
+            target.stub("retainedMediaTransferOffer(for:)", returning:
+                RetainedSourceMedia.TransferOffer(archiveIdentitySha256: "b".repeated(64), members: [],
+                    outputSha256: conflict == "digest" ? "c".repeated(64) : base.outputSha256,
+                    outputSizeBytes: conflict == "size" ? 4 : 3, metadata: conflict == "recipe" ? changed : metadata))
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "old.png", metadata: conflict == "listing" ? changed : metadata,
+                    from: source, to: target, as: "copy.png",
+                    expectedSourceArchiveIdentity: conflict == "identity" ? "c".repeated(64) : base.archiveIdentitySha256)
+            }
+            #expect(target.count("importRetainedMedia(_:for:)") == 0)
+            #expect(source.count("retainedSourceMediaBytes(for:member:)") == 0)
+        }
+    }
+
     @Test func embeddedRecipeCanReceiveArchiveEnrichedSources() async throws {
         let source = FakeBackend(), target = FakeBackend()
         let embedded = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(
@@ -196,6 +277,10 @@ struct RetainedMediaTransferTests {
             }
             await #expect(throws: (any Error).self) {
                 _ = try await RetainedSourceMedia.preflightMirror(for: "original.png", metadata: disclosed, from: source, to: target)
+            }
+            await #expect(throws: (any Error).self) {
+                try await RetainedSourceMedia.mirrorSources(for: "original.png", metadata: disclosed,
+                    from: source, to: target, as: "copy.png")
             }
             #expect(target.calls.isEmpty)
         }
