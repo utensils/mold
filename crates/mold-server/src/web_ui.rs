@@ -85,6 +85,15 @@ const FALLBACK_INDEX_HTML: &str = r##"<!doctype html>
 </html>
 "##;
 
+/// Attach only the browser UI fallback; API routing stays intact in either mode.
+pub fn attach(api: Router, enabled: bool) -> Router {
+    if enabled {
+        api.merge(router())
+    } else {
+        api
+    }
+}
+
 /// Build a router whose fallback serves the bundled web UI (or a small
 /// placeholder page when the embedded bundle is the build-time stub).
 pub fn router() -> Router {
@@ -263,6 +272,41 @@ mod tests {
     // other env reader and writer (one serialization domain), so the
     // `std::sync` guard is deliberately held across `.await` under the
     // current-thread test runtime, exactly as `routes_test` does.
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn disabled_ui_keeps_api_routes_and_returns_404_for_ui() {
+        let _guard = env_lock();
+        let api = Router::new().route("/api/test", axum::routing::get(|| async { "api works" }));
+        let disabled = attach(api.clone(), false);
+        for path in ["/", "/create", "/assets/app.js", "/favicon.ico"] {
+            let response = disabled
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let response = disabled
+            .oneshot(
+                Request::builder()
+                    .uri("/api/test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            "api works"
+        );
+        let response = attach(api, true)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     /// With nothing staged at build time, the binary should still serve the
     /// inline "mold is running" placeholder — confirms the stub plumbing.

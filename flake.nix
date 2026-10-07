@@ -1123,6 +1123,31 @@
               );
               pkgs.runCommand "mold-devshell-cuda-load-path-check" { } "touch $out";
 
+            web-ui-module =
+              let
+                evaluate =
+                  moduleConfig:
+                  (inputs.nixpkgs.lib.nixosSystem {
+                    inherit system;
+                    modules = [
+                      ./nix/module.nix
+                      {
+                        services.mold = {
+                          enable = true;
+                          package = mold;
+                        }
+                        // moduleConfig;
+                      }
+                    ];
+                  }).config.systemd.services.mold;
+                enabled = evaluate { };
+                disabled = evaluate { webUi.enable = false; };
+              in
+              assert enabled.environment.MOLD_WEB_UI_ENABLED == "true";
+              assert disabled.environment.MOLD_WEB_UI_ENABLED == "false";
+              assert enabled.serviceConfig.ExecStart == disabled.serviceConfig.ExecStart;
+              pkgs.runCommand "mold-web-ui-module-check" { } "touch $out";
+
             artifact-attestation-private-state =
               let
                 evaluated = inputs.nixpkgs.lib.nixosSystem {

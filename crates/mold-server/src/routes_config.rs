@@ -32,7 +32,7 @@ const FILE_BACKED_KEY: &str = "FILE_BACKED_KEY";
 const RESTART_REQUIRED: &str = "RESTART_REQUIRED";
 
 fn needs_restart(key: &str) -> bool {
-    key == "server_port" || key.starts_with("scheduler.")
+    key == "web_ui_enabled" || key == "server_port" || key.starts_with("scheduler.")
 }
 
 fn settings_db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
