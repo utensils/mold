@@ -467,11 +467,14 @@ describe("CreatePage layout and behavior", () => {
       kind: "upload" as const,
       filename: "source.png",
       base64: "SOURCE",
+      // Autosave assigns an ID after its debounce; make identity deterministic.
+      draftId: "00000000-0000-4000-8000-000000000001",
     };
     const mask = {
       kind: "upload" as const,
       filename: "mask.png",
       base64: "MASK",
+      draftId: "00000000-0000-4000-8000-000000000002",
     };
     form.state.value.prompt = "A quiet shore";
     form.state.value.imageAttachments = [source];
