@@ -1,8 +1,11 @@
 import AppKit
+import MoldClient
 import SwiftUI
 
 /// A bottom-anchored editor grows when its top handle is dragged upward.
 struct PromptResizeHandle: View {
+    private enum SizeAction { case taller, shorter, reset }
+
     @Binding var preferredHeight: Double
     let available: CGFloat
     @State private var dragStart: CGFloat?
@@ -32,10 +35,16 @@ struct PromptResizeHandle: View {
         .accessibilityAdjustableAction { direction in
             adjust(direction == .increment ? 40 : -40)
         }
-        .contextMenu {
-            Button("Make Prompt Taller") { adjust(40) }
-            Button("Make Prompt Shorter") { adjust(-40) }
-            Button("Reset Prompt Height") { preferredHeight = PromptEditorHeight.initial }
+        .rowActionMenu([
+            RowAction(kind: SizeAction.taller, title: "Make Prompt Taller"),
+            RowAction(kind: SizeAction.shorter, title: "Make Prompt Shorter"),
+            RowAction(kind: SizeAction.reset, title: "Reset Prompt Height")
+        ]) { action in
+            switch action {
+            case .taller: adjust(40)
+            case .shorter: adjust(-40)
+            case .reset: preferredHeight = PromptEditorHeight.initial
+            }
         }
     }
 

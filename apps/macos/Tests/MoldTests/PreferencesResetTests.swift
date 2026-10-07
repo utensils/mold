@@ -1,4 +1,5 @@
 import Foundation
+import MoldClient
 import Testing
 
 @testable import Mold
@@ -81,7 +82,11 @@ struct PreferencesResetTests {
     }
 
     private static let globalConstants: [String: String] = {
-        var all: [String: String] = [:]
+        // These keys live in the shared package rather than app source.
+        var all: [String: String] = [
+            "autoplayKey": VideoPlaybackPreferences.autoplayKey,
+            "repeatKey": VideoPlaybackPreferences.repeatKey,
+        ]
         for file in (try? sources()) ?? [] {
             guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
             all.merge(constantStrings(in: text)) { first, _ in first }

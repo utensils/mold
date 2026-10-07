@@ -226,3 +226,5 @@ Generate keeps the prompt, attachments and Generate button stable while jobs run
 Picture menus in Library and its viewer offer **Use as Source**, retaining your prompt and model. The source picker searches all machines together and can filter to one machine. New oversized still inputs fit automatically with orientation and transparency preserved; original library files remain unchanged.
 
 **Settings → Video Playback** offers autoplay and repeat. Only the selected video plays, and leaving the viewer or backgrounding pauses it. 3-D views load only when selected, use file-backed downloads and offer Retry on failure. Paired connections prefer a verified local-network route and reconsider routes on network changes.
+
+On macOS, image and video viewers default to **Fit**, keeping the entire frame visible as the window changes size. **Actual Size** shows one media pixel per screen pixel and lets you scroll larger media. Video controls remain below the picture without dimming it on hover.

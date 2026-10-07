@@ -24,6 +24,7 @@ enum PreferencesReset {
         "defaultMachine",
         "generateMachine",
         "generateShowsInspector",
+        "generatePromptEditorHeight",
         "libraryShowsInspector",
         "libraryScope",
         "libraryEdge",
@@ -31,6 +32,7 @@ enum PreferencesReset {
         "createShowsAdapters",
         "createShowsSampler",
         "createShowsIdentity",
+        "createShowsReferences",
         "createShowsRefine",
         "createShowsClip",
         "createShowsOutput",
@@ -86,6 +88,8 @@ enum PreferencesReset {
         "managedRemoteAccessEnabled",
         // Playback sound is a universal choice across Generate and Library.
         "videoPlaybackMuted",
+        "videoPlaybackAutoplay",
+        "videoPlaybackRepeat",
     ]
 
     static func reset(in defaults: UserDefaults) {

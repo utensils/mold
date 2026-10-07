@@ -734,7 +734,7 @@ Click a queue job’s main content to see its source, full settings and live pro
 
 Discover initially shows models from the selected machine’s Mold manifest, including install/repair state. Browse Community Catalog, search or choose a family for provider results; Load More Models has a prominent footer with shown/total counts. Manifest discovery works without a community catalog.
 
-Settings → General → Video Playback controls autoplay (on initially) and repeat (off initially). Inline video controls avoid the full-video hover dimming. Video and 3-D GIF export offer Loop/Bounce, Forever/Once and applicable pause controls; playback repeat preferences do not change exported GIFs.
+Settings → General → Video Playback controls autoplay (on initially) and repeat (off initially). Images and videos default to Fit, showing the entire frame within the available width and height. Actual Size displays one media pixel per screen pixel, with scrolling for larger media; Fit restores the full view. Playback controls sit below the video, so hovering never dims the picture. Video and 3-D GIF export offer Loop/Bounce, Forever/Once and applicable pause controls; playback repeat preferences do not change exported GIFs.
 
 New input pictures larger than 4096 pixels per axis or 2 MiB are proportionally downsampled with orientation/alpha preserved. Original library files and retained source/mask pairs are unchanged; replacing the source clears the old mask. Paired remote machines prefer a verified LAN route over Tailscale and relay, and recheck on network changes. The embedded engine’s existing loopback-only listener is unchanged.
 

@@ -34,28 +34,20 @@ struct VideoPlaybackView: View {
     private var repeats = VideoPlaybackPreferences.defaultRepeat
     @State private var presentationSize: CGSize = .zero
     @State private var isObserving = false
+    @State private var displayMode = MediaDisplayMode.fit
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
             if let item = player.currentItem {
-                InlineVideoPlayer(player: player)
-                    .aspectRatio(VideoPlaybackLayout.aspectRatio(for: presentationSize),
-                                 contentMode: .fit)
+                VideoViewport(player: player, pixels: presentationSize,
+                              mode: displayMode, displayScale: displayScale)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .onReceive(item.publisher(for: \.presentationSize, options: [.initial, .new])) {
                         presentationSize = $0
                     }
             }
-        }
-        .overlay(alignment: .topTrailing) {
-            Button {
-                isMuted.toggle()
-            } label: {
-                Label(isMuted ? "Unmute" : "Mute",
-                      systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-            }
-            .buttonStyle(.bordered)
-            .padding(12)
-            .help(isMuted ? "Unmute all videos" : "Mute all videos")
+            VideoTransportBar(player: player, isMuted: $isMuted, displayMode: $displayMode)
         }
         .onAppear {
             player.isMuted = isMuted
@@ -79,24 +71,5 @@ struct VideoPlaybackView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in player.pause() }
         .onDisappear { isObserving = false; player.pause() }
-    }
-}
-
-/// Inline AVKit controls avoid the floating player's full-video hover scrim.
-private struct InlineVideoPlayer: NSViewRepresentable {
-    let player: AVPlayer
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.controlsStyle = .inline
-        view.videoGravity = .resizeAspect
-        view.player = player
-        return view
-    }
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        if view.player !== player { view.player = player }
-    }
-    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) {
-        view.player?.pause()
-        view.player = nil
     }
 }
