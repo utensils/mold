@@ -369,3 +369,12 @@ struct RetainedSourceMediaTests {
             .retainedMediaBatchRefusal == nil)
     }
 }
+
+@Test(arguments: [true, false]) func explicitIdentityOverridesBothArchivedWireShapes(plural: Bool) {
+    var request = GenerateRequest(prompt: "test", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
+    if plural { request.idImages = ["new-face"] } else { request.idImage = "new-face" }
+    let members = ["identity_image", "identity_images"].map {
+        RetainedSourceMedia.Member(memberId: $0, role: $0, displayName: "old-face", sizeBytes: 1)
+    }
+    #expect(RetainedSourceMedia.members(members, forHydrating: request).isEmpty)
+}

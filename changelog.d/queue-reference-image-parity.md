@@ -7,3 +7,7 @@
 - **Native Library badge parity.** iOS and macOS mark new media since the previous
   Library visit, matching desktop session behavior. iOS machine labels fit beside
   clip playback badges without overlap.
+- **Reliable native iOS settings reuse.** Collection items replace stale draft
+  attachments with their own retained inputs. Missing/offline media can be retried
+  and blocks generation until restored or explicitly removed; late downloads
+  cannot revive removed sources or replace a newer selection.

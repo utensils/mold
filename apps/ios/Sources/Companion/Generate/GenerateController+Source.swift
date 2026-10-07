@@ -32,7 +32,8 @@ extension GenerateController {
             } else {
                 DraftPictureAttachment.useAsSource(picked, in: &draft, recipe: recipe)
             }
-            retainedReuse.clear()
+            // An authored picture overrides its own role. Other retained
+            // roles (audio, identity, control) still belong to this reuse.
             saveDraft()
         } catch {
             guard !Task.isCancelled else { return }

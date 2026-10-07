@@ -505,6 +505,8 @@ final class LibraryLongPressTests: XCTestCase {
         app.terminate()
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        app.chooseLibraryShelf("UAT Drafts")
+        XCTAssertTrue(app.navigationBars["UAT Drafts"].waitForExistence(timeout: 5))
         let print = fixturePrint(in: app)
         XCTAssertTrue(print.waitForExistence(timeout: 10))
         print.press(forDuration: 1)

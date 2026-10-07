@@ -13,7 +13,7 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
-    private func model(_ name: String = "flux-dev:q4") throws -> Model {
+    func model(_ name: String = "flux-dev:q4") throws -> Model {
         let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: profilesURL())) as! [String: Any]
         let rows = doc["profiles"] as! [[String: Any]]
         let row = rows.first { ($0["models"] as! [[String: Any]]).contains { $0["model"] as? String == name } }!
@@ -37,7 +37,7 @@ struct GenerateControllerTests {
         return try MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
     }
 
-    private func setUp() async throws -> (GenerateController, FakeBackend) {
+    func setUp() async throws -> (GenerateController, FakeBackend) {
         let fake = FakeBackend()
         fake.stub("status()", returning: try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
             #"{"version":"0.32.0","busy":false,"uptime_secs":1}"#.utf8)))
@@ -223,8 +223,6 @@ struct GenerateControllerTests {
     @Test func retainedPairHonorsExplicitSourceAndMaskOverrides() async throws {
         for hasSource in [false, true] {
             let (generate, fake) = try await setUp()
-            generate.draft.media.maskImage = "user-mask"
-            if hasSource { generate.draft.media.sourceImage = "user-source" }
             let members = ["source_image", "mask_image"].map {
                 RetainedSourceMedia.Member(memberId: $0, role: $0, displayName: $0 + ".png", sizeBytes: 3)
             }
@@ -233,6 +231,8 @@ struct GenerateControllerTests {
             let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
                 #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
             generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
+            generate.draft.media.maskImage = "user-mask"
+            if hasSource { generate.draft.media.sourceImage = "user-source" }
             try await waitUntil { !generate.retainedReuse.probing }
             #expect(generate.draft.media.maskImage == "user-mask")
             #expect(generate.draft.media.sourceImage == (hasSource ? "user-source" : "AQID"))
@@ -449,7 +449,7 @@ struct GenerateControllerTests {
         #expect(generate.recipe?.makes == .picture)
     }
 
-    private func waitUntil(_ condition: () -> Bool) async throws {
+    func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<200 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
         #expect(condition())
     }

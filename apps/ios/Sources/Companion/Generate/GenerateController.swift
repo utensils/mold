@@ -11,7 +11,15 @@ import MoldClient
 @Observable
 final class GenerateController {
     let retainedReuse = RetainedReuse()
-    var draft = RenderDraft()
+    private(set) var sourceMediaRevision = 0
+    var draft = RenderDraft() {
+        didSet {
+            if oldValue.media.sourceImage != draft.media.sourceImage
+                || oldValue.media.sourceImageOriginal != draft.media.sourceImageOriginal {
+                sourceMediaRevision += 1
+            }
+        }
+    }
     /// Still picture, Short clip, 3-D object.
     var kind: PrintKind = .picture
     var modelName: String?
@@ -168,6 +176,11 @@ final class GenerateController {
             return String(localized: "Reattach this print’s reference media before generating.")
         }
         if retainedReuse.probing { return String(localized: "Restoring the print’s source media…") }
+        if retainedReuse.canDiscard {
+            let outgoing = modelName.map { RenderRequest.one(draft, model: $0,
+                maxIdentityPhotos: target.flatMap { hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0) }
+            if let refusal = retainedReuse.restorationRefusal(for: outgoing) { return refusal }
+        }
         if hosts.hosts.isEmpty { return String(localized: "Add a machine to start generating.") }
         if hosts.upHosts.isEmpty { return String(localized: "No machine is answering. Check Machines to reconnect.") }
         if restoringChoice, model == nil {

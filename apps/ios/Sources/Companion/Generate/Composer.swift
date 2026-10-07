@@ -104,7 +104,12 @@ struct Composer: View {
                 Label(notice, systemImage: "photo.on.rectangle")
                     .font(.subheadline)
                     .foregroundStyle(.secondaryText)
-                if generate.retainedReuse.authority != nil {
+                if generate.retainedReuse.canRetry {
+                    Button("Retry retained media", systemImage: "arrow.clockwise") {
+                        generate.retainedReuse.retry(controller: generate)
+                    }
+                }
+                if generate.retainedReuse.canDiscard {
                     Button("Remove retained sources", systemImage: "xmark.circle") {
                         generate.retainedReuse.clear()
                     }

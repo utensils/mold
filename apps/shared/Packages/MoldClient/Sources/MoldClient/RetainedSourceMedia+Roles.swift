@@ -63,8 +63,7 @@ public extension GenerateRequest {
     func isVacant(_ field: RetainedSourceMedia.Field) -> Bool {
         switch field {
         case .sourceImage: sourceImage == nil
-        case .identityImage: idImage == nil
-        case .identityImages: idImages?.isEmpty ?? true
+        case .identityImage, .identityImages: idImage == nil && (idImages?.isEmpty ?? true)
         case .editImages: editImages?.isEmpty ?? true
         case .maskImage: maskImage == nil
         case .controlImage: controlImage == nil

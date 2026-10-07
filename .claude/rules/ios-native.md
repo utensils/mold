@@ -171,3 +171,9 @@ Library New badges compare filenames with the previous session visit, using the
 whole active pool and a stable per-view snapshot. First visit establishes a
 baseline; viewer navigation preserves the visit. Badge rows must fit machine
 labels beside playback without overlap, including narrow tiles.
+
+Use These Settings starts from fresh selected-print media, including parked wells.
+Probe fences cover reuse identity and source authoring revisions. Unavailable
+expected conditioning must block generation until restore, replacement or
+explicit discard; retry after reconnection. Single/plural identity photos are one
+authority when selecting retained members.
