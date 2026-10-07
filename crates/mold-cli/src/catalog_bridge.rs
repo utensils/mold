@@ -265,6 +265,7 @@ mod tests {
             default_model: "flux2-klein".into(),
             models_dir: models_dir.to_string(),
             server_port: 7680,
+            web_ui_enabled: true,
             default_width: 1024,
             default_height: 1024,
             default_steps: 4,
