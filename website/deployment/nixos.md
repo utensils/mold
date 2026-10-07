@@ -173,6 +173,7 @@ works for SPA hot-iteration without recompiling Rust.
 | `enable`                | bool        | `false`             | Enable the mold server                                                               |
 | `package`               | package     | --                  | The mold package (must set explicitly)                                               |
 | `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below                         |
+| `webUi.enable` | bool | `true` | Serve the web interface and assets. Set false for API-only mode; API routes stay available. |
 | `port`                  | port        | `7680`              | HTTP server port                                                                     |
 | `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                                      |
 | `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                                           |
@@ -347,3 +348,14 @@ The devshell includes Rust toolchain, CUDA toolkit, and convenience commands:
 | `docs-dev`        | Start VitePress docs dev server                           |
 | `docs-build`      | Build the documentation site                              |
 | `docs-fmt`        | Format docs with prettier                                 |
+
+### API-only deployment
+
+```nix
+services.mold.webUi.enable = false;
+```
+
+The module sets `MOLD_WEB_UI_ENABLED=false` without changing the server command.
+UI pages and SPA assets return 404, while the API (including `/api/docs`) remains
+available with the same authentication and generation behavior. Omit this option
+or set it to `true` to retain the default browser interface.

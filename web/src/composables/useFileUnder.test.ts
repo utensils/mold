@@ -18,7 +18,7 @@ vi.mock("../components/machines/hostClient", () => ({
 }));
 
 const listCollectionsMock = vi.hoisted(() =>
-  vi.fn(async () => [
+  vi.fn(async (): Promise<import("../types").Collection[]> => [
     {
       id: "c1",
       name: "Smurfs",
@@ -194,4 +194,73 @@ describe("useFileUnder", () => {
       collection: { name: "Smurfs" },
     });
   });
+});
+
+it("filters hidden collection members from Recent and reacts to visibility changes", async () => {
+  const fileUnder = controller();
+  const collection = {
+    id: "c1",
+    name: "Smurfs",
+    slug: "smurfs",
+    hidden: true,
+    description: null,
+    cover_filename: null,
+    count: 1,
+    created_at: 1,
+    updated_at: 1,
+  };
+  listCollectionsMock.mockResolvedValue([collection]);
+  const privatePrint = {
+    filename: "private.png",
+    timestamp: 1,
+    metadata: { collection: "Smurfs" },
+    collections: ["c1"],
+  } as unknown as import("../types").GalleryImage;
+  const publicPrint = {
+    ...privatePrint,
+    filename: "public.png",
+    metadata: privatePrint.metadata,
+    collections: [],
+  } as import("../types").GalleryImage;
+  await fileUnder.refreshRecentVisibility();
+  expect(fileUnder.visibleRecent([privatePrint, publicPrint])).toEqual([
+    publicPrint,
+  ]);
+  listCollectionsMock.mockResolvedValue([{ ...collection, hidden: false }]);
+  await fileUnder.refreshRecentVisibility();
+  expect(fileUnder.visibleRecent([privatePrint, publicPrint])).toEqual([
+    privatePrint,
+    publicPrint,
+  ]);
+});
+
+it("keeps hidden visibility on failed refresh and withholds unresolved memberships", async () => {
+  const fileUnder = controller();
+  const print = {
+    filename: "private.png",
+    timestamp: 1,
+    metadata: {},
+    collections: ["private"],
+  } as unknown as import("../types").GalleryImage;
+  listCollectionsMock.mockRejectedValueOnce(new Error("offline"));
+  await fileUnder.refreshRecentVisibility();
+  expect(fileUnder.visibleRecent([print])).toEqual([]);
+  listCollectionsMock.mockResolvedValueOnce([
+    {
+      id: "private",
+      slug: "private",
+      name: "Private",
+      hidden: true,
+      description: null,
+      cover_filename: null,
+      count: 1,
+      created_at: 1,
+      updated_at: 1,
+    },
+  ]);
+  await fileUnder.refreshRecentVisibility();
+  expect(fileUnder.visibleRecent([print])).toEqual([]);
+  listCollectionsMock.mockRejectedValueOnce(new Error("offline"));
+  await fileUnder.refreshRecentVisibility();
+  expect(fileUnder.visibleRecent([print])).toEqual([]);
 });

@@ -284,6 +284,15 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     liveReadOnly: true,
   },
   {
+    key: "web_ui_enabled",
+    section: "performance",
+    label: "Serve the web interface",
+    help: "Startup-only: run `mold config set web_ui_enabled false` and restart for API-only mode. API functionality stays available.",
+    editor: "toggle",
+    needsEngineRestart: true,
+    liveReadOnly: true,
+  },
+  {
     key: "server_port",
     section: "performance",
     label: "Server port",

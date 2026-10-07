@@ -685,6 +685,10 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub server_port: u16,
 
+    /// Serve the browser SPA and static assets. Read once at server startup.
+    #[serde(default = "default_web_ui_enabled")]
+    pub web_ui_enabled: bool,
+
     #[serde(default = "default_dimension")]
     pub default_width: u32,
 
@@ -1103,6 +1107,10 @@ fn default_models_dir() -> String {
     }
 }
 
+fn default_web_ui_enabled() -> bool {
+    true
+}
+
 fn default_port() -> u16 {
     7680
 }
@@ -1126,6 +1134,7 @@ impl Default for Config {
             default_model: default_model(),
             models_dir: default_models_dir(),
             server_port: default_port(),
+            web_ui_enabled: true,
             default_width: default_dimension(),
             default_height: default_dimension(),
             default_steps: default_steps(),

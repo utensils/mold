@@ -46,6 +46,12 @@ in
       example = "blackwell";
     };
 
+    webUi.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Serve the web interface and SPA assets. Disable for API-only mode; all API routes remain available.";
+    };
+
     port = lib.mkOption {
       type = lib.types.port;
       default = 7680;
@@ -369,6 +375,7 @@ in
       environment = {
         MOLD_HOME = cfg.homeDir;
         MOLD_PORT = toString cfg.port;
+        MOLD_WEB_UI_ENABLED = lib.boolToString cfg.webUi.enable;
         MOLD_MODELS_DIR = cfg.modelsDir;
         # MOLD_HOME is deliberately 0775 for CLI/service sharing. Artifact
         # attestations replace multi-gigabyte hashes, so keep their trust root

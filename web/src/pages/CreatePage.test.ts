@@ -1157,6 +1157,36 @@ describe("CreatePage layout and behavior", () => {
     expect(feed.props("limit")).toBe(50);
   });
 
+  it("keeps Recent lightbox navigation out of hidden collections", async () => {
+    const hidden = {
+      ...entry,
+      filename: "private.png",
+      collections: ["private"],
+    };
+    const next = { ...entry, filename: "next.png" };
+    galleryListing.value = [entry, hidden, next];
+    listCollectionsMock.mockResolvedValue([
+      { id: "private", slug: "private", name: "Private", hidden: true },
+    ]);
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.Lightbox = {
+      name: "Lightbox",
+      props: ["item", "total"],
+      template: "<div />",
+    };
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    const feed = wrapper.findComponent(RecentGridStub);
+    expect(feed.props("entries")).toEqual([entry, next]);
+    feed.vm.$emit("open", entry);
+    await flushPromises();
+    const lightbox = wrapper.findComponent({ name: "Lightbox" });
+    expect(lightbox.props("total")).toBe(2);
+    lightbox.vm.$emit("next");
+    await flushPromises();
+    expect(lightbox.props("item").filename).toBe("next.png");
+  });
+
   /* Templates left the row beside the print title and became the rail's
    * Starters disclosure. The contract under test is the dismissal, which the
    * sheet keeps: Escape and a click outside the panel both close it. */

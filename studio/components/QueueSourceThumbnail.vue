@@ -21,12 +21,14 @@ function release() {
   url.value = null;
 }
 watch(
-  () => [
-    props.target?.baseUrl,
-    props.target?.apiKey,
-    props.instanceId,
-    props.jobId,
-    props.online,
+  // Compare each primitive identity separately. Polling creates fresh target
+  // objects; their identity must not restart an unchanged media request.
+  [
+    () => props.target?.baseUrl,
+    () => props.target?.apiKey,
+    () => props.instanceId,
+    () => props.jobId,
+    () => props.online,
   ],
   async (_, __, onCleanup) => {
     release();

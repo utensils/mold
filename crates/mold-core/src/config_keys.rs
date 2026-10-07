@@ -76,6 +76,12 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         section: "General",
     },
     ConfigKeyInfo {
+        key: "web_ui_enabled",
+        value_type: ValueType::Bool,
+        env_var: Some("MOLD_WEB_UI_ENABLED"),
+        section: "General",
+    },
+    ConfigKeyInfo {
         key: "server_port",
         value_type: ValueType::U16,
         env_var: None,
@@ -480,6 +486,7 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
             Some(s) => ConfigValue::String(s.clone()),
             None => ConfigValue::None,
         },
+        "web_ui_enabled" => ConfigValue::Bool(config.web_ui_enabled),
         "server_port" => ConfigValue::U16(config.server_port),
         "default_width" => ConfigValue::U32(config.default_width),
         "default_height" => ConfigValue::U32(config.default_height),
@@ -648,6 +655,7 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
         "default_model" => config.default_model = parse_string(raw)?,
         "models_dir" => config.models_dir = parse_string(raw)?,
         "output_dir" => config.output_dir = parse_optional_string(raw),
+        "web_ui_enabled" => config.web_ui_enabled = parse_bool(raw, key)?,
         "server_port" => config.server_port = parse_u16(raw, 1, 65535, key)?,
         "default_width" => config.default_width = parse_u32(raw, 64, 8192, key)?,
         "default_height" => config.default_height = parse_u32(raw, 64, 8192, key)?,
@@ -1015,6 +1023,21 @@ mod tests {
         // Unknown siblings under the prefix still route to the DB so a
         // future gallery.* key can never split-brain against the sweeper.
         assert_eq!(surface_for_key("gallery.something_else"), Surface::Db);
+    }
+
+    #[test]
+    fn web_ui_enabled_defaults_on_and_round_trips_as_bootstrap() {
+        let mut config: Config = toml::from_str("server_port = 7680").unwrap();
+        assert!(config.web_ui_enabled);
+        assert_eq!(surface_for_key("web_ui_enabled"), Surface::File);
+        set_value(&mut config, "web_ui_enabled", "false").unwrap();
+        assert!(matches!(
+            get_value(&config, "web_ui_enabled").unwrap(),
+            ConfigValue::Bool(false)
+        ));
+        let decoded: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(!decoded.web_ui_enabled);
+        assert!(set_value(&mut config, "web_ui_enabled", "maybe").is_err());
     }
 
     /// `generate.auto_tag_title` is a DB-surface bool that defaults on, is

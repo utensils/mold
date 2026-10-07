@@ -129,3 +129,11 @@ boundary pause through `pause_ms`; inspect the holding host's
 `/api/gallery/export-options` `gif_pause` advertisement first. Zero adds no
 pause while preserving FPS. This is an export API/GUI control, not a generation
 setting or a new CLI flag. Non-GIF requests omit it.
+
+API-only deployments: the bootstrap `web_ui_enabled` setting defaults to true.
+Run `mold config set web_ui_enabled false` and restart the server, or use
+`MOLD_WEB_UI_ENABLED=false`. NixOS exposes `services.mold.webUi.enable = false;`.
+Only browser pages and SPA assets are disabled (404); all API routes remain,
+including `/api/docs`, media, queue and generation. `MOLD_WEB_DIR` does not enable
+a disabled interface. Queue source previews keep their media across unchanged
+polls; Create's Recent excludes hidden collection members just like the Library.
