@@ -509,7 +509,10 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["UAT Drafts"].waitForExistence(timeout: 5))
         let print = fixturePrint(in: app)
         XCTAssertTrue(print.waitForExistence(timeout: 10))
-        print.press(forDuration: 1)
+        print.tap()
+        let more = app.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        more.tap()
         app.buttons["Use These Settings"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch

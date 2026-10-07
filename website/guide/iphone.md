@@ -513,5 +513,4 @@ further visual refinements and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
 intentionally absent.
 
-
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.

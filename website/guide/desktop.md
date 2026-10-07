@@ -853,5 +853,4 @@ signing keychain is removed even if the build fails.
 
 Attaching a first/start frame selects the closest supported aspect ratio from that image; adding a closing frame preserves it. Crop to fill is the default. The iOS aspect menu marks its current selection with a checkmark.
 
-
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.

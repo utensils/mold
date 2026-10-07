@@ -229,7 +229,6 @@ Picture menus in Library and its viewer offer **Use as Source**, retaining your 
 
 On macOS, image and video viewers default to **Fit**, keeping the entire frame visible as the window changes size. **Actual Size** shows one media pixel per screen pixel and lets you scroll larger media. Video controls remain below the picture without dimming it on hover.
 
-
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
 Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
