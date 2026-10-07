@@ -66,18 +66,87 @@ struct LibraryLocalSaveTests {
         #expect(!library.localSaveFailures.isEmpty)
     }
 
-    @Test func unavailableDisclosedSourceDoesNotImportOutput() async throws {
+    private func legacyPrint(_ name: String, upscaled: Bool) throws -> GalleryPrint {
+        var metadata: [String: Any] = ["prompt": "legacy", "model": "fixture"]
+        if upscaled {
+            metadata["model"] = "real-esrgan-x4plus:fp16"
+            metadata["edit_image_sha256s"] = [String(repeating: "b", count: 64)]
+        } else {
+            metadata["source_image_sha256"] = String(repeating: "b", count: 64)
+        }
+        return try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: [
+            "filename": name, "timestamp": 1000, "size_bytes": 3,
+            "media_version": "1000:3", "metadata": metadata,
+        ]))
+    }
+
+    @Test(arguments: [false, true])
+    func legacyInputsDoNotPreventSavingFinishedOutput(upscaled: Bool) async throws {
         let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
-        let remote = host("unavailable-source-remote")
+        let remote = host("legacy-new-source")
         let source = FakeBackend(host: remote, noRetainedMedia: true)
         let target = FakeBackend(host: local, noRetainedMedia: true)
-        var object = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(versionedPrint("missing-source.png"))) as? [String: Any])
-        var metadata = try #require(object["metadata"] as? [String: Any])
-        metadata["source_image_sha256"] = "abc"
-        object["metadata"] = metadata
-        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: JSONSerialization.data(withJSONObject: object))
+        let print = try legacyPrint("legacy-new.png", upscaled: upscaled)
         source.prints = [print]
         source.mediaAnswer = Data([1, 2, 3])
+        source.retainedInventories[print.filename] = .init(availability: .unavailableLegacy, members: [])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.saveLocally([LibraryEntry(host: remote, print: print)])
+        #expect(target.importedNames == [print.filename])
+        #expect(target.importedMedia == [Data([1, 2, 3])])
+        #expect(target.retainedTransfers.isEmpty)
+        #expect(library.localSaveFailures.isEmpty)
+        #expect(library.localSaveReport.contains("Copied 1 print"))
+        #expect(library.localSaveReport.contains("Original inputs are unavailable on the source machine for 1 legacy print; its finished file is saved."))
+        #expect(!library.localSaveReport.contains("not copied"))
+        #expect(!library.localSaveReport.contains("issues need attention"))
+    }
+
+    @Test(arguments: [false, true])
+    func existingLegacyOutputsStaySyncedAcrossRepeatedCachedSync(upscaled: Bool) async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("legacy-existing-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = try legacyPrint("legacy-existing.png", upscaled: upscaled)
+        source.prints = [print]
+        target.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        target.mediaAnswers[print.filename] = Data([1, 2, 3])
+        source.retainedInventories[print.filename] = .init(availability: .unavailableLegacy, members: [])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(source.callCount("mediaFile") == 1)
+        let outputReads = source.callCount("mediaFile")
+        for _ in 0..<2 {
+            #expect(target.importedNames.isEmpty)
+            #expect(library.localSaveFailures.isEmpty)
+            #expect(library.localSaveReport.contains("1 was already here"))
+            #expect(library.localSaveReport.contains("Original inputs are unavailable"))
+            #expect(!library.localSaveReport.contains("not copied"))
+            #expect(!library.localSaveReport.contains("issues need attention"))
+            await library.syncAllLocally()
+            #expect(source.callCount("mediaFile") == outputReads)
+        }
+        #expect(target.importedNames.isEmpty)
+        #expect(library.localSaveFailures.isEmpty)
+        #expect(library.localSaveReport.contains("1 was already here"))
+    }
+
+    @Test func unsupportedSourceTransferEndpointStillRefusesDisclosedInputs() async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("unsupported-source-transfer")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = try legacyPrint("unsupported-source.png", upscaled: false)
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.plantedErrors["retainedMediaTransferOffer"] = MoldClientError.http(status: 404, code: nil, message: "Not found")
+        source.retainedInventories[print.filename] = .init(availability: .unavailableLegacy, members: [])
         let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
         hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
         let library = LibraryStore(hosts: hosts)
@@ -85,6 +154,28 @@ struct LibraryLocalSaveTests {
         #expect(target.callCount("importPrint") == 0)
         #expect(source.callCount("mediaFile") == 0)
         #expect(!library.localSaveFailures.isEmpty)
+        #expect(!library.localSaveReport.contains("Original inputs are unavailable"))
+    }
+
+    @Test(arguments: [RetainedSourceMedia.Availability.unavailableAuth, .unavailableMissingOrCorrupt, .unknown])
+    func unverifiedMissingInputsRemainFailures(availability: RetainedSourceMedia.Availability) async throws {
+        let local = MoldEngine.localHost(port: 7680, apiKey: "test")!
+        let remote = host("unverified-source")
+        let source = FakeBackend(host: remote, noRetainedMedia: true)
+        let target = FakeBackend(host: local, noRetainedMedia: true)
+        let print = try legacyPrint("unverified.png", upscaled: false)
+        source.prints = [print]
+        source.mediaAnswer = Data([1, 2, 3])
+        source.retainedInventories[print.filename] = .init(availability: availability, members: [])
+        let hosts = HostStore(hosts: [local, remote]) { $0.id == local.id ? target : source }
+        hosts.reachability[local.id] = .up(FakeFixtures.serverStatus())
+        let library = LibraryStore(hosts: hosts)
+        await library.syncAllLocally()
+        #expect(target.importedNames.isEmpty)
+        #expect(source.callCount("mediaFile") == 0)
+        #expect(library.localSaveFailures.count == 1)
+        #expect(library.localSaveReport.contains("1 were not copied"))
+        #expect(!library.localSaveReport.contains("Original inputs are unavailable"))
     }
 
     @Test func saveLocallyRetainsSourceMediaBeforeReportingSuccess() async {

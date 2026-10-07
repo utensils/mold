@@ -169,3 +169,5 @@ GenerateRequest may hydrate only `stage_source:0` as source_image, never later
 stages; reject duplicate logical source targets. Full sequence replay remains a
 separate authoring workflow. All-model transfer regressions must cover every
 accepted binary role and destination reads after origin output/pin deletion.
+
+**Native Mac legacy copies:** output-copy completion and retained-input completeness are separate outcomes. An empty exact-output transfer offer with conditioning provenance is allowed only after an explicit `unavailable_legacy` inventory. Verify source listing/offer recipe, captured identity, and destination output digest, size and recipe before returning the legacy-input outcome. Never relax corrupt/auth/unknown failures or the source-bearing unsupported-transfer fallback. Cached repair must return the same outcome, count the output as already local, and disclose unavailable originals separately from save failures. Preserve any destination retained binding; do not replace it with an empty source set.

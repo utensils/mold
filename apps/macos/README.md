@@ -704,8 +704,13 @@ conditioning; ordinary navigation does not. Shape menus show proportional outlin
 supported output type, regardless of model family. Source, identity, mask,
 control, edit and typed reference images, audio/video, boundary/keyframes,
 continuation media and chain stage images stay attached to the destination
-archive. A failed source copy is reported as incomplete. Copies can be reused
-without the original machine. Sequence settings reuse restores the first stage's
+archive. A failed transfer of retained sources is reported as incomplete. When
+the source archive proves that a legacy print has no retained inputs, its verified
+finished image or video still counts as copied (or already here). Sync reports
+those unavailable original inputs separately, including on repeated Sync All,
+without treating the saved output as a failed copy. Original inputs remain
+unavailable for settings reuse unless they are reattached. Copies with retained
+inputs can be reused without the original machine. Sequence settings reuse restores the first stage's
 source; the other stages remain downloadable from the retained archive. This
 single-render action does not reconstruct a complete authored sequence.
 

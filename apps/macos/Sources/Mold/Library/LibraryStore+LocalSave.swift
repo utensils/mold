@@ -13,6 +13,7 @@ private struct MirrorResult: Sendable {
     let filename: String?
     let alreadyLocal: Bool
     let error: String?
+    var sourceMedia: RetainedSourceMedia.MirrorResult = .complete
 }
 
 private struct SyncDiskSpaceError: LocalizedError {
@@ -202,9 +203,9 @@ private func collisionName(for target: MirrorTarget, file: URL) throws -> String
 private func repairCachedSources(_ target: MirrorTarget, to destination: any MoldBackend,
                                  as filename: String) async -> MirrorResult {
     do {
-        try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+        let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
             from: target.source, to: destination, as: filename)
-        return MirrorResult(filename: filename, alreadyLocal: true, error: nil)
+        return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false, error: error.localizedDescription)
     }
@@ -230,9 +231,9 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
             }
             try? FileManager.default.removeItem(at: existing)
             if equal {
-                try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+                let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                     from: target.source, to: destination, as: requestedName, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-                return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil)
+                return MirrorResult(filename: requestedName, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
             }
         }
         let filename = occupied ? try collisionName(for: target, file: file) : requestedName
@@ -242,9 +243,9 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
                 ? try filesEqual(file, existing) : false
             try? FileManager.default.removeItem(at: existing)
             if equal {
-                try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+                let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                     from: target.source, to: destination, as: filename, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-                return MirrorResult(filename: filename, alreadyLocal: true, error: nil)
+                return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
             }
         }
         let item = try GalleryImport(mirroring: target.print, fileAt: file)
@@ -254,9 +255,9 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         do {
             let imported = try await destination.importPrint(item, as: filename)
             if imported != filename { await pending?.mark(sourceKey, filename: imported) }
-            try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
+            let sourceMedia = try await RetainedSourceMedia.mirrorSources(for: target.print.filename, metadata: target.print.metadata,
                 from: target.source, to: destination, as: imported, expectedSourceArchiveIdentity: sourceIdentity, downloadedOutput: file)
-            return MirrorResult(filename: imported, alreadyLocal: false, error: nil)
+            return MirrorResult(filename: imported, alreadyLocal: false, error: nil, sourceMedia: sourceMedia)
         } catch {
             // The server may have committed the file before the response was
             // lost. Keep the pending marker for the next fresh listing.
@@ -452,6 +453,7 @@ extension LibraryStore {
         var organizationFailedFiles: Set<String> = []
         var alreadyLocal = 0
         var transferred = 0
+        var legacyInputsUnavailable = 0
         var completed = 0
         func record(_ target: MirrorTarget, as filename: String, organize: Bool) {
             if syncAll { successfulCopies.append((target, filename)) }
@@ -529,6 +531,7 @@ extension LibraryStore {
             for await (index, result) in group {
                 completed += 1
                 if let name = result.filename {
+                    if result.sourceMedia == .legacyInputsUnavailable { legacyInputsUnavailable += 1 }
                     if result.alreadyLocal { alreadyLocal += 1 }
                     else { transferred += 1 }
                     let sourceKey = LocalSyncRecord.key(hostID: targets[index].hostID,
@@ -634,6 +637,11 @@ extension LibraryStore {
         var summary = "Copied \(transferred) \(transferred == 1 ? "print" : "prints") to This Mac’s Library."
         if alreadyLocal > 0 {
             summary += alreadyLocal == 1 ? " 1 was already here." : " \(alreadyLocal) were already here."
+        }
+        if legacyInputsUnavailable > 0 {
+            summary += legacyInputsUnavailable == 1
+                ? " Original inputs are unavailable on the source machine for 1 legacy print; its finished file is saved."
+                : " Original inputs are unavailable on the source machine for \(legacyInputsUnavailable) legacy prints; their finished files are saved."
         }
         if createdCollections > 0 {
             summary += " Created \(createdCollections) \(createdCollections == 1 ? "collection" : "collections")."

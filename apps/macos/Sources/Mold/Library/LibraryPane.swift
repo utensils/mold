@@ -99,6 +99,7 @@ struct LibraryPane: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Sync to This Mac").font(.title2.bold())
                     Text(library.localSaveReport)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !library.localSaveFailures.isEmpty {
                         Text("Couldn’t save").font(.headline)
                         ScrollView {
@@ -125,7 +126,9 @@ struct LibraryPane: View {
                     }
                 }
                 .padding(24)
-                .frame(width: 600, height: library.localSaveFailures.isEmpty ? 180 : 480)
+                .frame(width: 600)
+                .frame(height: library.localSaveFailures.isEmpty ? nil : 480)
+                .frame(minHeight: 180)
             }
             .sheet(isPresented: Binding(
                 get: { newCollectionTargets != nil },
