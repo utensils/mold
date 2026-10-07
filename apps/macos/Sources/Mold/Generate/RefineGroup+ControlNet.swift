@@ -31,7 +31,9 @@ extension RefineGroup {
                 Text(model.headline).tag(String?.some(model.name))
             }
         }
+        .help("Choose an adapter that uses a control picture to guide the result’s structure")
         .labelsHidden()
+        .frame(maxWidth: .infinity)
         if draft.media.control?.model != nil {
             HStack(spacing: 8) {
                 ControlPictureWell(draft: $draft)

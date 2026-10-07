@@ -65,7 +65,7 @@ struct LibraryCell: View {
                 .padding(.vertical, 2)
                 .background(Chrome.badgeBackdrop, in: Capsule())
                 .padding(5)
-                .help(days == 0 ? "Purged today" : "Purged in \(days) days")
+                .help(days == 0 ? "Permanently deleted today" : "Permanently deleted in \(days) days")
         }
     }
 

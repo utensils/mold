@@ -87,6 +87,7 @@ extension MachinesPane {
         HStack(spacing: 10) {
             Text(count)
             Button(show, systemImage: "chevron.right", action: act)
+                .help(show)
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)

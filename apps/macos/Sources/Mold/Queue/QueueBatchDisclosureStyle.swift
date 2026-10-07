@@ -37,6 +37,7 @@ private struct QueueBatchDisclosureToggle: View {
             expanded.toggle()
             return .handled
         }
+        .help(expanded ? "Hide the individual jobs in this batch" : "Show the individual jobs in this batch")
         .accessibilityLabel(expanded ? "Collapse batch" : "Expand batch")
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
         .accessibilityIdentifier("queue-batch-disclosure-" + id)

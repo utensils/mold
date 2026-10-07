@@ -75,6 +75,29 @@ starting it again.
 Not in Mold Studio (by design or not yet): authoring scripted sequences (CLI
 and API only), RunPod provisioning, and the 3-D authoring workflows.
 
+## Working in Generate
+
+Drag the handle above the prompt upward to make the editor taller, or Control-click
+it for size options. Your preferred height is remembered and fits the available
+window space. Drag the settings inspector divider to change its width; click any
+section heading to show or hide its controls. Recent prompts initially shows five
+items, with search and **Show more** for older entries. Choosing a recent prompt
+keeps your other settings.
+
+**Random each time** chooses a new seed for every submission. **Keep this seed**
+reuses the displayed starting number; **New seed** chooses another without
+generating. A batch uses successive seeds to make variations.
+
+Generate shows preparation and sending progress immediately, then confirms when
+the machine accepts the job or explains why it could not. An accepted job may
+start generating or wait in the queue. When reusing a print, **Stop restoring
+original inputs** keeps your prompt, settings and attached files while removing
+references that could not be restored. It does not delete Library files; attach
+any required replacement inputs before generating.
+
+Job Details groups progress, preview and settings, with copyable identifiers under
+**Technical details**. Hover over controls for a plain-English explanation.
+
 ## Keyboard
 
 ⌘1–⌘5 switch destinations, ⌘↩ generates, ⌘R refreshes, ⌥⌘I toggles the

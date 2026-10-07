@@ -20,7 +20,8 @@ struct SourceFitRow: View {
                     ForEach(modes, id: \.self) { Text($0.label).tag($0) }
                 }
                 .labelsHidden()
-                .fixedSize()
+                .frame(maxWidth: .infinity)
+                .help("Choose how the source picture fits the new canvas: crop it, add space around it, or stretch it")
                 Text(draft.media.sourceFit.mode.help)
                     .font(.caption)
                     .foregroundStyle(.secondary)

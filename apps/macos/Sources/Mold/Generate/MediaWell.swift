@@ -45,15 +45,18 @@ struct MediaWell: View {
 
     private var well: some View {
         HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-            Text(attachment?.name ?? placeholder)
-                .font(.callout)
-                .foregroundStyle(attachment == nil ? .tertiary : .primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text(attachment?.name ?? placeholder)
+                    .font(.callout)
+                    .foregroundStyle(attachment == nil ? .tertiary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .help(attachment.map { "Replace \($0.name), or drop a different file here" } ?? "Choose a file, or drop one here")
             if attachment != nil {
                 Button {
                     attachment = nil
@@ -62,7 +65,7 @@ struct MediaWell: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Remove")
+                .help("Remove this attached file")
             }
         }
         .padding(.horizontal, 8)
@@ -77,7 +80,6 @@ struct MediaWell: View {
             load(url)
             return true
         } isTargeted: { targeted = $0 }
-        .help(attachment?.name ?? "Drop a file, or click to choose one")
     }
 
     private func choose() {

@@ -25,7 +25,7 @@ struct MachineControl: View {
                     Text("Auto")
                 }
             }
-            .help("Whichever machine is set as default, or the first one that's up")
+            .help("Use your default machine, or the first available machine")
             Divider()
             ForEach(rows.machines) { row in
                 Button { choose(row.id) } label: {
@@ -42,7 +42,7 @@ struct MachineControl: View {
         .menuStyle(.button)
         .buttonStyle(.accessoryBar)
         .fixedSize()
-        .help("Where this render runs")
+        .help("Choose which machine will make this result")
     }
 
     /// Sets the choice, then re-resolves the model on the machine it now

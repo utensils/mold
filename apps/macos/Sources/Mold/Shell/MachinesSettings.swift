@@ -78,13 +78,16 @@ struct MachinesSettings: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button("Add a machine", systemImage: "plus") { isAdding = true }
+                .help("Connect to another machine running Mold")
             // The ellipsis is the promise the dialog keeps: this button asks.
             Button("Remove the selected machine…", systemImage: "minus") { removeSelected() }
+                .help("Forget this machine on this Mac; its saved prints stay on that machine")
                 .disabled(selected.map(isManaged) != true)
             Button("Edit the selected machine", systemImage: "pencil") {
                 if let selected { edit(selected) }
             }
             .disabled(selected.map(isManaged) != true)
+            .help("Change this machine’s name, address or access key")
             Spacer()
             Button("Check All") { Task { await hosts.refreshAll() } }
                 .disabled(hosts.hosts.isEmpty)

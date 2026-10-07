@@ -22,15 +22,18 @@ extension RecentGroup {
     func row(_ entry: HistoryEntry) -> some View {
         Button { Self.pick(entry, into: &draft) } label: {
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.prompt).lineLimit(3)
+                Text(entry.prompt).lineLimit(2)
                 Text("\(entry.model) · \(entry.usedAtDate, format: .relative(presentation: .named))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Puts this prompt back. The model and the controls stay as they are.")
+        .help("Use this prompt again without changing your model or settings")
         .rowActionMenu(GenerateMenus.recentPrompt()) { perform($0, on: entry) }
     }
 }

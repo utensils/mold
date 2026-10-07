@@ -26,7 +26,7 @@ extension ReuseStore {
         guard let saved = savedFile?.load() else {
             if savedFile?.exists == true {
                 restoring = true
-                notice = "The saved conditioning recipe could not be read. Reselect its source print or discard the saved conditioning."
+                notice = "The saved links to the original input files could not be read. Use the source print’s settings again, or stop restoring its inputs."
             }
             return
         }
@@ -36,7 +36,7 @@ extension ReuseStore {
         restoring = true
         controller.draft.media = RenderDraft(reusing: saved.metadata).media
         if saved.invalidated || saved.version != 1 {
-            notice = "Reselect the source print or replace its conditioning before generating."
+            notice = "Use the source print’s settings again, or attach replacement input files before generating."
         }
     }
 
@@ -67,7 +67,7 @@ extension ReuseStore {
               let instance = saved.instance, hosts.instanceID(of: saved.origin) == instance,
               let archive = saved.archive, let output = saved.output,
               let backend = hosts.backend(for: saved.origin) else {
-            notice = "Reconnect the original machine and reselect the source print to restore its conditioning."
+            notice = "Reconnect the original machine and use the source print’s settings again to restore its input files."
             return
         }
         do {
@@ -101,7 +101,7 @@ extension ReuseStore {
             await loadPreviews(in: controller.draft)
         } catch {
             if isCurrent(fence), !Task.isCancelled {
-                notice = "The retained conditioning could not be verified. Reconnect and reselect the source print."
+                notice = "The original input files could not be verified. Reconnect the original machine and use the source print’s settings again."
             }
         }
     }

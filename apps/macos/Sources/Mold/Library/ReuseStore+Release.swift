@@ -32,7 +32,7 @@ extension ReuseStore {
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
         if attachingSource { return "Loading the retained source picture…" }
-        if restoring { return notice ?? "Verifying retained conditioning on its original machine…" }
+        if restoring { return notice ?? "Checking the original input files on their source machine…" }
         if let authority = pending(for: draft), draft.media.sourceImage == nil,
            authority.members.filter({ RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }).count > 1 {
             return "This archive has multiple source pictures for one input. Attach the picture to use before generating."

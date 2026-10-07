@@ -25,6 +25,7 @@ struct ReferenceWeightControl: View {
                       step: control.step) {
             Text(value.wrappedValue, format: .number.precision(.fractionLength(2)))
         }
+        .help("Choose how strongly the reference pictures influence the new image")
         .rowActionMenu(GenerateMenus.referenceWeight(isAtDefault: isAtDefault),
                        perform: perform)
     }

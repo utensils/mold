@@ -21,6 +21,8 @@ struct GenerateInspector: View {
     @Environment(LibraryStore.self) private var library
     @Environment(GenerateController.self) private var controller
 
+    @AppStorage("createShowsReferences", store: AppStorageSuite.defaults)
+    private var showsReferences = true
     @AppStorage("createShowsAdapters", store: AppStorageSuite.defaults)
     private var showsAdapters = true
     @AppStorage("createShowsIdentity", store: AppStorageSuite.defaults)
@@ -43,7 +45,26 @@ struct GenerateInspector: View {
             if model == nil {
                 ContentUnavailableView("Nothing to set", systemImage: "slider.horizontal.3")
             } else {
-                ScrollView { content.padding(16) }
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Settings").font(.headline)
+                        Spacer()
+                        Menu {
+                            Button("Expand All") { setExpanded(true) }
+                            Button("Collapse All") { setExpanded(false) }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .accessibilityLabel("Settings sections")
+                        .help("Expand or collapse settings sections")
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    Divider()
+                    ScrollView { content.padding(.horizontal, 12).padding(.vertical, 8) }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -54,9 +75,11 @@ struct GenerateInspector: View {
     /// narrower than the column leads like every other row rather than
     /// floating in the middle of it.
     @ViewBuilder private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             if let recipe, GenerationReferencesGroup.isShown(recipe.capabilities) {
-                GenerationReferencesGroup(recipe: recipe, draft: $draft)
+                InspectorSection("References", isExpanded: $showsReferences) {
+                    GenerationReferencesGroup(recipe: recipe, draft: $draft)
+                }
             }
             if let recipe, let stack = recipe.capabilities.loraStack, let model, let host {
                 InspectorSection("Adapters", isExpanded: $showsAdapters) {
@@ -94,6 +117,18 @@ struct GenerateInspector: View {
             RecentGroup(host: host, draft: $draft, isExpanded: $showsRecent, isBusy: controller.run.isBusy)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func setExpanded(_ expanded: Bool) {
+        showsReferences = expanded
+        showsAdapters = expanded
+        showsIdentity = expanded
+        showsRefine = expanded
+        showsClip = expanded
+        showsSampler = expanded
+        showsOutput = expanded
+        showsFileUnder = expanded
+        showsRecent = expanded
     }
 
     /// What this recipe offers the Sampler group, resolved once so the rows

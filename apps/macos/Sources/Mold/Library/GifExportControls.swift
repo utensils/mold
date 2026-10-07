@@ -47,14 +47,17 @@ struct GifExportControls: View {
                     Text(choice == .loop ? "Loop" : "Bounce").tag(choice)
                 }
             }
+            .help("Loop plays forward; Bounce plays forward and then backward")
             Picker("Repeat", selection: $selection.repeatMode) {
                 ForEach(options.repeatChoices, id: \.self) { choice in
                     Text(choice == .forever ? "Forever" : "Once").tag(choice)
                 }
             }
+            .help("Choose whether the animation plays once or keeps repeating")
         }
         if selection.takesPause(format: "gif", options: options), let control = GifExportSelection.control(options) {
             TextField(selection.playback == .bounce ? "Pause at turns (ms)" : "Pause between loops (ms)", text: $selection.pauseText)
+                .help("Add a pause at each turn or repeat. Enter 0 for no extra pause; 1000 milliseconds is one second.")
             if control.min < control.max {
             Slider(value: Binding(get: { Double(selection.pauseText) ?? Double(control.defaultValue) },
                                   set: { selection.pauseText = String(Int($0)) }),

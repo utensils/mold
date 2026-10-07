@@ -32,7 +32,7 @@ struct SamplerGroup: View {
 
     @ViewBuilder private var solverRow: some View {
         if !offered.schedulers.isEmpty {
-            LabeledSection("Solver") {
+            InspectorField("Solver") {
                 Picker("Solver", selection: solver) {
                     // "Default" means OMIT the field, which is how the server
                     // is asked for its own choice -- never a spelling.
@@ -41,8 +41,9 @@ struct SamplerGroup: View {
                         Text(Self.label(for: name)).tag(String?.some(name))
                     }
                 }
+                .help("Choose the method used to refine the image; Default uses the model’s normal choice")
                 .labelsHidden()
-                .fixedSize()
+                .frame(maxWidth: .infinity)
             }
         }
     }
@@ -55,7 +56,7 @@ struct SamplerGroup: View {
         if offered.cfgPlus {
             LabeledSection("Guidance style") {
                 Toggle("CFG++", isOn: $draft.advanced.cfgPlus)
-                    .help("A different guidance update; the same step count.")
+                    .help("Try a different way of following the prompt, without changing the number of steps.")
             }
         }
     }

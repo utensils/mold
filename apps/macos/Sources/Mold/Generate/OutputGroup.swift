@@ -16,12 +16,13 @@ struct OutputGroup: View {
             transparencySection
             upscaleSection
             Toggle("Save to library", isOn: $draft.savesToGallery)
-            Text("""
-            Still rendered and still recoverable — it goes straight to Recently \
-            Deleted, and the trash purges it.
-            """)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                .help("Keep new results in the Library. When off, they go to Recently Deleted.")
+            if !draft.savesToGallery {
+                Text("New prints go to Recently Deleted and remain recoverable until the trash is purged.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -37,16 +38,20 @@ struct OutputGroup: View {
                 }
             }
         case let .picker(formats, defaultFormat):
-            LabeledSection("Format") {
-                Picker("Format", selection: formatBinding(fallback: defaultFormat)) {
-                    ForEach(formats, id: \.self) { format in
-                        Text(format.uppercased()).tag(format)
-                            // JPEG has no alpha channel: admission refuses the
-                            // pair rather than flattening the cut-out.
-                            .disabled(draft.transparencyBlocksFormat(format))
+            VStack(alignment: .leading, spacing: 5) {
+                InspectorField("Format") {
+                    Picker("Format", selection: formatBinding(fallback: defaultFormat)) {
+                        ForEach(formats, id: \.self) { format in
+                            Text(format.uppercased()).tag(format)
+                                // JPEG has no alpha channel: admission refuses the
+                                // pair rather than flattening the cut-out.
+                                .disabled(draft.transparencyBlocksFormat(format))
+                        }
                     }
+                    .help("Choose the file format for new results")
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                 }
-                .labelsHidden()
                 if formats.contains(where: draft.transparencyBlocksFormat) {
                     Text(TransparencyControl.unavailableFormatReason)
                         .font(.caption)
@@ -69,6 +74,7 @@ struct OutputGroup: View {
         if Self.offersTransparency(draft) {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle(TransparencyControl.label, isOn: transparencyBinding)
+                    .help("Create an image with a transparent background using a supported file format")
                 Text(TransparencyControl.note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -87,7 +93,7 @@ struct OutputGroup: View {
     @ViewBuilder private var upscaleSection: some View {
         let ready = UpscaleRow.resolve(models: models)
         if !ready.isEmpty {
-            LabeledSection("Upscale") {
+            InspectorField("Upscale") {
                 Picker("Upscale", selection: $draft.upscaleModel) {
                     Text("Don't upscale").tag(String?.none)
                     ForEach(ready) { model in
@@ -95,10 +101,11 @@ struct OutputGroup: View {
                     }
                 }
                 .labelsHidden()
+                .frame(maxWidth: .infinity)
             }
             .help("""
-            Images are upscaled before they arrive. A clip is upscaled after \
-            it lands in the Library, as a second job.
+            Make the result larger. Images are enlarged before delivery; clips \
+            are enlarged in a second job after they reach the Library.
             """)
         }
     }

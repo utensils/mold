@@ -45,12 +45,13 @@ extension SamplerGroup {
     /// own transformer depth, which no client knows, so a list this app
     /// cannot fault is still the server's to refuse.
     @ViewBuilder private var stgBlocksRow: some View {
-        LabeledSection("STG blocks") {
+        InspectorField("STG blocks") {
             VStack(alignment: .leading, spacing: 3) {
                 TextField("Pipeline default", text: $draft.advanced.stgBlocks)
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 140)
+                    .frame(maxWidth: .infinity)
                     .accessibilityLabel("STG blocks")
+                    .help("Choose which model layers the guidance changes, using a comma-separated list. Leave empty to use the model’s normal choice.")
                 if let refusal = draft.advanced.stgBlocksRefusal {
                     Text(refusal).font(.caption).foregroundStyle(.secondary)
                 }

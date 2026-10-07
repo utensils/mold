@@ -42,7 +42,7 @@ struct RecipePicker: View {
             }
             .labelStyle(.titleAndIcon)
             .frame(width: Self.maxToolbarWidth)
-            .help("Choose which of this model's recipes to run")
+            .help("Choose how to use this model, such as creating a new image or editing one")
         }
     }
 }

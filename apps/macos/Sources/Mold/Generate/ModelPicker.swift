@@ -27,7 +27,7 @@ struct ModelPicker: View {
         }
         .labelStyle(.titleAndIcon)
         .frame(width: Self.maxToolbarWidth)
-        .help(selected?.description ?? "Choose a model")
+        .help("Choose the model that will create your result")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             content
         }

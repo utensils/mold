@@ -22,9 +22,18 @@ struct SourceBadge: View {
                     .foregroundStyle(.orange)
             }
         }
-        .help(entry.envVar ?? label)
+        .help(sourceExplanation)
         .accessibilityElement(children: .combine)
         .accessibilityValue(entry.source)
+    }
+
+    private var sourceExplanation: String {
+        switch entry.source {
+        case "db": "Changes to this setting are saved in this machine’s settings."
+        case "file": "Changes to this setting are saved in this machine’s configuration file."
+        case "env": "This value is set when the machine starts and cannot be changed here."
+        default: "This machine is using the default value."
+        }
     }
 
     private var label: String {

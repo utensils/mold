@@ -22,7 +22,13 @@ extension GenerateController {
     func submit(on host: MoldHost, backend: any MoldBackend,
                 routing: ChainRouting.Decision = .single(),
                 retained: RetainedMediaHydration? = nil) {
-        guard let modelName else { return }
+        guard let modelName else {
+            let message = "Choose a model before generating."
+            submissionFeedback.begin(message, phase: .refused)
+            if !run.isBusy { run = .failed(message) }
+            return
+        }
+        let feedbackID = submissionFeedback.begin("Sending to \(host.name)…", phase: .submitting)
         // The Batch control already caps at `maxBatchOutputs`; this is a belt
         // on the one path a stale draft could still exceed it.
         let caps = hosts.capabilities(of: host)
@@ -35,7 +41,7 @@ extension GenerateController {
             randomBase: .random(in: 0 ... UInt64(UInt32.max)),
             maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0)
         if ChainSubmission.take(routing, requests: built,
-                                on: host, backend: backend, controller: self) { return }
+                                on: host, backend: backend, controller: self, feedbackID: feedbackID) { return }
         let admission = BatchAdmission(requests: built)
         PendingBatch.remember(admission.clientBatchId, host: host.id)
 
@@ -60,6 +66,13 @@ extension GenerateController {
                 let accepted = try await backend.submit(
                     RetainedMedia.hydrated(admission, with: retained, on: host, backend: backend))
                 guard let self else { return }
+                self.submissionFeedback.update(
+                    accepted.children.contains { $0.state == .running }
+                        ? "Generation started on \(host.name)."
+                        : (accepted.children.allSatisfy { $0.state == .accepted }
+                           ? "Added to the generation queue on \(host.name)."
+                           : "Accepted by \(host.name). View progress in Queue."),
+                    phase: .accepted, for: feedbackID)
                 let active = ActiveBatch(
                     id: accepted.id, clientBatchId: admission.clientBatchId,
                     host: host.id, admitted: accepted)
@@ -81,6 +94,7 @@ extension GenerateController {
                 }
             } catch {
                 guard let self else { return }
+                self.submissionFeedback.update(error.failureSentence, phase: .refused, for: feedbackID)
                 // A CANCELLED post may well have reached the host. Forgetting
                 // its recovery record would orphan exactly the render the
                 // fence exists to keep findable.

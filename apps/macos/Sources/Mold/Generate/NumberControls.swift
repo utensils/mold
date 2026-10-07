@@ -40,6 +40,7 @@ struct StepsControl: View {
         ) {
             Text(draft.steps.formatted())
         }
+        .help("Choose how many refinement steps to run. More steps take longer and may change the result.")
     }
 }
 
@@ -53,6 +54,7 @@ struct GuidanceControl: View {
                       step: control.step) {
             Text(draft.guidance, format: .number.precision(.fractionLength(1)))
         }
+        .help("Choose how strongly the result follows your prompt. Higher is not always better.")
     }
 }
 
@@ -82,7 +84,7 @@ struct LengthControl: View {
             Text(seconds)
         }
         .accessibilityValue(seconds)
-        .help("\(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) fps")
+        .help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) frames per second.")
     }
 
     private var seconds: String {
@@ -99,15 +101,15 @@ struct BatchControl: View {
     var body: some View {
         Menu {
             ForEach(counts, id: \.self) { count in
-                Button(count == 1 ? "1 seed" : "\(count) seeds") { draft.batchSize = count }
+                Button(count == 1 ? "1 result" : "\(count) results") { draft.batchSize = count }
             }
         } label: {
-            Text(draft.batchSize == 1 ? "1 seed" : "\(draft.batchSize) seeds")
+            Text(draft.batchSize == 1 ? "1 result" : "\(draft.batchSize) results")
         }
         .menuStyle(.button)
         .buttonStyle(.accessoryBar)
         .fixedSize()
-        .help("Render several seeds at once")
+        .help("Choose how many different results to make with one click")
     }
 
     /// Powers of two up to what the host will admit in one batch.

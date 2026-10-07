@@ -18,7 +18,6 @@ struct ShapeControl: View {
                 aspectMenu(shape)
                 sizeMenu(shape)
             }
-            .help("The picture's aspect and size")
         case let .fixed(text):
             // Verbatim: pixel dimensions take no thousands separator.
             Text(verbatim: text).monospacedDigit()
@@ -52,6 +51,7 @@ struct ShapeControl: View {
         .menuStyle(.button)
         .buttonStyle(.accessoryBar)
         .fixedSize()
+        .help("Choose a square, portrait or landscape shape")
     }
 
     private func sizeMenu(_ shape: Shape) -> some View {
@@ -73,6 +73,7 @@ struct ShapeControl: View {
         .menuStyle(.button)
         .buttonStyle(.accessoryBar)
         .fixedSize()
+        .help("Choose the image dimensions in pixels; larger images take more memory and time")
     }
 
     /// Choosing a canvas RECORDS that somebody chose it (#1166): the intent

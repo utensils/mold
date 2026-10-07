@@ -13,6 +13,7 @@ extension MeshExportSheet {
             // "leave it alone", and the toggle would be a lie.
             if prompt.offersAsStored {
                 Toggle("Resize for printing", isOn: $scaled)
+                    .help("Set the exported object’s physical size in millimetres")
             }
             if scaled || !prompt.offersAsStored {
                 HStack {
@@ -31,11 +32,13 @@ extension MeshExportSheet {
                     Text(axis == .z ? "Z up" : "Y up").tag(axis)
                 }
             }
+            .help("Choose which direction should point up in the exported object")
             Picker("Origin", selection: $geometry.origin) {
                 ForEach(capabilities.origins, id: \.self) { origin in
                     Text(origin == .floor ? "On the floor" : "Centred").tag(origin)
                 }
             }
+            .help("Place the exported object on the floor or centre it around its starting point")
             Text(MeshExportGeometry.sizeLabel(bounds: prompt.bounds, options: resolved))
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -74,6 +77,7 @@ extension MeshExportSheet {
             }
         }
         Toggle("Transparent background", isOn: $turntable.transparent)
+            .help("Export the rotating object without a solid background")
         if prompt.format == "gif" { GifExportControls(selection: $gif, options: prompt.exportOptions) }
         Text(duration).font(.callout).foregroundStyle(.secondary)
         if let note = turntable.budgetNote {

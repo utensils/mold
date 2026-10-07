@@ -36,6 +36,7 @@ struct BoundaryFrameWells: View {
                         BoundaryFramePolicy.set(first: first, picture: nil, draft: &draft,
                                                 capabilities: recipe.capabilities, recipe: recipe)
                     }.labelStyle(.iconOnly).buttonStyle(.plain)
+                    .help(first ? "Remove the picture guiding the first frame" : "Remove the picture guiding the last frame")
                 }
             }
         }

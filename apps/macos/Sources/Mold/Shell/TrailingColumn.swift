@@ -19,11 +19,30 @@ extension View {
     /// A search field already reserves the trailing toolbar region; other
     /// panes reserve that space beside the inspector switch themselves.
     func trailingColumn(
-        isShowing: Binding<Bool>, searchFillsTheColumn: Bool = false,
+        isShowing: Binding<Bool>, searchFillsTheColumn: Bool = false, resizable: Bool = false,
         @ViewBuilder _ column: () -> some View
     ) -> some View {
-        inspector(isPresented: isShowing) {
-            column().inspectorColumnWidth(TrailingColumn.width)
+        modifier(TrailingColumnModifier(isShowing: isShowing, searchFillsTheColumn: searchFillsTheColumn,
+                                        resizable: resizable, column: column()))
+    }
+}
+
+private struct TrailingColumnModifier<Column: View>: ViewModifier {
+    @Binding var isShowing: Bool
+    let searchFillsTheColumn: Bool
+    let resizable: Bool
+    let column: Column
+    @State private var measuredWidth = TrailingColumn.width
+
+    func body(content: Content) -> some View {
+        content.inspector(isPresented: $isShowing) {
+            column
+                // Keep the inspector width trait outermost. Wrapping it in the
+                // geometry observer can leave the native divider fixed.
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { measuredWidth = $0 }
+                .inspectorColumnWidth(min: resizable ? 260 : TrailingColumn.width,
+                                      ideal: resizable ? 320 : TrailingColumn.width,
+                                      max: resizable ? 480 : TrailingColumn.width)
         }
         .toolbar {
             // Keep the pane's controls and the inspector switch in separate
@@ -32,19 +51,19 @@ extension View {
             ToolbarSpacer(.fixed)
             // Hidden, there is no column and no divider, so the switch is an
             // ordinary trailing button whatever the pane does with search.
-            let reservesColumn = isShowing.wrappedValue && !searchFillsTheColumn
+            let reservesColumn = isShowing && !searchFillsTheColumn
             // The reservation is a spacer BESIDE the button, never a frame
             // on it: a frame widens the button's hit region too, and a click
             // anywhere in the empty band over the column toggled the column.
             ToolbarItem {
                 HStack(spacing: 0) {
                     if reservesColumn { Spacer(minLength: 0) }
-                    Button { isShowing.wrappedValue.toggle() } label: {
+                    Button { isShowing.toggle() } label: {
                         Label("Inspector", systemImage: "sidebar.trailing")
                     }
-                    .help(isShowing.wrappedValue ? "Hide the inspector" : "Show the inspector")
+                    .help(isShowing ? "Hide the inspector" : "Show the inspector")
                 }
-                .frame(width: reservesColumn ? TrailingColumn.toolbarRegion : nil)
+                .frame(width: reservesColumn ? max(0, measuredWidth - Chrome.toolbarEdgeInset) : nil)
             }
             .sharedBackgroundVisibility(.hidden)
         }
@@ -62,8 +81,8 @@ enum TrailingColumn {
     /// owner's screenshot; at this one it sits flush against the column's
     /// leading edge and the two toolbar regions read as one clean split.
     ///
-    /// Fixed rather than resizable for the same reason, and because the
-    /// `HStack` this replaced was a hard `.frame(width: 320)` anyway.
+    /// Search-backed columns keep this fixed width. Generate opts into a
+    /// resizable column and measures it to keep its toolbar reservation aligned.
     static let width: CGFloat = toolbarRegion + Chrome.toolbarEdgeInset
 
     /// The column's share of the toolbar: its width, less the inset every

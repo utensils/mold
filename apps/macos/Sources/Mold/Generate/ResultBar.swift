@@ -23,17 +23,20 @@ struct ResultBar: View {
             Button { actions.save(result) } label: {
                 Label(GenerateAction.saveACopy.title, systemImage: "square.and.arrow.down")
             }
+            .help("Save a copy of this result to a folder you choose")
             .disabled(host == nil)
 
             Button { actions.copy(result) } label: {
                 Label(GenerateAction.copyResult.title, systemImage: "doc.on.doc")
             }
+            .help("Copy this result to the clipboard")
             .disabled(host == nil)
 
             Button(action: actions.showInLibrary) {
                 Label(GenerateAction.showInLibrary.title,
                       systemImage: "photo.on.rectangle.angled")
             }
+            .help("Find this finished result in the Library")
 
             if let seed = result.seed {
                 Spacer(minLength: 12)

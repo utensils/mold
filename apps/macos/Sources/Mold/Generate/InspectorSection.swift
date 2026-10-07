@@ -38,35 +38,60 @@ struct InspectorSection<Content: View, Accessory: View>: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             content
-                // Both halves of the rule, in the one place that owns it.
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, Self.titleInset)
                 .padding(.top, 6)
         } label: {
-            HStack(spacing: 0) {
-                Text(title)
-                Spacer(minLength: 8)
-                accessory
-            }
+            Text(title)
         }
+        .disclosureGroupStyle(InspectorDisclosureStyle(title: title, accessory: accessory))
         .font(.callout)
     }
 
-    /// What a native macOS `DisclosureGroup` leaves between its own leading
-    /// edge and the first glyph of its title at `.callout`.
-    ///
-    /// Measured off the real control rather than guessed --
-    /// `uat/lane-n-02-generate-inspector-top-before.png` is the photograph,
-    /// where the chevron's leading edge and the title's first glyph are 14
-    /// points apart. It has to be a photograph: the disclosure row is drawn
-    /// by AppKit and `ImageRenderer` does not capture it, so
-    /// `InspectorSectionLayoutTests` can only pin what this file does with
-    /// the number -- which is the half that actually regressed.
+    /// Keep the heading and content aligned after the chevron gutter.
     static var titleInset: CGFloat { 14 }
 }
 
 extension InspectorSection where Accessory == EmptyView {
     init(_ title: String, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
         self.init(title, isExpanded: isExpanded, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// Give the whole heading one explicit action. The default macOS disclosure
+/// label is not a reliable pointer target, and nesting Refresh inside it
+/// also makes the accessory part of the disclosure's accessibility label.
+private struct InspectorDisclosureStyle<Accessory: View>: DisclosureGroupStyle {
+    let title: String
+    let accessory: Accessory
+
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    configuration.isExpanded.toggle()
+                } label: {
+                    HStack(spacing: 0) {
+                        Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: InspectorSection<EmptyView, EmptyView>.titleInset, alignment: .leading)
+                            .accessibilityHidden(true)
+                        configuration.label
+                            .fontWeight(.semibold)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minHeight: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(title)
+                .help(configuration.isExpanded ? "Hide \(title) settings" : "Show \(title) settings")
+                .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+                accessory
+            }
+            if configuration.isExpanded { configuration.content.padding(.bottom, 10) }
+            Divider().padding(.top, 6)
+        }
     }
 }

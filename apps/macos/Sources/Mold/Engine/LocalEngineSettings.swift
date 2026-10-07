@@ -81,9 +81,9 @@ struct LocalEngineSettings: View {
 
     private var homeExplanation: String {
         switch home.source {
-        case .environment: "From MOLD_HOME in this app's environment."
-        case .saved: "The home chosen in Mold Desktop, shared with every mold on this Mac."
-        case .fallback: "The default home, shared with every mold on this Mac."
+        case .environment: "Folder set when this app starts. Mold stores its models, Library and settings here."
+        case .saved: "The folder chosen in Mold Desktop for models, Library and settings on this Mac."
+        case .fallback: "The default folder for Mold’s models, Library and settings on this Mac."
         }
     }
 

@@ -10,6 +10,7 @@ struct CopyButton: View {
             Clipboard.put(value)
         }
         .labelStyle(.iconOnly)
+        .help("Copy \(what.lowercased()) to the clipboard")
         .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
     }

@@ -18,7 +18,7 @@ struct DownloadsButton: View {
         if Self.isShown(active: active, finished: finished) {
             Button { showsPopover.toggle() } label: { icon }
                 .buttonStyle(.plain)
-                .help("Downloads")
+                .help("Show download progress and cancel downloads")
                 .accessibilityLabel("Downloads")
                 .popover(isPresented: $showsPopover) {
                     DownloadsPopover(host: host)

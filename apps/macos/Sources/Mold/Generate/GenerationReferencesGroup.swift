@@ -80,13 +80,17 @@ struct GenerationReferencesGroup: View {
             if reference.kind != "image" {
                 Button("Replace", systemImage: "arrow.triangle.2.circlepath") { choose(kind: reference.kind, replacing: index) }
                     .labelStyle(.iconOnly).disabled(importing)
+                    .help("Choose a different file for this reference")
             }
             Button("Move earlier", systemImage: "arrow.up") { draft.media.moveGenerationReference(from: index, to: index - 1) }
                 .labelStyle(.iconOnly).disabled(index == 0)
+                .help("Move this reference one place earlier")
             Button("Move later", systemImage: "arrow.down") { draft.media.moveGenerationReference(from: index, to: index + 1) }
                 .labelStyle(.iconOnly).disabled(index == draft.media.generationReferences.count - 1)
+                .help("Move this reference one place later")
             Button("Remove", systemImage: "xmark.circle") { draft.media.removeGenerationReference(at: index) }
                 .labelStyle(.iconOnly)
+                .help("Remove this reference from the next render")
         }.buttonStyle(.plain)
     }
 
@@ -107,6 +111,7 @@ struct GenerationReferencesGroup: View {
                 Button("Remove", systemImage: "xmark.circle") {
                     draft.media.removeGenerationReference(at: index)
                 }.labelStyle(.iconOnly)
+                .help("Remove the \(role.rawValue) camera-view picture")
             }
         }.disabled(importing)
     }

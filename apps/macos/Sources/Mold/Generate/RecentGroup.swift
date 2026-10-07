@@ -21,6 +21,8 @@ struct RecentGroup: View {
 
     @Environment(PromptHistoryStore.self) private var history
     @Environment(HostStore.self) private var hosts
+    @State private var search = ""
+    @State private var visibleCount = 5
     @State private var pendingDestruction: LibraryActions.Destruction?
 
     var body: some View {
@@ -32,7 +34,7 @@ struct RecentGroup: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .help("Refresh")
+            .help("Load the latest prompts from this machine")
         } content: {
             content
         }
@@ -41,6 +43,8 @@ struct RecentGroup: View {
             guard wasBusy, !nowBusy else { return }
             Task { await refresh() }
         }
+        .onChange(of: host?.id) { search = ""; visibleCount = 5 }
+        .onChange(of: search) { visibleCount = 5 }
         .destructionDialog($pendingDestruction)
     }
 
@@ -60,16 +64,43 @@ struct RecentGroup: View {
                 Text("Prompts you send appear here.")
                     .font(.caption).foregroundStyle(.secondary)
             case let .rows(entries):
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(entries) { entry in
-                        row(entry)
-                        if entry.id != entries.last?.id { Divider() }
-                    }
-                    Button("Clear Recent…", role: .destructive) { confirmClear(on: host) }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.red)
-                }
+                historyList(entries, on: host)
             }
+        }
+    }
+
+    private func historyList(_ entries: [HistoryEntry], on host: MoldHost) -> some View {
+        let page = RecentPromptPage(entries: entries, query: search, limit: visibleCount)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Choose a prompt to use it again. Your other settings stay the same.")
+                .font(.caption).foregroundStyle(.secondary)
+            if page.showsSearch {
+                TextField("Search recent prompts", text: $search)
+                    .textFieldStyle(.roundedBorder)
+            }
+            if page.visible.isEmpty {
+                Text("No matching prompts.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(page.visible) { entry in
+                row(entry)
+                Divider()
+            }
+            HStack {
+                if page.remaining > 0 {
+                    Button("Show more (\(page.remaining))") { visibleCount += 5 }
+                }
+                if visibleCount > 5 {
+                    Button("Show fewer") { visibleCount = 5 }
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    Button("Clear Recent…", role: .destructive) { confirmClear(on: host) }
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .accessibilityLabel("Prompt history actions")
+            }
+            .buttonStyle(.link)
         }
     }
 

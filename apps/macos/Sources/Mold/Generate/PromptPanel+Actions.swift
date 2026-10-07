@@ -20,15 +20,39 @@ extension PromptPanel {
 
     func actions(_ recipe: GenerationRecipe) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let message = controller.submissionFeedback.message {
+                HStack(alignment: .top, spacing: 8) {
+                    if controller.submissionFeedback.isPending {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: controller.submissionFeedback.phase == .refused
+                              ? "exclamationmark.circle" : "checkmark.circle")
+                    }
+                    Text(message).font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    if !controller.submissionFeedback.isPending {
+                        Button("Dismiss", systemImage: "xmark") { controller.submissionFeedback.dismiss() }
+                            .labelStyle(.iconOnly).buttonStyle(.plain)
+                            .help("Dismiss this generation status")
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("generate-submission-feedback")
+            }
             if let refusal = submitRefusal {
                 Text(refusal).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("generate-submit-refusal")
                 if reuse.restoring {
-                    Button("Discard retained conditioning") {
+                    Text("You can stop restoring the original input files and keep your prompt, settings, and attached files. References that haven’t been restored will be removed. Without the original inputs, the result may differ. Add any inputs this model requires before generating.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Stop restoring original inputs") {
                         draft.media.generationReferences.removeAll { $0.media.authority == "descriptor" }
                         reuse.clear()
                     }.font(.caption)
+                        .help("Forget the saved input links for this draft. Keeps attached files and does not delete anything from the Library.")
                 }
             }
             HStack(spacing: 10) {
@@ -55,24 +79,27 @@ extension PromptPanel {
                         controller.chain.resume(backend: { controller.hosts.backend(for: $0) })
                     }
                     .controlSize(.large)
-                    .help("Continue this clip where the machine parked it")
+                    .help("Continue this clip from its saved progress")
                 }
                 if controller.run.isBusy {
                     stopButton
                 }
                 Button(action: submit) {
                     HStack(spacing: 6) {
-                        Text("Generate")
+                        if controller.submissionFeedback.isPending {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(controller.submissionFeedback.isPreparing ? "Preparing…" : "Generate")
                         Text("⌘↩").foregroundStyle(.secondary)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(submitRefusal != nil)
+                .disabled(submitRefusal != nil || controller.submissionFeedback.isPreparing)
                 .help(controller.run.isBusy
-                      ? "Queue another render"
-                      : (submitRefusal ?? "Render this"))
+                      ? "Add another generation to the machine’s queue"
+                      : (submitRefusal ?? "Send this prompt and settings to the selected machine"))
                 .fixedSize()
             }
         }
@@ -96,15 +123,16 @@ extension PromptPanel {
     @ViewBuilder private var stopButton: some View {
         switch Self.stopControl(queued: controller.queuedCount) {
         case .button:
-            Button("Stop", role: .destructive, action: cancel)
+            Button("Stop", role: .destructive) { controller.submissionFeedback.dismiss(); cancel() }
                 .controlSize(.large)
                 .fixedSize()
         case .menu:
             Menu {
-                Button("Stop All Queued", role: .destructive, action: stopAll)
+                Button("Stop All Queued", role: .destructive) { controller.submissionFeedback.dismiss(); stopAll() }
             } label: {
                 Text("Stop")
             } primaryAction: {
+                controller.submissionFeedback.dismiss()
                 cancel()
             }
             .controlSize(.large)
