@@ -824,20 +824,18 @@ pub(crate) fn validate_edit_reference_request(
     Ok(())
 }
 
-/// Download one ordered reference and check its container against the
-/// contract's accepted formats (PNG/JPEG unless the recipe lists more, e.g.
-/// Qwen Image 2.1's WebP). The bytes are passed through untouched — alpha is
-/// never flattened.
+/// Download a bounded original, check its supported container, and normalize
+/// only if it exceeds the transport image budget. Alpha is never flattened.
 pub(crate) async fn fetch_reference_image(
     att: &serenity::Attachment,
     position: usize,
     profile: &mold_core::ReferenceImagesProfile,
 ) -> Result<Vec<u8>, String> {
-    if att.size as u64 > MAX_SOURCE_IMAGE_BYTES {
+    if att.size as u64 > mold_core::input_image::MAX_INGEST_BYTES as u64 {
         return Err(format!(
             "Reference {position} is too large ({:.1} MiB). Keep it under {} MiB.",
             att.size as f64 / (1024.0 * 1024.0),
-            MAX_SOURCE_IMAGE_BYTES / (1024 * 1024)
+            mold_core::input_image::MAX_INGEST_BYTES / (1024 * 1024)
         ));
     }
     let bytes = att
@@ -845,7 +843,7 @@ pub(crate) async fn fetch_reference_image(
         .await
         .map_err(|e| format!("Failed to download reference {position}: {e}"))?;
     check_reference_bytes(&bytes, position, profile)?;
-    Ok(bytes)
+    prepare_discord_image(bytes).await
 }
 
 fn check_reference_bytes(
@@ -924,10 +922,8 @@ fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
 }
 
 /// Maximum inline attachment size we will accept for `source_image`. Discord
-/// caps uploads to 25 MiB for free users (100 MiB with Nitro), but very large
-/// images are almost always a mistake for img2img — resizing happens inside
-/// the server. Keep the bar well below Discord's hard limit to avoid obvious
-/// abuse.
+/// Processing sizes remain engine-owned; larger safe originals are prepared
+/// before this effective transport budget is checked.
 const MAX_SOURCE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 // GenerateRequest embeds every attachment as base64 in one JSON body. Keep the
 // aggregate raw payload below 47 MiB so its 4/3 expansion plus request metadata
@@ -991,11 +987,11 @@ fn fit_attachment_dims(
 /// before we ship the bytes to the server (which will reject anything else
 /// with a less friendly error).
 pub(crate) async fn fetch_source_image(att: &serenity::Attachment) -> Result<Vec<u8>, String> {
-    if att.size as u64 > MAX_SOURCE_IMAGE_BYTES {
+    if att.size as u64 > mold_core::input_image::MAX_INGEST_BYTES as u64 {
         return Err(format!(
             "Source image is too large ({:.1} MiB). Keep it under {} MiB.",
             att.size as f64 / (1024.0 * 1024.0),
-            MAX_SOURCE_IMAGE_BYTES / (1024 * 1024)
+            mold_core::input_image::MAX_INGEST_BYTES / (1024 * 1024)
         ));
     }
     if let Some(ct) = &att.content_type {
@@ -1010,7 +1006,25 @@ pub(crate) async fn fetch_source_image(att: &serenity::Attachment) -> Result<Vec
     if !looks_like_png_or_jpeg(&bytes) {
         return Err("Source image must be a valid PNG or JPEG file.".to_string());
     }
-    Ok(bytes)
+    prepare_discord_image(bytes).await
+}
+
+async fn prepare_discord_image(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() <= MAX_SOURCE_IMAGE_BYTES as usize {
+        return Ok(bytes);
+    }
+    tokio::task::spawn_blocking(move || {
+        mold_core::input_image::prepare_image(
+            &bytes,
+            mold_core::input_image::InputImageLimits {
+                max_bytes: MAX_SOURCE_IMAGE_BYTES as usize,
+                max_axis: mold_core::reference_image::REFERENCE_IMAGE_MAX_SIDE,
+                max_pixels: mold_core::reference_image::REFERENCE_IMAGE_MAX_PIXELS,
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("Image preparation failed: {error}"))?
 }
 
 fn looks_like_png_or_jpeg(bytes: &[u8]) -> bool {
@@ -1344,7 +1358,12 @@ pub async fn generate(
         .chain(source_video.iter())
         .chain(keyframe_attachments.iter().copied())
         .chain(reference_attachments.iter().copied());
-    if let Err(message) = validate_inline_media_size(inline_attachments) {
+    if let Err(message) = validate_inline_media_size(inline_attachments.filter(|attachment| {
+        !attachment
+            .content_type
+            .as_deref()
+            .is_some_and(|mime| mime.starts_with("image/"))
+    })) {
         ctx.send(
             poise::CreateReply::default()
                 .content(message)
@@ -1627,6 +1646,19 @@ pub async fn generate(
         }),
         _ => None,
     };
+    let source_name = source_image
+        .as_ref()
+        .and_then(|attachment| crate::h3_references::safe_name(&attachment.filename))
+        .map(|name| {
+            if source_bytes
+                .as_ref()
+                .is_some_and(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+            {
+                mold_core::input_image::png_name(&name)
+            } else {
+                name
+            }
+        });
     let mut req = build_generate_request(BuildParams {
         prompt: &prompt,
         model: &model_name,
@@ -1639,9 +1671,7 @@ pub async fn generate(
         negative_prompt: negative_prompt.as_deref(),
         defaults: model_defaults,
         source_image: source_bytes,
-        source_image_name: source_image
-            .as_ref()
-            .and_then(|attachment| crate::h3_references::safe_name(&attachment.filename)),
+        source_image_name: source_name,
         references: prepared_references
             .as_ref()
             .map(|prepared| prepared.descriptors.clone()),
@@ -1665,6 +1695,31 @@ pub async fn generate(
         transparent_background: None,
         still_format: None,
     });
+
+    // Validate the effective transport payload after fresh still normalization.
+    let inline_sizes = req
+        .source_image
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .chain(
+            req.edit_images
+                .iter()
+                .flatten()
+                .map(|bytes| bytes.len() as u64),
+        )
+        .chain(
+            req.keyframes
+                .iter()
+                .flatten()
+                .map(|frame| frame.image.len() as u64),
+        )
+        .chain(req.audio_file.iter().map(|bytes| bytes.len() as u64))
+        .chain(req.source_video.iter().map(|bytes| bytes.len() as u64));
+    if let Err(message) = validate_inline_media_lengths(inline_sizes) {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(ctx, &message).await?;
+        return Ok(());
+    }
 
     let mut reference_session = if let Some(prepared) = prepared_references {
         match crate::h3_references::bind_remote_references(&ctx.data().client, &mut req, prepared)

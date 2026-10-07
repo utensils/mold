@@ -61,6 +61,31 @@ pub(crate) async fn prepare_attachments(
         !attachments.is_empty() && attachments.len() <= MAX_DISCORD_REFERENCES,
         "Discord accepts one or two ordered MiniMax H3 references"
     );
+    let mut declared_non_image_bytes = 0usize;
+    for attachment in attachments {
+        let is_image = attachment
+            .content_type
+            .as_deref()
+            .is_some_and(|mime| mime.starts_with("image/"));
+        let limit = if is_image {
+            mold_core::input_image::MAX_INGEST_BYTES
+        } else {
+            MAX_REFERENCE_TOTAL_BYTES
+        };
+        anyhow::ensure!(
+            attachment.size as usize <= limit,
+            "reference original exceeds its bounded download envelope"
+        );
+        if !is_image {
+            declared_non_image_bytes = declared_non_image_bytes
+                .checked_add(attachment.size as usize)
+                .context("combined non-image reference size overflowed")?;
+        }
+    }
+    anyhow::ensure!(
+        declared_non_image_bytes <= MAX_REFERENCE_TOTAL_BYTES,
+        "combined video/audio references must stay under 47 MiB"
+    );
     let declared_total = attachments
         .iter()
         .try_fold(0_usize, |total, attachment| {
@@ -68,8 +93,8 @@ pub(crate) async fn prepare_attachments(
         })
         .context("combined reference attachment size overflowed")?;
     anyhow::ensure!(
-        declared_total <= MAX_REFERENCE_TOTAL_BYTES,
-        "combined reference attachments must stay under 47 MiB"
+        declared_total <= mold_core::input_image::MAX_INGEST_BYTES * MAX_DISCORD_REFERENCES,
+        "combined original reference downloads must stay under 128 MiB"
     );
 
     let mut bodies = Vec::with_capacity(attachments.len());
@@ -79,9 +104,19 @@ pub(crate) async fn prepare_attachments(
             .await
             .map_err(|_| anyhow::anyhow!("reference {} download failed", index + 1))?;
         anyhow::ensure!(!bytes.is_empty(), "reference {} is empty", index + 1);
-        bodies.push((attachment.filename.as_str(), bytes));
+        bodies.push((attachment.filename.clone(), bytes));
     }
-    prepare_named_bytes(bodies)
+    tokio::task::spawn_blocking(move || {
+        let (names, data): (Vec<_>, Vec<_>) = bodies.into_iter().unzip();
+        prepare_named_bytes(
+            names
+                .iter()
+                .zip(data)
+                .map(|(name, bytes)| (name.as_str(), bytes)),
+        )
+    })
+    .await
+    .context("reference preparation task failed")?
 }
 
 fn prepare_named_bytes<'a>(
@@ -92,6 +127,32 @@ fn prepare_named_bytes<'a>(
         !bodies.is_empty() && bodies.len() <= MAX_DISCORD_REFERENCES,
         "Discord accepts one or two ordered MiniMax H3 references"
     );
+    // Fresh image bytes are bounded before their canonical descriptors/hashes
+    // and upload leases exist. Audio/video retain their original bytes.
+    let bodies = bodies
+        .into_iter()
+        .map(|(name, bytes)| {
+            if mold_core::validation::sniff_image_input_format(&bytes).is_some() {
+                let prepared = mold_core::input_image::prepare_image(
+                    &bytes,
+                    mold_core::input_image::InputImageLimits {
+                        max_bytes: MAX_REFERENCE_IMAGE_BYTES,
+                        max_axis: mold_core::reference_image::REFERENCE_IMAGE_MAX_SIDE,
+                        max_pixels: mold_core::reference_image::REFERENCE_IMAGE_MAX_PIXELS,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+                let name = if prepared == bytes {
+                    name.to_string()
+                } else {
+                    mold_core::input_image::png_name(name)
+                };
+                Ok((name, prepared))
+            } else {
+                Ok((name.to_string(), bytes))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
     let actual_total = bodies
         .iter()
         .try_fold(0_usize, |total, (_, bytes)| total.checked_add(bytes.len()))
@@ -106,7 +167,7 @@ fn prepare_named_bytes<'a>(
     for (index, (name, bytes)) in bodies.into_iter().enumerate() {
         let provenance = GenerationReferenceProvenance {
             name: Some(
-                safe_name(name)
+                safe_name(&name)
                     .with_context(|| format!("reference {} filename is invalid", index + 1))?,
             ),
             sha256: Some(format!("{:x}", Sha256::digest(&bytes))),

@@ -12,13 +12,29 @@ import Testing
         """.utf8))
     }
 
-    @Test func limitsComeFromHostAndTightenForMultipleReferences() throws {
+    @Test func processingBudgetsDoNotRefuseOriginalReferences() throws {
         let cap = try capability(",\"max_pixels_single\":100,\"max_pixels_multi\":50")
         #expect(cap.maxPixelsSingle == 100)
         #expect(cap.stillRefusal(images: [png(10, 10)]) == nil)
-        #expect(cap.stillRefusal(images: [png(10, 10), png(5, 5)]) != nil)
+        #expect(cap.stillRefusal(images: [png(10, 10), png(5, 5)]) == nil)
         #expect(cap.stillRefusal(images: []) != nil)
         #expect(cap.stillRefusal(images: ["bad bytes"]) != nil)
+    }
+
+    @Test func ordinaryOversizedReferencesQueueAcrossProcessingBudgets() throws {
+        for budget in [1_048_576, 4_096_576] {
+            let cap = try capability(",\"max_pixels_single\":\(budget),\"max_pixels_multi\":1048576")
+            #expect(cap.stillRefusal(images: [png(1280, 853)]) == nil)
+            #expect(cap.stillRefusal(images: [png(1280, 853), png(1600, 900)]) == nil)
+        }
+        #expect(try capability().stillRefusal(images: [png(1280, 853)]) == nil)
+    }
+
+    @Test func ingestionBoundsRemainIndependentOfProcessingBudgets() throws {
+        let cap = try capability()
+        #expect(cap.stillRefusal(images: [png(1, 201)]) != nil)
+        #expect(cap.stillRefusal(images: [png(16_385, 1)]) != nil)
+        #expect(cap.stillRefusal(images: [png(200, 1)]) == nil)
     }
 
     @Test func sharedMutationsRecomputeDefaultCanvasAndKeepChosenCanvas() throws {
@@ -60,7 +76,7 @@ import Testing
         draft.media.editImages = ["bad bytes"]
         #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
         draft.media.editImages = [png(11, 10)]
-        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
+        #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) == nil)
         draft.media.editImages = [png(5, 5), png(5, 5)]
         #expect(draft.refusal(for: recipe, retainedFields: [.editImages]) != nil)
     }

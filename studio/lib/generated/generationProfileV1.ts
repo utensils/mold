@@ -179,11 +179,13 @@ max_count?: number | null,
  */
 primary_is_target: boolean, source_relation: ReferenceSourceRelation,
 /**
- * Per-image pixel ceiling when the request carries exactly one reference.
+ * Engine processing budget per image with exactly one reference.
+ * Originals above this size are resized by the engine, not refused at admission.
  */
 max_pixels_single?: number | null,
 /**
- * Per-image pixel ceiling when the request carries several.
+ * Engine processing budget per image with several references.
+ * This is not an ingestion or transport limit.
  */
 max_pixels_multi?: number | null,
 /**

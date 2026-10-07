@@ -18,7 +18,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mold_core::identity::ID_IMAGE_LIMITS;
 
 /// The identity flags exactly as clap parsed them.
 ///
@@ -101,9 +100,16 @@ impl IdentityArgs {
         let mut bytes = Vec::with_capacity(self.id_images.len());
         let mut names = Vec::with_capacity(self.id_images.len());
         for path in &self.id_images {
-            let (payload, name) = read_id_image(path)?;
+            let (payload, name) = read_id_image_original(path)?;
             bytes.push(payload);
             names.push(name);
+        }
+        let originals = bytes.clone();
+        mold_core::input_image::prepare_identity_group(&mut bytes).map_err(anyhow::Error::msg)?;
+        for ((original, prepared), name) in originals.iter().zip(&bytes).zip(&mut names) {
+            if original != prepared {
+                *name = mold_core::input_image::png_name(name);
+            }
         }
         // The whole-set budgets, applied before anything is uploaded.
         let borrowed: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
@@ -138,18 +144,33 @@ impl IdentityArgs {
 ///    be pointed at a link into somewhere else, at a directory, or at a fifo
 ///    that would block forever.
 /// 2. **Bounded before allocating.** The descriptor's own size is checked
-///    against the contract's encoded-byte limit before a buffer is reserved,
+///    against the original ingestion-byte limit before a buffer is reserved,
 ///    so an enormous file is refused rather than read.
 /// 3. **Read from the retained descriptor.** The bytes come from the handle
 ///    that was checked, never from a second open of the pathname — the name
 ///    can be replaced between the two, the descriptor cannot.
-/// 4. **Validated against the contract's bounded-decode limits.** Magic bytes
-///    and header-declared dimensions only; no decoder sees the payload here.
+/// 4. **Prepared inside the broad safe decode envelope when needed.**
+///    Oversized photographs are proportionally reduced before the narrower
+///    identity role limits are checked; small originals remain byte-identical.
 ///
-/// Returns the bytes and the file's own name, which becomes `id_image_name`.
+/// Returns the effective bytes and display name (PNG after normalization).
 /// The client's directory layout is never sent.
+#[cfg(test)]
 pub fn read_id_image(path: &Path) -> Result<(Vec<u8>, String)> {
-    let mut file = mold_core::secure_file::open_regular_file_no_follow(path)
+    let (bytes, original_name) = read_id_image_original(path)?;
+    let prepared =
+        mold_core::input_image::prepare_identity_image(&bytes).map_err(anyhow::Error::msg)?;
+    let name = if prepared == bytes {
+        original_name
+    } else {
+        mold_core::input_image::png_name(&original_name)
+    };
+    mold_core::identity::validate_id_image_bytes(&prepared).map_err(anyhow::Error::msg)?;
+    Ok((prepared, name))
+}
+
+fn read_id_image_original(path: &Path) -> Result<(Vec<u8>, String)> {
+    let file = mold_core::secure_file::open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open --id-image '{}'", path.display()))?;
 
     let length = file
@@ -159,21 +180,39 @@ pub fn read_id_image(path: &Path) -> Result<(Vec<u8>, String)> {
     if length == 0 {
         anyhow::bail!("--id-image '{}' is empty", path.display());
     }
-    if length > ID_IMAGE_LIMITS.max_encoded_bytes as u64 {
+    if length > mold_core::input_image::MAX_INGEST_BYTES as u64 {
         anyhow::bail!(
-            "--id-image '{}' is {length} bytes, which exceeds the {} byte (16 MiB) limit",
+            "--id-image '{}' is {length} bytes, which exceeds the {} byte (64 MiB) ingestion limit",
             path.display(),
-            ID_IMAGE_LIMITS.max_encoded_bytes
+            mold_core::input_image::MAX_INGEST_BYTES
         );
     }
 
     let mut bytes = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut bytes)
+    file.take(mold_core::input_image::MAX_INGEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("failed to read --id-image '{}'", path.display()))?;
 
-    mold_core::identity::validate_id_image_bytes(&bytes)
-        .map_err(|reason| anyhow::anyhow!("invalid --id-image '{}': {reason}", path.display()))?;
-
+    anyhow::ensure!(
+        bytes.len() <= mold_core::input_image::MAX_INGEST_BYTES,
+        "identity original grew beyond the ingestion limit"
+    );
+    anyhow::ensure!(
+        matches!(
+            mold_core::validation::sniff_image_input_format(&bytes),
+            Some(mold_core::ImageInputFormat::Png | mold_core::ImageInputFormat::Jpeg)
+        ),
+        "invalid --id-image '{}': id_image must be a PNG or JPEG image",
+        path.display()
+    );
+    let (width, height) =
+        mold_core::reference_image::oriented_dimensions(&bytes).map_err(anyhow::Error::msg)?;
+    mold_core::reference_image::validate_reference_image_dimensions(
+        "Identity photo",
+        width,
+        height,
+    )
+    .map_err(anyhow::Error::msg)?;
     Ok((bytes, display_name(path)))
 }
 
@@ -342,12 +381,12 @@ mod tests {
     fn an_oversized_file_is_refused_on_its_size_alone() {
         let dir = tempfile::tempdir().unwrap();
         let mut bytes = png_1x1();
-        bytes.resize(ID_IMAGE_LIMITS.max_encoded_bytes + 1, 0);
+        bytes.resize(mold_core::input_image::MAX_INGEST_BYTES + 1, 0);
         let path = write(dir.path(), "huge.png", &bytes);
 
         let error = read_id_image(&path).unwrap_err();
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("16 MiB"), "{rendered}");
+        assert!(rendered.contains("64 MiB"), "{rendered}");
         assert!(rendered.contains("huge.png"), "{rendered}");
     }
 

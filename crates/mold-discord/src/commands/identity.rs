@@ -46,7 +46,7 @@ pub struct IdentityOptions<'a> {
 /// and the ranges are `mold_core::identity`'s, so this bot and the server
 /// draw the same line.
 pub fn validate_identity_options(options: &IdentityOptions<'_>) -> Result<(), String> {
-    let limit = identity::ID_IMAGE_LIMITS.max_encoded_bytes as u64;
+    let limit = mold_core::input_image::MAX_INGEST_BYTES as u64;
     if options.attachment_bytes > limit {
         return Err(format!(
             "Identity photo is too large ({:.1} MiB). Keep it under {} MiB.",
@@ -139,8 +139,12 @@ async fn fetch_identity_image(attachment: &serenity::Attachment) -> Result<Vec<u
         .download()
         .await
         .map_err(|error| format!("Failed to download identity photo: {error}"))?;
-    validate_identity_bytes(&bytes)?;
-    Ok(bytes)
+    let prepared =
+        tokio::task::spawn_blocking(move || mold_core::input_image::prepare_identity_image(&bytes))
+            .await
+            .map_err(|error| format!("Identity preparation failed: {error}"))??;
+    validate_identity_bytes(&prepared)?;
+    Ok(prepared)
 }
 
 async fn autocomplete_identity_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
@@ -246,6 +250,13 @@ pub async fn identity(
         }
     };
 
+    let image_name = identity_image_name(&identity).map(|name| {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            mold_core::input_image::png_name(&name)
+        } else {
+            name
+        }
+    });
     let req = build_generate_request(BuildParams {
         prompt: &prompt,
         model: &model_name,
@@ -257,7 +268,7 @@ pub async fn identity(
         seed,
         defaults: model_defaults,
         id_image: Some(bytes),
-        id_image_name: identity_image_name(&identity),
+        id_image_name: image_name,
         id_weight: identity_strength,
         id_start_step: identity_start_step,
         ..Default::default()
@@ -341,13 +352,13 @@ mod tests {
 
     #[test]
     fn oversized_and_wrong_container_uploads_are_refused_before_the_download() {
-        let over = identity::ID_IMAGE_LIMITS.max_encoded_bytes as u64 + 1;
+        let over = mold_core::input_image::MAX_INGEST_BYTES as u64 + 1;
         let error = validate_identity_options(&IdentityOptions {
             attachment_bytes: over,
             ..Default::default()
         })
         .unwrap_err();
-        assert!(error.contains("16 MiB"), "{error}");
+        assert!(error.contains("64 MiB"), "{error}");
 
         // Exactly at the ceiling is allowed — the byte check is the authority.
         assert!(validate_identity_options(&IdentityOptions {

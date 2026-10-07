@@ -1446,6 +1446,10 @@ pub async fn run(
         edit_images.get_or_insert_with(Vec::new).extend(references);
     }
 
+    if let Some(images) = &mut edit_images {
+        mold_core::input_image::prepare_reference_images(images).map_err(anyhow::Error::msg)?;
+    }
+
     // Read the identity reference. Secure-open, bound, and validate against
     // the request contract's decode limits BEFORE any request bytes exist —
     // see `commands::identity`.

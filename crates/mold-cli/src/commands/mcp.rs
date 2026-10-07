@@ -2730,10 +2730,21 @@ fn build_generate_mesh_request(
             Some(image::ImageFormat::Jpeg) => "image/jpeg",
             _ => return Err(format!("{label} must be a PNG or JPEG")),
         };
-        let (width, height) = reader
-            .into_dimensions()
-            .map_err(|error| format!("{label} image dimensions could not be read: {error}"))?;
-        Ok((bytes, mime.to_string(), width, height))
+        let prepared = mold_core::input_image::prepare_image(
+            &bytes,
+            mold_core::input_image::InputImageLimits {
+                max_bytes: if label == "image" {
+                    32 * 1024 * 1024
+                } else {
+                    8 * 1024 * 1024
+                },
+                max_axis: mold_core::reference_image::REFERENCE_IMAGE_MAX_SIDE,
+                max_pixels: mold_core::reference_image::REFERENCE_IMAGE_MAX_PIXELS,
+            },
+        )?;
+        let (width, height) = mold_core::reference_image::oriented_dimensions(&prepared)?;
+        let mime = if prepared == bytes { mime } else { "image/png" };
+        Ok((prepared, mime.to_string(), width, height))
     };
     let image = match args.image {
         Some(value) => Some(decode("image", value)?.0),
@@ -2870,7 +2881,10 @@ fn build_generate_request(
             ))
         }
     };
-    let edit_images = decode_mcp_reference_images(args.reference_images)?;
+    let mut edit_images = decode_mcp_reference_images(args.reference_images)?;
+    if let Some(images) = &mut edit_images {
+        mold_core::input_image::prepare_reference_images(images)?;
+    }
     // Only an explicit `true` asks for anything; `false` is the same request
     // as an absent field and never reaches the wire.
     let transparent_background = (args.transparent_background == Some(true)).then_some(true);

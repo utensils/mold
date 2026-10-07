@@ -42,3 +42,5 @@ Moved from the root CLAUDE.md; loaded only when working under the paths above. Q
   with descriptors and removes display filenames; generation retains exact
   decoded frame/sample facts and canonical upload metadata. Native draft
   persistence continues to omit all media bytes and scoped handles.
+
+- **Processing budgets are not raw input limits.** `max_pixels_single/multi` describe engine reference preparation. Native `StillReferenceValidation` enforces only the general reference ingestion envelope (16384 axis, 100 MP, 200:1), required/count and readable-header checks. CPU-only `mold_core::input_image` prepares fresh identity photographs and transport-heavy authoring before role validation and sealed media facts; unchanged inputs preserve their bytes. Never re-encode an existing upload lease or retained authority. Normalization applies EXIF to pixels, retains ICC in PNG, resamples alpha premultiplied, and names transformed media by its actual container. Explicit source-fit and paired mask geometry stay with their existing authorities.
