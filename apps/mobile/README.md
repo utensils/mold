@@ -1000,3 +1000,6 @@ controls. Older hosts keep their existing export controls without a pause input.
 Video clips now offer both Share and Save to Mold folder, as mesh turntables do.
 Turntables default to 512 px, 10 fps and 36 views, with a frame budget based on
 size and transparency. These controls agree with the native iOS companion.
+
+
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.

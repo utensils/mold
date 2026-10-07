@@ -7483,6 +7483,9 @@ describe("MobileApp queue rows", () => {
 
   it("draws a machine's own work the same way as this phone's", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue/foreign-queued/inputs")
+        return Promise.resolve([{ index: 0, label: "Reference image 1", preview: true }]);
+      if (path === "/api/queue/foreign-running/inputs") return Promise.resolve([]);
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -7534,9 +7537,7 @@ describe("MobileApp queue rows", () => {
     expect(running.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
 
     const queued = cards[1]!;
-    expect(queued.get(".queue-source-thumbnail img").attributes("alt")).toBe(
-      "Source image for this render",
-    );
+    expect(queued.get(".queue-source-thumbnail img").attributes("alt")).toBe("Reference image 1");
     expect(wrapper.find(".live-activity-row").exists()).toBe(false);
   });
 });

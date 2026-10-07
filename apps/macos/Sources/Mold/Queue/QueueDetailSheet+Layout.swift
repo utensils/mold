@@ -18,7 +18,7 @@ extension QueueDetailSheet {
     var overview: some View {
         let status = QueueDetailPresentation.status(current: current, progress: progress)
         return HStack(alignment: .top, spacing: 20) {
-            QueueSourceThumbnail(entry: entry, host: activeHost, size: 120)
+            QueueSourceThumbnail(entry: entry, host: activeHost, size: 120, detailed: true)
             VStack(alignment: .leading, spacing: 8) {
                 Text(status.title).font(.headline)
                 if let message = status.message {

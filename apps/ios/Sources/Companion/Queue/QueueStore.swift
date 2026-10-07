@@ -18,8 +18,11 @@ final class QueueStore {
     var summary: String?
     private(set) var acting: Set<String> = []
     private var sourcePrompts: [String: String] = [:]
-    private var sourceThumbnails: [String: Data] = [:]
+    private var inputFailures: Set<String> = []
+    private var sourceThumbnails: [String: [QueueInputPreview]] = [:]
     @ObservationIgnored private var thumbnailAttempts: Set<String> = []
+    @ObservationIgnored private var detailThumbnailAttempts: Set<String> = []
+    @ObservationIgnored private var thumbnailInFlight: Set<String> = []
 
     private func thumbnailKey(_ entry: QueueEntry, _ id: MoldHost.ID) -> String {
         "\(id)|\(hosts.instanceID(of: id) ?? "unknown")|\(entry.id)"
@@ -30,24 +33,46 @@ final class QueueStore {
     }
 
     func sourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID) -> Data? {
-        sourceThumbnails[thumbnailKey(entry, id)]
+        inputPreviews(for: entry, on: id).first(where: { $0.bytes != nil })?.bytes
     }
 
-    func loadSourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID) async {
+    func inputPreviews(for entry: QueueEntry, on id: MoldHost.ID) -> [QueueInputPreview] {
+        sourceThumbnails[thumbnailKey(entry, id)] ?? []
+    }
+
+    func inputLoadFailed(for entry: QueueEntry, on id: MoldHost.ID) -> Bool {
+        inputFailures.contains(thumbnailKey(entry, id))
+    }
+
+    func loadSourceThumbnail(for entry: QueueEntry, on id: MoldHost.ID, detailed: Bool = false, retry: Bool = false) async {
         let key = thumbnailKey(entry, id)
-        guard let host = hosts.host(id), hosts.isUp(host), thumbnailAttempts.insert(key).inserted else { return }
+        let flightKey = key + (detailed ? "|detail" : "|row")
+        guard let host = hosts.host(id), hosts.isUp(host), !thumbnailInFlight.contains(flightKey) else { return }
+        if detailed {
+            guard retry || detailThumbnailAttempts.insert(key).inserted else { return }
+        } else { guard thumbnailAttempts.insert(key).inserted else { return } }
+        thumbnailInFlight.insert(flightKey)
+        defer { thumbnailInFlight.remove(flightKey) }
         let client = hosts.backend(for: host)
-        if let detail = try? await client.queueJob(id: entry.id), canStorePreview(entry, on: id, key: key) {
+        if !detailed, let detail = try? await client.queueJob(id: entry.id), canStorePreview(entry, on: id, key: key) {
             sourcePrompts[key] = detail.job.metadata?.prompt
         }
         do {
-            let bytes = try await client.queueInputThumbnail(id: entry.id)
-            guard !Task.isCancelled else { thumbnailAttempts.remove(key); return }
-            guard canStorePreview(entry, on: id, key: key), bytes.count <= 2 * 1024 * 1024 else { thumbnailAttempts.remove(key); return }
-            sourceThumbnails[key] = bytes
+            let previews = try await client.queueInputPreviews(id: entry.id, firstOnly: !detailed, cached: inputPreviews(for: entry, on: id))
+            guard !Task.isCancelled else { thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key); return }
+            guard canStorePreview(entry, on: id, key: key), previews.allSatisfy({ ($0.bytes?.count ?? 0) <= 2 * 1024 * 1024 }) else { thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key); return }
+            inputFailures.remove(key)
+            let existing = sourceThumbnails[key] ?? []
+            sourceThumbnails[key] = previews.map { preview in
+                QueueInputPreview(input: preview.input, bytes: preview.bytes ?? existing.first(where: { $0.input == preview.input })?.bytes)
+            }
+            if detailed && previews.contains(where: { $0.input.preview && $0.bytes == nil }) { detailThumbnailAttempts.remove(key) }
+            if !detailed && previews.contains(where: { $0.input.preview }) && !previews.contains(where: { $0.bytes != nil }) { thumbnailAttempts.remove(key) }
         } catch is CancellationError {
-            thumbnailAttempts.remove(key)
+            thumbnailAttempts.remove(key); detailThumbnailAttempts.remove(key)
         } catch {
+            if detailed && canStorePreview(entry, on: id, key: key) { inputFailures.insert(key) }
+            detailThumbnailAttempts.remove(key)
             // Older hosts and jobs without a source image simply have no preview.
             if let issue = error as? MoldClientError, case .http(status: 404, code: _, message: _) = issue {
                 return
@@ -115,7 +140,9 @@ final class QueueStore {
         })
         sourceThumbnails = sourceThumbnails.filter { retained.contains($0.key) }
         sourcePrompts = sourcePrompts.filter { retained.contains($0.key) }
+        inputFailures.formIntersection(retained)
         thumbnailAttempts.formIntersection(retained)
+        detailThumbnailAttempts.formIntersection(retained)
     }
 
     /// Coalesced: a burst of job events is one re-read.

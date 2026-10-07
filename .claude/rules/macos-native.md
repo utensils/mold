@@ -44,3 +44,8 @@ or overwrite explicitly replaced attachments. Surface save failures. Missing or
 corrupt snapshots block Generate and remain preserved until the user explicitly
 chooses **Use current inputs** after reattaching any needed files. This snapshot
 behavior is Mac-only; preserve the existing scalar-only iOS persistence path.
+
+Library New badges compare filenames with the previous session visit, using the
+whole active pool and a stable per-view snapshot. First visit establishes a
+baseline; viewer navigation preserves the visit. Badge rows must fit machine
+labels beside playback without overlap, including narrow tiles.

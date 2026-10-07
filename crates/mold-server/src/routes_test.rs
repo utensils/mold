@@ -6060,6 +6060,24 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn queue_inputs_without_conditioning_are_empty_not_a_legacy_source() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        admit_one_durable_batch(&state, "plain-job", "plain-batch");
+        let response = create_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/queue/plain-job/inputs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        assert_eq!(json_body(response).await, serde_json::json!([]));
+    }
+
     async fn wait_for_attempt_cleanup(state: &AppState, id: &str) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {

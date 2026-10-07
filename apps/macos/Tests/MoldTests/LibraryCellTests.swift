@@ -21,3 +21,16 @@ struct LibraryCellTests {
         #expect(firstView.contains(".accessibilityLabel("))
     }
 }
+
+// Older hosts omit `format`; the public kind contract still recognizes the file.
+import MoldClient
+import SwiftUI
+@testable import Mold
+
+@MainActor @Test func legacyClipKeepsItsPlaybackBadge() throws {
+    let host = MoldHost(name: "fixture", baseURL: URL(string: "http://fixture")!)
+    let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(#"{"filename":"clip.mp4","timestamp":1,"metadata":{}}"#.utf8))
+    let cell = LibraryCell(entry: LibraryEntry(host: host, print: print), host: host, edge: 96,
+                           isSelected: false, isLead: false, showsHostBadge: true)
+    #expect(cell.mediaSymbol == "play.fill")
+}

@@ -1247,19 +1247,35 @@ impl QueueMediaStore {
 
     /// Authenticate the entire stream while retaining only one bounded memory
     /// record. Other inputs are hashed and discarded, never staged to disk.
+    #[cfg(test)]
     pub(crate) fn read_source_image(
         &self,
         media_set: &MediaSetRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>, QueueMediaError> {
         let manifest = self.load(media_set)?;
-        let (index, entry) = manifest
+        let index = manifest
             .entries
             .iter()
-            .enumerate()
-            .find(|(_, entry)| entry.role == "source_image" && entry.name == "scalar")
+            .position(|entry| entry.role == "source_image" && entry.name == "scalar")
             .ok_or(QueueMediaError::NotFound)?;
-        if entry.sink != QueueMediaSink::Memory || entry.size_bytes > max_bytes {
+        self.read_input_member(&manifest, index, max_bytes)
+    }
+
+    /// Authenticate the whole stream, retaining only this bounded member, even
+    /// for upload-backed references. No plaintext staging files are created.
+    pub(crate) fn read_input_member(
+        &self,
+        manifest: &MediaSetManifest,
+        index: usize,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        let media_set = &manifest.media_set;
+        let entry = manifest
+            .entries
+            .get(index)
+            .ok_or(QueueMediaError::NotFound)?;
+        if entry.size_bytes > max_bytes {
             return Err(QueueMediaError::NotFound);
         }
         let index = u32::try_from(index).map_err(|_| QueueMediaError::NotFound)?;
@@ -1268,7 +1284,7 @@ impl QueueMediaStore {
             .ok_or(QueueMediaError::NotFound)?;
         let mut decoded =
             self.decode_v2_from_path(media_set, &path, None, true, Some((index, max_bytes)))?;
-        if decoded.manifest != manifest {
+        if &decoded.manifest != manifest {
             return Err(QueueMediaError::Authentication);
         }
         decoded
@@ -3349,7 +3365,7 @@ fn begin_v2_observation(
         output,
         memory_limit: selected_index.map(|(_, limit)| limit),
         memory: (mixed
-            && sink == QueueMediaSink::Memory
+            && (sink == QueueMediaSink::Memory || selected_index.is_some())
             && selected_index.is_none_or(|(selected, _)| selected == index))
         .then(|| SensitiveBytes(Vec::new())),
     });
@@ -5901,6 +5917,32 @@ mod tests {
             before
         );
         assert!(store.read_source_image(&reference, 1).is_err());
+        assert_eq!(
+            store
+                .read_input_member(&store.load(&reference).unwrap(), 1, 1024)
+                .unwrap(),
+            b"unrelated-face"
+        );
+        assert_eq!(
+            store
+                .read_input_member(
+                    &store.load(&reference).unwrap(),
+                    2,
+                    (CHUNK_BYTES * 3) as u64
+                )
+                .unwrap(),
+            vec![7_u8; CHUNK_BYTES * 3]
+        );
+        assert!(store
+            .read_input_member(&store.load(&reference).unwrap(), 2, 1)
+            .is_err());
+        assert!(store
+            .read_input_member(&store.load(&reference).unwrap(), 99, 1024)
+            .is_err());
+        assert_eq!(
+            fs::read_dir(&store.runtime_staging.root).unwrap().count(),
+            before
+        );
     }
 
     #[cfg(unix)]

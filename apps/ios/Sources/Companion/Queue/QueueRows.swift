@@ -136,11 +136,17 @@ struct QueueEntryRow: View {
                 Image(uiImage: image).resizable().scaledToFill()
                     .frame(width: thumb, height: thumb)
                     .clipShape(.rect(cornerRadius: 7))
-                    .accessibilityLabel("Source image for this render")
+                    .accessibilityLabel(queue.inputPreviews(for: entry, on: host.id).first(where: { $0.bytes != nil })?.input.label ?? "Source")
                     .accessibilityIdentifier("queue-source-" + entry.id)
-                Text("Source").font(.caption).foregroundStyle(.secondaryText)
+                Text(inputCaption).font(.caption).foregroundStyle(.secondaryText)
             }
         }
+    }
+
+    private var inputCaption: String {
+        let inputs = queue.inputPreviews(for: entry, on: host.id)
+        let label = inputs.first(where: { $0.bytes != nil })?.input.label ?? "Source"
+        return inputs.count > 1 ? "\(label) +\(inputs.count - 1)" : label
     }
 
     /// The Mac row menu's items, in its order; Cancel last, behind a divider.

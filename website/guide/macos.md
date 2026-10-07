@@ -146,3 +146,8 @@ Discover opens with manifest models from the selected machine. Choose **Browse C
 In **Settings → General → Video Playback**, choose autoplay and repeat. Videos use inline controls without the full-video hover overlay. Video and 3-D GIF export provide Loop/Bounce, Forever/Once and pause settings when applicable.
 
 New oversized input pictures are fitted proportionally, with orientation and transparency preserved. Paired remote connections prefer verified LAN routes over Tailscale and relay and recheck when the network changes.
+
+
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.

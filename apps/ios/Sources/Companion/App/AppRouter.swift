@@ -6,7 +6,18 @@ import Observation
 /// command or a deep link can send it somewhere else.
 @Observable
 final class AppRouter {
-    var selection: TabSelection = .go(.generate)
+    var libraryVisit: LibraryNewMedia.Visit?
+    var selection: TabSelection = .go(.generate) {
+        didSet {
+            if !isInLibrary { libraryVisit = nil }
+        }
+    }
+    var isInLibrary: Bool {
+        switch selection {
+        case .go(.library), .search, .shelf: true
+        default: false
+        }
+    }
     var showsSettings = false
     var showsAddMachine = false
     /// What the Add sheet opens with: a Nearby machine's resolved address,

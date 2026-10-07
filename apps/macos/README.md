@@ -665,7 +665,7 @@ only its prepared managed HTTPS origin. An existing paired machine keeps its
 identity and credential as routes change. For an independently hosted server,
 configure `MOLD_PUBLIC_URL` to advertise its actual public HTTPS relay origin.
 
-Queue rows show the owning machine's retained source thumbnail, labeled **Source**,
+Queue rows show the owning machine's retained input thumbnail, labeled by role,
 including work submitted on another device. Expanded batch children and held jobs
 use the same authenticated preview route. A source remains attached to its library
 outputs after the queue finishes; **Use These Settings** recalls retained sources.
@@ -769,3 +769,8 @@ host history before paging and preserve access to an active filter after refresh
 Job Details keeps status, preview and grouped recipe values together, with raw
 identifiers in a separate disclosure. See [the tooltip audit](docs/tooltip-audit.md)
 for the reviewed native surfaces and runtime verification boundaries.
+
+
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.

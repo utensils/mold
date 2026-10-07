@@ -363,6 +363,13 @@ export function useQueueInspection(
   onBeforeUnmount(close);
   return {
     selected,
+    inputTarget: computed(() => {
+      try {
+        return selected.value ? targetFor(selected.value) : null;
+      } catch {
+        return null;
+      }
+    }),
     detail,
     model,
     error,

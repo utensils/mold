@@ -70,7 +70,7 @@ extension PrintDetails {
         if let named = meta.references, !named.isEmpty {
             let labels = named.compactMap(\.name)
             return labels.count == named.count ? labels.joined(separator: ", ")
-                : count(named.count, of: "picture")
+                : count(named.count, of: "reference")
         }
         let digests = meta.editImageDigests
         return digests.isEmpty ? nil : count(digests.count, of: "picture")

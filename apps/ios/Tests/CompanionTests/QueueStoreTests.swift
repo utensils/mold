@@ -38,6 +38,18 @@ struct QueueStoreTests {
         return (queue, hosts, fake)
     }
 
+    @Test func inputListingFailureCanBeRetriedWithoutReopeningDetails() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let row = try #require(queue.listings[id]?.first { $0.id == "q1" })
+        fake.stub("queueInputs(id:)") { _ in throw URLError(.timedOut) }
+        await queue.loadSourceThumbnail(for: row, on: id, detailed: true)
+        #expect(queue.inputLoadFailed(for: row, on: id))
+        fake.stub("queueInputs(id:)", returning: [QueueInput]())
+        await queue.loadSourceThumbnail(for: row, on: id, detailed: true, retry: true)
+        #expect(!queue.inputLoadFailed(for: row, on: id))
+    }
+
     @Test func cancellingAndOfflineRowsOfferNoMutations() async throws {
         let (queue, hosts, _) = try await Self.setUp(capabilities: #"{"queue":{"can_pause_job":true,"can_cancel_running":true}}"#)
         let host = hosts.hosts[0]
@@ -103,11 +115,33 @@ struct QueueStoreTests {
         #expect(fake.count("retryJob(_:)" ) == 0)
     }
 
+    @Test func orderedReferencePreviewsSurviveASingleMissingImage() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        let id = hosts.hosts[0].id
+        let entry = try #require(queue.listings[id]?.first)
+        fake.stub("queueInputs(id:)", returning: [QueueInput(index: 2, label: "Reference image 1", preview: true), QueueInput(index: 3, label: "Reference image 2", preview: true)])
+        fake.stub("queueInputThumbnail(id:index:)") { args in
+            if args[1] as? Int == 2 { throw MoldClientError.malformedResponse }
+            return Data([4, 5, 6])
+        }
+        await queue.loadSourceThumbnail(for: entry, on: id, detailed: true)
+        let inputs = queue.inputPreviews(for: entry, on: id)
+        #expect(inputs.count == 2)
+        #expect(inputs[0].bytes == nil)
+        #expect(inputs[1].bytes == Data([4, 5, 6]))
+        fake.stub("queueInputThumbnail(id:index:)", returning: Data([7, 8, 9]))
+        await queue.loadSourceThumbnail(for: entry, on: id, detailed: true)
+        let retried = queue.inputPreviews(for: entry, on: id)
+        #expect(retried[0].bytes == Data([7, 8, 9]))
+        #expect(retried[1].bytes == Data([4, 5, 6]))
+    }
+
     @Test func sourceThumbnailUsesTheQueuedJobsPrivateRoute() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
         let id = hosts.hosts[0].id
         let entry = try #require(queue.listings[id]?.first)
         let bytes = Data([1, 2, 3])
+        fake.stub("queueInputs(id:)", returning: [QueueInput(label: "Source", preview: true)])
         fake.stub("queueInputThumbnail(id:)", returning: bytes)
         await queue.loadSourceThumbnail(for: entry, on: id)
         #expect(queue.sourceThumbnail(for: entry, on: id) == bytes)
@@ -117,6 +151,7 @@ struct QueueStoreTests {
         let (queue, hosts, fake) = try await Self.setUp()
         let id = hosts.hosts[0].id
         let entry = try #require(queue.listings[id]?.first)
+        fake.stub("queueInputs(id:)", returning: [QueueInput(label: "Source", preview: true)])
         fake.stub("queueInputThumbnail(id:)", returning: Data([1, 2, 3]))
         await queue.loadSourceThumbnail(for: entry, on: id)
         #expect(queue.sourceThumbnail(for: entry, on: id) != nil)
@@ -129,6 +164,7 @@ struct QueueStoreTests {
         let (queue, hosts, fake) = try await Self.setUp()
         let id = hosts.hosts[0].id
         let entry = try #require(queue.listings[id]?.first)
+        fake.stub("queueInputs(id:)", returning: [QueueInput(label: "Source", preview: true)])
         fake.stub("queueInputThumbnail(id:)") { _ in
             fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
             await queue.poll(id)

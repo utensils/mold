@@ -1374,6 +1374,11 @@ onBeforeUnmount(() => {
       <QueueEntryDetail
         :transfer-host-id="hostId"
         :model="inspectedModel"
+        :input-target="
+          host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null
+        "
+        :input-instance-id="poll.status.value?.instance_id"
+        :input-online="online && !poll.stale.value"
         :preview="inspectPreview"
         :cancelling="
           inspectedEntry ? cancellingIds.includes(inspectedEntry.id) : false

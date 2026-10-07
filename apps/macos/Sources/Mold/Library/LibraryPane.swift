@@ -28,6 +28,7 @@ struct LibraryPane: View {
     @Environment(\.undoManager) var undoManager
     @Binding var destination: Destination
 
+    @State var newMediaVisit: LibraryNewMedia.Visit?
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
     @State var gridReturn: (id: PrintID, scope: LibraryScope, query: LibraryQuery)?

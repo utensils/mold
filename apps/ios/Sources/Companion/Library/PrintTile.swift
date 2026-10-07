@@ -19,6 +19,7 @@ struct PrintTile: View {
     /// and auditing even when it is hidden from VoiceOver, so tiny badge
     /// text inside the label was audited as if it were the tile's content.
     var drawsBadges = true
+    var fresh = false
 
     var body: some View {
         Color.clear
@@ -29,7 +30,7 @@ struct PrintTile: View {
             .clipShape(.rect(cornerRadius: 5))
             .contentShape(.rect)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(entry.spokenDescription(showsHost: showsHost))
+            .accessibilityLabel((fresh && !trashed ? String(localized: "New") + ", " : "") + entry.spokenDescription(showsHost: showsHost))
             .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -38,8 +39,12 @@ struct PrintTile: View {
     var badges: some View {
         Color.clear
             .overlay(alignment: .topTrailing) { topBadge }
-            .overlay(alignment: .bottomLeading) { hostBadge }
-            .overlay(alignment: .bottomTrailing) { kindBadge }
+            .overlay(alignment: .bottom) {
+                HStack(spacing: 0) {
+                    hostBadge.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    kindBadge.layoutPriority(1)
+                }
+            }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -47,8 +52,11 @@ struct PrintTile: View {
     @ViewBuilder private var topBadge: some View {
         if trashed, let days = TrashCountdown.days(until: entry.print.purgeAt) {
             Badge(text: String(localized: "\(days) d"), mono: true)
-        } else if entry.print.isFavorite {
-            Badge(symbol: "star.fill")
+        } else {
+            VStack(alignment: .trailing, spacing: 0) {
+                if fresh { Badge(text: String(localized: "New"), accent: true) }
+                if entry.print.isFavorite { Badge(symbol: "star.fill") }
+            }
         }
     }
 
@@ -97,6 +105,7 @@ struct Badge: View {
     var symbol: String?
     var text: String?
     var mono = false
+    var accent = false
 
     /// XCUITest still lists hidden views; the accessibility audit keys its
     /// badge exemption on this (ShellAccessibilityTests).
@@ -125,7 +134,7 @@ struct Badge: View {
         .padding(.vertical, 2)
         // Dark enough for white text over any picture: over pure white it
         // still leaves 5:1.
-        .background(.black.opacity(0.85), in: .rect(cornerRadius: 5))
+        .background(accent ? Color.accentColor.mix(with: .black, by: 0.4) : .black.opacity(0.85), in: .rect(cornerRadius: 5))
         .padding(5)
         // a11y: the tile is one element whose spoken label already says what
         // each badge shows; a second, tiny copy would only be noise.
