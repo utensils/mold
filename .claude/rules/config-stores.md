@@ -22,3 +22,8 @@ Two stores, one logical `Config` view:
 Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, which runs a one-shot idempotent `config.toml → DB` migration on first boot (renames original to `config.toml.migrated`) and overlays DB onto every `Config::load_or_default()`. Consumers still read `cfg.expand.*` unchanged.
 
 `mold config set <key> <val>` routes by key prefix (`expand.*` → DB, `models_dir` → TOML). `mold config where <key>` prints the surface. `mold config list --json` tags each row `[db]` / `[file]` / `[env]`. Multi-profile: `settings` and `model_prefs` are keyed on `(profile, key)`; active profile resolves `MOLD_PROFILE` → `settings.profile.active` → `"default"`.
+
+`web_ui_enabled` is a bootstrap boolean (default true), with runtime override
+`MOLD_WEB_UI_ENABLED`. Resolve it once at server startup. False omits only the
+web UI/static-asset/SPA fallback router; every API route retains its behavior.
+NixOS exposes the same policy as `services.mold.webUi.enable`. Requires restart.

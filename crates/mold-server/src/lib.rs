@@ -432,6 +432,11 @@ async fn run_server_inner(
 
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
+    let web_ui_enabled = match std::env::var("MOLD_WEB_UI_ENABLED") {
+        Ok(raw) => mold_core::config_keys::parse_bool(&raw, "MOLD_WEB_UI_ENABLED")?,
+        Err(std::env::VarError::NotPresent) => config.web_ui_enabled,
+        Err(error) => return Err(error.into()),
+    };
     let model_name = config.resolved_default_model();
 
     // Writing storage version 3 is a decision about a SHARED resource: the
@@ -1434,8 +1439,7 @@ async fn run_server_inner(
     let video_upscale_dispatcher = video_upscale::recover_at_startup(&state);
     let connection_addresses = state.connection_addresses.clone();
     #[allow(unused_mut)]
-    let mut app = routes::create_router(state)
-        .merge(web_ui::router())
+    let mut app = web_ui::attach(routes::create_router(state), web_ui_enabled)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn_with_state(

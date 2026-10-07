@@ -1027,9 +1027,19 @@ const { sharedActivityRows, localActivityJobs } = useActivityRows(
   liveActivity.rows,
 );
 
+const recentEntries = computed(() =>
+  fileUnder.visibleRecent(galleryEntries.value),
+);
+
+let galleryDisposed = false;
+let galleryRefreshEpoch = 0;
 async function refreshGallery() {
+  const epoch = ++galleryRefreshEpoch;
   try {
-    galleryEntries.value = await listGallery();
+    await fileUnder.refreshRecentVisibility();
+    const entries = await listGallery();
+    if (!galleryDisposed && epoch === galleryRefreshEpoch)
+      galleryEntries.value = entries;
   } catch {
     /* ignore */
   }
@@ -4721,7 +4731,7 @@ async function useRecentAsSource(item: GalleryImage) {
 
 function openItem(item: GalleryImage) {
   closeRecentContextMenu();
-  selectedIndex.value = galleryEntries.value.findIndex(
+  selectedIndex.value = recentEntries.value.findIndex(
     (e) => e.filename === item.filename,
   );
   selected.value = item;
@@ -5117,11 +5127,14 @@ async function onLightboxUpscale(item: GalleryImage) {
   );
 }
 function stepDrawer(delta: number) {
+  selectedIndex.value = recentEntries.value.findIndex(
+    (entry) => entry.filename === selected.value?.filename,
+  );
   if (selectedIndex.value < 0) return;
   const next = selectedIndex.value + delta;
-  if (next < 0 || next >= galleryEntries.value.length) return;
+  if (next < 0 || next >= recentEntries.value.length) return;
   selectedIndex.value = next;
-  selected.value = galleryEntries.value[next] ?? null;
+  selected.value = recentEntries.value[next] ?? null;
 }
 async function handleDelete(item: GalleryImage) {
   closeRecentContextMenu();
@@ -5239,20 +5252,16 @@ watch(
   { immediate: true },
 );
 
-onMounted(async () => {
+onMounted(() => {
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
   // Models arrive from the host-routing poll (every machine, not just this
   // one); the watcher above homes the form onto one that's actually installed.
   void routing.refresh();
-  // Filing capability, the fleet's tag vocabulary, and its collections.
+  // Resolve collection visibility before exposing the first Recent rows.
   void fileUnder.refresh().catch(() => {});
-  try {
-    galleryEntries.value = await listGallery();
-  } catch (e) {
-    console.error(e);
-  }
+  void refreshGallery();
   void refreshHistory();
   window.addEventListener("mold:new-print", onNewPrint);
   window.addEventListener("dragover", onWindowDragOver);
@@ -5263,6 +5272,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  galleryDisposed = true;
   window.removeEventListener("dragover", onWindowDragOver);
   window.removeEventListener("drop", onWindowDrop);
   clearSelectedQueueRender();
@@ -5645,7 +5655,7 @@ onBeforeUnmount(() => {
             >
           </div>
           <RecentGrid
-            :entries="galleryEntries"
+            :entries="recentEntries"
             :max-rows="2"
             :limit="isPhone ? 18 : 50"
             @open="openItem"
@@ -6018,11 +6028,9 @@ onBeforeUnmount(() => {
       :item="selected"
       :models="models"
       :has-prev="selectedIndex > 0"
-      :has-next="
-        selectedIndex >= 0 && selectedIndex < galleryEntries.length - 1
-      "
+      :has-next="selectedIndex >= 0 && selectedIndex < recentEntries.length - 1"
       :index="selectedIndex"
-      :total="galleryEntries.length"
+      :total="recentEntries.length"
       :muted="muted"
       @close="closeDrawer"
       @prev="stepDrawer(-1)"

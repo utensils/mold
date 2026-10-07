@@ -88,6 +88,10 @@ mold video-upscale create clip.mp4 --wait
 mold serve
 ```
 
+For API-only servers, set `web_ui_enabled = false` in `config.toml` (or
+`MOLD_WEB_UI_ENABLED=false`) and restart. The interface defaults on; disabling
+it leaves every API route available. NixOS: `services.mold.webUi.enable = false;`.
+
 Models download automatically on first use. Generated media is saved locally
 with prompt, model, seed, and generation metadata.
 Framewise video upscale also needs the host codec bridge: Nix packages and

@@ -467,11 +467,14 @@ describe("CreatePage layout and behavior", () => {
       kind: "upload" as const,
       filename: "source.png",
       base64: "SOURCE",
+      // Autosave assigns an ID after its debounce; make identity deterministic.
+      draftId: "00000000-0000-4000-8000-000000000001",
     };
     const mask = {
       kind: "upload" as const,
       filename: "mask.png",
       base64: "MASK",
+      draftId: "00000000-0000-4000-8000-000000000002",
     };
     form.state.value.prompt = "A quiet shore";
     form.state.value.imageAttachments = [source];
@@ -1157,6 +1160,36 @@ describe("CreatePage layout and behavior", () => {
     expect(feed.props("limit")).toBe(50);
   });
 
+  it("keeps Recent lightbox navigation out of hidden collections", async () => {
+    const hidden = {
+      ...entry,
+      filename: "private.png",
+      collections: ["private"],
+    };
+    const next = { ...entry, filename: "next.png" };
+    galleryListing.value = [entry, hidden, next];
+    listCollectionsMock.mockResolvedValue([
+      { id: "private", slug: "private", name: "Private", hidden: true },
+    ]);
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.Lightbox = {
+      name: "Lightbox",
+      props: ["item", "total"],
+      template: "<div />",
+    };
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    const feed = wrapper.findComponent(RecentGridStub);
+    expect(feed.props("entries")).toEqual([entry, next]);
+    feed.vm.$emit("open", entry);
+    await flushPromises();
+    const lightbox = wrapper.findComponent({ name: "Lightbox" });
+    expect(lightbox.props("total")).toBe(2);
+    lightbox.vm.$emit("next");
+    await flushPromises();
+    expect(lightbox.props("item").filename).toBe("next.png");
+  });
+
   /* Templates left the row beside the print title and became the rail's
    * Starters disclosure. The contract under test is the dismissal, which the
    * sheet keeps: Escape and a click outside the panel both close it. */
@@ -1415,7 +1448,18 @@ describe("CreatePage layout and behavior", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => ({
       ok: true,
-      blob: async () => new Blob(["image"], { type: "image/png" }),
+      blob: async () =>
+        new Blob(
+          [
+            Uint8Array.from(
+              atob(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+              ),
+              (c) => c.charCodeAt(0),
+            ),
+          ],
+          { type: "image/png" },
+        ),
     })) as never;
     const stubs: Record<string, Component> = pageStubs();
     stubs.RecentGrid = defineComponent({
@@ -1440,8 +1484,8 @@ describe("CreatePage layout and behavior", () => {
     expect(form.h3Authoring.firstFrame).toMatchObject({
       filename: entry.filename,
       mimeType: "image/png",
-      width: entry.metadata.width,
-      height: entry.metadata.height,
+      width: 1,
+      height: 1,
     });
     expect(form.imageAttachments).toHaveLength(0);
     wrapper.unmount();

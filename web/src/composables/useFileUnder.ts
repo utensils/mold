@@ -11,7 +11,14 @@
  * develop time, which is what makes one request file correctly anywhere in
  * the fleet.
  */
-import { computed, ref, shallowRef, type Ref } from "vue";
+import {
+  computed,
+  ref,
+  shallowRef,
+  getCurrentScope,
+  onScopeDispose,
+  type Ref,
+} from "vue";
 import {
   buildFileUnderRequestFields,
   emptyFileUnderState,
@@ -21,13 +28,20 @@ import {
 import type { TagCount } from "../types";
 import {
   anyHostOrganizes,
+  entryMatchesOrganization,
   fetchOrganization,
   hostOrganizes,
   mergedCollections,
   mergedTags,
   type HostOrganizationSnapshot,
 } from "../lib/libraryOrganization";
-import { listHosts } from "../lib/hostRegistry";
+import { listCollections } from "@studio/api/galleryOrganization";
+import { collectionSlugResolver } from "@studio/lib/libraryOrganization";
+import { hostApiTarget } from "../components/machines/hostClient";
+import type { Collection } from "../types";
+import { decorateEntries } from "../lib/multiHostGallery";
+import type { GalleryImage } from "../types";
+import { originHost, listHosts } from "../lib/hostRegistry";
 import { autoTagTitle, titleTagWasApplied } from "../lib/fileUnder";
 import type { OutputMetadata } from "../types";
 
@@ -54,6 +68,9 @@ export interface FileUnderController {
   requestFields: () => FileUnderRequestFields;
   /** Re-probe every registered host's organization state. */
   refresh: () => Promise<void>;
+  /** Recent respects the same hidden-collection policy as the Library. */
+  visibleRecent: (entries: GalleryImage[]) => GalleryImage[];
+  refreshRecentVisibility: () => Promise<void>;
   /** ⌘N / "new print": back to a fresh draft. */
   reset: () => void;
   /** Reuse settings: restore what a print was actually filed under. */
@@ -81,6 +98,61 @@ export function useFileUnder(
 
   async function refresh(): Promise<void> {
     snapshots.value = await fetchOrganization(listHosts());
+  }
+
+  // Recent lists this server only. Keep its visibility authority independent
+  // of fleet filing, tags and trash, and retain it through transient failures.
+  const recentCollections = shallowRef<Collection[]>([]);
+  let visibilityRequest: Promise<void> | null = null;
+  let visibilityController: AbortController | null = null;
+  if (getCurrentScope()) onScopeDispose(() => visibilityController?.abort());
+  function refreshRecentVisibility(): Promise<void> {
+    if (visibilityRequest) return visibilityRequest;
+    const controller = new AbortController();
+    visibilityController = controller;
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(5000),
+    ]);
+    visibilityRequest = listCollections(hostApiTarget(originHost()), signal)
+      .then((collections) => {
+        if (!signal.aborted) recentCollections.value = collections;
+      })
+      .catch(() => {
+        /* Keep the last successful visibility snapshot. */
+      })
+      .finally(() => {
+        visibilityRequest = null;
+        visibilityController = null;
+      });
+    return visibilityRequest;
+  }
+
+  function visibleRecent(entries: GalleryImage[]): GalleryImage[] {
+    const hidden = new Set(
+      recentCollections.value.filter((c) => c.hidden).map((c) => c.slug),
+    );
+    const host = originHost();
+    const decorated = decorateEntries(
+      entries.map((entry) => ({
+        ...entry,
+        hostId: host.id,
+        hostLabel: host.name,
+      })),
+      {
+        resolveCollectionSlug: collectionSlugResolver([
+          { hostId: host.id, collections: recentCollections.value },
+        ]),
+      },
+    );
+    // Return the original rows so media identity remains stable during polls.
+    return entries.filter(
+      (_, index) =>
+        !decorated[index]!.organization!.unresolvedCollectionIds.length &&
+        entryMatchesOrganization(decorated[index]!, {
+          excludeCollectionSlugs: hidden,
+        }),
+    );
   }
 
   function requestFields(): FileUnderRequestFields {
@@ -122,6 +194,8 @@ export function useFileUnder(
     suggestions,
     collections,
     requestFields,
+    visibleRecent,
+    refreshRecentVisibility,
     refresh,
     reset,
     restoreFromMetadata,

@@ -10,6 +10,47 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("retained source thumbnail lifetime", () => {
+  it("keeps the image and pending request across equivalent polling targets", async () => {
+    mocks.fetch.mockClear();
+    let finish!: (blob: Blob) => void;
+    mocks.fetch.mockImplementationOnce(
+      () =>
+        new Promise<Blob>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const revoke = vi.fn();
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static createObjectURL = vi.fn(() => "blob:stable");
+        static revokeObjectURL = revoke;
+      },
+    );
+    const view = mount(QueueSourceThumbnail, {
+      props: {
+        target: { baseUrl: "http://machine", apiKey: "key" },
+        jobId: "job",
+        instanceId: "instance",
+      },
+    });
+    const signal = mocks.fetch.mock.calls[0]![2] as AbortSignal;
+    await view.setProps({
+      target: { baseUrl: "http://machine", apiKey: "key" },
+    });
+    expect(signal.aborted).toBe(false);
+    finish(new Blob(["source"]));
+    await flushPromises();
+    const img = view.get("img").element;
+    await view.setProps({
+      target: { baseUrl: "http://machine", apiKey: "key" },
+    });
+    expect(view.get("img").element).toBe(img);
+    expect(view.get("img").attributes("src")).toBe("blob:stable");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(revoke).not.toHaveBeenCalled();
+    view.unmount();
+  });
   it("ignores obsolete host responses and releases blob URLs", async () => {
     let finish!: (blob: Blob) => void;
     mocks.fetch.mockImplementationOnce(

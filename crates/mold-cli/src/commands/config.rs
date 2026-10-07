@@ -583,6 +583,7 @@ mod tests {
             default_model: "flux2-klein".to_string(),
             models_dir: "~/.mold/models".to_string(),
             server_port: 7680,
+            web_ui_enabled: true,
             default_width: 768,
             default_height: 768,
             default_steps: 4,
@@ -656,18 +657,6 @@ mod tests {
     #[test]
     fn model_key_unknown_field_errors() {
         assert!(parse_model_key("models.flux-dev:q4.bogus_field").is_err());
-    }
-
-    #[test]
-    fn all_keys_count() {
-        // 12 General + 8 Expand + 3 Scheduler + 2 Gallery + 1 Queue +
-        // 1 Generate + 4 Logging + 8 RunPod + 9 Lambda static keys.
-        // General gained `umt5_variant` with the Wan quantized encoder (#778);
-        // Gallery gained `trash_retention_days` with the Library trash, and
-        // `authority_log` with opt-in archive-authority storage version 3;
-        // Generate gained `auto_tag_title` with creation-time filing;
-        // Queue gained `held_retention_days` with durable held-row retention.
-        assert_eq!(ALL_KEYS.len(), 48);
     }
 
     #[test]

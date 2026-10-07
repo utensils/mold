@@ -148,6 +148,7 @@ mod tests {
             default_model: "flux2-klein".to_string(),
             models_dir: "/nonexistent".to_string(),
             server_port: 7680,
+            web_ui_enabled: true,
             default_width: 768,
             default_height: 768,
             default_steps: 4,
