@@ -233,7 +233,7 @@ multi-output batch receives bounded relayed bytes. Missing retained inputs are
 explained when the print recorded conditioning; an ordinary text-only print
 stays quiet.
 
-Queue rows show the prompt and the sealed source image, labeled **Source**,
+Queue rows show the prompt and a sealed input image, labeled by role,
 separately from a live **Rendering** preview. Durable images remain readable
 after a machine restart. Wide iPad windows keep queue content centered at a
 readable width; large accessibility text stacks the image and words.
@@ -294,3 +294,10 @@ size/up-axis/origin defaults. Persistent filenames gain a numbered suffix on
 collision. Temporary files stay alive until system delivery finishes.
 
 Local validation and qualification limits: [native acceptance record](../../docs/uat/native-authoring-media.md).
+
+
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+
+On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.

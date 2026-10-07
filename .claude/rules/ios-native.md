@@ -164,3 +164,16 @@ XCTest can silently ignore an unknown selector while other selected tests pass.
 Native CI splits media exports into delivery, video accessibility and mesh accessibility jobs per appearance. Method selectors cover every MediaExportUITests method exactly once; the routing contract refuses omissions and duplicates. The full local suite remains unchanged.
 
 **Stable authoring and media.** Generate is a composer with a pinned Generate action and queue-count navigation; running/result media belongs in Queue/Library. Do not key or replace the composer/picker hierarchy on rendering state. Production Live Activities are disabled; keep completion/failure notifications. Source Library is merged across hosts with machine/search filters. Use as Source preserves unrelated draft edits, fences model/host/recipe/media changes, and routes through capability-defined boundary/reference/named-view inputs. New pictures conform through PictureImport (4096 axis/2 MiB, orientation/alpha), never through retained-media recovery. New source clears a stale mask. Selected-page 3-D loading uses mediaFile, checks size before parsing and removes temporary files. Video autoplay/repeat are user settings; background/deselection pauses.
+
+Queue inputs use shared QueueInput descriptors and QueueInputPreview loading. Details independently load every ordered input, with role labels and explicit failed/nonimage previews; rows show an input image and additional-input count. Older hosts fall back only on missing additive routes. A failed member must not hide later images. Host/instance/job fencing and removal pruning apply to the entire set.
+
+Library New badges compare filenames with the previous session visit, using the
+whole active pool and a stable per-view snapshot. First visit establishes a
+baseline; viewer navigation preserves the visit. Badge rows must fit machine
+labels beside playback without overlap, including narrow tiles.
+
+Use These Settings starts from fresh selected-print media, including parked wells.
+Probe fences cover reuse identity and source authoring revisions. Unavailable
+expected conditioning must block generation until restore, replacement or
+explicit discard; retry after reconnection. Single/plural identity photos are one
+authority when selecting retained members.

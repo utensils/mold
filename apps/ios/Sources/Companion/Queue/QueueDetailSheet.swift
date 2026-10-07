@@ -35,11 +35,27 @@ struct QueueDetailSheet: View {
                             .accessibilityLabel("Live render preview")
                     } header: { SectionHeader("Rendering preview") }
                 }
-                if let bytes = queue.sourceThumbnail(for: entry, on: host.id), let image = UIImage(data: bytes) {
+                let inputs = queue.inputPreviews(for: entry, on: host.id)
+                if !inputs.isEmpty || queue.inputLoadFailed(for: entry, on: host.id) {
                     Section {
-                        Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 240)
-                            .accessibilityLabel("Source image for this render")
-                    } header: { SectionHeader("Source image") }
+                        if queue.inputLoadFailed(for: entry, on: host.id) {
+                            Text("Input previews unavailable").foregroundStyle(.secondaryText)
+                        }
+                        ForEach(inputs) { preview in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(preview.input.label).font(.headline)
+                                if let bytes = preview.bytes, let image = UIImage(data: bytes) {
+                                    Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320)
+                                        .accessibilityLabel(preview.input.label)
+                                } else {
+                                    Text(preview.input.preview ? "Preview unavailable" : "No still preview").foregroundStyle(.secondaryText)
+                                }
+                            }
+                        }
+                        if queue.inputLoadFailed(for: entry, on: host.id) || inputs.contains(where: { $0.input.preview && $0.bytes == nil }) {
+                            Button("Retry input previews") { Task { await queue.loadSourceThumbnail(for: entry, on: host.id, detailed: true, retry: true) } }
+                        }
+                    } header: { SectionHeader("Input images and references") }
                 }
                 if let current {
                     Section {
@@ -75,6 +91,9 @@ struct QueueDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") { await load() }
+            .task(id: "inputs|\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
+                await queue.loadSourceThumbnail(for: entry, on: host.id, detailed: true)
+            }
         }
         .presentationDetents([.large])
     }

@@ -351,6 +351,7 @@ use crate::queue::clean_error_message;
         complete_held_queue_transfer,
         get_queue_job_preview,
         crate::queue_input_thumbnail::get,
+        crate::queue_input_thumbnail::list,
         crate::gallery_source_thumbnail::get,
         patch_queue_job,
         cancel_queue_job,
@@ -402,6 +403,7 @@ use crate::queue::clean_error_message;
         crate::routes_mesh_workflows::delete_mesh_workflow,
     ),
     components(schemas(
+        crate::queue_input_thumbnail::QueueInput,
         mold_core::GenerateRequest,
         mold_core::CollectionRef,
         mold_core::Ltx2ControlAdapterInfo,
@@ -935,6 +937,10 @@ pub fn create_router(state: AppState) -> Router {
             post(crate::queue_retention::sweep_settled_batches),
         )
         .route("/api/queue/:id/preview", get(get_queue_job_preview))
+        .route(
+            "/api/queue/:id/inputs",
+            get(crate::queue_input_thumbnail::list),
+        )
         .route(
             "/api/queue/:id/input-thumbnail",
             get(crate::queue_input_thumbnail::get),

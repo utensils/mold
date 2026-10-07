@@ -9,6 +9,22 @@ public extension HTTPBackend {
         try await get("/api/queue/\(escaped(id))")
     }
 
+    func queueInputs(id: String) async throws -> [QueueInput] {
+        do { return try await get("/api/queue/\(escaped(id))/inputs") }
+        catch let error as MoldClientError {
+            if case let .http(status, _, _) = error, [404, 405].contains(status) {
+                return [QueueInput(label: "Source", preview: true)]
+            }
+            throw error
+        }
+    }
+
+    func queueInputThumbnail(id: String, index: Int?) async throws -> Data {
+        let (stream, http) = try await relayBytes(request(queueInputThumbnailPath(id, index: index)))
+        try Self.validateQueueThumbnail(http)
+        return try await stream.collected(upTo: Self.queueThumbnailCeiling)
+    }
+
     /// Private, bounded preview of this job's sealed source image.
     func queueInputThumbnail(id: String) async throws -> Data {
         let (stream, http) = try await relayBytes(request(queueInputThumbnailPath(id)))
@@ -72,8 +88,8 @@ struct GenerationBatchStatusQuery: Encodable {
 extension HTTPBackend {
     static let queueThumbnailCeiling = 2 * 1_024 * 1_024
 
-    func queueInputThumbnailPath(_ id: String) -> String {
-        "/api/queue/\(escaped(id))/input-thumbnail"
+    func queueInputThumbnailPath(_ id: String, index: Int? = nil) -> String {
+        "/api/queue/\(escaped(id))/input-thumbnail" + (index.map { "?index=\($0)" } ?? "")
     }
 
     static func validateQueueThumbnail(_ http: HTTPURLResponse) throws {

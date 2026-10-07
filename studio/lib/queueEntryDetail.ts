@@ -55,6 +55,12 @@ export interface QueueDetailMetadata {
   source_image_name?: string | null;
   source_image_sha256?: string | null;
   id_image_name?: string | null;
+  id_image_names?: readonly string[] | null;
+  edit_image_sha256s?: readonly string[] | null;
+  references?: readonly { kind?: string | null; name?: string | null }[] | null;
+  keyframes?: readonly { frame: number; name?: string | null }[] | null;
+  control_model?: string | null;
+  control_scale?: number | null;
   id_weight?: number | null;
   id_start_step?: number | null;
   extend_overlap_frames?: number | null;
@@ -302,6 +308,44 @@ function settingsGroups(
       text(metadata.id_image_name) === null
         ? null
         : { label: "Identity", value: text(metadata.id_image_name) as string },
+      (metadata.id_image_names ?? []).length > 0
+        ? {
+            label: "Identity photos",
+            value: metadata.id_image_names!.join(", "),
+          }
+        : null,
+      (metadata.edit_image_sha256s ?? []).length > 0
+        ? {
+            label: "Reference images",
+            value: String(metadata.edit_image_sha256s!.length),
+          }
+        : null,
+      (metadata.references ?? []).length > 0
+        ? {
+            label: "References",
+            value: metadata
+              .references!.map(
+                (reference, index) =>
+                  `${index + 1}. ${reference.kind ?? "media"}${reference.name ? ` · ${reference.name}` : ""}`,
+              )
+              .join(", "),
+          }
+        : null,
+      (metadata.keyframes ?? []).length > 0
+        ? {
+            label: "Keyframes",
+            value: metadata
+              .keyframes!.map(
+                (frame) =>
+                  `Frame ${frame.frame}${frame.name ? ` · ${frame.name}` : ""}`,
+              )
+              .join(", "),
+          }
+        : null,
+      text(metadata.control_model)
+        ? { label: "Control", value: metadata.control_model! }
+        : null,
+      numberField("Control strength", metadata.control_scale),
       numberField("Identity strength", metadata.id_weight),
       numberField("Identity start step", metadata.id_start_step),
       numberField("Extend overlap", metadata.extend_overlap_frames),

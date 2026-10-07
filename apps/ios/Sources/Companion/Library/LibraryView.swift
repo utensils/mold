@@ -55,7 +55,7 @@ struct LibraryView: View {
                 LibraryGrid(sections: showing.sections, tile: $tile, position: $scrollPosition,
                             projection: projection,
                             viewport: viewport, returnGeneration: returnGeneration, selecting: selecting,
-                            selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible)
+                            selection: $selection, trashed: scope.isTrash, zoom: zoom, visible: showing.visible, newMediaVisit: router.libraryVisit)
                     // A different shelf or search is a new scroll context.
                     // Clearing the bound target alone leaves the old offset.
                     .id(LibraryGridContext(scope: scope, query: query))
@@ -111,7 +111,14 @@ struct LibraryView: View {
         }
         .onChange(of: sort) { query.sort = sort }
         .onChange(of: query) { scrollPosition.reset(); selection = [] }
-        .onAppear { query.sort = sort }
+        .onAppear {
+            query.sort = sort
+            if router.libraryVisit == nil { router.libraryVisit = library.newMedia.beginVisit() }
+            library.markLibrarySeen()
+        }
+        .onChange(of: library.revision) { _, _ in
+            if router.isInLibrary { library.markLibrarySeen() }
+        }
     }
 
     private var libraryTitle: String {

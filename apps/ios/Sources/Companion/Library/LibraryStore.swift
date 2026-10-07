@@ -9,6 +9,13 @@ import MoldClient
 /// the machine's ETag, so an unchanged library costs a 304 and no decoding.
 @Observable
 final class LibraryStore {
+    var newMedia = LibraryNewMedia()
+
+    func markLibrarySeen() {
+        guard !live.isEmpty else { return }
+        newMedia.markSeen(pool.map { $0.print.filename })
+    }
+
     private(set) var pool: [LibraryEntry] = []
     private(set) var trashPool: [LibraryEntry] = []
     private(set) var shelves: [CollectionShelf] = []

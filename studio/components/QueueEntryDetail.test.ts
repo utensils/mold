@@ -232,3 +232,18 @@ describe("QueueEntryDetail", () => {
     );
   });
 });
+
+it("renders retained inputs for the captured host independently of denoise previews", () => {
+  const view = mount(QueueEntryDetail, {
+    props: {
+      model: model(),
+      inputTarget: { baseUrl: "http://box", apiKey: null },
+      inputInstanceId: "i",
+    },
+    global: { stubs: { QueueSourceThumbnail: true } },
+  });
+  const inputs = view.findComponent({ name: "QueueSourceThumbnail" });
+  expect(inputs.exists()).toBe(true);
+  expect(inputs.props("jobId")).toBe("job-1");
+  expect(inputs.props("detailed")).toBe(true);
+});

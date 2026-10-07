@@ -6,6 +6,39 @@ import UIKit
 final class LibraryLongPressTests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions() }
 
+    @MainActor func testNewClipBadgeAndMachinePlaybackPlacement() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(galleryPrints: 3, mixedMedia: true)
+        let other = try FixtureMachine(galleryPrints: 1, galleryID: "other")
+        let port = try await machine.start()
+        let otherPort = try await other.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop(); other.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        cleanUpFixture(other, port: otherPort, app: app)
+        app.launch()
+        pair(port, in: app, name: "Long media workstation East")
+        pair(otherPort, in: app, name: "Other workstation")
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertTrue(fixturePrint(in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, '")).firstMatch.exists)
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        await machine.addNewClip()
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        app.swipeDown()
+        let fresh = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New, New clip'")).firstMatch
+        XCTAssertTrue(fresh.waitForExistence(timeout: 15))
+        attach(app, name: "New clip and separated machine playback badges")
+        fresh.tap()
+        XCTAssertTrue(app.buttons["Info"].firstMatch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(fresh.waitForExistence(timeout: 5), "Viewer return keeps this visit's New badge")
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        XCTAssertFalse(fresh.exists, "Next Library visit clears the badge")
+        attach(app, name: "Next visit clears New")
+    }
+
     @MainActor func testPopulatedLibrarySelectContrastAtLargestText() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(galleryPrints: 6)
@@ -472,9 +505,14 @@ final class LibraryLongPressTests: XCTestCase {
         app.terminate()
         app.launch()
         XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        app.chooseLibraryShelf("UAT Drafts")
+        XCTAssertTrue(app.navigationBars["UAT Drafts"].waitForExistence(timeout: 5))
         let print = fixturePrint(in: app)
         XCTAssertTrue(print.waitForExistence(timeout: 10))
-        print.press(forDuration: 1)
+        print.tap()
+        let more = app.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        more.tap()
         app.buttons["Use These Settings"].firstMatch.tap()
         XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
         let prompt = app.descendants(matching: .any)["generation-prompt"].firstMatch

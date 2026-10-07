@@ -6,6 +6,7 @@
  * web, and iPhone cannot disagree, and the actions are emitted for
  * `HostQueuePanel` to route to the exact selected host.
  */
+import type { ApiTarget } from "@studio/api/client";
 import { onMounted, onUnmounted } from "vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import type { QueueEntryDetailModel } from "@studio/lib/queueEntryDetail";
@@ -13,6 +14,9 @@ import type { QueueJobProgress } from "@studio/api/generationSelection";
 
 defineProps<{
   model: QueueEntryDetailModel;
+  inputTarget?: ApiTarget | null | undefined;
+  inputInstanceId?: string | null | undefined;
+  inputOnline?: boolean | undefined;
   transferHostId?: string | undefined;
   preview?: QueueJobProgress | null;
   cancelling?: boolean;
@@ -43,6 +47,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   >
     <QueueEntryDetail
       :model="model"
+      :input-target="inputTarget"
+      :input-instance-id="inputInstanceId"
+      :input-online="inputOnline"
       :transfer-host-id="transferHostId"
       :preview="preview ?? null"
       :cancelling="cancelling ?? false"

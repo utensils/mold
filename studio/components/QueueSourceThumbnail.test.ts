@@ -1,9 +1,13 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueueSourceThumbnail from "./QueueSourceThumbnail.vue";
-const mocks = vi.hoisted(() => ({ fetch: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  fetch: vi.fn(),
+  inputs: vi.fn(async () => [{ label: "Source", preview: true }]),
+}));
 vi.mock("../api/queueSourceThumbnail", () => ({
   queueSourceThumbnail: mocks.fetch,
+  queueInputs: mocks.inputs,
 }));
 afterEach(() => {
   vi.restoreAllMocks();
@@ -34,6 +38,7 @@ describe("retained source thumbnail lifetime", () => {
         instanceId: "instance",
       },
     });
+    await flushPromises();
     const signal = mocks.fetch.mock.calls[0]![2] as AbortSignal;
     await view.setProps({
       target: { baseUrl: "http://machine", apiKey: "key" },
@@ -76,6 +81,7 @@ describe("retained source thumbnail lifetime", () => {
         instanceId: "old",
       },
     });
+    await flushPromises();
     const oldSignal = mocks.fetch.mock.calls[0]![2] as AbortSignal;
     await view.setProps({
       target: { baseUrl: "http://new", apiKey: "b" },
@@ -116,4 +122,50 @@ describe("retained source thumbnail lifetime", () => {
     );
     view.unmount();
   });
+});
+
+it("details show every ordered role and keep later images after one preview fails", async () => {
+  mocks.inputs.mockResolvedValueOnce([
+    { index: 2, label: "Reference image 1", preview: true },
+    { index: 3, label: "Reference image 2", preview: true },
+    { index: 4, label: "Reference 3 · audio", preview: false },
+  ] as never);
+  mocks.fetch.mockReset();
+  mocks.fetch.mockRejectedValueOnce(new Error("missing"));
+  mocks.fetch.mockResolvedValueOnce(new Blob(["second"]));
+  vi.stubGlobal(
+    "URL",
+    class extends URL {
+      static createObjectURL = vi.fn(() => "blob:second");
+      static revokeObjectURL = vi.fn();
+    },
+  );
+  const view = mount(QueueSourceThumbnail, {
+    props: {
+      target: { baseUrl: "http://box", apiKey: null },
+      jobId: "edit",
+      detailed: true,
+    },
+  });
+  await flushPromises();
+  expect(view.findAll("figure")).toHaveLength(3);
+  expect(view.text()).toContain("Reference image 1");
+  expect(view.text()).toContain("Preview unavailable");
+  expect(view.text()).toContain("Reference 3 · audio");
+  expect(view.findAll("img")).toHaveLength(1);
+  expect(mocks.fetch.mock.calls.map((call) => call[3])).toEqual([2, 3]);
+  view.unmount();
+});
+
+it("compact rows keep their fallback when no image can be loaded", async () => {
+  mocks.inputs.mockResolvedValueOnce([
+    { index: 0, label: "Source audio", preview: false },
+  ] as never);
+  const view = mount(QueueSourceThumbnail, {
+    props: { target: { baseUrl: "http://box", apiKey: null }, jobId: "audio" },
+    slots: { default: "Running preview" },
+  });
+  await flushPromises();
+  expect(view.text()).toBe("Running preview");
+  view.unmount();
 });

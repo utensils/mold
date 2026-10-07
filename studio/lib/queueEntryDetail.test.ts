@@ -387,3 +387,29 @@ describe("queueEntryDetailModel", () => {
     expect(detail.modelId).toBe("flux-dev:q8");
   });
 });
+
+it("discloses ordered references, identity sets, and frame positions without media payloads", () => {
+  const result = model({
+    metadata: {
+      ...metadata,
+      edit_image_sha256s: ["a", "b"],
+      id_image_names: ["one.jpg", "two.jpg"],
+      references: [{ kind: "audio", name: "voice.wav" }],
+      keyframes: [{ frame: 24, name: "end.png" }],
+    },
+  });
+  const fields = result.groups.flatMap((group) => group.fields);
+  expect(fields).toContainEqual({ label: "Reference images", value: "2" });
+  expect(fields).toContainEqual({
+    label: "Identity photos",
+    value: "one.jpg, two.jpg",
+  });
+  expect(fields).toContainEqual({
+    label: "References",
+    value: "1. audio · voice.wav",
+  });
+  expect(fields).toContainEqual({
+    label: "Keyframes",
+    value: "Frame 24 · end.png",
+  });
+});

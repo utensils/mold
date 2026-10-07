@@ -81,8 +81,7 @@ extension GenerateController {
     /// on the machine that made it. A model this fleet no longer has leaves
     /// the choice alone and says so through `blocker`.
     func reuse(_ entry: LibraryEntry) {
-        var reused = RenderDraft(reusing: entry.print.metadata)
-        reused.media = draft.media
+        let reused = RenderDraft(reusing: entry.print.metadata)
         draft = reused
         if let name = entry.print.metadata.model {
             modelName = name
@@ -91,7 +90,7 @@ extension GenerateController {
             if let recipe, let model { draft = draft.adopting(recipe, isNewModel: false, for: model) }
         }
         machine = .pinned(entry.hostID)
-        let fence = retainedReuse.begin(draft)
+        let fence = retainedReuse.begin(draft, metadata: entry.print.metadata, sourceRevision: sourceMediaRevision)
         Task { await retainedReuse.probe(entry, fence: fence, controller: self) }
     }
 }

@@ -114,6 +114,19 @@ final class FixtureMachine: @unchecked Sendable {
 
     func stop() { listener.cancel() }
 
+    func addNewClip() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                var rows = (try? JSONSerialization.jsonObject(with: gallery)) as? [[String: Any]] ?? []
+                rows.insert(["filename": "fixture-new.mp4", "timestamp": Int(Date().timeIntervalSince1970) + 1,
+                             "metadata": ["prompt": "New clip", "frames": 270, "fps": 30]], at: 0)
+                gallery = (try? JSONSerialization.data(withJSONObject: rows)) ?? gallery
+                continuation.resume()
+            }
+        }
+    }
+
+
     func restoreResidentModels() async {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
@@ -225,6 +238,9 @@ final class FixtureMachine: @unchecked Sendable {
     private func response(_ path: String, historyQuery: String? = nil) -> Data {
         // A visible coastal illustration makes queue screenshots useful for
         // visual acceptance, rather than a white one-pixel placeholder.
+        if queueFixture && path.hasSuffix("/inputs") {
+            return Data(#"[{"index":0,"label":"Reference image 1","preview":true},{"index":1,"label":"Reference image 2","preview":true},{"index":2,"label":"Reference 3 · audio","preview":false}]"#.utf8)
+        }
         if path.hasSuffix("/input-thumbnail") {
             return Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAABE0lEQVR4nO3QPQ0CQRRF4fWDDxos0CIACxjAACpQQE+FA4yQUNBB2J2defPz7jvJqW9uvul8f9JMU/cHgwcQQAABBNDAAQQQQAABZNTrtv8NoL80JkwKQIs6JUYAqQMl6mQbAQQQQAABBBBADozyxgEKAJRilL0sAjTDVLgpBVQjgAACCCCABm56XE+r6v54dKBoTJlAcZiKgD5tjhfhDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YuoG5IVp2h52X8G0AARTEhBMSUAwJQFFZloBFJNpNVA0pkygOExFQBGYDIC0mcyAVJmMgfSYqgApMVUE0mCqDuSdqRGQX6amQB6ZOgD5YnoDLYwrtRN2YTcAAAAASUVORK5CYII=")!
         }

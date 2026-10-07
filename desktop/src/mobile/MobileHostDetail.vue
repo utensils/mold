@@ -1545,6 +1545,9 @@ onBeforeUnmount(() => {
       <QueueEntryDetail
         v-if="inspectedQueueModel"
         :model="inspectedQueueModel"
+        :input-target="target"
+        :input-instance-id="host.instanceId"
+        :input-online="host.online"
         :transfer-host-id="host.id"
         :preview="queuePreview"
         :cancelling="inspectedQueueEntry ? cancellingQueueIds.has(inspectedQueueEntry.id) : false"

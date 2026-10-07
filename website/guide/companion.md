@@ -169,7 +169,7 @@ named beside the composer and remain available across prompt edits and repeated
 renders. **Remove retained sources** clears those attachments; replacing an
 image keeps your choice. Unavailable retained files are explained inline.
 
-The Queue shows the prompt and actual **Source** image separately from the live
+The Queue shows the prompt and actual conditioning images separately from the live
 **Rendering** preview, including when the source belongs to a durable job that
 survived a machine restart. On iPad, jobs stay within a readable centered column.
 
@@ -228,3 +228,9 @@ Picture menus in Library and its viewer offer **Use as Source**, retaining your 
 **Settings → Video Playback** offers autoplay and repeat. Only the selected video plays, and leaving the viewer or backgrounding pauses it. 3-D views load only when selected, use file-backed downloads and offer Retry on failure. Paired connections prefer a verified local-network route and reconsider routes on network changes.
 
 On macOS, image and video viewers default to **Fit**, keeping the entire frame visible as the window changes size. **Actual Size** shows one media pixel per screen pixel and lets you scroll larger media. Video controls remain below the picture without dimming it on hover.
+
+Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
+
+Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+
+On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.

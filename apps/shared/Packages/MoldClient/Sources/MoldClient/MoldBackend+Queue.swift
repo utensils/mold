@@ -7,6 +7,8 @@ public protocol MoldQueueBackend: Sendable {
     /// One job in full, settings included -- `GET /api/queue` cannot answer
     /// this (`routes.rs:6817-6828`).
     func queueJob(id: String) async throws -> QueueJobDetail
+    func queueInputs(id: String) async throws -> [QueueInput]
+    func queueInputThumbnail(id: String, index: Int?) async throws -> Data
     func queueInputThumbnail(id: String) async throws -> Data
     func cancelJob(id: String) async throws
     /// Cancels the row ONLY if it is held right now (`?only_held=true`).
@@ -43,6 +45,13 @@ public protocol MoldQueueBackend: Sendable {
 }
 
 public extension MoldQueueBackend {
+    func queueInputs(id: String) async throws -> [QueueInput] {
+        [QueueInput(label: "Source", preview: true)]
+    }
+    func queueInputThumbnail(id: String, index: Int?) async throws -> Data {
+        guard index == nil else { throw MoldClientError.malformedResponse }
+        return try await queueInputThumbnail(id: id)
+    }
     func queueInputThumbnail(id: String) async throws -> Data {
         throw MoldClientError.malformedResponse
     }

@@ -455,6 +455,7 @@ impl QueueMediaLifecycle {
     }
 
     /// Returns only the scalar conditioning source image, never provenance or paths.
+    #[cfg(test)]
     pub(crate) fn input_image_bytes(
         &self,
         media_set: MediaSetRef,
@@ -464,6 +465,28 @@ impl QueueMediaLifecycle {
         }
         self.runtime_store()?
             .read_source_image(&media_set, 64 * 1024 * 1024)
+    }
+
+    pub(crate) fn input_manifest(
+        &self,
+        media_set: &MediaSetRef,
+    ) -> Result<crate::queue_media_store::MediaSetManifest, QueueMediaError> {
+        if media_set.owner_id != self.owner_uuid {
+            return Err(QueueMediaError::NotFound);
+        }
+        self.runtime_store()?.load(media_set)
+    }
+
+    pub(crate) fn input_member_bytes(
+        &self,
+        manifest: &crate::queue_media_store::MediaSetManifest,
+        index: usize,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        if manifest.media_set.owner_id != self.owner_uuid {
+            return Err(QueueMediaError::NotFound);
+        }
+        self.runtime_store()?
+            .read_input_member(manifest, index, 64 * 1024 * 1024)
     }
 
     pub(crate) fn gallery_member_bytes(
@@ -1115,6 +1138,7 @@ mod tests {
         );
         let mut wrong_owner = set;
         wrong_owner.owner_id = "other-owner".into();
+        assert!(lifecycle.input_manifest(&wrong_owner).is_err());
         assert!(lifecycle.input_image_bytes(wrong_owner).is_err());
     }
 

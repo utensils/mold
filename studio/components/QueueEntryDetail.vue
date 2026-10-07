@@ -7,6 +7,8 @@
  * only paints it. Actions are emitted rather than performed, because each
  * shell owns its own authenticated target for the exact selected host.
  */
+import QueueSourceThumbnail from "./QueueSourceThumbnail.vue";
+import type { ApiTarget } from "../api/client";
 import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
 import { computed, ref } from "vue";
 import type { QueueEntryDetailModel } from "../lib/queueEntryDetail";
@@ -15,6 +17,9 @@ import { copyTextToClipboard } from "../lib/notificationClipboard";
 const props = withDefaults(
   defineProps<{
     model: QueueEntryDetailModel;
+    inputTarget?: ApiTarget | null | undefined;
+    inputInstanceId?: string | null | undefined;
+    inputOnline?: boolean | undefined;
     transferHostId?: string | undefined;
     /** Live denoise snapshot for a running row, when the host emits one. */
     /** The host's folded progress snapshot: a denoise image is optional,
@@ -104,6 +109,13 @@ async function copyDetail(): Promise<void> {
     </header>
 
     <div class="qed__body">
+      <QueueSourceThumbnail
+        :target="inputTarget"
+        :instance-id="inputInstanceId"
+        :online="inputOnline"
+        :job-id="model.jobId"
+        detailed
+      />
       <figure
         v-if="
           preview &&

@@ -18,12 +18,20 @@ extension LibraryPane {
             // per machine, so a job survives a restart and a second Mac.
             .task { await upscales.recover() }
             .onAppear { library.undo.manager = undoManager }
-            .onAppear { revealIfNeeded() }
+            .onAppear {
+                newMediaVisit = library.newMedia.beginVisit()
+                library.markLibrarySeen()
+                revealIfNeeded()
+            }
+            .onDisappear { library.markLibrarySeen() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
             .onChange(of: navigation.scope) { _, _ in clearSelection() }
             .onChange(of: navigation.query) { _, _ in clearSelection() }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
-            .onChange(of: library.rows.value) { _, _ in followMergedTiles() }
+            .onChange(of: library.rows.value) { _, _ in
+                library.markLibrarySeen()
+                followMergedTiles()
+            }
             // A click on an already-open Library: `.onAppear` above only
             // fires when the pane is freshly mounted.
             .onChange(of: navigation.reveal) { _, _ in revealIfNeeded() }
@@ -75,7 +83,8 @@ extension LibraryPane {
                 returnToPrint: gridReturn?.scope == navigation.scope && gridReturn?.query == navigation.query
                     ? gridReturn?.id : nil,
                 onReturnRestored: { gridReturn = nil },
-                onOpen: { gridReturn = nil; viewing = $0 }
+                onOpen: { gridReturn = nil; viewing = $0 },
+                newMediaVisit: newMediaVisit
             )
             .id(LibraryGridContext(scope: navigation.scope, query: navigation.query))
         }

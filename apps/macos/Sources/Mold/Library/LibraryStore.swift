@@ -10,6 +10,13 @@ import MoldClient
 @MainActor
 @Observable
 final class LibraryStore {
+    var newMedia = LibraryNewMedia()
+
+    func markLibrarySeen() {
+        guard !perHost.isEmpty else { return }
+        newMedia.markSeen(items.map { $0.print.filename })
+    }
+
     /// The one object that knows which machines exist and how to reach them.
     let hosts: HostStore
 

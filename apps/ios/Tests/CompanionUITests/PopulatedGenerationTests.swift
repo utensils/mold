@@ -398,6 +398,18 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["A coastal path at sunrise"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.images["queue-source-fixture-video"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["LTX-2.5 Distilled BF16"].exists)
+        app.buttons["queue-open-fixture-video"].tap()
+        XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+        let detail = app.descendants(matching: .any)["queue-detail"].firstMatch
+        XCTAssertTrue(detail.staticTexts["Reference image 1"].waitForExistence(timeout: 5))
+        reveal(detail.staticTexts["Reference image 2"].firstMatch, in: app)
+        XCTAssertTrue(detail.images["Reference image 2"].waitForExistence(timeout: 5))
+        attach(app)
+        reveal(detail.staticTexts["Reference 3 · audio"].firstMatch, in: app)
+        XCTAssertTrue(detail.staticTexts["Reference 3 · audio"].exists)
+        XCTAssertFalse(machine.requestLog().contains { $0.contains("input-thumbnail?index=2") })
+        app.buttons["Done"].firstMatch.tap()
+
         XCTAssertLessThanOrEqual(row.frame.width, 860)
         attach(app)
         for category in ["UICTContentSizeCategoryXS", "UICTContentSizeCategoryAccessibilityXXXL"] {
