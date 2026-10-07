@@ -36,6 +36,7 @@ extension GeneratePane {
         case .clear:
             return false
         case .ask(let licence):
+            controller.submissionFeedback.begin("Accept the model licence to continue.", phase: .refused)
             downloads.pendingLicense = DownloadStore.PendingLicense(
                 refusal: licence, mismatch: false, host: host.id
             ) {
@@ -43,6 +44,7 @@ extension GeneratePane {
             }
             return true
         case .unknown:
+            let feedbackID = controller.submissionFeedback.begin("Checking model requirements on \(host.name)…")
             let pressed = LicenceSubmission(
                 draft: controller.draft, model: controller.modelName, host: host.id)
             Task {
@@ -51,7 +53,12 @@ extension GeneratePane {
                 // The press resumes only if nothing moved while the machine
                 // answered; otherwise the new selection waits for its own press
                 // and its own gate.
-                guard Self.resumes(pressed, now: currentSubmission) else { return }
+                guard Self.resumes(pressed, now: currentSubmission) else {
+                    controller.submissionFeedback.update(
+                        "The draft or machine changed. Press Generate to send the current settings.",
+                        phase: .refused, for: feedbackID)
+                    return
+                }
                 // A machine that cannot answer (an older host, a dropped
                 // connection) is not a reason to refuse THIS render: the worker
                 // still fails closed on a gated fetch, exactly as before.

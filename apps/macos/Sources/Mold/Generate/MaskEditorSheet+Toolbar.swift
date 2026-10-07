@@ -11,6 +11,7 @@ extension MaskEditorSheet {
                 Text("Erase").tag(true)
             }
             .pickerStyle(.segmented)
+            .help("Brush marks areas to change; Erase removes marks")
             .labelsHidden()
             .fixedSize()
 
@@ -23,12 +24,14 @@ extension MaskEditorSheet {
             } onDecrement: {
                 stepBrush(-1)
             }
-            .help("Brush size (also \u{2018}[\u{2019} and \u{2018}]\u{2019})")
+            .help("Change the brush size. Use [ to make it smaller or ] to make it larger.")
 
             Spacer()
 
             Button("Invert") { strokes.invert() }
+                .help("Swap the areas to change with the areas to keep")
             Button("Clear") { strokes.clear() }
+                .help("Remove every painted mark from the mask")
                 .disabled(strokes.isEmpty)
 
             Spacer()

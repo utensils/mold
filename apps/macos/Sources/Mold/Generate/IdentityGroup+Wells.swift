@@ -31,6 +31,7 @@ extension IdentityGroup {
             caption: WellCaption.identityAdd,
             label: "Add a photograph of the face to preserve",
             pick: { draft.media = Self.staging($0, in: draft.media, maxPhotos: maxPhotos) })
+            .help("Choose or paste a photograph of the face to preserve")
     }
 
     private func removeButton(_ photo: IdentityPhoto) -> some View {

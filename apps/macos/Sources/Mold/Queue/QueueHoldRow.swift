@@ -57,7 +57,7 @@ struct QueueHoldRow: View {
         // is two lists that agreed by hand.
         .rowActionMenu(Self.offered(for: hold, destinations: moveToDestinations),
                        perform: perform)
-        .help(entry.id)
+        .help("Show this job’s details and why it is waiting")
     }
 
     private var sentence: String {

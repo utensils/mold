@@ -41,6 +41,7 @@ struct KeyframeTable: View {
                         .monospacedDigit()
                         .frame(minWidth: 30, alignment: .trailing)
                 }
+                .help("Choose which frame of the clip this picture should guide")
                 MediaWell(
                     systemImage: "photo", allowedTypes: [.png, .jpeg],
                     placeholder: "No picture", attachment: attachmentBinding(index: index)
@@ -63,6 +64,7 @@ struct KeyframeTable: View {
             } label: {
                 Label("Add keyframe", systemImage: "plus")
             }
+            .help("Choose a picture to guide a specific moment in the clip")
             .buttonStyle(.plain)
             .font(.caption)
         }

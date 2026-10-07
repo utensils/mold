@@ -62,7 +62,7 @@ struct GeneratePane: View {
         // Before the pane's own `.toolbar`, so the column's switch is the
         // LAST item in the row and the model and recipe capsules stop at the
         // divider. See `TrailingColumn`.
-        .trailingColumn(isShowing: $showsInspector) {
+        .trailingColumn(isShowing: $showsInspector, resizable: true) {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
         }

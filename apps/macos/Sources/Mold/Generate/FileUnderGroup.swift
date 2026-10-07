@@ -28,7 +28,7 @@ struct FileUnderGroup: View {
                 FileUnderTagsRow(tags: $draft.tags, title: draft.title,
                                 autoTagTitle: $draft.autoTagTitle)
             }
-            LabeledSection("Collection") {
+            InspectorField("Collection") {
                 Picker("Collection", selection: collectionSelection) {
                     Text("None").tag(CollectionOption.none)
                     ForEach(shelves) { shelf in
@@ -37,9 +37,12 @@ struct FileUnderGroup: View {
                     Divider()
                     Text("New Collection…").tag(CollectionOption.new)
                 }
+                .help("Choose the Library collection where new results will be filed")
                 .labelsHidden()
+                .frame(maxWidth: .infinity)
             }
             Toggle("Tag new prints with their title", isOn: $draft.autoTagTitle)
+                .help("Automatically add the print’s title as a searchable tag")
         }
         .sheet(isPresented: $showingNewCollectionSheet) {
             NewCollectionNameSheet { draft.collectionName = $0 }

@@ -27,23 +27,29 @@ struct InspectorActions: View {
                     Button { actions.toggleFavorite(entries) } label: {
                         Label("Favourite", systemImage: allFavorite ? "star.fill" : "star")
                     }
+                    .help(allFavorite ? "Remove these prints from Favourites" : "Add these prints to Favourites")
                     Button { actions.quickLook(entries) } label: {
                         Label("Quick Look", systemImage: "eye")
                     }
+                    .help("Preview the selected prints without leaving the Library")
                     ShareLink(items: entries.map(actions.draggable)) { print in
                         SharePreview(print.filename)
                     } label: {
                         Label("Share", systemImage: "square.and.arrow.up")
                     }
+                    .help("Share the selected prints with another app or person")
                     Button { actions.save(entries) } label: {
                         Label("Save", systemImage: "square.and.arrow.down")
                     }
+                    .help("Save a copy of the selected prints to a folder you choose")
                     Button { actions.copy(entries) } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                     }
+                    .help("Copy the selected prints to the clipboard")
                     Button(role: .destructive) { actions.moveToTrash(entries) } label: {
                         Label("Trash", systemImage: "trash")
                     }
+                    .help("Move the selected prints to Recently Deleted")
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.bordered)

@@ -61,6 +61,7 @@ struct IdentityGroup: View {
                               range: Identity.weightRange, step: Identity.weightStep) {
                     Text(weightBinding.wrappedValue, format: .number.precision(.fractionLength(2)))
                 }
+                .help("Choose how strongly the result preserves the face in your photographs")
             }
             LabeledSection("Start step") {
                 // `Identity.startStepRange` moves with `draft.steps`, and
@@ -69,6 +70,7 @@ struct IdentityGroup: View {
                 Stepper(value: startStepBinding, in: Identity.startStepRange(steps: draft.steps)) {
                     Text(startStepBinding.wrappedValue.formatted())
                 }
+                .help("Choose the generation step when the model starts using the face photographs")
             }
             if let importFailure {
                 Text(importFailure).font(.caption).foregroundStyle(.secondary)

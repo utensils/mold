@@ -19,15 +19,16 @@ struct OptionalNumberRow: View {
     let refusal: String?
 
     var body: some View {
-        LabeledSection(title) {
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 3) {
+            InspectorField(title) {
                 TextField(placeholder, text: text)
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 140)
+                    .frame(maxWidth: .infinity)
                     .accessibilityLabel(title)
-                if let refusal {
-                    Text(refusal).font(.caption).foregroundStyle(.secondary)
-                }
+                    .help("Override \(title.lowercased()). Leave the field empty to use the model’s normal setting.")
+            }
+            if let refusal {
+                Text(refusal).font(.caption).foregroundStyle(.secondary)
             }
         }
     }

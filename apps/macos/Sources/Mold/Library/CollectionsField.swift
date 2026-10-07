@@ -48,7 +48,7 @@ struct CollectionsField: View {
                 Image(systemName: "xmark")
             }
             .buttonStyle(.plain)
-            .help("Take these out of \(shelf.name)")
+            .help("Remove these prints from \(shelf.name), keeping them in the Library")
         }
         .font(.caption)
         .padding(.horizontal, 7)

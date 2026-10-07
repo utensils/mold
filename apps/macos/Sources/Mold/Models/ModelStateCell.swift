@@ -36,7 +36,7 @@ struct ModelStateCell: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Fetch the rest of this model")
+                .help("Download the missing files for this model")
             case .available:
                 Button("Install") { install(model) }
                     .buttonStyle(.bordered)

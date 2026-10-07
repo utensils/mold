@@ -38,6 +38,8 @@ struct PromptPanel: View {
     @State private var contentHeight: CGFloat = 0
     @State private var actionsHeight: CGFloat = 0
     @State private var stepsHeight: CGFloat = 0
+    @AppStorage("generatePromptEditorHeight", store: AppStorageSuite.defaults)
+    private var preferredPromptHeight = Double(PromptEditorHeight.initial)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -100,10 +102,21 @@ struct PromptPanel: View {
         default:
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    TextField(placeholder(recipe), text: $draft.prompt, axis: .vertical)
-                        .textFieldStyle(.plain)
+                    PromptResizeHandle(preferredHeight: $preferredPromptHeight, available: promptAvailableHeight)
+                    TextEditor(text: $draft.prompt)
                         .font(.body)
-                        .lineLimit(2...6)
+                        .scrollContentBackground(.hidden)
+                        .frame(height: PromptEditorHeight.resolve(preferredPromptHeight, available: promptAvailableHeight))
+                        .overlay(alignment: .topLeading) {
+                            if draft.prompt.isEmpty {
+                                Text(placeholder(recipe)).foregroundStyle(.secondary)
+                                    .padding(.leading, 5).padding(.top, 1)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .accessibilityLabel(placeholder(recipe))
+                        .accessibilityIdentifier("generate-prompt-editor")
                         .focused($focusedField, equals: .prompt)
                     if recipe.capabilities.negativePrompt?.isAvailable == true {
                         TextField("Avoid…", text: $draft.negativePrompt, axis: .vertical)
@@ -159,6 +172,11 @@ struct PromptPanel: View {
     /// prompt -- the operation the accepted choice actually carried out.
     private var undoLabel: String {
         draft.promptTransform?.operation == .remix ? "remixed" : "expanded"
+    }
+
+    private var promptAvailableHeight: CGFloat {
+        // Other controls may scroll, but Generate always remains outside that area.
+        max(0, scrollHeight - 100)
     }
 
     private var scrollHeight: CGFloat {

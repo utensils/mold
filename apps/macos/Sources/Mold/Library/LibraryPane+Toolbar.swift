@@ -57,7 +57,7 @@ extension LibraryPane {
             } label: {
                 Label("Sort", systemImage: "arrow.up.arrow.down")
             }
-            .help("How the prints are ordered")
+            .help("Choose the order of prints in this shelf")
         }
         ToolbarItem {
             Button {
@@ -73,7 +73,7 @@ extension LibraryPane {
         ToolbarItem {
             Slider(value: $navigation.edge, in: 88...260) { Text("Thumbnail size") }
                 .frame(width: 110)
-                .help("Thumbnail size")
+                .help("Make the Library thumbnails larger or smaller")
                 .onChange(of: navigation.edge) { _, _ in navigation.rememberEdge() }
         }
         // No inspector switch here: it belongs over the column it opens,

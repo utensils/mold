@@ -22,7 +22,7 @@ enum ChainSubmission {
     /// what M8 decision 8 says for every press.
     static func take(
         _ routing: ChainRouting.Decision, requests: [GenerateRequest],
-        on host: MoldHost, backend: any MoldBackend, controller: GenerateController
+        on host: MoldHost, backend: any MoldBackend, controller: GenerateController, feedbackID: UUID? = nil
     ) -> Bool {
         guard !requests.isEmpty else { return false }
         switch routing {
@@ -31,6 +31,7 @@ enum ChainSubmission {
         case let .reject(reason):
             // `mold_core::chain::text_only_auto_chain_refusal`'s own words,
             // so this app, the CLI and the server's 422 read the same.
+            if let feedbackID { controller.submissionFeedback.update(reason, phase: .refused, for: feedbackID) }
             controller.run = .failed(reason)
             return true
         case let .chain(clipFrames, motionTail, stageCount):
@@ -48,11 +49,11 @@ enum ChainSubmission {
                 if following {
                     controller.run = .submitting
                     controller.chain.start(body, stageCount: stageCount, on: host.id,
-                                           backend: backend, report: reporter(for: controller))
+                                           backend: backend, report: reporter(for: controller, feedbackID: feedbackID, hostName: host.name))
                     following = false
                 } else {
                     admitAndQueue(body, stageCount: stageCount, on: host,
-                                  backend: backend, controller: controller)
+                                  backend: backend, controller: controller, feedbackID: feedbackID)
                 }
             }
             return true
@@ -64,7 +65,7 @@ enum ChainSubmission {
     /// watches it until the canvas is free.
     private static func admitAndQueue(
         _ body: AutoChainRequest, stageCount: Int, on host: MoldHost,
-        backend: any MoldBackend, controller: GenerateController
+        backend: any MoldBackend, controller: GenerateController, feedbackID: UUID?
     ) {
         Task { [weak controller] in
             do {
@@ -76,12 +77,18 @@ enum ChainSubmission {
                     try? await backend.cancelChainJob(id: created.jobId)
                     return
                 }
+                if let feedbackID {
+                    controller.submissionFeedback.update("Added to the generation queue on \(host.name).", phase: .accepted, for: feedbackID)
+                }
                 PendingChain.remember(created.jobId, host: host.id)
                 controller.queued.append(.chain(AdmittedChain(
                     jobId: created.jobId, stageCount: stageCount, host: host.id)))
             } catch {
                 // The render on screen is unaffected by a second one failing
                 // to be admitted -- report it, never replace `run`.
+                if let feedbackID {
+                    controller?.submissionFeedback.update(error.failureSentence, phase: .refused, for: feedbackID)
+                }
                 controller?.hosts.report(error, on: host.id, doing: "queue that render")
             }
         }
@@ -89,9 +96,12 @@ enum ChainSubmission {
 
     /// What the follow reports back onto the pane. Not `private`:
     /// `followNext` re-attaches a queued chain with the same reporter.
-    static func reporter(for controller: GenerateController) -> ChainRun.Reporter {
+    static func reporter(for controller: GenerateController, feedbackID: UUID? = nil, hostName: String? = nil) -> ChainRun.Reporter {
         ChainRun.Reporter(
             progress: { [weak controller] progress in
+                if let feedbackID, let hostName {
+                    controller?.submissionFeedback.update("Accepted by \(hostName). View progress in Queue.", phase: .accepted, for: feedbackID)
+                }
                 controller?.run = .runningChain(progress)
             },
             finished: { [weak controller] filename, host in
@@ -113,6 +123,7 @@ enum ChainSubmission {
                 controller.handoff.hold { [weak controller] in controller?.followNext() }
             },
             failed: { [weak controller] message in
+                if let feedbackID { controller?.submissionFeedback.update(message, phase: .refused, for: feedbackID) }
                 controller?.run = .failed(message)
                 controller?.handoff.hold { [weak controller] in controller?.followNext() }
             })

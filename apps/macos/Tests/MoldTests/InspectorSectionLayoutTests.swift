@@ -6,7 +6,7 @@ import Testing
 
 /// The Generate inspector's alignment rule, MEASURED rather than eyeballed.
 ///
-/// **Fails today**: every group draws its content in a bare `DisclosureGroup`
+/// Regression: every group draws its content in a bare `DisclosureGroup`
 /// over a leading `VStack` that never says it is the flexible side, so a group
 /// whose widest child is narrow shrinks to that child and SwiftUI centres the
 /// lot -- "No adapters installed for this model." sat in the middle of the
@@ -23,11 +23,8 @@ struct InspectorSectionLayoutTests {
     private static let width: CGFloat = 320
     private static let height: CGFloat = 60
 
-    /// The content leads from the title's edge, which is the inset this file
-    /// records off the photograph -- the one thing `ImageRenderer` cannot
-    /// measure is the AppKit disclosure row itself, which it does not draw at
-    /// all. What it CAN measure is where the content lands, and that is the
-    /// half that regressed.
+    /// The colored content marker starts at the title inset. Header text and
+    /// separators are ignored so their rendering cannot mask misalignment.
     @Test func aSectionsContentStartsAtTheTitlesInset() {
         #expect(contentLeadingX(Self.bar) == Int(InspectorSection<EmptyView, EmptyView>.titleInset))
     }
@@ -36,7 +33,7 @@ struct InspectorSectionLayoutTests {
     /// row instead of floating in the middle of it.
     @Test func aNarrowLineLeadsRatherThanFloatingInTheMiddle() {
         let narrow = contentLeadingX(Self.bar)
-        let wide = contentLeadingX(Color.white.frame(width: Self.width, height: 6))
+        let wide = contentLeadingX(Color.red.frame(width: Self.width, height: 6))
         #expect(narrow == wide)
     }
 
@@ -47,16 +44,28 @@ struct InspectorSectionLayoutTests {
         let besideAWideRow = contentLeadingX(
             VStack(alignment: .leading, spacing: 2) {
                 Self.bar
-                Color.white.frame(width: Self.width - 40, height: 6)
+                Color.red.frame(width: Self.width - 40, height: 6)
             })
         #expect(alone == besideAWideRow)
+    }
+
+    @Test func collapsedSectionsHideTheirContentWithAndWithoutAccessories() {
+        for expanded in [false, true] {
+            let section = InspectorSection("Recent", isExpanded: .constant(expanded)) {
+                Button("Refresh") {}
+            } content: { Self.bar }
+            let empty = InspectorSection("Recent", isExpanded: .constant(expanded)) {
+                Button("Refresh") {}
+            } content: { EmptyView() }
+            #expect((gained(by: section, over: empty) != nil) == expanded)
+        }
     }
 
     // MARK: - Measuring
 
     /// A narrow, fully opaque mark: no antialiased edge to threshold around,
     /// so its leading column is exact.
-    private static var bar: some View { Color.white.frame(width: 6, height: 6) }
+    private static var bar: some View { Color.red.frame(width: 6, height: 6) }
 
     private func contentLeadingX(_ content: some View) -> Int? {
         gained(by: section(title: "", content: content),
@@ -96,9 +105,9 @@ struct InspectorSectionLayoutTests {
         for y in 0..<height {
             for x in 0..<width where !columns.contains(x) {
                 let offset = (y * width + x) * 4
-                let brightness = Int(pixels[offset]) + Int(pixels[offset + 1])
-                    + Int(pixels[offset + 2])
-                if brightness > 150 { columns.insert(x) }
+                if pixels[offset] > 150 && pixels[offset + 1] < 70 && pixels[offset + 2] < 70 {
+                    columns.insert(x)
+                }
             }
         }
         return columns

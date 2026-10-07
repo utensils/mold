@@ -15,8 +15,16 @@ extension GeneratePane {
     /// `licenceSettled` skips the licence gate once the machine could not
     /// answer the fresh probe it asked for (`GeneratePane+Licence.swift`).
     func startRun(accepted: Set<String>, licenceSettled: Bool = false) {
-        guard let host else { return }
+        guard let host else {
+            controller.submissionFeedback.begin("Choose a connected machine before generating.", phase: .refused)
+            return
+        }
+        guard controller.modelName != nil else {
+            controller.submissionFeedback.begin("Choose a model before generating.", phase: .refused)
+            return
+        }
         if let refusal = reuse.referenceRefusal(for: controller.draft) {
+            controller.submissionFeedback.begin(refusal, phase: .refused)
             reuse.notice = refusal
             return
         }
@@ -39,7 +47,8 @@ extension GeneratePane {
             let draft = controller.draft
             let outgoing = outgoingProbe(on: host)
             let fence = reuse.beginSourceSubmission()
-            Task { await attachThenRun(draft, outgoing: outgoing, fence: fence, accepted: accepted) }
+            let feedbackID = controller.submissionFeedback.begin("Restoring the source media before sending…")
+            Task { await attachThenRun(draft, outgoing: outgoing, fence: fence, accepted: accepted, feedbackID: feedbackID) }
             return
         }
         // Whatever a chain still cannot carry -- a mask, an identity photo --
@@ -68,12 +77,16 @@ extension GeneratePane {
     /// this whole path exists to stop.
     func attachThenRun(
         _ draft: RenderDraft, outgoing: GenerateRequest?, fence: Int,
-        accepted: Set<String> = []
+        accepted: Set<String> = [], feedbackID: UUID? = nil
     ) async {
         if let placed = await reuse.sourceForSubmission(in: draft, outgoing: outgoing,
             live: { controller.draft }, fence: fence) {
             controller.draft = placed
             startRun(accepted: accepted)
+        } else if let feedbackID {
+            controller.submissionFeedback.update(
+                reuse.notice ?? "The source media or draft changed. Check the source and press Generate again.",
+                phase: .refused, for: feedbackID)
         }
     }
 

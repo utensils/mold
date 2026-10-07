@@ -54,6 +54,7 @@ struct RefineGroup: View {
             LabeledSection("Mask") {
                 HStack(spacing: 8) {
                     Button("Edit mask…") { controller.showsMaskEditor = true }
+                        .help("Paint the part of the source picture you want to change")
                     if let maskPreview {
                         Image(nsImage: maskPreview)
                             .resizable()

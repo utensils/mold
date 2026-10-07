@@ -72,7 +72,7 @@ struct ControlsRow: View {
                     ReferenceWeightControl(control: weight, draft: $draft)
                 }
             }
-            ControlLabel("Seed") { SeedControl(draft: $draft) }
+            ControlLabel("Seed", allowsMultipleRows: true) { SeedControl(draft: $draft) }
             ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
         }
     }
@@ -111,10 +111,12 @@ struct ControlsRow: View {
 /// up whatever each one is.
 struct ControlLabel<Content: View>: View {
     let title: String
+    let allowsMultipleRows: Bool
     @ViewBuilder let content: Content
 
-    init(_ title: String, @ViewBuilder content: () -> Content) {
+    init(_ title: String, allowsMultipleRows: Bool = false, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.allowsMultipleRows = allowsMultipleRows
         self.content = content()
     }
 
@@ -124,7 +126,8 @@ struct ControlLabel<Content: View>: View {
             // `name`), so this caption would otherwise be read twice.
             Text(title).font(.caption).foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
-            content.frame(height: Chrome.fieldHeight)
+            content.frame(height: allowsMultipleRows ? nil : Chrome.fieldHeight)
+                .frame(minHeight: Chrome.fieldHeight)
         }
     }
 }

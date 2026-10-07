@@ -69,7 +69,7 @@ struct QueueRow: View {
                 canMoveUp: isReorderable && canMoveUp,
                 canMoveDown: isReorderable && canMoveDown),
             perform: perform)
-        .help(entry.id)
+        .help("Show this job’s progress, settings and available actions")
     }
 
     private func perform(_ kind: QueueRowActions.Kind) {

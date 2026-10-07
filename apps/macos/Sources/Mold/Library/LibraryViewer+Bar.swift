@@ -37,7 +37,7 @@ extension LibraryViewer {
             Button { actions.save([entry]) } label: {
                 Label("Save", systemImage: "square.and.arrow.down")
             }
-            .help("Save a copy")
+            .help("Save a copy of this print to a folder you choose")
         }
         .buttonStyle(.accessoryBar)
         .labelStyle(.iconOnly)

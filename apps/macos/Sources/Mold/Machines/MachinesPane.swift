@@ -103,6 +103,7 @@ struct MachinesPane: View {
             Button { refresh() } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
+            .help("Check this machine’s connection, models and current work")
             .disabled(selected == nil)
         }
         // Overflow rather than a fixed slot: a choice made far more rarely
@@ -112,6 +113,7 @@ struct MachinesPane: View {
             Button { selected.map(hosts.setDefault) } label: {
                 Label("Set as Default", systemImage: "star")
             }
+            .help("Use this machine when a new render has no machine selected")
             .disabled(selected == nil)
         }
     }

@@ -49,6 +49,8 @@ final class GenerateController {
     /// drives.
     var showsMaskEditor = false
 
+    let submissionFeedback = GenerationSubmissionFeedback()
+
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: ActiveBatch?

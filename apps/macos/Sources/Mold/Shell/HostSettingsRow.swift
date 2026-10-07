@@ -20,7 +20,7 @@ struct HostSettingsRow: View {
                 Image(systemName: "key.fill")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-                    .help("Using a stored API key")
+                    .help("Mold uses a saved access key to connect to this machine")
             }
             if reachability.isChecking {
                 ProgressView().controlSize(.small)
@@ -61,6 +61,7 @@ struct HostProbeSummary: View {
                 if let recheck {
                     Button("Check again", systemImage: "arrow.clockwise", action: recheck)
                         .labelStyle(.iconOnly)
+                        .help("Check whether this machine is reachable with these connection settings")
                         .buttonStyle(.borderless)
                         .controlSize(.small)
                 }

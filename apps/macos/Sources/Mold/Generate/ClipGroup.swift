@@ -27,6 +27,7 @@ struct ClipGroup: View {
             LabeledSection("Sound") {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle("Generate audio", isOn: audioBinding)
+                        .help("Create sound together with the video")
                     if draft.enableAudio, recipe?.capabilities.output?.audioRequiresMp4 == true {
                         Text("Delivered as MP4.")
                             .font(.caption)
@@ -57,6 +58,7 @@ struct ClipGroup: View {
             Text(reason).font(.caption).foregroundStyle(.secondary)
         } else {
             Toggle("Skip the audio branch", isOn: $draft.videoOnly)
+                .help("Generate only video, without running the model’s sound generation")
         }
     }
 

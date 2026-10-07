@@ -34,6 +34,7 @@ struct AdaptersGroup: View {
                 Text(choice.name)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .help(helpText(for: choice, info: info))
                 Spacer()
                 Button {
                     draft.media.loras.removeAll { $0.path == choice.path }
@@ -47,8 +48,8 @@ struct AdaptersGroup: View {
                           range: Lora.scaleRange, step: 0.05) {
                 Text(choice.scale, format: .number.precision(.fractionLength(2)))
             }
+            .help("Choose how strongly this adapter changes the model’s look")
         }
-        .help(helpText(for: choice, info: info))
         .rowActionMenu(adapterMenu(choice, words: info?.trainedWords ?? [])) {
             perform($0, on: choice)
         }
@@ -70,6 +71,7 @@ struct AdaptersGroup: View {
                     }
                 }
                 .menuStyle(.button)
+                .help("Add an installed style adapter to influence the next render")
                 .fixedSize()
             }
         }

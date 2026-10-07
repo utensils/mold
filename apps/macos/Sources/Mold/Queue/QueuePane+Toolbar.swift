@@ -12,6 +12,7 @@ extension QueuePane {
             Button { Task { await load() } } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
+            .help("Check the latest jobs and their progress on every machine")
             .disabled(queue.isLoading)
         }
         if !queueGate.machines.isEmpty {

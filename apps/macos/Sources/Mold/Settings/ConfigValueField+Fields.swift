@@ -17,6 +17,7 @@ extension ConfigValueField {
     var toggleField: some View {
         Toggle(isOn: toggleBinding) { EmptyView() }
             .labelsHidden()
+            .help("Turn this setting on or off for the selected machine")
     }
 
     var toggleBinding: Binding<Bool> {
@@ -39,6 +40,7 @@ extension ConfigValueField {
             // something stored to remove.
             if entry.value != .null {
                 Button("Clear") { Task { await onSet(.null) } }
+                    .help("Remove the saved secret value for this setting")
                     .buttonStyle(.borderless)
                     .controlSize(.small)
             }

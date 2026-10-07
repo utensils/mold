@@ -13,6 +13,7 @@ extension ModelsPane {
                     ForEach(availableScopes, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .help("Switch between installed models and models available to download")
             }
         }
         ToolbarItem {
@@ -21,6 +22,7 @@ extension ModelsPane {
                     Text(host.name).tag(MoldHost.ID?.some(host.id))
                 }
             }
+            .help("Choose the machine whose models you want to manage")
         }
         if let host {
             ToolbarItem { DownloadsButton(host: host) }

@@ -141,7 +141,7 @@ struct AdvancedSettings: View {
             }
             .buttonStyle(.borderless)
             .labelStyle(.iconOnly)
-            .help("Reset \(row.entry.key) to its fallback")
+            .help("Remove the saved override for \(row.entry.key) and use the fallback value")
             .accessibilityLabel("Reset \(row.entry.key)")
         }
     }

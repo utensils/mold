@@ -727,3 +727,33 @@ Settings → General → Video Playback controls autoplay (on initially) and rep
 New input pictures larger than 4096 pixels per axis or 2 MiB are proportionally downsampled with orientation/alpha preserved. Original library files and retained source/mask pairs are unchanged; replacing the source clears the old mask. Paired remote machines prefer a verified LAN route over Tailscale and relay, and recheck on network changes. The embedded engine’s existing loopback-only listener is unchanged.
 
 Local validation and qualification limits: [native acceptance record](../../docs/uat/native-authoring-media.md).
+
+Generate’s Settings inspector adapts its fields to the available width. Simple
+fields place labels beside controls when there is room and stack them at narrower widths;
+menus and sampler inputs use the available column width. Section headers toggle
+across their full label area, while Recent’s Refresh stays an independent action.
+The Settings menu expands or collapses every section, including References, and
+remembers those choices. Recent starts with five prompts, with search and Show
+More / Show Fewer controls for the rest. The save-to-library explanation appears
+when saving is turned off, where it explains the Recently Deleted destination.
+
+Job Details keeps the model, owning machine and live status together, with a
+compact source picture beside progress and a separate live-preview area. Settings
+use labeled rows and full-width wrapping prompt text. The prompt heading appears
+once; raw job/model identifiers are under Technical details with Copy buttons.
+Pause, Resume and Cancel still follow the latest queue state, and Done closes the
+sheet without changing the job.
+
+### Generate usability
+
+The prompt editor has a top resize handle (drag upward to grow), a size context
+menu and an accessible adjustment action. Its preferred height persists while
+actual height stays within the available panel space. Generate reports preparation,
+sending, machine acceptance and refusals separately from the current canvas job.
+Late replies cannot overwrite feedback for a newer press. Random/fixed seed modes
+are explicit; fixed batches use successive seeds. Recent prompts search the full
+host history before paging and preserve access to an active filter after refresh.
+
+Job Details keeps status, preview and grouped recipe values together, with raw
+identifiers in a separate disclosure. See [the tooltip audit](docs/tooltip-audit.md)
+for the reviewed native surfaces and runtime verification boundaries.

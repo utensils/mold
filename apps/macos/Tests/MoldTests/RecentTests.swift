@@ -42,6 +42,24 @@ struct RecentTests {
         #expect(RecentGroup.Listing.resolve(hasLoaded: true, isUnavailable: false, entries: [entry]) == .rows([entry]))
     }
 
+    @Test func recentHistoryStartsBoundedAndSearchFindsOlderPrompts() {
+        let entries = (0..<12).map { HistoryEntry(prompt: "Prompt \($0)", model: "fixture", usedAt: Int64($0)) }
+        #expect(RecentPromptPage(entries: entries, query: "", limit: 5).visible.count == 5)
+        #expect(RecentPromptPage(entries: entries, query: "", limit: 10).remaining == 2)
+        let search = RecentPromptPage(entries: entries, query: "  prompt 11  ", limit: 5)
+        #expect(search.visible.map(\.prompt) == ["Prompt 11"])
+        #expect(search.remaining == 0)
+        #expect(RecentPromptPage(entries: entries, query: "absent", limit: 5).visible.isEmpty)
+    }
+
+    @Test func activeSearchRemainsEditableWhenHistoryShrinks() {
+        let entries = [HistoryEntry(prompt: "New prompt", model: "fixture", usedAt: 1)]
+        let page = RecentPromptPage(entries: entries, query: "old", limit: 5)
+        #expect(page.visible.isEmpty)
+        #expect(page.showsSearch)
+        #expect(!RecentPromptPage(entries: entries, query: "", limit: 5).showsSearch)
+    }
+
     // MARK: - Clearing asks first
 
     @Test func clearingAsksFirst() async {

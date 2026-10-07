@@ -6,15 +6,16 @@ import SwiftUI
 struct QueueDetailSheet: View {
     let entry: QueueEntry
     let host: MoldHost
-    @Environment(QueueStore.self) private var queue
-    @Environment(HostStore.self) private var hosts
-    @Environment(\.dismiss) private var dismiss
+    @Environment(QueueStore.self) var queue
+    @Environment(HostStore.self) var hosts
+    @Environment(\.dismiss) var dismiss
     @State private var detail: QueueEntry?
-    @State private var progress: JobProgress?
+    @State var progress: JobProgress?
     @State private var unavailable = false
     @State private var loading = true
+    @State var showsTechnicalDetails = false
 
-    private var current: QueueEntry? { Self.current(entry, in: queue.entries(on: host.id)) }
+    var current: QueueEntry? { Self.current(entry, in: queue.entries(on: host.id)) }
     private struct DetailIdentity: Equatable {
         let host: MoldHost?
         let instance: String?
@@ -22,7 +23,7 @@ struct QueueDetailSheet: View {
         let job: String
         var state: QueueState?
     }
-    private var activeHost: MoldHost { hosts.host(host.id) ?? host }
+    var activeHost: MoldHost { hosts.host(host.id) ?? host }
     private var identity: DetailIdentity {
         DetailIdentity(host: hosts.host(host.id), instance: hosts.instanceID(of: host.id),
                        up: hosts.isUp(activeHost), job: entry.id)
@@ -38,60 +39,47 @@ struct QueueDetailSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Job Details").font(.title2.weight(.semibold))
+        VStack(spacing: 0) {
+            header
+                .padding(20)
+            Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text((current ?? entry).modelHeadline).font(.headline)
-                    Text(activeHost.name).foregroundStyle(.secondary)
-                    Text(current?.waitDescription ?? "This job is no longer in the queue.")
-                    if current?.state == .running {
-                        Text(progress?.stage ?? "Getting ready…")
-                        if let step = progress?.step, let total = progress?.total, total > 0 {
-                            Text("Step \(step) of \(total)").monospacedDigit()
-                        }
-                        if let bytes = progress?.previewData, let image = NSImage(data: bytes) {
-                            Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 280)
+                VStack(alignment: .leading, spacing: 20) {
+                    overview
+                    if current?.state == .running,
+                       let bytes = progress?.previewData, let image = NSImage(data: bytes) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Live preview").font(.headline)
+                            Image(nsImage: image).resizable().scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: 260)
                                 .accessibilityLabel("Live render preview")
                         }
                     }
-                    QueueSourceThumbnail(entry: entry, host: activeHost, size: 240)
-                    Text(entry.model ?? "Model").textSelection(.enabled)
-                    Text(entry.id).font(.caption.monospaced()).textSelection(.enabled)
                     if let metadata = detail?.metadata ?? current?.metadata ?? entry.metadata {
                         ForEach(detailGroups(metadata)) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(group.title).font(.headline)
-                                ForEach(group.rows, id: \.label) { row in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(row.label).foregroundStyle(.secondary)
-                                        Text(row.value).textSelection(.enabled)
-                                    }
-                                }
-                            }
+                            QueueDetailFacts(group: group)
                         }
                     }
-                    if loading { ProgressView("Reading job settings…") }
+                    if loading { ProgressView("Reading job settings…").controlSize(.small) }
                     if unavailable {
-                        Text("Full settings are unavailable. The current queue state remains above.")
-                            .foregroundStyle(.secondary)
-                        Button("Try Again") { Task { await load() } }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Full settings are unavailable. The current queue status is shown above.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Button("Try Again") { Task { await load() } }
+                                .help("Try loading the full settings for this job again")
+                        }
                     }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-            HStack {
-                if let current {
-                    let actions = QueueRowActions.resolve(current, on: hosts.capabilities[host.id])
-                    if actions.pause { Button("Pause") { act(.pause, current) } }
-                    if actions.resume { Button("Resume") { act(.resume, current) } }
-                    if actions.cancel { Button("Cancel Job", role: .destructive) { act(.cancel, current) } }
+                    technicalDetails
                 }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
             }
+            Divider()
+            actions
+                .padding(16)
         }
-        .padding(20)
-        .frame(width: 560, height: 620)
+        .frame(minWidth: 440, idealWidth: 580, maxWidth: 760,
+               minHeight: 440, idealHeight: 620, maxHeight: 820)
         .accessibilityIdentifier("queue-detail")
         .task(id: identity) { await load() }
         .task(id: previewIdentity) {
@@ -105,7 +93,7 @@ struct QueueDetailSheet: View {
         }
     }
 
-    private func act(_ action: QueueRow.Action, _ entry: QueueEntry) {
+    func act(_ action: QueueRow.Action, _ entry: QueueEntry) {
         Task {
             switch action {
             case .pause: await queue.pause(entry, on: host.id)

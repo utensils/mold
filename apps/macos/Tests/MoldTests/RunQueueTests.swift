@@ -25,6 +25,53 @@ struct RunQueueTests {
         return controller
     }
 
+    @Test func missingModelRefusesSubmissionVisibly() {
+        let host = machine()
+        let backend = FakeBackend(host: host)
+        let controller = makeController(backend, host: host)
+        controller.modelName = nil
+        controller.submit(on: host, backend: backend)
+        if case .failed(let message) = controller.run {
+            #expect(message.contains("model"))
+        } else {
+            Issue.record("Generate silently ignored a click with no model")
+        }
+        #expect(!backend.calls.contains("submit"))
+    }
+
+    @Test func secondClickShowsPendingUntilMachineActuallyAccepts() async {
+        let host = machine()
+        let backend = FakeBackend(host: host)
+        let controller = makeController(backend, host: host)
+        controller.run = .running(FakeFixtures.batchStatus(id: "existing", clientBatchId: "existing", [.init(1, state: "running")]), nil)
+        backend.holdsSubmit = true
+        backend.submitAnswers = [FakeFixtures.batchStatus(id: "queued", clientBatchId: "queued", [.init(1, state: "accepted")])]
+        controller.submit(on: host, backend: backend)
+        #expect(controller.submissionFeedback.isPending)
+        #expect(controller.submissionFeedback.message == "Sending to workstation…")
+        #expect(controller.queuedCount == 0)
+        await settle { backend.calls.contains("submit") }
+        #expect(controller.submissionFeedback.isPending)
+        backend.releaseSubmit()
+        await settle { controller.queuedCount == 1 }
+        #expect(controller.submissionFeedback.phase == .accepted)
+        #expect(controller.submissionFeedback.message == "Added to the generation queue on workstation.")
+        #expect(!controller.submissionFeedback.isPending)
+    }
+
+    @Test func rejectedSecondClickShowsFailureWithoutReplacingCurrentRun() async {
+        let host = machine()
+        let backend = FakeBackend(host: host)
+        let controller = makeController(backend, host: host)
+        controller.run = .running(FakeFixtures.batchStatus(id: "existing", clientBatchId: "existing", [.init(1, state: "running")]), nil)
+        backend.plantedErrors["submit"] = MoldClientError.http(status: 409, code: nil, message: "Queue unavailable")
+        controller.submit(on: host, backend: backend)
+        await settle { controller.submissionFeedback.phase == .refused }
+        #expect(controller.submissionFeedback.message?.contains("Queue unavailable") == true)
+        #expect(controller.run.isBusy)
+        #expect(controller.queuedCount == 0)
+    }
+
     // MARK: - Admitting a second batch while one runs
 
     @Test func aSecondGenerateWhileOneRunsIsAdmittedAndQueued() async {

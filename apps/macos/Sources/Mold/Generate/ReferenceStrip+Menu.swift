@@ -68,7 +68,7 @@ extension ReferenceStrip {
                 .padding(3)
                 .background(Chrome.badgeBackdrop, in: Circle())
                 .padding(3)
-                .help("Sets the canvas shape")
+                .help("Use this reference picture’s shape for the new image")
                 .accessibilityHidden(true)
         }
     }

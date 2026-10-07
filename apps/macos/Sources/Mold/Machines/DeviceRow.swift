@@ -98,6 +98,7 @@ struct DeviceRow: View {
                 .toggleStyle(.switch)
                 .disabled(!isEnabled)
                 .accessibilityLabel("Use \(title)")
+                .help("Allow new jobs to use this graphics card. Turning it off lets current work finish.")
         case .enableAtRestart:
             Button("Enable at next restart") { flip(true) }
                 .buttonStyle(.link)

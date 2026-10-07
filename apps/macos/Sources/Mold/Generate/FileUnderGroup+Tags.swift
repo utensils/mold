@@ -70,6 +70,6 @@ struct FileUnderTagsRow: View {
         .padding(.vertical, 3)
         .background(Chrome.wellFill, in: Capsule())
         .opacity(ghost ? 0.7 : 1)
-        .help(ghost ? "Added from the title -- remove to stop auto-tagging" : "Remove this tag")
+        .help(ghost ? "Remove this tag and stop adding the title as a tag" : "Remove this tag")
     }
 }
