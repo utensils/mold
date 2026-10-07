@@ -13,6 +13,14 @@ struct ConnectionSupervisor: ViewModifier {
     func body(content: Content) -> some View {
         content
             .task { await stores.becameActive() }
+            .task(id: phase) {
+                guard phase == .active else { return }
+                for await _ in NetworkRouteChanges.stream() {
+                    do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                    guard !Task.isCancelled else { return }
+                    await stores.hosts.refreshPairedRoutes()
+                }
+            }
             .onChange(of: phase) { _, new in
                 switch new {
                 case .active: Task { await stores.becameActive() }

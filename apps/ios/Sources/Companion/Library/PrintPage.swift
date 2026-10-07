@@ -13,7 +13,7 @@ struct PrintPage: View {
     var body: some View {
         switch entry.print.kind {
         case .clip: ClipPlayer(entry: entry, isSelected: isSelected)
-        case .mesh: MeshPage(entry: entry)
+        case .mesh: MeshPage(entry: entry, isSelected: isSelected)
         default: ZoomableStill(entry: entry, trashed: trashed)
         }
     }
@@ -116,6 +116,9 @@ struct ClipPlayer: View {
     @Environment(HostStore.self) private var hosts
     let entry: LibraryEntry
     let isSelected: Bool
+    @AppStorage(VideoPlaybackPreferences.autoplayKey) private var autoplay = VideoPlaybackPreferences.defaultAutoplay
+    @AppStorage(VideoPlaybackPreferences.repeatKey) private var repeats = VideoPlaybackPreferences.defaultRepeat
+    @Environment(\.scenePhase) private var scenePhase
     @State private var player: AVPlayer?
     @State private var problem: String?
 
@@ -136,6 +139,18 @@ struct ClipPlayer: View {
             else { ClipPlayback.sync(player, isSelected: false) }
         }
         .onDisappear { ClipPlayback.sync(player, isSelected: false) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { player?.pause() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard repeats, isSelected, scenePhase == .active, let player,
+                  let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
+            Task { @MainActor in
+                await player.seek(to: .zero)
+                guard repeats, isSelected, scenePhase == .active, player.currentItem === item else { return }
+                player.play()
+            }
+        }
     }
 
     private func load() async {
@@ -165,7 +180,7 @@ struct ClipPlayer: View {
         if let player { player.replaceCurrentItem(with: item) } else { player = AVPlayer(playerItem: item) }
         if let time { await player?.seek(to: time) }
         guard !Task.isCancelled, isSelected else { player?.pause(); return }
-        ClipPlayback.sync(player, isSelected: true)
+        if autoplay || reminted { ClipPlayback.sync(player, isSelected: true) }
         for await status in item.publisher(for: \.status).values where status == .failed {
             guard !Task.isCancelled else { return }
             guard !reminted else {

@@ -48,6 +48,13 @@ struct RootView: View {
             LicenseSheet(pending: pending)
         }
         .task { await hosts.refreshAll() }
+        .task {
+            for await _ in NetworkRouteChanges.stream() {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                guard !Task.isCancelled else { return }
+                await hosts.refreshPairedRoutes()
+            }
+        }
         // Shelves and their counts belong to the shell, regardless of which
         // destination opens first. Keep this independent of host probes so
         // an unreachable machine cannot postpone reading reachable ones.

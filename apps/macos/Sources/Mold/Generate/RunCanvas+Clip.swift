@@ -23,7 +23,6 @@ extension RunCanvas {
             show(.unavailable(error.failureSentence))
             return
         }
-        player.play()
         show(.clip(player))
 
         guard let item = player.currentItem else { return }

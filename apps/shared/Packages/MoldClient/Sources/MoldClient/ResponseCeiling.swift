@@ -33,6 +33,14 @@ public enum ResponseCeiling {
         return data
     }
 
+    /// File-backed media avoids buffering a large download before its size is
+    /// known. Call off the main actor; the caller owns and removes the file.
+    public static func readFile(_ file: URL, ceiling: Int, what: String) throws -> Data {
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= ceiling else { throw Exceeded(bytes: size, ceiling: ceiling, what: what) }
+        return try checked(Data(contentsOf: file, options: .mappedIfSafe), ceiling: ceiling, what: what)
+    }
+
     public struct Exceeded: LocalizedError, Hashable, Sendable {
         public let bytes: Int
         public let ceiling: Int

@@ -28,6 +28,13 @@ struct QueueDetailSheet: View {
                         }
                     } else { Text("This job is no longer in the queue.").foregroundStyle(.secondaryText) }
                 }
+                if current?.state == .running, let bytes = queue.progress[entry.id]?.previewData,
+                   let image = UIImage(data: bytes) {
+                    Section {
+                        Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320)
+                            .accessibilityLabel("Live render preview")
+                    } header: { SectionHeader("Rendering preview") }
+                }
                 if let bytes = queue.sourceThumbnail(for: entry, on: host.id), let image = UIImage(data: bytes) {
                     Section {
                         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 240)
@@ -47,7 +54,7 @@ struct QueueDetailSheet: View {
                     Text(entry.id).font(.caption).textSelection(.enabled)
                 } header: { SectionHeader("Model and job identity") }
                 if let metadata = detail?.metadata ?? current?.metadata ?? entry.metadata {
-                    ForEach(PrintDetails.groups(for: metadata)) { group in
+                    ForEach(detailGroups(metadata)) { group in
                         Section {
                             ForEach(group.rows, id: \.label) { row in
                                 VStack(alignment: .leading, spacing: 4) {
@@ -70,6 +77,13 @@ struct QueueDetailSheet: View {
             .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") { await load() }
         }
         .presentationDetents([.large])
+    }
+
+    private func detailGroups(_ metadata: OutputMetadata) -> [PrintDetailGroup] {
+        var displaying = current ?? entry
+        displaying.metadata = metadata
+        if let pinned = detail?.seedPinned { displaying.seedPinned = pinned }
+        return PrintDetails.groups(for: displaying)
     }
 
     private func load() async {

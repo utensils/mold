@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { inputImageFacts, normalizeInputImage } from "@studio/lib/inputImage";
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IdentityPhotoWell from "@studio/components/IdentityPhotoWell.vue";
@@ -9,7 +10,6 @@ import {
   ingestMobileIdentityPhoto,
   mobileIdentityBudgetBytes,
   mobileIdentityFileRefusal,
-  mobileIdentityFileSizeRefusal,
   mobileIdentityMimeType,
 } from "./identity";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
@@ -46,15 +46,7 @@ async function onFile(file: File): Promise<void> {
     ingestError.value = refused;
     return;
   }
-  // Size is judged from the File itself, BEFORE it is read: a phone has no
-  // room to spare, and reading a 40 MP photo into a base64 string only to
-  // refuse it is exactly the allocation this check exists to avoid.
   const budget = mobileIdentityBudgetBytes(props.form);
-  const tooLarge = mobileIdentityFileSizeRefusal(file.size, budget);
-  if (tooLarge) {
-    ingestError.value = tooLarge;
-    return;
-  }
   let base64: string;
   try {
     base64 = await fileToBase64(file);
@@ -62,7 +54,10 @@ async function onFile(file: File): Promise<void> {
     ingestError.value = "Couldn’t read that photo.";
     return;
   }
-  const result = ingestMobileIdentityPhoto({ filename: file.name, base64 }, budget);
+  const result = ingestMobileIdentityPhoto(
+    { ...inputImageFacts(base64, file.name), base64 },
+    budget,
+  );
   if (!result.ok) {
     ingestError.value = result.error;
     return;
@@ -97,11 +92,6 @@ async function pickNativeIdentity(source: "library" | "camera"): Promise<void> {
       return;
     }
     const budget = mobileIdentityBudgetBytes(props.form);
-    const tooLarge = mobileIdentityFileSizeRefusal(picked.sizeBytes, budget);
-    if (tooLarge) {
-      ingestError.value = tooLarge;
-      return;
-    }
     const refused = mobileIdentityFileRefusal({
       name: picked.filename,
       type: picked.mimeType ?? "",
@@ -111,7 +101,7 @@ async function pickNativeIdentity(source: "library" | "camera"): Promise<void> {
       return;
     }
     const result = ingestMobileIdentityPhoto(
-      { filename: picked.filename, base64: picked.dataB64 },
+      await normalizeInputImage(picked.dataB64, picked.filename),
       budget,
     );
     if (!result.ok) {

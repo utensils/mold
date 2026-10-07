@@ -9,6 +9,7 @@ import {
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import { fileToBase64, isStillImageFile } from "../../lib/image";
+import { inputImageFacts } from "@studio/lib/inputImage";
 import { identityConditioningValidationError } from "../../lib/generateValidation";
 
 /**
@@ -74,7 +75,7 @@ async function onFile(file: File) {
     ingestError.value = "Couldn't read the image.";
     return;
   }
-  stage(file.name || "identity photo", base64);
+  stage(inputImageFacts(base64, file.name || "identity photo").filename, base64);
 }
 
 /** One admission for every road in: the server's own header-only pre-checks

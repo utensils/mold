@@ -12,6 +12,10 @@ struct PictureWells: View {
         let mode = SourceImageMode(references: references)
         let readsSource = Self.showsSourceWell(capabilities: caps, mode: mode)
         VStack(alignment: .leading, spacing: 8) {
+            if generate.draft.media.parked.sourceImage != nil || !generate.draft.media.parked.editImages.isEmpty {
+                Text("Some attached pictures are kept for another model. Switch back to restore them.")
+                    .font(.caption).foregroundStyle(.secondaryText)
+            }
             if readsSource || references != nil {
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 10) {

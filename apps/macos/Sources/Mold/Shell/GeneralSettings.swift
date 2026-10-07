@@ -17,6 +17,10 @@ struct GeneralSettings: View {
     private var capMegabytes = PrintMaterializer.defaultCapMegabytes
     @Environment(PrintMaterializer.self) private var materializer
     @Environment(ThumbnailCache.self) private var thumbnails
+    @AppStorage(VideoPlaybackPreferences.autoplayKey, store: AppStorageSuite.defaults)
+    private var autoplay = VideoPlaybackPreferences.defaultAutoplay
+    @AppStorage(VideoPlaybackPreferences.repeatKey, store: AppStorageSuite.defaults)
+    private var repeats = VideoPlaybackPreferences.defaultRepeat
     @State private var used = 0
     @State private var pendingReset: Destruction?
 
@@ -47,6 +51,10 @@ struct GeneralSettings: View {
                 Text("Only while Mold is in the background. Coming back to the app clears the badge.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("Video Playback") {
+                Toggle("Play videos automatically", isOn: $autoplay)
+                Toggle("Repeat videos", isOn: $repeats)
             }
             // Release builds offer channel selection and a quick check;
             // development builds explain why updates are unavailable.

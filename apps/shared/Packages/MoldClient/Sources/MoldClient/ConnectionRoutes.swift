@@ -133,10 +133,12 @@ public enum ConnectionRoutes {
         func priority(_ kind: ConnectionEndpoint.Kind) -> Int {
             switch kind { case .lan: 0; case .tailscale: 1; case .relay: 2 }
         }
-        let preferredIndex = preferred.flatMap { route in valid.first { candidates[$0].url == route } }
-        guard let winner = preferredIndex ?? valid.min(by: {
+        guard let winner = valid.min(by: {
             let a = priority(candidates[$0].kind), b = priority(candidates[$1].kind)
-            return a == b ? $0 < $1 : a < b
+            if a != b { return a < b }
+            if candidates[$0].url == preferred { return true }
+            if candidates[$1].url == preferred { return false }
+            return $0 < $1
         }), let url = URL(string: candidates[winner].url) else {
             throw URLError(.cannotConnectToHost)
         }

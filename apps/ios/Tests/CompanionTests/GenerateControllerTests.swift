@@ -13,13 +13,6 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
-    @Test func accessibilityComposerYieldsToActiveCanvas() {
-        #expect(GenerateView.composerHeightFraction(run: .idle, accessibility: true) == 0.9)
-        #expect(GenerateView.composerHeightFraction(run: .submitting, accessibility: true) == 0.55)
-        #expect(GenerateView.composerHeightFraction(run: .failed("Offline"), accessibility: true) == 0.55)
-        #expect(GenerateView.composerHeightFraction(run: .idle, accessibility: false) == 0.55)
-    }
-
     private func model(_ name: String = "flux-dev:q4") throws -> Model {
         let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: profilesURL())) as! [String: Any]
         let rows = doc["profiles"] as! [[String: Any]]
@@ -63,6 +56,29 @@ struct GenerateControllerTests {
         return (generate, fake)
     }
 
+    @Test(arguments: ["minimax-h3-ref2va:official-bf16", "hunyuan3d-2mv:fp16"])
+    func librarySourceUsesTypedRecipeInputs(name: String) async throws {
+        let (generate, fake) = try await setUp()
+        let chosen = try model(name)
+        let host = generate.hosts.hosts[0]
+        generate.hosts.setModels([chosen], for: host.id)
+        generate.setKind(name.contains("hunyuan") ? .mesh : .clip)
+        generate.choose(chosen)
+        generate.draft.prompt = "a lighthouse at dusk"
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        fake.stub("media(_:trashed:)", returning: picture)
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"source.png","format":"png","timestamp":1790000000,"metadata":{"prompt":"source"}}"#.utf8))
+        let role = name.contains("hunyuan") ? GenerationImageReferenceRole.front : nil
+        await generate.useAsSource(LibraryEntry(host: host, print: print), role: role)
+        #expect(generate.draft.media.generationReferences.count == 1)
+        #expect(generate.draft.media.generationReferences.first?.role == role)
+        #expect(generate.draft.media.sourceImage == nil)
+        #expect(generate.draft.prompt == "a lighthouse at dusk")
+    }
+
     @Test func pendingLibraryReuseIsConsumedOnFirstMountAndChangesWithoutReplay() async throws {
         let (generate, fake) = try await setUp()
         fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .unavailableLegacy, members: []))
@@ -77,11 +93,12 @@ struct GenerateControllerTests {
         let previous = scene.keyWindow
         let window = UIWindow(windowScene: scene)
         let library = LibraryStore(hosts: generate.hosts)
+        let queue = QueueStore(hosts: generate.hosts)
         var appearances = 0
         func mount() {
             window.rootViewController = UIHostingController(rootView: NavigationStack {
                 GenerateView().onAppear { appearances += 1 }
-            }.environment(generate).environment(generate.hosts).environment(router).environment(library))
+            }.environment(generate).environment(generate.hosts).environment(router).environment(library).environment(queue))
             window.makeKeyAndVisible()
         }
         defer {

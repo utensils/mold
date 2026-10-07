@@ -29,7 +29,10 @@ import {
   sourceFitHelp,
 } from "@studio/lib/sourceFit";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
-import { blobToBase64 } from "../../lib/base64";
+import {
+  inputImageBase64 as blobToBase64,
+  inputImageFacts,
+} from "@studio/lib/inputImage";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   imageInputFormatsSentence,
@@ -254,11 +257,11 @@ async function fileToSourceImage(
   uploadError.value = null;
   return {
     kind: "upload",
-    filename: file.name,
+    filename: inputImageFacts(base64, file.name).filename,
     base64,
     width: dimensions.width,
     height: dimensions.height,
-    mime: file.type || null,
+    mime: inputImageFacts(base64, file.name).mimeType,
   };
 }
 
@@ -268,6 +271,7 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
   if (slot === "source") {
     // Every newly selected source starts from the shared crop-fill policy.
     patch({
+      maskImage: null,
       imageAttachments:
         plan.value.kind === "attachments"
           ? [image, ...props.modelValue.imageAttachments.slice(1)]

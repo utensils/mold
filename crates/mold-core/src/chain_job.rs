@@ -302,12 +302,13 @@ impl ChainJobManifest {
     /// `request_json` (canonical JSON). `ephemeral` defaults to false;
     /// shim callers set the pub field directly.
     pub fn new(job_id: String, created_at_unix_ms: u64, request: &ChainRequest) -> Result<Self> {
-        let request_json = serde_json::to_string(request).map_err(|e| {
+        let mut request = request.clone();
+        let base_seed = request.materialize_seed();
+        let request_json = serde_json::to_string(&request).map_err(|e| {
             MoldError::Other(anyhow::anyhow!(
                 "chain job request JSON serialise failed: {e}"
             ))
         })?;
-        let base_seed = request.seed.unwrap_or(0);
         let stage_status = request
             .stages
             .iter()
@@ -966,6 +967,43 @@ mod tests {
         assert!(!ChainJobState::Failed.is_terminal());
         assert!(ChainJobState::Completed.is_terminal());
         assert!(!ChainJobState::Cancelled.is_terminal());
+    }
+
+    #[test]
+    fn new_manifest_resolves_random_seed_and_persists_stage_authority() {
+        let mut request = sample_request();
+        request.seed = None;
+        let first = ChainJobManifest::new("random-one".into(), 1, &request).unwrap();
+        let second = ChainJobManifest::new("random-two".into(), 1, &request).unwrap();
+        let seed = first
+            .request()
+            .unwrap()
+            .seed
+            .expect("random seed resolved at creation");
+        assert_ne!(Some(seed), second.request().unwrap().seed);
+        for (status, stage) in first.stage_status.iter().zip(&request.stages) {
+            assert_eq!(status.seed, effective_stage_seed(seed, stage.seed_offset));
+        }
+        assert_eq!(
+            ChainJobManifest::from_toml(&first.to_toml().unwrap())
+                .unwrap()
+                .request()
+                .unwrap()
+                .seed,
+            Some(seed)
+        );
+        assert_eq!(request.seed, None);
+    }
+
+    #[test]
+    fn new_manifest_preserves_explicit_zero_seed() {
+        let mut request = sample_request();
+        request.seed = Some(0);
+        let manifest = ChainJobManifest::new("zero".into(), 1, &request).unwrap();
+        assert_eq!(manifest.request().unwrap().seed, Some(0));
+        for (status, stage) in manifest.stage_status.iter().zip(&request.stages) {
+            assert_eq!(status.seed, effective_stage_seed(0, stage.seed_offset));
+        }
     }
 
     #[test]

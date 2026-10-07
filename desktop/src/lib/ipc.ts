@@ -9,6 +9,8 @@ import type {
 import type { GalleryImage, OutputMetadata } from "./api/types";
 import type { ApiTarget } from "./api/client";
 import type { DesktopImageImport } from "./desktopImageDrop";
+import { normalizeInputImage } from "@studio/lib/inputImage";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import type { NotificationAction } from "./notificationAction";
 import type { ThemeId } from "./theme";
 
@@ -394,9 +396,15 @@ export const ipc = {
     return invoke<ArrayBuffer | ArrayLike<number>>("fetch_gallery_media", { target, filename });
   },
   /** Read a native OS-dropped PNG/JPEG plus any embedded Mold metadata. */
-  importSourceImage(path: string): Promise<DesktopImageImport> {
+  async importSourceImage(path: string): Promise<DesktopImageImport> {
     if (!inTauri()) return Promise.reject(new Error("Native file drops require the desktop app."));
-    return invoke<DesktopImageImport>("import_source_image", { path });
+    const original = await invoke<DesktopImageImport>("import_source_image", { path });
+    const normalized = await normalizeInputImage(original.base64, original.filename);
+    const dimensions = imageDimensionsFromBase64(normalized.base64);
+    const result = { ...original, ...normalized, ...dimensions };
+    // An original-file content key must not identify transformed bytes.
+    if (original.base64 !== normalized.base64) delete result.sha256;
+    return result;
   },
   /**
    * Open the platform file picker for still-image conditioning inputs. The
@@ -414,9 +422,7 @@ export const ipc = {
     });
     if (!picked) return null;
     const paths = Array.isArray(picked) ? picked : [picked];
-    return Promise.all(
-      paths.map((path) => invoke<DesktopImageImport>("import_source_image", { path })),
-    );
+    return Promise.all(paths.map((path) => ipc.importSourceImage(path)));
   },
   /** Mirror a library print together with its authoritative retained sources. */
   async mirrorGalleryPrint(

@@ -178,12 +178,15 @@ overlay register calls top acts on either.
   uses the platform Photo Picker (with the document picker fallback before API
   33), and **Take photo** uses a temporary FileProvider content URI. Neither
   path asks for broad photo-library access. Android resolves provider size
-  metadata and refuses anything over 16 MiB before opening the byte stream; the
+  metadata and samples oversized photos before decoding, applies JPEG orientation,
+  and proportionally bounds input images to 4096 px and 2 MiB while preserving
+  transparency; the
   system back gesture closes the source sheet without changing the draft. The
   gallery escape hatch the source wells offer is deliberately absent, because
   a gallery print is a render, not a reference photograph. The bytes travel
-  VERBATIM: an identity photo is never routed
-  through source-fit preprocessing and carries no `source_fit` provenance. A
+  without canvas fitting: an identity photo is never routed through source-fit
+  preprocessing and carries no `source_fit` provenance. Small photos keep their
+  original bytes. A
   photo staged before a capability-losing model switch is PARKED — retained in
   the form, kept off the wire by `buildRequest`, Develop still enabled — and
   the well returns with it when a qualified checkpoint is selected again.

@@ -42,7 +42,8 @@ extension QueuePane {
                 canMoveUp: canReorder && QueueBatchRow.canMove(group, .up, in: groups),
                 canMoveDown: canReorder && QueueBatchRow.canMove(group, .down, in: groups),
                 moveUp: { moveBatch(group, .up, host: host, groups: groups, entries: entries) },
-                moveDown: { moveBatch(group, .down, host: host, groups: groups, entries: entries) })
+                moveDown: { moveBatch(group, .down, host: host, groups: groups, entries: entries) },
+                inspect: { detailTarget = QueueDetailTarget(entry: $0, host: host) })
         } else {
             let entry = group.rows[0]
             if entry.state == .held, let hold = queue.hold(for: entry, on: host.id) {
@@ -52,7 +53,8 @@ extension QueuePane {
                     tryAgain: { act(.retry, on: entry, host: host) },
                     moveToDestinations: transfers.transferDestinations(from: host.id),
                     moveTo: { moveTo(entry, from: host, to: $0) },
-                    cancel: { act(.cancel, on: entry, host: host) })
+                    cancel: { act(.cancel, on: entry, host: host) },
+                    inspect: { detailTarget = QueueDetailTarget(entry: entry, host: host) })
             } else {
                 let reorderable = canReorder && entry.state.isReorderable
                 QueueRow(
@@ -63,6 +65,7 @@ extension QueuePane {
                     canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
                     moveUp: { move(entry.id, .up, host: host, entries: entries) },
                     moveDown: { move(entry.id, .down, host: host, entries: entries) },
+                    inspect: { detailTarget = QueueDetailTarget(entry: entry, host: host) },
                     act: { act($0, on: entry, host: host) })
             }
         }

@@ -39,6 +39,29 @@ struct PictureImportTests {
         #expect(PictureImport.pixelSize(of: picked.data)?.width == 8)
     }
 
+    @Test func anOversizedReadableImageIsDownsampledWithoutCropping() throws {
+        let context = try #require(CGContext(data: nil, width: 4200, height: 2100, bitsPerComponent: 8,
+                                             bytesPerRow: 4200 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(red: 1, green: 0, blue: 0, alpha: 0.5)
+        context.fill(CGRect(x: 0, y: 0, width: 4200, height: 2100))
+        let image = try #require(context.makeImage())
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let picked = try PictureImport.conform(data as Data, name: "large.png", accepting: PictureImport.engineReadable)
+        let size = try #require(PictureImport.pixelSize(of: picked.data))
+        #expect(size.width <= 4096)
+        #expect(abs(Double(size.width) / Double(size.height) - 2) < 0.01)
+        #expect(picked.data != data as Data)
+        #expect(picked.data.count <= 2 * 1024 * 1024)
+        #expect(Data(base64Encoded: picked.encoded) == picked.data)
+        let source = try #require(CGImageSourceCreateWithData(picked.data as CFData, nil))
+        let resized = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        #expect(resized.alphaInfo != .none)
+    }
+
     @Test func somethingThatIsNotAPictureIsRefusedByName() {
         #expect(throws: PictureImportError.self) {
             try PictureImport.conform(Data("hello".utf8), name: "notes.txt", accepting: PictureImport.engineReadable)

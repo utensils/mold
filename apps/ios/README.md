@@ -19,7 +19,7 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
 | Queue             | Every machine's work; held jobs in words with Pull and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                                 |
 | Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
-| Away from the app | Live Activity with Stop, local notifications, background refresh, widgets, Share extension                                                                                                                                              |
+| Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                                          |
 
 A render notification opens its finished print when the app is in the background
 or closed. Notification activation and its system completion callback run on the
@@ -31,7 +31,7 @@ On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
 The prompt stays in one scrollable form as the keyboard and text size change;
-Generate stays visible above the phone tabs.
+Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
 The model search sheet keeps a Close action visible when its keyboard is open.
 More Options gives Shape, Steps, Batch and Length their own rows, including at
 large accessibility text sizes. Clip and 3-D drafts restore their kind after
@@ -54,10 +54,18 @@ Its cached listing and images load before
 the machines respond. Closing a print restores the exact viewport, including
 partially visible tiles. Scrolling uses cached gallery projections and the viewer
 loads only nearby pages, so large libraries stay responsive. Clips play
-automatically only while their page is selected in the viewer. Settings is available from Generate, Library and Machines;
+only while their page is selected in the viewer. Settings → Video Playback controls autoplay (on initially) and repeat (off initially); leaving the viewer or backgrounding pauses playback. Settings is available from Generate, Library and Machines;
 Library settings show image storage against its limit and saved listing size,
 offer offline thumbnail saving, and
 can clear both pictures and saved listings after explaining the offline effect.
+
+### Sources and large pictures
+
+Library tiles and the picture viewer’s More menu offer **Use as Source** without replacing the prompt or model. Reference-only recipes receive a reference; named camera views ask which role to fill. Choose from Library searches the merged gallery, with an All Machines or individual-machine filter. Switching models preserves explicit attachments; incompatible source/reference pictures are disclosed as parked until a compatible recipe is selected.
+
+Oversized new still inputs are proportionally reduced to at most 4096 pixels per axis and 2 MiB, applying orientation and preserving transparency. Smaller compatible inputs keep their bytes. Replacing a source clears its old mask; retained source/mask pairs and exported originals remain unchanged. Fresh drafts use Random; a deliberately locked seed of zero remains valid.
+
+Paired connections prefer a verified LAN endpoint over Tailscale and HTTPS relay, including after network changes. 3-D downloads use a temporary file and size check before decoding; only the selected viewer page loads a mesh, and failures offer Retry.
 
 ### Reusing retained source media
 
@@ -92,6 +100,7 @@ UI tests make one complete pass, then retry only identified failed methods once
 <!-- Temporary owner-directed build-first delivery, 2026-10-06: hosted
 accessibility matrix disabled; local tests remain available and CI compiles the
 native app/shared packages for Simulator instead of running test/lint lanes. -->
+
 in a fresh `xcodebuild` process. The runner reads public `xcresulttool` test JSON
 and verifies that every requested retry actually ran and passed; incomplete
 reports and infrastructure failures fail the audit. Original and retry logs
@@ -283,3 +292,5 @@ original media uses the same file destinations. Turntables expose frame count,
 size, FPS and transparency; geometry controls follow the host's per-format
 size/up-axis/origin defaults. Persistent filenames gain a numbered suffix on
 collision. Temporary files stay alive until system delivery finishes.
+
+Local validation and qualification limits: [native acceptance record](../../docs/uat/native-authoring-media.md).

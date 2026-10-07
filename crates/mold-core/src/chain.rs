@@ -205,6 +205,7 @@ pub struct ChainRequest {
 
     /// Chain base seed. Every stage uses it unchanged unless that authored
     /// stage supplies a `seed_offset`, which is XORed into the base seed.
+    /// Omission resolves to a random seed once at creation; explicit zero stays fixed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
     pub seed: Option<u64>,
@@ -800,6 +801,16 @@ pub fn text_only_auto_chain_refusal(
 }
 
 impl ChainRequest {
+    /// Resolve an omitted seed once before dispatch or persistence. Explicit zero is fixed.
+    pub fn materialize_seed(&mut self) -> u64 {
+        *self.seed.get_or_insert_with(|| {
+            // UUIDv4 already uses OS entropy. XOR its independently random halves
+            // so the UUID version/variant bits do not fix any seed bits.
+            let (high, low) = uuid::Uuid::new_v4().as_u64_pair();
+            high ^ low
+        })
+    }
+
     /// Canonicalize raw prompt text at one chain ingress. Callers that forward
     /// an already-canonical request must protect backslashes on that wire hop
     /// instead of applying this method twice.

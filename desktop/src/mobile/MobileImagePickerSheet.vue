@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { inputImageBase64, inputImageFacts } from "@studio/lib/inputImage";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useMobileBack } from "./useMobileBack";
@@ -7,7 +8,7 @@ import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
 import { galleryMediaPath } from "../lib/gallery/media";
 import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
-import { blobToBase64, fileToBase64, isStillImageFile } from "../lib/image";
+import { fileToBase64, isStillImageFile } from "../lib/image";
 
 export interface MobilePickedImage {
   filename: string;
@@ -193,18 +194,24 @@ async function chooseFile(event: Event): Promise<void> {
     error.value = "That image is empty.";
     return;
   }
-  if (selected.reduce((total, file) => total + file.size, 0) > props.maxBytes) {
-    error.value = props.oversizeMessage;
-    return;
-  }
   error.value = "";
   const generation = selectionGeneration;
   picking.value = true;
   try {
     const picked = await Promise.all(
-      selected.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })),
+      selected.map(async (file) => {
+        const base64 = await fileToBase64(file);
+        return { base64, ...inputImageFacts(base64, file.name) };
+      }),
     );
     if (!selectionCurrent(generation)) return;
+    if (
+      picked.reduce((total, image) => total + Math.floor((image.base64.length * 3) / 4), 0) >
+      props.maxBytes
+    ) {
+      error.value = props.oversizeMessage;
+      return;
+    }
     if (props.multiple) emit("pick-many", picked);
     else emit("pick", picked[0]!);
     emit("close");
@@ -249,18 +256,15 @@ async function emitGalleryEntries(selected: MobileGalleryEntry[]): Promise<void>
         { signal: controller.signal },
       );
       if (!selectionCurrent(generation)) return;
-      const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
-      if (Number.isFinite(declared) && totalBytes + declared > props.maxBytes) {
-        throw new Error(props.oversizeMessage);
-      }
       const blob = await response.blob();
       if (!selectionCurrent(generation)) return;
       if (blob.size === 0) throw new Error("That gallery image is empty.");
-      totalBytes += blob.size;
+      const base64 = await inputImageBase64(blob);
+      totalBytes += Math.floor((base64.length * 3) / 4);
       if (totalBytes > props.maxBytes) throw new Error(props.oversizeMessage);
       picked.push({
-        filename: entry.image.filename,
-        base64: await blobToBase64(blob),
+        filename: inputImageFacts(base64, entry.image.filename).filename,
+        base64,
       });
     }
     if (!selectionCurrent(generation)) return;

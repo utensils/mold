@@ -5,6 +5,7 @@ public struct QueueEntry: Codable, Hashable, Sendable, Identifiable {
     public let id: String
     public let model: String?
     public var metadata: OutputMetadata? = nil
+    public var seedPinned: Bool? = nil
     public var modelDisplayName: String? = nil
     public var modelHeadline: String { modelDisplayName ?? model ?? "Model" }
     public let state: QueueState

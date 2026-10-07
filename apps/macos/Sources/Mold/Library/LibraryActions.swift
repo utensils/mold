@@ -37,6 +37,7 @@ struct LibraryActions {
     /// -- so the ones that have any ASK before converting. Absent in contexts
     /// with nowhere to put a sheet, where the host's own defaults are used.
     var meshExport: ((MeshExportPrompt) -> Void)?
+    var videoExport: ((VideoExportPrompt) -> Void)?
 
     /// Moved to `Shell/Destruction.swift` (M5 S5, decision 12) so the Models
     /// pane can raise the same confirm without depending on a Library type.

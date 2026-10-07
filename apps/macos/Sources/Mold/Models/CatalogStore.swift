@@ -26,7 +26,9 @@ final class CatalogStore {
         /// so far -- reset wholesale on a fresh search, appended to by
         /// `more(on:)`.
         var entries: [CatalogEntry] = []
+        var revision = UUID()
         var isSearching = false
+        var isLoadingMore = false
         var searchTask: Task<Void, Never>?
         var credentials: CatalogCredentialStatus?
     }
@@ -92,8 +94,11 @@ final class CatalogStore {
     func search(on host: MoldHost.ID) {
         byHost[host, default: HostState()].searchTask?.cancel()
         guard let client = hosts.backend(for: host) else { return }
+        let revision = UUID()
+        byHost[host, default: HostState()].revision = revision
         let query = byHost[host]?.query ?? CatalogQuery(includeNSFW: false)
         byHost[host, default: HostState()].isSearching = true
+        byHost[host]?.isLoadingMore = false
         byHost[host]?.searchTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
@@ -103,7 +108,7 @@ final class CatalogStore {
                 // A later filter change may have moved this host's query on
                 // while this was in flight -- an answer to a stale question
                 // must not overwrite what is now asked for.
-                guard self.byHost[host]?.query == query else { return }
+                guard !Task.isCancelled, self.byHost[host]?.revision == revision else { return }
                 self.byHost[host]?.listing = listing
                 self.byHost[host]?.entries = listing.entries
                 self.byHost[host]?.isSearching = false
@@ -111,6 +116,7 @@ final class CatalogStore {
             } catch is CancellationError {
                 // Superseded by a later filter change, not a failed request.
             } catch {
+                guard !Task.isCancelled, self.byHost[host]?.revision == revision else { return }
                 self.byHost[host]?.isSearching = false
                 self.hosts.report(error, on: host, doing: "search the catalog")
             }
@@ -121,11 +127,14 @@ final class CatalogStore {
     func more(on host: MoldHost.ID) async {
         guard let client = hosts.backend(for: host), var state = byHost[host], let listing = state.listing
         else { return }
-        guard state.entries.count < listing.total else { return }
+        guard !state.isSearching, !state.isLoadingMore, state.entries.count < listing.total else { return }
+        byHost[host]?.isLoadingMore = true
+        defer { if byHost[host]?.revision == state.revision { byHost[host]?.isLoadingMore = false } }
         var next = state.query
         next.page = listing.page + 1
         do {
             let page = try await client.searchCatalog(next)
+            guard !Task.isCancelled, byHost[host]?.revision == state.revision else { return }
             state.entries += page.entries
             state.listing = page
             state.query = next

@@ -155,6 +155,9 @@ current platform support.
 notarized, self-updating through Sparkle, with mold's own Metal engine built
 in, and it talks to any `mold serve` on your network too. Generate, a merged
 multi-machine Library, Queue, Models and Machines, all in one native window.
+Queue jobs open into details and live previews; Discover starts with manifest models.
+Native playback settings control autoplay/repeat, and oversized GUI input pictures
+are fitted automatically while library originals remain unchanged.
 The Generate controls stay at the bottom; the Library can create a collection
 from selected prints and hide collection members from general browsing across
 all their machine copies. The native iOS companion shares collection hiding.

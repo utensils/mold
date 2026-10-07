@@ -2,6 +2,13 @@ import Foundation
 import MoldClient
 
 extension HostStore {
+    func refreshPairedRoutes() async {
+        for host in hosts where ConnectionRoutes.supportsAutomaticRouting(host.apiKey ?? "") {
+            guard !Task.isCancelled else { return }
+            await refresh(host)
+        }
+    }
+
     func applyConnection(_ updated: MoldHost, expectedURL: URL? = nil) {
         guard var current = host(updated.id), current.apiKey == updated.apiKey,
               expectedURL.map({ $0 == current.baseURL }) ?? true else { return }

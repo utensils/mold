@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { galleryMediaPath } from "../../lib/gallery/media";
 import { readGalleryMediaBase64 } from "../../lib/gallery/sourceMedia";
+import { inputImageFacts, normalizeInputImage } from "@studio/lib/inputImage";
 import { fileToBase64, isStillImageGalleryItem } from "../../lib/image";
 import {
   fileMatchesImageInputFormats,
@@ -327,7 +328,10 @@ async function ingestFiles(files: File[]) {
   const selected = props.multiple ? images : images.slice(0, 1);
   if (!selected.length) return;
   const picked = await Promise.all(
-    selected.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })),
+    selected.map(async (file) => {
+      const base64 = await fileToBase64(file);
+      return { base64, ...inputImageFacts(base64, file.name) };
+    }),
   );
   emit("pick", picked);
   emit("close");
@@ -393,10 +397,9 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
   error.value = null;
   try {
     const picked = await Promise.all(
-      entries.map(async (entry) => ({
-        filename: entry.item.filename,
-        base64: await readGalleryMediaBase64(entry, gallery),
-      })),
+      entries.map(async (entry) =>
+        normalizeInputImage(await readGalleryMediaBase64(entry, gallery), entry.item.filename),
+      ),
     );
     emit("pick", picked);
     emit("close");

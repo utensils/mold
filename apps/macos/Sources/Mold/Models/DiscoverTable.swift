@@ -15,15 +15,21 @@ struct DiscoverTable: View {
     // Not `private`: `DiscoverTable+Cells.swift` reads both, and `private`
     // does not cross a file boundary even within one type.
     @Environment(DownloadStore.self) var downloads
+    @Environment(ModelStore.self) var models
+    @State var browsingCatalog = false
+    @State private var loadingMore = false
     @State private var selection: CatalogEntry.ID?
     @State var detailEntry: CatalogEntry?
 
-    private var capabilities: Capabilities? { hosts.capabilities[host.id] }
+    var capabilities: Capabilities? { hosts.capabilities[host.id] }
     private var entries: [CatalogEntry] { catalog.entries(on: host.id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            filters
+            if capabilities?.canBrowseCatalog == true { filters }
+            if showsFeatured {
+                featured
+            } else {
             if let note = Self.providerNote(catalog.providerErrors(on: host.id)) {
                 Text(note).font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 12).padding(.top, 4)
@@ -34,13 +40,19 @@ struct DiscoverTable: View {
                 table
                 if catalog.hasMore(on: host.id) { loadMore }
             }
+            }
         }
         .task(id: host.id) {
             catalog.adopt(host.id, sortOptions: capabilities?.catalogSortOptions ?? [])
-            if catalog.entries(on: host.id).isEmpty { catalog.search(on: host.id) }
-            await catalog.loadCredentials(on: host.id)
+            browsingCatalog = false
+            if capabilities?.canBrowseCatalog == true {
+                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { catalog.setText(searchText, on: host.id) }
+                await catalog.loadCredentials(on: host.id)
+            }
         }
-        .onChange(of: searchText) { _, text in catalog.setText(text, on: host.id) }
+        .onChange(of: searchText) { _, text in
+            if capabilities?.canBrowseCatalog == true { catalog.setText(text, on: host.id) }
+        }
         .onChange(of: selection) { _, id in detailEntry = entries.first { $0.id == id } }
         .sheet(item: $detailEntry) { entry in CatalogDetailSheet(entry: entry, host: host) }
     }
@@ -71,13 +83,21 @@ struct DiscoverTable: View {
     private var filters: some View {
         let query = catalog.query(on: host.id)
         return HStack(spacing: 8) {
+            if !showsFeatured {
+                Button("Featured Models") {
+                    browsingCatalog = false
+                    searchText = ""
+                    catalog.setText("", on: host.id)
+                    catalog.setFamily(nil, on: host.id)
+                }.buttonStyle(.bordered)
+            }
             Picker("Family", selection: Binding(get: { query.family }, set: { catalog.setFamily($0, on: host.id) })) {
                 Text("Any").tag(String?.none)
                 ForEach(capabilities?.catalogFamilies ?? [], id: \.self) { Text($0).tag(String?.some($0)) }
             }
             .frame(width: 160)
             // Hidden, not drawn empty, on a host that advertises no sorts.
-            if let sortOptions = capabilities?.catalogSortOptions, !sortOptions.isEmpty {
+            if !showsFeatured, let sortOptions = capabilities?.catalogSortOptions, !sortOptions.isEmpty {
                 Picker("Sort", selection: Binding(get: { query.sort }, set: { catalog.setSort($0, on: host.id) })) {
                     ForEach(sortOptions, id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
                 }
@@ -91,13 +111,34 @@ struct DiscoverTable: View {
     }
 
     private var loadMore: some View {
-        HStack {
+        HStack(spacing: 16) {
+            Text("Showing \(Self.rows(for: entries).count) of \(catalog.total(on: host.id)) results")
+                .foregroundStyle(.secondary)
             Spacer()
-            Button("Load more") { Task { await catalog.more(on: host.id) } }
-                .buttonStyle(.bordered).controlSize(.small)
-            Spacer()
+            if loadingMore { ProgressView().controlSize(.small) }
+            Button(loadingMore ? "Loading Models…" : "Load More Models") {
+                loadingMore = true
+                Task {
+                    await catalog.more(on: host.id)
+                    loadingMore = false
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(loadingMore || catalog.isSearching(on: host.id))
         }
-        .padding(.vertical, 8)
+        .padding(16)
+        .background(.bar)
+    }
+
+    var showsFeatured: Bool {
+        capabilities?.canBrowseCatalog != true || DiscoverLanding.showsFeatured(text: searchText, family: catalog.query(on: host.id).family,
+                                      browsingCatalog: browsingCatalog)
+    }
+
+    func browseCatalog() {
+        browsingCatalog = true
+        catalog.search(on: host.id)
     }
 
     @ViewBuilder private var empty: some View {

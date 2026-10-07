@@ -30,6 +30,11 @@ final class ActivityCoordinator {
         saver = PrintActions(hosts: hosts)
         StopRenderIntent.handler = { [weak self] id in await self?.stop(clientBatchId: id) }
         generate.settled = { [weak self] batch, run in self?.terminal(batch, run) }
+        Task {
+            for activity in Activity<GenerationActivityAttributes>.activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
         observe()
         #if DEBUG
         LiveActivityFixture.startIfRequested()
@@ -48,7 +53,7 @@ final class ActivityCoordinator {
     }
 
     private var enabled: Bool {
-        Preference.isOn(Preference.liveActivities) && ActivityAuthorizationInfo().areActivitiesEnabled
+        false // Queue is the live progress surface; completion notifications remain enabled.
     }
 
     /// Running updates, coalesced to about one a second. Where a batch ENDS

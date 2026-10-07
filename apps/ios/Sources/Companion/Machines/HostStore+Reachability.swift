@@ -19,6 +19,13 @@ extension HostStore {
     }
 
     func refresh(_ original: MoldHost) async {
+        await refreshCoordinator.run(original.id.uuidString) { [weak self] in
+            guard let self, let current = self.host(original.id), !Task.isCancelled else { return }
+            await self.refreshOnce(current)
+        }
+    }
+
+    private func refreshOnce(_ original: MoldHost) async {
         defer {
             if let current = self.host(original.id), current.baseURL != original.baseURL {
                 stopWatching(original.id)
@@ -29,15 +36,15 @@ extension HostStore {
         if let current = self.host(original.id) { host = current }
         do {
             if let resolved = try await backend(for: host).resolvedConnection() {
-                guard let current = self.host(host.id), current.apiKey == host.apiKey,
-                      current.baseURL == host.baseURL else { return }
+                guard self.host(host.id) == host, !Task.isCancelled else { return }
                 let previousURL = host.baseURL
                 host = resolved
                 applyConnection(host, expectedURL: previousURL)
+                guard let saved = self.host(host.id) else { return }
+                host = saved
             }
         } catch {
-            guard let current = self.host(host.id), current.apiKey == host.apiKey,
-                  current.baseURL == host.baseURL, !Task.isCancelled else { return }
+            guard self.host(host.id) == host, !Task.isCancelled else { return }
             recordConnectionFailure(error, on: host.id)
             return
         }
@@ -46,8 +53,7 @@ extension HostStore {
         // Initial checks still say Checking; the answer records real failure.
         if !isUp(host) { setReachability(.checking, for: host.id) }
         let state = await check(host)
-        guard let current = self.host(host.id), current.apiKey == host.apiKey,
-              current.baseURL == host.baseURL, !Task.isCancelled else { return }
+        guard self.host(host.id) == host, !Task.isCancelled else { return }
         // Removed while we asked: nothing to record.
         guard self.host(host.id) != nil else { return }
         setReachability(state, for: host.id)
@@ -56,15 +62,23 @@ extension HostStore {
         setLastAnswered(.now, for: host.id)
         clearFailures(for: host.id, doing: HostFailure.reachVerb)
         let client = backend(for: host)
-        if let info = try? await client.connectionAddresses(), info.instanceId == instanceID(of: host.id) {
+        if let info = try? await client.connectionAddresses(), self.host(host.id) == host, !Task.isCancelled, info.instanceId == instanceID(of: host.id) {
             host.connectionEndpoints = ConnectionRoutes.sanitized(info.endpoints)
             host.connectionInstanceID = info.instanceId
             applyConnection(host, expectedURL: host.baseURL)
+            guard let saved = self.host(host.id) else { return }
+            host = saved
         }
+        guard self.host(host.id) == host, !Task.isCancelled else { return }
         if capabilities[host.id] == nil {
-            setCapabilities(try? await client.capabilities(), for: host.id)
+            let answer = try? await client.capabilities()
+            guard self.host(host.id) == host, !Task.isCancelled else { return }
+            setCapabilities(answer, for: host.id)
         }
-        if let models = try? await client.models() { setModels(models, for: host.id) }
+        if let models = try? await client.models() {
+            guard self.host(host.id) == host, !Task.isCancelled else { return }
+            setModels(models, for: host.id)
+        }
     }
 
     /// Asks one machine what it is, and answers rather than recording: the

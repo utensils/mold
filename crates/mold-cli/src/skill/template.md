@@ -129,3 +129,7 @@ boundary pause through `pause_ms`; inspect the holding host's
 `/api/gallery/export-options` `gif_pause` advertisement first. Zero adds no
 pause while preserving FPS. This is an export API/GUI control, not a generation
 setting or a new CLI flag. Non-GIF requests omit it.
+
+### Native authoring and GUI inputs
+
+Native iOS Generate is a stable composer; inspect live rendering in Queue and results in Library. Library **Use as Source** keeps prompt/model choices, and its source picker searches all hosts with a machine filter. Mac Queue rows open job details; Discover starts with manifest models. Native Settings offers video autoplay/repeat; Mac GIF export includes playback/repeat/pause controls. GUI still-input imports fit oversized images while preserving orientation and alpha; original exports and retained source/mask pairs remain authoritative. These GUI conveniences do not change CLI/API admission limits or explicit fixed seeds.

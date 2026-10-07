@@ -25,6 +25,7 @@ struct QueueBatchRow: View {
     var canMoveDown = false
     var moveUp: () -> Void = {}
     var moveDown: () -> Void = {}
+    var inspect: ((QueueEntry) -> Void)? = nil
     @State var expanded = false
 
     var body: some View {
@@ -32,6 +33,7 @@ struct QueueBatchRow: View {
             ForEach(group.rows) { entry in
                 QueueRow(entry: entry, actions: childActions(entry),
                          caption: entry.batchWaitDescription, sourceHost: sourceHost,
+                         inspect: inspect.map { inspect in { inspect(entry) } },
                          act: { rowAct($0, entry) })
                     .padding(.leading, 20)
                     .tag(entry.id)

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { inputImageFacts } from "@studio/lib/inputImage";
 import { useMobileBack } from "./useMobileBack";
 import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
 import { fetchCatalogInstalled } from "../lib/api/catalog";
@@ -180,8 +181,7 @@ function applyH3(result: MinimaxH3GalleryImageResult): void {
   props.form.h3Authoring = result.state;
 }
 async function onH3File(slot: SourceMediaSlot, file: File): Promise<void> {
-  // The same 45 MiB request budget the picker sheet enforces — checked before
-  // the file is read so an oversized base64 never lands in the WebView.
+  // Judge the request budget after input sizing, so large source photos fit.
   const endpoint = h3Endpoint(slot);
   const budget = Math.max(
     0,
@@ -191,11 +191,13 @@ async function onH3File(slot: SourceMediaSlot, file: File): Promise<void> {
         endpoint === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
       ),
   );
-  if (file.size > budget) {
+  const result = await setMinimaxH3BoundaryFile(props.form.h3Authoring, endpoint, file);
+  const media = result.ok ? result.state[endpoint] : null;
+  if (media && decodedBase64Bytes(media.data) > budget) {
     h3Error.value = MOBILE_MEDIA_BUDGET_ERROR;
     return;
   }
-  applyH3(await setMinimaxH3BoundaryFile(props.form.h3Authoring, endpoint, file));
+  applyH3(result);
 }
 function onH3Gallery(slot: SourceMediaSlot): void {
   h3PickerTarget.value = h3Endpoint(slot);
@@ -332,14 +334,14 @@ async function onNamedViewFile(role: NamedViewRole, file: File): Promise<void> {
     error.value = "Only PNG or JPEG photos can be used here.";
     return;
   }
+  const base64 = await fileToBase64(file);
   if (
-    inlineGenerationMediaBytes(props.form, "namedViews") + file.size >
+    inlineGenerationMediaBytes(props.form, "namedViews") + Math.floor((base64.length * 3) / 4) >
     MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
   ) {
     error.value = MOBILE_MEDIA_BUDGET_ERROR;
     return;
   }
-  const base64 = await fileToBase64(file);
   const dimensions = imageDimensionsFromBase64(base64);
   if (!dimensions) {
     error.value = "Only PNG or JPEG photos can be used here.";
@@ -348,8 +350,8 @@ async function onNamedViewFile(role: NamedViewRole, file: File): Promise<void> {
   error.value = "";
   props.form.namedViews = setNamedView(props.form.namedViews, role, {
     base64,
-    filename: file.name || `${role}.png`,
-    mimeType: file.type === "image/jpeg" ? "image/jpeg" : "image/png",
+    filename: inputImageFacts(base64, file.name || `${role}.png`).filename,
+    mimeType: base64.startsWith("iVBOR") ? "image/png" : "image/jpeg",
     ...dimensions,
   });
 }
@@ -467,14 +469,6 @@ async function readImages(
     error.value = "Empty photos can’t be used here.";
     return [];
   }
-  if (
-    inlineGenerationMediaBytes(props.form, replacing) +
-      files.reduce((sum, file) => sum + file.size, 0) >
-    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
-  ) {
-    error.value = "Combined generation media must be 45 MiB or smaller on this phone.";
-    return [];
-  }
   if (files.some((file) => !isAcceptedImage(file, formats))) {
     error.value = `Only ${imageInputFormatsSentence(formats)} photos can be used here.`;
     return [];
@@ -483,9 +477,21 @@ async function readImages(
   error.value = "";
   const selected = multiple ? files : files.slice(0, 1);
   try {
-    return await Promise.all(
-      selected.map(async (file) => ({ file, b64: await fileToBase64(file) })),
+    const pictures = await Promise.all(
+      selected.map(async (file) => ({
+        file,
+        b64: await fileToBase64(file, replacing !== "maskImage"),
+      })),
     );
+    if (
+      inlineGenerationMediaBytes(props.form, replacing) +
+        pictures.reduce((sum, picture) => sum + Math.floor((picture.b64.length * 3) / 4), 0) >
+      MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
+    ) {
+      error.value = "Combined generation media must be 45 MiB or smaller on this phone.";
+      return [];
+    }
+    return pictures;
   } catch {
     error.value = "Couldn’t read that photo. Try choosing it again.";
     return [];
@@ -494,6 +500,7 @@ async function readImages(
 
 function pickSource(image: MobilePickedImage): void {
   error.value = "";
+  if (props.form.sourceImage !== image.base64) props.form.maskImage = null;
   props.form.sourceImage = image.base64;
   props.form.sourceImageName = image.filename || null;
   props.form.sourceFit = defaultSourceFitPolicy();
@@ -516,12 +523,13 @@ async function onEditTargetFile(_slot: SourceMediaSlot, file: File): Promise<voi
     error.value = "Only PNG or JPEG photos can be used here.";
     return;
   }
-  if (file.size > sourcePickerMaxBytes.value) {
-    error.value = MOBILE_MEDIA_BUDGET_ERROR;
-    return;
-  }
   try {
-    replaceEditTarget(await fileToBase64(file));
+    const base64 = await fileToBase64(file);
+    if (Math.floor((base64.length * 3) / 4) > sourcePickerMaxBytes.value) {
+      error.value = MOBILE_MEDIA_BUDGET_ERROR;
+      return;
+    }
+    replaceEditTarget(base64);
     error.value = "";
   } catch {
     error.value = "Couldn’t read that photo. Try choosing it again.";
@@ -538,21 +546,22 @@ async function onSingleSourceFile(slot: SourceMediaSlot, file: File): Promise<vo
     return;
   }
   const maxBytes = slot === "source" ? sourcePickerMaxBytes.value : endFramePickerMaxBytes.value;
-  if (file.size > maxBytes) {
-    error.value = MOBILE_MEDIA_BUDGET_ERROR;
-    return;
-  }
   try {
     const base64 = await fileToBase64(file);
+    if (Math.floor((base64.length * 3) / 4) > maxBytes) {
+      error.value = MOBILE_MEDIA_BUDGET_ERROR;
+      return;
+    }
     error.value = "";
     if (slot === "source") {
+      if (props.form.sourceImage !== base64) props.form.maskImage = null;
       props.form.sourceImage = base64;
-      props.form.sourceImageName = file.name;
+      props.form.sourceImageName = inputImageFacts(base64, file.name).filename;
       props.form.sourceFit = defaultSourceFitPolicy();
       // Last write wins on an exclusive recipe: the references park, kept.
       props.form.exclusiveWell = "source";
     } else {
-      props.form.endFrame = { filename: file.name, base64 };
+      props.form.endFrame = { filename: inputImageFacts(base64, file.name).filename, base64 };
     }
   } catch {
     error.value = "Couldn’t read that photo. Try choosing it again.";

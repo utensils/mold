@@ -439,6 +439,7 @@ pub async fn run_chain(
     // before the first stage renders, exactly as the single-clip path does
     // (#1050).
     let mut req = req;
+    req.materialize_seed();
     if offload {
         req.offload = Some(true);
     }
@@ -523,7 +524,7 @@ pub async fn run_chain(
     };
 
     let elapsed_ms = t0.elapsed().as_millis() as u64;
-    let base_seed = req.seed.unwrap_or(0);
+    let base_seed = req.seed.expect("chain seed materialized before dispatch");
 
     encode_and_save(
         &req,

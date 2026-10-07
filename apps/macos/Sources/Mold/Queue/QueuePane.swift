@@ -21,6 +21,7 @@ struct QueuePane: View {
     /// `QueueEntry.id`, one string space. `QueuePane+Commands.swift` reads
     /// it for the Queue menu's `FocusedValue`.
     @State var selection: String?
+    @State var detailTarget: QueueDetailTarget?
 
     var body: some View {
         Group {
@@ -62,6 +63,9 @@ struct QueuePane: View {
         .navigationTitle("Queue")
         .navigationSubtitle(QueueSummary.sentence(queue.all))
         .toolbar { toolbar }
+        .sheet(item: $detailTarget) { target in
+            QueueDetailSheet(entry: target.entry, host: target.host)
+        }
         .destructionDialog($pendingDestruction)
         .task { await load() }
         // The clip upscales already running on each machine. Not the

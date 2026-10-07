@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { inputImageBase64, inputImageFacts } from "../lib/inputImage";
 import {
   MINIMAX_H3_MAX_REFERENCE_AUDIOS,
   MINIMAX_H3_MAX_REFERENCE_IMAGES,
@@ -89,10 +90,6 @@ async function digestBytes(bytes: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-async function digest(file: File): Promise<string> {
-  return digestBytes(await file.arrayBuffer());
-}
-
 async function imageDimensions(
   file: File,
 ): Promise<{ width: number; height: number }> {
@@ -120,14 +117,22 @@ async function imageDimensions(
 async function referenceDraft(file: File): Promise<MinimaxH3ReferenceDraft> {
   const mime = file.type.toLowerCase();
   if (mime.startsWith("image/")) {
-    const [data, sha256] = await Promise.all([base64(file), digest(file)]);
-    const dimensions = await imageDimensions(file);
+    const data = await inputImageBase64(file);
+    const facts = inputImageFacts(data, file.name);
+    const bytes = Uint8Array.from(atob(data), (character) =>
+      character.charCodeAt(0),
+    );
+    const sha256 = await digestBytes(bytes.buffer);
+    const normalized = new File([bytes], facts.filename, {
+      type: facts.mimeType,
+    });
+    const dimensions = await imageDimensions(normalized);
     return {
       reference: {
         kind: "image",
         media: { authority: "inline", data },
-        provenance: { name: file.name, sha256 },
-        mime_type: file.type,
+        provenance: { name: facts.filename, sha256 },
+        mime_type: facts.mimeType,
         ...dimensions,
       },
     };

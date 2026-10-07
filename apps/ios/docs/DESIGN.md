@@ -217,30 +217,13 @@ follows Dynamic Type. Empty model searches explain that no models match and
 offer Clear Search. Restored drafts resolve their kind from the saved recipe
 when model profiles arrive, without resetting authored options.
 
-**While running.**
+**While running and after completion.**
 
-- The canvas shows the denoise preview. On a glass plate over it: the sentence
-  (e.g. "Adding detail — about 12s left · `denoise 18/28`"), a
-  `ProgressView(value:)` with step marks, and a small **Stop**. Stop stops the
-  batch on screen; its menu adds "Stop Everything from Here".
-- Pressing Generate again queues another batch; the plate shows "+2 waiting".
+The composer and its pinned Generate button remain in place. A fleet queue-count link opens Queue for progress and supported live previews. Results open from Library or completion notifications; Generate does not mount a result canvas. Attachment pickers remain presented through queue updates. Video autoplay/repeat is controlled in Settings and applies only to the selected viewer page.
 
-**Result.**
+**3-D object.** A recipe that ignores the prompt hides the prompt field and explains that it works from a picture. Named-view recipes expose their camera roles.
 
-- A batch pages horizontally, with a page indicator.
-- The bottom glass bar has Save to Photos, Share, Copy, Favourite and Show in
-  Library. The overflow menu has Use These Settings.
-- A clip plays in place (AVKit, looped, muted until tapped).
-- A mesh opens in the MoldMesh viewer: drag to turn, pinch to zoom, double-tap
-  to reset, and a slow auto-turn unless Reduce Motion is on. If the mesh cannot
-  be drawn, the poster shows with one line saying why.
-
-**3-D object.** The source-picture well is the primary input. A recipe that
-ignores the prompt hides the prompt field and says: "This model works from a
-picture, not a description."
-
-**Licence.** A gated model shows its licence in a `.large` sheet before any
-pull, with "Accept and Download".
+**Licence.** Gated downloads present the licence before Accept and Download.
 
 ### 5.2 Library
 
@@ -451,6 +434,8 @@ There is no Appearance setting; the system decides. Advanced config editing
 stays on the Mac.
 
 ### 5.7 Live Activity and Dynamic Island
+
+Current behavior: production Live Activities are disabled and any existing one is ended at launch. Completion/failure notifications remain enabled by their existing preferences. The foreground Generate screen links to Queue with fleet counts; it never embeds running or completed media. The extension designs below remain as historical component specifications, not active generation UI.
 
 One activity per running batch. It starts on iPhone only when activities are
 enabled.

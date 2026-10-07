@@ -7,6 +7,7 @@ struct QueueSourceThumbnail: View {
     @Environment(HostStore.self) private var hosts
     let entry: QueueEntry
     let host: MoldHost
+    var size: CGFloat = 48
     @State private var image: NSImage?
     @State private var loading = true
 
@@ -19,10 +20,10 @@ struct QueueSourceThumbnail: View {
             if loading || image != nil {
                 VStack(alignment: .leading, spacing: 3) {
                     Group {
-                        if let image { Image(nsImage: image).resizable().scaledToFill() }
+                        if let image { Image(nsImage: image).resizable().scaledToFit() }
                         else { Color.clear }
                     }
-                    .frame(width: 48, height: 48)
+                    .frame(width: size, height: size)
                     .clipShape(.rect(cornerRadius: 6))
                     .accessibilityLabel("Source image for this render")
                     .accessibilityIdentifier("queue-source-" + entry.id)

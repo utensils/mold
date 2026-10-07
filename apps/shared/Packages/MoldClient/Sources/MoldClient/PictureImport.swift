@@ -94,7 +94,7 @@ public nonisolated enum PictureImport {
         return (5...8).contains(orientation) ? (height, width) : (width, height)
     }
 
-    /// Passes acceptable bytes through untouched; re-encodes anything else as
+    /// Passes small acceptable inputs through untouched; bounds oversized pictures and re-encodes as
     /// PNG, which every decoder behind mold reads.
     public static func conform(
         _ data: Data, name: String, accepting: Set<String>
@@ -103,10 +103,12 @@ public nonisolated enum PictureImport {
               let type = CGImageSourceGetType(source) as String?
         else { throw PictureImportError.undecodable(name: name) }
 
-        guard !accepting.contains(type) else {
+        let size = pixelSize(of: data)
+        let oversized = data.count > maxInputBytes || size.map { max($0.width, $0.height) > maxInputAxis } == true
+        guard !accepting.contains(type) || oversized else {
             return ImportedPicture(encoded: data.base64EncodedString(), name: name, data: data)
         }
-        let png = try transcodeToPNG(source, name: name)
+        let png = try boundedPNG(source, name: name, longestSide: size.map { max($0.width, $0.height) } ?? maxInputAxis)
         return ImportedPicture(
             encoded: png.base64EncodedString(),
             name: (name as NSString).deletingPathExtension + ".png",
@@ -117,11 +119,12 @@ public nonisolated enum PictureImport {
     /// EXIF orientation: an iPhone photograph is stored landscape with a
     /// rotation flag, and `NSBitmapImageRep(cgImage:)` alone would send it
     /// sideways.
-    private static func transcodeToPNG(_ source: CGImageSource, name: String) throws -> Data {
+    private static func transcodeToPNG(_ source: CGImageSource, name: String, longestSide: Int) throws -> Data {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxTranscodePixels,
+            kCGImageSourceThumbnailMaxPixelSize: longestSide,
+            kCGImageSourceShouldCache: false,
         ]
         let png = NSMutableData()
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
@@ -134,9 +137,22 @@ public nonisolated enum PictureImport {
         return png as Data
     }
 
-    /// Well past any canvas mold renders, so a transcode is a format change
-    /// and not a downscale anybody would notice.
-    private static let maxTranscodePixels = 16_384
+    /// Conservative per-picture transport budget, shared by every native well.
+    /// Twelve typed references remain below the 32 MiB inline-media budget.
+    public static let maxInputBytes = 2 * 1024 * 1024
+    public static let maxInputAxis = 4096
+
+    private static func boundedPNG(_ source: CGImageSource, name: String, longestSide: Int) throws -> Data {
+        var side = min(longestSide, maxInputAxis)
+        while side >= 1 {
+            let png = try transcodeToPNG(source, name: name, longestSide: side)
+            if png.count <= maxInputBytes { return png }
+            guard side > 1 else { break }
+            side = max(1, Int(Double(side) * 0.75))
+        }
+        throw PictureImportError.undecodable(name: name)
+    }
+
 }
 
 public enum PictureImportError: LocalizedError {
