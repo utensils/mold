@@ -168,37 +168,37 @@ works for SPA hot-iteration without recompiling Rust.
 
 ### Server Options
 
-| Option                  | Type        | Default             | Description                                                                          |
-| ----------------------- | ----------- | ------------------- | ------------------------------------------------------------------------------------ |
-| `enable`                | bool        | `false`             | Enable the mold server                                                               |
-| `package`               | package     | --                  | The mold package (must set explicitly)                                               |
-| `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below                         |
-| `webUi.enable` | bool | `true` | Serve the web interface and assets. Set false for API-only mode; API routes stay available. |
-| `port`                  | port        | `7680`              | HTTP server port                                                                     |
-| `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                                      |
-| `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                                           |
-| `modelsDir`             | string      | `homeDir + /models` | Model storage directory                                                              |
-| `logLevel`              | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                                              |
-| `corsOrigin`            | null/string | `null`              | CORS origin restriction (null = permissive)                                          |
-| `openFirewall`          | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                                 |
-| `mdns`                  | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`                        |
-| `defaultModel`          | null/string | `null`              | Default model name                                                                   |
-| `gpus`                  | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs                        |
-| `queueSize`             | null/int    | `null`              | Jobs hydrated into the runtime window (null = default 200); durable backlog uncapped |
-| `shutdown.abortSeconds` | int         | `45`                | Seconds the server waits for its GPU workers on stop (see below)                     |
-| `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                                   |
-| `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                                        |
-| `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                                            |
-| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret)                 |
-| `runpodApiKeyFile`      | null/path   | `null`              | Path to file with the RunPod API key, loaded at service start                        |
-| `metadataDb.enable`     | bool        | `true`              | SQLite gallery metadata DB; `false` sets `MOLD_DB_DISABLE=1`                         |
-| `metadataDb.path`       | null/string | `null`              | Override the metadata DB path (sets `MOLD_DB_PATH`)                                  |
-| `rateLimit`             | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                                  |
-| `rateLimitBurst`        | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                                       |
-| `logToFile`             | bool        | `false`             | Enable file logging (in addition to journal)                                         |
-| `logDir`                | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                                  |
-| `logRetentionDays`      | int         | `7`                 | Days to retain rotated log files                                                     |
-| `environment`           | attrs       | `{}`                | Extra environment variables                                                          |
+| Option                  | Type        | Default             | Description                                                                                 |
+| ----------------------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------- |
+| `enable`                | bool        | `false`             | Enable the mold server                                                                      |
+| `package`               | package     | --                  | The mold package (must set explicitly)                                                      |
+| `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below                                |
+| `webUi.enable`          | bool        | `true`              | Serve the web interface and assets. Set false for API-only mode; API routes stay available. |
+| `port`                  | port        | `7680`              | HTTP server port                                                                            |
+| `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                                             |
+| `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                                                  |
+| `modelsDir`             | string      | `homeDir + /models` | Model storage directory                                                                     |
+| `logLevel`              | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                                                     |
+| `corsOrigin`            | null/string | `null`              | CORS origin restriction (null = permissive)                                                 |
+| `openFirewall`          | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                                        |
+| `mdns`                  | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`                               |
+| `defaultModel`          | null/string | `null`              | Default model name                                                                          |
+| `gpus`                  | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs                               |
+| `queueSize`             | null/int    | `null`              | Jobs hydrated into the runtime window (null = default 200); durable backlog uncapped        |
+| `shutdown.abortSeconds` | int         | `45`                | Seconds the server waits for its GPU workers on stop (see below)                            |
+| `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                                          |
+| `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                                               |
+| `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                                                   |
+| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret)                        |
+| `runpodApiKeyFile`      | null/path   | `null`              | Path to file with the RunPod API key, loaded at service start                               |
+| `metadataDb.enable`     | bool        | `true`              | SQLite gallery metadata DB; `false` sets `MOLD_DB_DISABLE=1`                                |
+| `metadataDb.path`       | null/string | `null`              | Override the metadata DB path (sets `MOLD_DB_PATH`)                                         |
+| `rateLimit`             | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                                         |
+| `rateLimitBurst`        | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                                              |
+| `logToFile`             | bool        | `false`             | Enable file logging (in addition to journal)                                                |
+| `logDir`                | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                                         |
+| `logRetentionDays`      | int         | `7`                 | Days to retain rotated log files                                                            |
+| `environment`           | attrs       | `{}`                | Extra environment variables                                                                 |
 
 `queueSize` bounds only the hydrated runtime window; the durable backlog
 itself is uncapped — see
