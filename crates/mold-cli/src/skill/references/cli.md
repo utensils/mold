@@ -761,3 +761,5 @@ Gallery host copies include retained conditioning independently of model family,
 including chain stage images. The destination owns its archive and can reuse
 without the original host. First-stage settings reuse hydrates stage 0 only;
 complete authored-sequence replay is a separate workflow. Unsupported or damaged source transfers fail explicitly. Native Mac copies with explicitly unavailable legacy inputs can finish after output verification, while reporting that the original inputs remain unavailable; they are not complete reproducible archives.
+
+Image sizing is automatic for supported roles: model reference pixel budgets describe engine processing, not a requirement to manually shrink original pictures. Identity photographs and oversized ordered-reference groups are bounded before transport; original files remain untouched. Decode/download/body ceilings, formats, counts and unsupported roles still apply.

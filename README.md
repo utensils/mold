@@ -400,3 +400,5 @@ remains FPS-derived; a pause does not repair a discontinuity in the source.
 Native iOS also exports host-advertised mesh formats, turntables and texture
 sidecars to Share, Files or its Mold folder, with GIF delivery to Photos.
 See [native export coverage](apps/ios/docs/MEDIA-EXPORT-PARITY.md).
+
+Image inputs above a model’s processing size are prepared automatically. Native reference strips accept ordinary oversized pictures; processing pixel budgets are separate from bounded image ingestion and request transport limits. Large identity photographs are proportionally reduced to the face detector’s ingestion envelope, and original files remain untouched.

@@ -65,7 +65,7 @@ struct LibraryViewer: View {
             activity.addUserInfoEntries(from: PrintHandoff.userInfo(
                 filename: id.filename, address: host.baseURL, instanceId: hosts.instanceIDs[host.id]))
         }
-        .overlay(alignment: .top) { bar }
+        .safeAreaInset(edge: .top, spacing: 0) { bar }
         .libraryMenu(LibraryMenu(targets: [entry], scope: scope, actions: actions,
                                  shelves: shelves, enclosingShelf: enclosingShelf,
                                  trashCount: trashCount, open: nil))

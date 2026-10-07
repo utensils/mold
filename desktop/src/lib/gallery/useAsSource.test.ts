@@ -4,6 +4,8 @@ import { newGenerateForm } from "../generateForm";
 import type { MergedPrint } from "../../stores/gallery";
 import type { GalleryImage } from "../api/types";
 
+import * as inputImage from "@studio/lib/inputImage";
+
 const image: GalleryImage = {
   filename: "subject.png",
   timestamp: 1,
@@ -36,6 +38,19 @@ describe("applyGalleryEntryAsSource", () => {
     expect(form.sourceImage).toBe("QUJD");
     expect(form.sourceImageName).toBe("subject.png");
     expect(form.sourceFit).toEqual({ mode: "crop-fill" });
+  });
+
+  it("normalizes fresh still authoring bytes before attachment, but keeps video bytes", async () => {
+    const normalize = vi.spyOn(inputImage, "normalizeInputImage").mockResolvedValue({
+      base64: "U01BTEw=",
+      filename: "subject.png",
+      mimeType: "image/png",
+    });
+    const form = newGenerateForm();
+    await applyGalleryEntryAsSource(entryFor(image), form, bytes("image/png"));
+    expect(normalize).toHaveBeenCalledWith("QUJD", "subject.png");
+    expect(form.sourceImage).toBe("U01BTEw=");
+    normalize.mockRestore();
   });
 
   // The Library has always allowed a rendered clip back in as LTX source

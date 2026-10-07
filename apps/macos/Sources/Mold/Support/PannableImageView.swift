@@ -16,7 +16,10 @@ final class PannableImageView: NSImageView {
 
     override func draw(_ dirtyRect: NSRect) {
         if showsAlphaBed, let image {
-            let picture = AlphaBed.fittedRect(content: image.size, in: bounds)
+            let picture = imageScaling == .scaleNone
+                ? CGRect(x: bounds.midX - image.size.width / 2, y: bounds.midY - image.size.height / 2,
+                         width: image.size.width, height: image.size.height)
+                : AlphaBed.fittedRect(content: image.size, in: bounds)
             // `labelColor` resolves against this view's appearance while it
             // draws, exactly as `.primary` does in the SwiftUI board.
             for square in AlphaBed.squares(in: picture) {
@@ -38,7 +41,9 @@ final class PannableImageView: NSImageView {
         let point = event.locationInWindow
         if hypot(point.x - startPoint.x, point.y - startPoint.y) > 3 { dragged = true }
         defer { previousPoint = point }
-        guard dragged, let scroll = enclosingScrollView, scroll.magnification > 1 else { return }
+        guard dragged, let scroll = enclosingScrollView,
+              scroll.magnification > 1 || bounds.width > scroll.contentView.bounds.width
+                || bounds.height > scroll.contentView.bounds.height else { return }
         let clip = scroll.contentView
         let scale = scroll.magnification
         var origin = clip.bounds.origin

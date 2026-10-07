@@ -21,6 +21,7 @@ pub mod gguf_probe;
 pub mod glb_summary;
 pub mod hunyuan3d_paint_assets;
 pub mod identity;
+pub mod input_image;
 pub mod install_error;
 pub mod lambda;
 pub mod license_acceptance;

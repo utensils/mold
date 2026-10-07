@@ -1,4 +1,5 @@
 import { blobToBase64 } from "@studio/lib/base64";
+import { normalizeInputImage } from "@studio/lib/inputImage";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   appendMinimaxH3GalleryImageReference,
@@ -67,11 +68,13 @@ export async function applyGalleryEntryAsSource(
   if (refusal) return { ok: false, error: refusal };
   try {
     const blob = await readBlob(entry);
-    const base64 = await blobToBase64(blob);
+    let base64 = await blobToBase64(blob);
     if (isVideoItem(item)) {
       attachPickedVideo(form, { filename: item.filename, base64 });
       return { ok: true, message: "Loaded as source video" };
     }
+    const prepared = await normalizeInputImage(base64, item.filename);
+    base64 = prepared.base64;
     const h3Task = minimaxH3TaskForModel(form.model);
     if (h3Task) {
       const dimensions = imageDimensionsFromBase64(base64) ?? {
@@ -79,8 +82,11 @@ export async function applyGalleryEntryAsSource(
         height: item.metadata.height,
       };
       const image = {
-        filename: item.filename,
-        mimeType: galleryImageMimeType(item, blob.type),
+        filename: prepared.filename,
+        mimeType:
+          prepared.mimeType === "application/octet-stream"
+            ? galleryImageMimeType(item, blob.type)
+            : prepared.mimeType,
         width: dimensions.width,
         height: dimensions.height,
         data: base64,
@@ -102,7 +108,7 @@ export async function applyGalleryEntryAsSource(
         error: "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
       };
     }
-    attachPickedImage(form, { filename: item.filename, base64 });
+    attachPickedImage(form, { filename: prepared.filename, base64 });
     return { ok: true, message: "Loaded as source" };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

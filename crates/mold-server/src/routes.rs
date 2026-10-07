@@ -5172,6 +5172,30 @@ async fn placement_preview_outcome(
     // `id_image` — or a build without the `pulid` feature, or a strength
     // outside the advertised range — would have its preview plan the PuLID
     // bundle and answer `planned` for a request generation then refuses.
+    #[cfg(feature = "pulid")]
+    if (request.id_image.is_some() || request.id_images.is_some())
+        && mold_core::identity::identity_qualified_model_with_family(
+            &request.model,
+            resolved_family.as_deref(),
+        )
+    {
+        let prepared = tokio::task::spawn_blocking(move || {
+            mold_core::input_image::prepare_identity_inputs(&mut request)?;
+            Ok::<_, String>(request)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("identity preview preparation failed: {error}"))
+        })?;
+        request = match prepared {
+            Ok(request) => request,
+            Err(reason) => {
+                let mut response = unavailable("infeasible", reason);
+                response.authoritative = true;
+                return Ok(response);
+            }
+        };
+    }
     if let Err(error) = mold_core::identity::validate_identity_conditioning_with_family(
         &request,
         resolved_family.as_deref(),

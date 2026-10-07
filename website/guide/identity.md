@@ -157,13 +157,13 @@ MOLD_HOST=http://gpu-box:7680 mold run flux-dev:q4 "a chef in a kitchen" \
 
 ### Flags
 
-| Flag               | Default | Meaning                                                                                                                   |
-| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `--id-image`       | --      | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP. **Repeatable**, up to 4 times.                |
-| `--id-weight`      | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy. |
-| `--id-start-step`  | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                     |
-| `--true-cfg`       | `1.0`   | **FLUX only.** True classifier-free guidance scale, `1.0`–`10.0`. `1.0` is off. Requires `--id-image`. Refused on SDXL.   |
-| `--cfg-start-step` | `1`     | **FLUX only.** First denoise step the true-CFG negative branch runs at. Must be below `--steps`. Requires `--true-cfg`.   |
+| Flag               | Default | Meaning                                                                                                                                              |
+| ------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--id-image`       | --      | Reference photograph. PNG or JPEG; larger safe originals are automatically fitted to 16 MiB, 8192 px per axis, 32 MP. **Repeatable**, up to 4 times. |
+| `--id-weight`      | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy.                            |
+| `--id-start-step`  | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                                                |
+| `--true-cfg`       | `1.0`   | **FLUX only.** True classifier-free guidance scale, `1.0`–`10.0`. `1.0` is off. Requires `--id-image`. Refused on SDXL.                              |
+| `--cfg-start-step` | `1`     | **FLUX only.** First denoise step the true-CFG negative branch runs at. Must be below `--steps`. Requires `--true-cfg`.                              |
 
 **`--id-weight 0` is completely inert.** Nothing is pulled, decoded, loaded, or
 extracted, and the render is byte-identical to the same seed with no identity

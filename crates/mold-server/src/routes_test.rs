@@ -14209,6 +14209,40 @@ mod tests {
         assert_eq!(body["authoritative"], true);
     }
 
+    #[cfg(feature = "pulid")]
+    #[tokio::test]
+    async fn placement_preview_prepares_a_safe_identity_original_before_role_limits() {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        let width = mold_core::identity::ID_IMAGE_LIMITS.max_axis_pixels + 1;
+        let pixels = image::GrayImage::from_pixel(width, 100, image::Luma([80]));
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(pixels.as_raw(), width, 100, image::ExtendedColorType::L8)
+            .unwrap();
+        assert!(mold_core::identity::validate_id_image_bytes(&bytes).is_err());
+        let state = AppState::for_tests();
+        let response = app_with_state(state)
+            .oneshot(
+                Request::post("/api/generate/placement-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"request": {
+                    "prompt": "portrait", "model": "flux-dev:bf16", "width": 1024, "height": 1024,
+                    "steps": 25, "guidance": 3.5,
+                    "id_image": base64::engine::general_purpose::STANDARD.encode(bytes)
+                }, "copies": 1})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["outcome"], "unsupported", "{body}");
+        assert_eq!(body["authoritative"], false, "{body}");
+    }
+
     #[tokio::test]
     async fn reviewed_reference_upload_session_requires_explicit_auth_before_staging() {
         let state = AppState::for_tests();

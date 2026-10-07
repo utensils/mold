@@ -57,7 +57,7 @@ struct QueueSourceLayoutTests {
                 ForEach(0..<2) { index in
                     QueueRow(entry: FakeFixtures.queueEntry("job-\(index)", state: "queued", model: "MiniMax H3 FL2VA"),
                         actions: QueueRowActions(), caption: "First caption line\nSecond caption line", sourceHost: host,
-                        isReorderable: true, act: { _ in })
+                        isReorderable: true, inspect: {}, act: { _ in })
                         .tag("job-\(index)")
                 }
                 .onMove { _, _ in }

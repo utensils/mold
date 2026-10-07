@@ -472,6 +472,18 @@ impl DurableMediaAdmission {
                 .as_ref()
                 .map(|_| state.reference_uploads.scope_sha256(&request))
                 .transpose()?;
+            // Fresh identity photographs use a narrower role envelope. Prepare
+            // before validation/placement/persistence, never after media sealing.
+            if cfg!(feature = "pulid")
+                && (request.id_image.is_some() || request.id_images.is_some())
+            {
+                request = spawn_admission_blocking("identity image preparation", move || {
+                    mold_core::input_image::prepare_identity_inputs(&mut request)
+                        .map_err(ApiError::validation)?;
+                    Ok(request)
+                })
+                .await??;
+            }
             crate::routes::apply_default_metadata_setting(state, &mut request).await;
             crate::routes::normalize_generation_placement(state, &mut request).await;
             // `transparent_background: false` and an absent field are one

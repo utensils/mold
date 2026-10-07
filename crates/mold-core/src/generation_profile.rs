@@ -577,11 +577,13 @@ pub struct ReferenceImagesProfile {
     /// therefore source-driven.
     pub primary_is_target: bool,
     pub source_relation: ReferenceSourceRelation,
-    /// Per-image pixel ceiling when the request carries exactly one reference.
+    /// Engine processing budget per image with exactly one reference.
+    /// Originals above this size are resized by the engine, not refused at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number | null")]
     pub max_pixels_single: Option<u64>,
-    /// Per-image pixel ceiling when the request carries several.
+    /// Engine processing budget per image with several references.
+    /// This is not an ingestion or transport limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number | null")]
     pub max_pixels_multi: Option<u64>,

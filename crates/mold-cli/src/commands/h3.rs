@@ -249,7 +249,8 @@ pub(crate) fn prepare_authoring(
     let (source_image, source_image_name, first_dimensions) = match first_path {
         Some(path) => {
             let (bytes, dimensions) = read_boundary_image(path, "first")?;
-            (Some(bytes), display_name(path), Some(dimensions))
+            let name = effective_image_name(path, &bytes);
+            (Some(bytes), name, Some(dimensions))
         }
         None if legacy_image == Some("-") => {
             // Stdin is read by the ordinary image path. It has no safe filename
@@ -261,11 +262,12 @@ pub(crate) fn prepare_authoring(
     let (keyframes, last_dimensions) = match last_frame {
         Some(path) => {
             let (image, dimensions) = read_boundary_image(path, "last")?;
+            let name = effective_image_name(path, &image);
             (
                 Some(vec![KeyframeCondition {
                     frame: frames - 1,
                     image,
-                    name: display_name(path),
+                    name,
                 }]),
                 Some(dimensions),
             )
@@ -428,16 +430,41 @@ fn validate_dimensions(width: u32, height: u32) -> Result<()> {
 }
 
 fn read_boundary_image(path: &Path, boundary: &str) -> Result<(Vec<u8>, (u32, u32))> {
+    read_boundary_image_with_budget(path, boundary, MAX_BOUNDARY_IMAGE_BYTES as usize)
+}
+
+fn read_boundary_image_with_budget(
+    path: &Path,
+    boundary: &str,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, (u32, u32))> {
     let mut file = mold_core::secure_file::open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open {boundary} frame"))?;
     let length = file.metadata()?.len();
     anyhow::ensure!(
-        length > 0 && length <= MAX_BOUNDARY_IMAGE_BYTES,
-        "MiniMax H3 {boundary} frame must contain 1..={MAX_BOUNDARY_IMAGE_BYTES} bytes"
+        length > 0 && length <= mold_core::input_image::MAX_INGEST_BYTES as u64,
+        "{boundary} frame original must contain 1..={} bytes",
+        mold_core::input_image::MAX_INGEST_BYTES
     );
     let mut bytes = Vec::with_capacity(usize::try_from(length)?);
     file.read_to_end(&mut bytes)
         .with_context(|| format!("failed to read {boundary} frame"))?;
+    anyhow::ensure!(
+        matches!(
+            mold_core::validation::sniff_image_input_format(&bytes),
+            Some(mold_core::ImageInputFormat::Png | mold_core::ImageInputFormat::Jpeg)
+        ),
+        "MiniMax H3 {boundary} frame must be PNG or JPEG"
+    );
+    let bytes = mold_core::input_image::prepare_image(
+        &bytes,
+        mold_core::input_image::InputImageLimits {
+            max_bytes,
+            max_axis: mold_core::reference_image::REFERENCE_IMAGE_MAX_SIDE,
+            max_pixels: mold_core::reference_image::REFERENCE_IMAGE_MAX_PIXELS,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
     let dimensions = validate_boundary_image_bytes(&bytes, boundary).map_err(|error| {
         anyhow::anyhow!("invalid {boundary} frame '{}': {error}", path.display())
     })?;
@@ -475,7 +502,7 @@ pub(crate) fn prepare_named_image(
         mold_core::GenerationImageReferenceRole::Back => "back",
         mold_core::GenerationImageReferenceRole::Right => "right",
     };
-    let (bytes, (width, height)) = read_boundary_image(path, label)?;
+    let (bytes, (width, height)) = read_boundary_image_with_budget(path, label, 8 * 1024 * 1024)?;
     let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else {
@@ -485,7 +512,13 @@ pub(crate) fn prepare_named_image(
         role,
         media: GenerationReferenceAuthority::Inline { data: bytes },
         provenance: GenerationReferenceProvenance {
-            name: display_name(path),
+            name: display_name(path).map(|name| {
+                if mime_type == "image/png" && !name.to_ascii_lowercase().ends_with(".png") {
+                    mold_core::input_image::png_name(&name)
+                } else {
+                    name
+                }
+            }),
             sha256: None,
             crop: None,
         },
@@ -551,6 +584,16 @@ fn prepare_references(
         minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
     }
     Ok((descriptors, uploads))
+}
+
+fn effective_image_name(path: &Path, bytes: &[u8]) -> Option<String> {
+    display_name(path).map(|name| {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && !name.to_ascii_lowercase().ends_with(".png") {
+            mold_core::input_image::png_name(&name)
+        } else {
+            name
+        }
+    })
 }
 
 fn display_name(path: &Path) -> Option<String> {
@@ -844,6 +887,40 @@ mod tests {
     /// the only kind an `edit_images` recipe consumes — so `image=` is what
     /// it means. A NAMED kind that is not one of the three is still a typo,
     /// and stdin still has no place in either destination.
+    #[test]
+    fn oversized_named_view_updates_bytes_name_and_geometry_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("left.jpg");
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(120, 80)
+            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+            .unwrap();
+        let mut bytes = bytes.into_inner();
+        bytes.resize(9 * 1024 * 1024, 0);
+        std::fs::write(&path, bytes).unwrap();
+        let reference =
+            prepare_named_image(&path, mold_core::GenerationImageReferenceRole::Left).unwrap();
+        let GenerationReference::NamedImage {
+            media: GenerationReferenceAuthority::Inline { data },
+            mime_type,
+            width,
+            height,
+            provenance,
+            ..
+        } = reference
+        else {
+            panic!("expected inline view")
+        };
+        assert!(data.len() <= 8 * 1024 * 1024);
+        assert_eq!(mime_type, "image/png");
+        assert_eq!(provenance.name.as_deref(), Some("left.png"));
+        assert_eq!((width, height), (120, 80));
+        assert_eq!(
+            mold_core::reference_image::oriented_dimensions(&data),
+            Ok((width, height))
+        );
+    }
+
     #[test]
     fn reference_arg_reads_a_bare_path_as_an_image() {
         let parsed: ReferenceArg = "/tmp/a.png".parse().unwrap();

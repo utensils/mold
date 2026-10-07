@@ -1,0 +1,3 @@
+- Native Mac and iOS reference images larger than a model's processing budget now remain usable; engines automatically prepare their pixels. Large identity photos and fresh Discord image attachments are bounded before transport and admission, and Library use-as-source applies the normal image import policy.
+- Native macOS images and videos fit the available viewer space, including tall clips, without hiding media behind the Library toolbar. Playback controls no longer dim the picture on hover.
+- Native macOS image and video viewers offer Actual Size at one image pixel per display pixel, with scrolling for larger media and Fit to return to the complete picture.

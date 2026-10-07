@@ -5,6 +5,15 @@ paths:
 
 # Native Mac interaction contracts
 
+Library and Generate media viewers fit both viewport axes by default and reserve
+space for their toolbar/transport controls. Actual Size means one media pixel per
+display backing pixel, with scrolling when the picture exceeds the viewport.
+Fit/Actual Size changes preserve the video player and playback position. AVKit
+hover transport must not dim the picture: use a control-free player with separate
+accessible playback controls. Alpha checkerboards follow the rendered picture in
+both image sizing modes. Test portrait/landscape fit, Retina sizing, scrolling,
+resize and the player control policy.
+
 Generate submission feedback is separate from the canvas following an earlier
 job. Start feedback synchronously on the press, acknowledge only actual backend
 acceptance, surface preparation/refusal failures, and fence late replies by the
