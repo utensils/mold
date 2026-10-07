@@ -45,7 +45,6 @@ struct Composer: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
-                ExpandButton()
                 Spacer()
                 Button("Done") { editing = false }
             }
@@ -82,7 +81,7 @@ struct Composer: View {
                         .accessibilityIdentifier("generation-prompt")
                         .id("prompt")
                         .frame(minHeight: 44)
-                    ExpandButton().labelStyle(.iconOnly)
+                    ExpandButton()
                 }
             } else {
                 Text("This model works from a picture, not a description.")
@@ -126,6 +125,9 @@ struct Composer: View {
                 }
             }
             if !inline || inlineAction { GenerateRow(estimate: estimate) }
+            if case let .failed(reason) = generate.run {
+                Text(reason).foregroundStyle(.secondaryText)
+            }
         }
     }
 
@@ -151,9 +153,8 @@ struct GenerateRow: View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 12))
         layout {
-            if let estimate {
-                Text(estimate).monospacedDigit().foregroundStyle(.secondaryText)
-            }
+            Text(estimate ?? " ").monospacedDigit().foregroundStyle(.secondaryText)
+                .accessibilityHidden(estimate == nil)
             if !stacked { Spacer(minLength: 0) }
             Button { generate.generate() } label: {
                 Label("Generate", systemImage: "wand.and.sparkles")

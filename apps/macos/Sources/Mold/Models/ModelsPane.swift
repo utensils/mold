@@ -107,7 +107,8 @@ struct ModelsPane: View {
     }
 
     private var subtitle: String {
-        Self.subtitle(scope: scope.wrappedValue, hostName: host?.name, installedCount: installedCount, discoverTotal: discoverTotal)
+        if scope.wrappedValue == .discover { return host.map { "Discover models on \($0.name)" } ?? "Discover models" }
+        return Self.subtitle(scope: scope.wrappedValue, hostName: host?.name, installedCount: installedCount, discoverTotal: discoverTotal)
     }
 
     @ViewBuilder private var empty: some View {

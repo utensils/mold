@@ -737,7 +737,8 @@ pub(crate) fn create_job_with_params(
         .write_atomic(&job_dir)
         .map_err(|e| anyhow!("{e:#}"))?;
     ChainExecutionAuthority::dormant(params.id.clone()).persist_atomic(&job_dir)?;
-    let request_json = serde_json::to_string(&request)?;
+    // The manifest resolves an omitted seed once; the index must persist that same request.
+    let request_json = manifest.request_json.clone();
     let row = ChainJobRow {
         id: params.id.clone(),
         state: ChainJobState::Queued,
@@ -8775,6 +8776,39 @@ mod tests {
         registry.register("parent");
         let next = registry.token("parent");
         assert!(!next.is_cancelled());
+    }
+
+    #[test]
+    fn create_job_random_seed_matches_manifest_database_and_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        req.seed = None;
+        let row = create_job_with_params(
+            &db,
+            dir.path(),
+            CreateJobParams {
+                id: "random-seed-authority".into(),
+                ephemeral: true,
+                frozen_model: None,
+                request: req,
+            },
+        )
+        .unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        assert_eq!(row.request_json, manifest.request_json);
+        let request: ChainRequest = serde_json::from_str(&row.request_json).unwrap();
+        let seed = request.seed.expect("persisted random seed");
+        for (status, stage) in chain_jobs::stages_for_job(&db, &row.id)
+            .unwrap()
+            .iter()
+            .zip(&request.stages)
+        {
+            assert_eq!(
+                status.seed,
+                mold_core::chain_job::effective_stage_seed(seed, stage.seed_offset)
+            );
+        }
     }
 
     #[test]

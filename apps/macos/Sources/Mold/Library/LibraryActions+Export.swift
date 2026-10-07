@@ -47,14 +47,19 @@ extension LibraryActions {
     ///
     /// A turntable ALWAYS asks -- its frames, rate and size are the point of
     /// the entry's ellipsis. A geometry container asks only where the host
-    /// advertised knobs to ask about. Everything else converts straight away,
-    /// which is what a clip's containers have always done.
+    /// advertised knobs to ask about. Clips use their own conversion options;
+    /// geometry formats without knobs still convert straight away.
     func requestExport(_ entry: LibraryEntry, as format: String, bounds: MeshBounds? = nil) {
         // A CLIP's only containers are `gif`/`apng`/`webp`, so the animated
         // test ALONE sent every video export through the turntable sheet --
         // which posts `transparent`, and the server refuses that outright for
         // anything but a mesh turntable. The kind is half the question.
         guard entry.print.isMesh else {
+            if entry.print.isVideo, let videoExport {
+                videoExport(VideoExportPrompt(entry: entry, format: format,
+                                              options: hosts.exportOptions[entry.hostID]))
+                return
+            }
             export(entry, as: format)
             return
         }
@@ -66,6 +71,7 @@ extension LibraryActions {
         }
         meshExport(MeshExportPrompt(entry: entry, format: format, geometry: geometry,
                                     capabilities: meshGeometryCapabilities(for: entry),
+                                    exportOptions: hosts.exportOptions[entry.hostID],
                                     bounds: bounds))
     }
 
@@ -79,35 +85,40 @@ extension LibraryActions {
     /// The same, with whatever optional controls the caller resolved.
     func export(_ entry: LibraryEntry, request: MeshExportRequest) {
         Task {
-            guard let client = hosts.backend(for: entry.hostID) else { return }
-            let data: Data
             do {
-                // Bounded like every other buffered body -- a conversion the
-                // machine performs is still an answer this app holds whole.
-                data = try ResponseCeiling.checked(
-                    await client.export(entry.print.filename, request: request),
-                    ceiling: ResponseCeiling.media, what: "that export")
-                hosts.succeeded(on: entry.hostID)
-            } catch {
+                _ = try await convertAndSave(entry, request: request)
+            } catch is CancellationError { return } catch {
                 hosts.report(error, on: entry.hostID, doing: "export that print")
-                return
-            }
-
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = MeshExport.filename(entry.print.filename,
-                                                             format: request.format)
-            guard await panel.begin() == .OK, let url = panel.url else { return }
-            do {
-                try await Task.detached(priority: .utility) {
-                    try data.write(to: url)
-                }.value
-            } catch {
-                // A disk full, a read-only folder: the person chose Export…,
-                // waited for the machine to convert, picked a destination --
-                // and got no file and no message. `saveAll` already reports
-                // this exact failure; nobody fixed the export half.
-                hosts.report(error, on: entry.hostID, doing: "save that export")
             }
         }
+    }
+
+    func convertAndSave(_ entry: LibraryEntry, request: MeshExportRequest) async throws -> Bool {
+        guard let client = hosts.backend(for: entry.hostID) else { throw MoldClientError.malformedResponse }
+        let data = try ResponseCeiling.checked(await client.export(entry.print.filename, request: request),
+                                               ceiling: ResponseCeiling.media, what: "that export")
+        try Task.checkCancellation()
+        return try await saveExport(data, entry: entry, filename: VideoExportRequest.filename(entry.print.filename, format: request.format))
+    }
+
+    func convertAndSave(_ entry: LibraryEntry, request: VideoExportRequest) async throws -> Bool {
+        guard let client = hosts.backend(for: entry.hostID) else { throw MoldClientError.malformedResponse }
+        let data = try ResponseCeiling.checked(await client.export(entry.print.filename, request: request),
+                                               ceiling: ResponseCeiling.media, what: "that export")
+        try Task.checkCancellation()
+        return try await saveExport(data, entry: entry, filename: VideoExportRequest.filename(entry.print.filename, format: request.format))
+    }
+
+    private func saveExport(_ data: Data, entry: LibraryEntry, filename: String) async throws -> Bool {
+        guard !data.isEmpty else { throw MoldClientError.malformedResponse }
+        hosts.succeeded(on: entry.hostID)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = filename
+        guard await panel.begin() == .OK, let url = panel.url else { return false }
+        try Task.checkCancellation()
+        try await Task.detached(priority: .utility) {
+            try data.write(to: url, options: .atomic)
+        }.value
+        return true
     }
 }

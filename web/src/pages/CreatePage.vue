@@ -56,7 +56,12 @@ import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import StatusDot from "@ui/components/StatusDot.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
-import { blobToBase64 } from "../lib/base64";
+import {
+  inputImageBase64 as blobToBase64,
+  inputImageFacts,
+  normalizeInputImage,
+} from "@studio/lib/inputImage";
+import { blobToBase64 as rawBlobToBase64 } from "../lib/base64";
 import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
 import {
@@ -1809,7 +1814,7 @@ async function restoreReusedH3BoundaryMedia() {
       if (!entry) return null;
       const host = listHosts().find((h) => h.id === entry.hostId);
       if (!host) return null;
-      return blobToBase64(await fetchGalleryBlob(host, filename));
+      return rawBlobToBase64(await fetchGalleryBlob(host, filename));
     },
   );
   // The fetches can take seconds; never clobber a slot the user has since
@@ -5039,6 +5044,10 @@ async function attachLightboxSource(
       form.state.value.audioFilePath = "";
     } else {
       const state = form.state.value;
+      const originalBase64 = base64;
+      const normalized = await normalizeInputImage(base64, item.filename);
+      base64 = normalized.base64;
+      mime = normalized.mimeType;
       const h3Task = minimaxH3TaskForModel(state.model);
       if (h3Task) {
         const dimensions = imageDimensionsFromBase64(base64) ?? {
@@ -5046,7 +5055,7 @@ async function attachLightboxSource(
           height: item.metadata.height,
         };
         const image = {
-          filename: item.filename,
+          filename: normalized.filename,
           mimeType: mime || `image/${item.format}`,
           width: dimensions.width,
           height: dimensions.height,
@@ -5066,10 +5075,13 @@ async function attachLightboxSource(
           "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
         );
       } else {
+        state.maskImage = null;
         state.imageAttachments = [
           {
-            kind: inlineBase64 ? "upload" : "gallery",
-            filename: item.filename,
+            kind:
+              inlineBase64 || originalBase64 !== base64 ? "upload" : "gallery",
+            filename:
+              originalBase64 === base64 ? item.filename : normalized.filename,
             base64,
           },
         ];
@@ -5180,11 +5192,11 @@ async function droppedSourceImage(
   }
   return {
     kind: "upload",
-    filename: file.name,
+    filename: inputImageFacts(base64, file.name).filename,
     base64,
     width: dimensions.width,
     height: dimensions.height,
-    mime: file.type || null,
+    mime: inputImageFacts(base64, file.name).mimeType,
   };
 }
 

@@ -297,6 +297,7 @@ import {
   sourceConditioningValidationError,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, blobToBase64, isStillImageFile, PHOTO_SAVE_FORMATS } from "../lib/image";
+import { inputImageBase64, inputImageFacts } from "@studio/lib/inputImage";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
@@ -8909,18 +8910,13 @@ async function useSelectedPrintAsSource(
     );
     const exceedsBudget = (incomingBytes: number) =>
       existingBytes + incomingBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES;
-    // Reject from Content-Length before materialising the response Blob when
-    // the host provides it; then verify the actual Blob size for older hosts
-    // and chunked responses before the ~4/3 base64 expansion.
-    const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declaredBytes) && declaredBytes >= 0 && exceedsBudget(declaredBytes)) {
-      throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
-    }
     const blob = await response.blob();
     if (!isCurrent()) return false;
     if (blob.size === 0) throw new Error("That gallery image is empty.");
-    if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
-    const base64 = await blobToBase64(blob);
+    const base64 = await inputImageBase64(blob);
+    if (exceedsBudget(Math.floor((base64.length * 3) / 4)))
+      throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
+    const facts = inputImageFacts(base64, print.filename);
     if (!isCurrent()) return false;
     if (h3Task) {
       const dimensions = imageDimensionsFromBase64(base64) ?? {
@@ -8928,8 +8924,8 @@ async function useSelectedPrintAsSource(
         height: print.metadata.height,
       };
       const image = {
-        filename: print.filename,
-        mimeType: galleryImageMimeType(print, blob.type),
+        filename: facts.filename,
+        mimeType: facts.mimeType,
         width: dimensions.width,
         height: dimensions.height,
         data: base64,
@@ -8964,8 +8960,9 @@ async function useSelectedPrintAsSource(
           : "Added gallery print as the edit target",
       );
     } else {
+      form.maskImage = null;
       form.sourceImage = base64;
-      form.sourceImageName = print.filename;
+      form.sourceImageName = facts.filename;
       form.sourceFit = defaultSourceFitPolicy();
       form.exclusiveWell = "source";
       setGenerationStatus("Gallery print selected as source");
@@ -8983,15 +8980,6 @@ async function useSelectedPrintAsSource(
       sourceUseController = null;
     }
   }
-}
-
-function galleryImageMimeType(print: GalleryImage, declared: string): string {
-  const mime = declared.split(";", 1)[0]!.trim().toLowerCase();
-  if (mime.startsWith("image/")) return mime;
-  const format = (print.format ?? print.filename.split(".").pop() ?? "")
-    .toLowerCase()
-    .replace("jpg", "jpeg");
-  return format ? `image/${format}` : "application/octet-stream";
 }
 
 function openPrint(print: GalleryPrint): void {

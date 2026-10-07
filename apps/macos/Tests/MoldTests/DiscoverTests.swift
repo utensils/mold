@@ -16,9 +16,9 @@ struct DiscoverTests {
     // MARK: - Scope
 
     /// **Fails today**: `ModelScope` does not exist.
-    @Test func aMachineThatCannotBrowseHasNoDiscoverScope() {
-        #expect(ModelScope.available(capabilities: nil) == [.installed])
-        #expect(ModelScope.available(capabilities: FakeFixtures.capabilities(catalog: false)) == [.installed])
+    @Test func manifestDiscoveryDoesNotRequireCommunityCatalog() {
+        #expect(ModelScope.available(capabilities: nil) == [.installed, .discover])
+        #expect(ModelScope.available(capabilities: FakeFixtures.capabilities(catalog: false)) == [.installed, .discover])
     }
 
     @Test func aMachineThatCanBrowseOffersBothScopes() {

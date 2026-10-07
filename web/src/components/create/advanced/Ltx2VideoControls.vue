@@ -26,6 +26,7 @@ import type {
 } from "../../../types";
 import { MAX_LORA_STACK } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
+import { inputImageBase64, inputImageFacts } from "@studio/lib/inputImage";
 import {
   cameraMotionLoraPath,
   cameraMotionLoraSlotAvailable,
@@ -273,10 +274,11 @@ async function readFile(event: Event): Promise<File | null> {
 async function readImage(event: Event): Promise<SourceImageState | null> {
   const file = await readFile(event);
   if (!file) return null;
+  const base64 = await inputImageBase64(file);
   return {
     kind: "upload",
-    filename: file.name,
-    base64: await blobToBase64(file),
+    filename: inputImageFacts(base64, file.name).filename,
+    base64,
   };
 }
 async function readMedia(event: Event): Promise<SourceMediaState | null> {

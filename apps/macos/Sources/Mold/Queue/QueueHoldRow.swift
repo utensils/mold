@@ -17,6 +17,7 @@ struct QueueHoldRow: View {
     /// a hold the machine says retrying will not fix, on a fleet with
     /// nowhere to send it, used to offer nothing at all.
     let cancel: () -> Void
+    var inspect: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -25,7 +26,10 @@ struct QueueHoldRow: View {
                 .foregroundStyle(.orange)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 6) {
-                Text(entry.modelHeadline)
+                Button { inspect?() } label: { Text(entry.modelHeadline) }
+                    .buttonStyle(.plain)
+                    .disabled(inspect == nil)
+                    .accessibilityLabel("Details for \(entry.modelHeadline)")
                 Text(sentence)
                     .font(.callout)
                     .foregroundStyle(.secondary)

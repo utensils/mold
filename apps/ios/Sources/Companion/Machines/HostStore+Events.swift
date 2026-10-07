@@ -19,6 +19,7 @@ extension HostStore {
 
     func stopWatching() {
         watching = false
+        refreshCoordinator.cancelAll()
         for id in Array(watchers.keys) { stopWatching(id) }
     }
 

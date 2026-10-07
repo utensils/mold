@@ -149,12 +149,14 @@ describe("routeCreateDrop — the well under the pointer", () => {
 describe("applyCreateDrop", () => {
   it("writes the source well and records the last write", async () => {
     const s = state();
+    s.maskImage = image("old-mask.png");
     expect(await applyCreateDrop(s, "source", image(), context(single))).toBe(
       null,
     );
     expect(s.imageAttachments).toHaveLength(1);
     expect(s.imageAttachments[0]?.filename).toBe("dropped.png");
     expect(s.sourceFitPolicy).toEqual({ mode: "crop-fill" });
+    expect(s.maskImage).toBeNull();
     expect(s.exclusiveWell).toBe("source");
   });
 

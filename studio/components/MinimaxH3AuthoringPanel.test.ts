@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as inputImage from "../lib/inputImage";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
@@ -177,6 +178,50 @@ describe("MinimaxH3AuthoringPanel", () => {
       "image",
       "audio",
     ]);
+  });
+
+  it("records normalized image bytes, name, MIME, and digest for references", async () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+    vi.spyOn(inputImage, "inputImageBase64").mockResolvedValue(png);
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: { firstFrame: null, lastFrame: null, references: [] },
+      },
+    });
+    const original = new File(["original camera bytes"], "camera.jpg", {
+      type: "image/jpeg",
+    });
+    const input = wrapper.get('[data-test="h3-reference-files"]');
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [original],
+    });
+    await input.trigger("change");
+    await vi.waitFor(() =>
+      expect(wrapper.emitted("update:modelValue")).toHaveLength(1),
+    );
+    const emitted = wrapper.emitted(
+      "update:modelValue",
+    )?.[0]?.[0] as MinimaxH3AuthoringState;
+    const hash = await crypto.subtle.digest(
+      "SHA-256",
+      Uint8Array.from(atob(png), (c) => c.charCodeAt(0)),
+    );
+    expect(emitted.references[0]?.reference).toMatchObject({
+      kind: "image",
+      media: { authority: "inline", data: png },
+      mime_type: "image/png",
+      provenance: {
+        name: "camera.png",
+        sha256: [...new Uint8Array(hash)]
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join(""),
+      },
+    });
+    expect(vi.mocked(createImageBitmap).mock.calls[0]?.[0]).toMatchObject({
+      name: "camera.png",
+      type: "image/png",
+    });
   });
 
   it("canonicalizes audio/x-wav without resampling or rounding its sample timeline", async () => {

@@ -1,3 +1,4 @@
+import { inputImageBase64 } from "@studio/lib/inputImage";
 import { blobToBase64 } from "@studio/lib/base64";
 import type { GalleryImage } from "./api/types";
 import {
@@ -18,8 +19,8 @@ export { blobToBase64 };
  * Native desktop chooser selection is read by the Rust backend; this remains
  * the portable path for drag-and-drop and the browser development surface.
  */
-export function fileToBase64(file: File): Promise<string> {
-  return blobToBase64(file);
+export function fileToBase64(file: File, resizeImage = true): Promise<string> {
+  return resizeImage ? inputImageBase64(file) : blobToBase64(file);
 }
 
 /** Object URL for a base64 payload so a `<img>` can preview it. Without an

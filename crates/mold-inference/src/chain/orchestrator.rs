@@ -258,6 +258,9 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             )));
         }
         validate_motion_tail(req).map_err(ChainOrchestratorError::Invalid)?;
+        let mut resolved = req.clone();
+        let base_seed = resolved.materialize_seed();
+        let req = &resolved;
 
         // Plan every stage's EXR window up front so an invalid layout (a
         // fade boundary, a clip shorter than its trim) fails before any
@@ -305,7 +308,6 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             });
         }
 
-        let base_seed = req.seed.unwrap_or(0);
         let mut stage_frames: Vec<Vec<RgbImage>> = Vec::with_capacity(req.stages.len());
         let mut stage_audio: Vec<Option<NativeAudioTrack>> = Vec::with_capacity(req.stages.len());
         let mut total_generation_ms: u64 = 0;
@@ -898,6 +900,23 @@ mod tests {
         // Stage 0 ran (recorded), stage 1 failed (recorded before bail),
         // stage 2 never ran.
         assert_eq!(renderer.calls.len(), 2);
+    }
+
+    #[test]
+    fn chain_random_seed_is_fresh_per_run_and_stable_within_run() {
+        let mut req = chain_req(vec![stage("a", 9), stage("b", 9)], 0);
+        req.seed = None;
+        let mut renderer = FakeRenderer::new();
+        renderer.frame_count_override = Some(9);
+        ChainOrchestrator::new(&mut renderer)
+            .run(&req, None)
+            .unwrap();
+        ChainOrchestrator::new(&mut renderer)
+            .run(&req, None)
+            .unwrap();
+        assert_eq!(renderer.calls[0].seed, renderer.calls[1].seed);
+        assert_eq!(renderer.calls[2].seed, renderer.calls[3].seed);
+        assert_ne!(renderer.calls[0].seed, renderer.calls[2].seed);
     }
 
     #[test]

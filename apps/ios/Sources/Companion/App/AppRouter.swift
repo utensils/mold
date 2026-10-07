@@ -20,6 +20,12 @@ final class AppRouter {
 
     /// A print whose recipe Generate should load next ("Use These Settings").
     var pendingReuse: LibraryEntry?
+    var pendingSource: LibraryEntry?
+
+    func useAsSource(_ entry: LibraryEntry) {
+        pendingSource = entry
+        selection = .go(.generate)
+    }
 
     func reuse(_ entry: LibraryEntry) {
         pendingReuse = entry

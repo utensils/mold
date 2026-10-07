@@ -63,6 +63,21 @@ struct MeshExportRoutingTests {
         #expect(prompted.isEmpty, "a clip has no turntable and no geometry")
     }
 
+    @Test func clipOptionsCaptureTheDisplayedHostAndStayOutOfMeshRequests() throws {
+        let host = machine()
+        var meshPrompts: [MeshExportPrompt] = []
+        var videoPrompts: [VideoExportPrompt] = []
+        var actions = try actions(host) { meshPrompts.append($0) }
+        actions.videoExport = { videoPrompts.append($0) }
+        let selected = entry("clip.mp4", format: "mp4", host: host)
+        actions.requestExport(selected, as: "gif")
+        #expect(meshPrompts.isEmpty)
+        #expect(videoPrompts.count == 1)
+        #expect(videoPrompts.first?.entry.hostID == host.id)
+        #expect(videoPrompts.first?.entry.print.filename == "clip.mp4")
+        #expect(videoPrompts.first?.format == "gif")
+    }
+
     /// A MESH's animated container is the one that opens the sheet, because a
     /// turntable is a RENDER with frames, a rate and a size of its own.
     @Test func aMeshTurntableAsksForItsControls() throws {

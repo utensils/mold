@@ -9,6 +9,7 @@ import MoldClient
 @MainActor
 @Observable
 final class HostStore {
+    @ObservationIgnored let refreshCoordinator = RefreshCoordinator()
     internal(set) var hosts: [MoldHost]
     internal(set) var reachability: [MoldHost.ID: Reachability] = [:]
     /// What each machine says it can do. Read rather than guessed -- an

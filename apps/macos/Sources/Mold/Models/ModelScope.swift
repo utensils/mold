@@ -14,16 +14,11 @@ enum ModelScope: String, CaseIterable, Hashable {
         }
     }
 
-    /// Discover only where THIS machine says it browses a catalog at all.
-    /// An older host, or one with catalog access turned off, offers
-    /// Installed alone -- and the picker is never drawn for one segment
-    /// (design S3).
-    static func available(capabilities: Capabilities?) -> [ModelScope] {
-        capabilities?.canBrowseCatalog == true ? [.installed, .discover] : [.installed]
-    }
+    /// The manifest is available independently of the optional community catalog.
+    static func available(capabilities: Capabilities?) -> [ModelScope] { [.installed, .discover] }
 
-    /// A stored `.discover` surviving onto a machine that cannot browse
-    /// falls back to `.installed` rather than showing an empty pane.
+    /// Retain the selected scope when moving between machines; every machine
+    /// can offer its manifest independently of community browsing.
     static func resolved(stored: ModelScope, available: [ModelScope]) -> ModelScope {
         available.contains(stored) ? stored : .installed
     }

@@ -96,11 +96,7 @@ keeps its original filename and file type.
 
 ## On the Lock Screen
 
-While a render runs, a **Live Activity** shows its preview, the progress
-sentence, the time left and a Stop button, on the Lock Screen and in the
-Dynamic Island. The translucent card keeps the prompt compact, gives progress its own row, and places the machine and waiting count together in the footer. Large text uses a simpler layout to keep the status and Stop control readable. mold servers cannot push to a phone, so once the app is in the
-background the activity is refreshed only when iOS lets Mold Studio run; it
-says "Open Mold Studio to refresh" when it may be out of date.
+Live progress is available in Queue. Persistent generic Live Activities are disabled.
 
 When a render finishes, fails or is held while the app is away, a
 **notification** says so; tap it to open the print. Each kind can be switched
@@ -156,7 +152,7 @@ Hold a Library tile to preview it and open its actions. Source-image selection a
 
 When a Library print is saved on several machines, the source-image picker uses a currently reachable copy, including when the first listed machine is offline.
 
-Live Activity cards use ActivityKit’s default material so the background and text follow the Lock Screen appearance together, including the stale “Open Mold Studio to refresh” state.
+Completion notifications use the system notification appearance.
 
 ## Find curated models and reuse their inputs
 
@@ -220,3 +216,11 @@ Activities have recovery actions in app Settings. Restricted access explains
 Screen Time or device management. Photo imports use the system picker without
 requesting access to your whole library. Auto-save requests Photos access when
 you enable it, and saving videos uses PhotoKit's background callback safely.
+
+## Focused generation and media playback
+
+Generate keeps the prompt, attachments and Generate button stable while jobs run. Tap the queue count for job details and supported live previews; completed media belongs in Library. Completion/failure notifications remain available without a persistent generic Live Activity.
+
+Picture menus in Library and its viewer offer **Use as Source**, retaining your prompt and model. The source picker searches all machines together and can filter to one machine. New oversized still inputs fit automatically with orientation and transparency preserved; original library files remain unchanged.
+
+**Settings → Video Playback** offers autoplay and repeat. Only the selected video plays, and leaving the viewer or backgrounding pauses it. 3-D views load only when selected, use file-backed downloads and offer Retry on failure. Paired connections prefer a verified local-network route and reconsider routes on network changes.

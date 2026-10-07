@@ -58,6 +58,7 @@ struct LibraryPane: View {
     /// The mesh export waiting on its controls. Both doors -- the tile's menu
     /// and the viewer's -- open this one sheet.
     @State private var meshExport: MeshExportPrompt?
+    @State private var videoExport: VideoExportPrompt?
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
@@ -69,7 +70,7 @@ struct LibraryPane: View {
                        materializer: materializer, upscales: upscales,
                        collectionAction: { performCollection($0) },
                        newCollection: { newCollectionTargets = $0 },
-                       meshExport: { meshExport = $0 })
+                       meshExport: { meshExport = $0 }, videoExport: { videoExport = $0 })
     }
 
     // Three stages rather than one chain: what is on screen, what dresses it,
@@ -136,7 +137,12 @@ struct LibraryPane: View {
             .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
             .sheet(item: $meshExport) { prompt in
                 MeshExportSheet(prompt: prompt) { request in
-                    actions.export(prompt.entry, request: request)
+                    try await actions.convertAndSave(prompt.entry, request: request)
+                }
+            }
+            .sheet(item: $videoExport) { prompt in
+                VideoExportSheet(prompt: prompt) { request in
+                    try await actions.convertAndSave(prompt.entry, request: request)
                 }
             }
     }

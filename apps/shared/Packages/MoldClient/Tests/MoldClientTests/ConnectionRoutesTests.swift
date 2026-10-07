@@ -99,6 +99,17 @@ struct ConnectionProbeTests {
         #expect(url.absoluteString == "https://relay.example")
     }
 
+    @Test func returningToLANOverridesCachedRelay() async throws {
+        ConnectionProbeProtocol.failLAN = true
+        ConnectionProbeProtocol.failTailscale = true
+        ConnectionProbeProtocol.badProof = false
+        defer { ConnectionProbeProtocol.failTailscale = false }
+        let relay = "https://return-to-lan.example"
+        #expect(try await selectPairingRoute(relay: relay).absoluteString == relay)
+        ConnectionProbeProtocol.failLAN = false
+        #expect(try await selectPairingRoute(relay: relay).absoluteString == "http://192.168.1.2:7680")
+    }
+
     @Test func pairingPrefersLANWhenAllAdvertisedRoutesAnswer() async throws {
         ConnectionProbeProtocol.failLAN = false
         ConnectionProbeProtocol.failTailscale = false

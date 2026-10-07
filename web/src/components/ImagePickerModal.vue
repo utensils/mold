@@ -15,7 +15,11 @@ import ModalPanel from "@ui/components/ModalPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
-import { blobToBase64 } from "../lib/base64";
+import {
+  inputImageBase64 as blobToBase64,
+  inputImageFacts,
+  normalizeInputImage,
+} from "@studio/lib/inputImage";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   fileMatchesImageInputFormats,
@@ -33,6 +37,7 @@ import {
 } from "../lib/multiHostGallery";
 import { getHost, HOSTS_CHANGED_EVENT, listHosts } from "../lib/hostRegistry";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
+import { blobToBase64 as rawBlobToBase64 } from "../lib/base64";
 import { mediaKind, type SourceImageState } from "../types";
 
 const props = withDefaults(
@@ -187,7 +192,7 @@ async function emitFiles(files: File[]) {
       const dimensions = imageDimensionsFromBase64(base64, props.formats);
       return {
         kind: "upload" as const,
-        filename: file.name,
+        filename: inputImageFacts(base64, file.name).filename,
         base64,
         ...(dimensions
           ? { width: dimensions.width, height: dimensions.height }
@@ -262,11 +267,13 @@ async function emitGallerySelection(items: HostGalleryImage[]) {
         const host = getHost(item.hostId);
         if (!host) throw new Error(`${item.hostLabel} is no longer connected.`);
         const blob = await fetchGalleryBlob(host, item.filename);
-        const b64 = await blobToBase64(blob);
+        const original = await rawBlobToBase64(blob);
+        const normalized = await normalizeInputImage(original, item.filename);
+        const b64 = normalized.base64;
         const dimensions = imageDimensionsFromBase64(b64, props.formats);
         return {
-          kind: "gallery" as const,
-          filename: item.filename,
+          kind: original === b64 ? ("gallery" as const) : ("upload" as const),
+          filename: original === b64 ? item.filename : normalized.filename,
           base64: b64,
           ...(dimensions
             ? { width: dimensions.width, height: dimensions.height }

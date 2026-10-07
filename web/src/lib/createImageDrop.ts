@@ -110,6 +110,7 @@ export async function applyCreateDrop(
 ): Promise<string | null> {
   switch (target) {
     case "source":
+      state.maskImage = null;
       state.imageAttachments =
         context.plan.kind === "attachments"
           ? [image, ...state.imageAttachments.slice(1)]

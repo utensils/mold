@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { inputImageFacts } from "@studio/lib/inputImage";
 import { computed, ref, useId, watch } from "vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import type {
@@ -39,6 +40,7 @@ import {
   cameraControlValidationError,
   fpsValidationError,
   inlineGenerationMediaBytes,
+  decodedBase64Bytes,
   wanRecipeValidationError,
   MAX_INLINE_GENERATION_MEDIA_BYTES,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
@@ -511,18 +513,22 @@ async function addKeyframes(event: Event): Promise<void> {
     mediaReadError.value = "Keyframes must be non-empty PNG or JPEG images.";
     return;
   }
-  const incomingBytes = files.reduce((sum, file) => sum + file.size, 0);
-  if (exceedsMobileRequestBudget(incomingBytes, null)) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
-    return;
-  }
   try {
     const picked = await Promise.all(
-      files.map<Promise<PickedImage>>(async (file) => ({
-        filename: file.name,
-        base64: await fileToBase64(file),
-      })),
+      files.map<Promise<PickedImage>>(async (file) => {
+        const base64 = await fileToBase64(file);
+        return { filename: inputImageFacts(base64, file.name).filename, base64 };
+      }),
     );
+    if (
+      exceedsMobileRequestBudget(
+        picked.reduce((sum, image) => sum + decodedBase64Bytes(image.base64), 0),
+        null,
+      )
+    ) {
+      mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
+      return;
+    }
     props.form.keyframes = [
       ...props.form.keyframes,
       ...picked.map((image, index) => ({ frame: suggestKeyframeFrame(index), image })),

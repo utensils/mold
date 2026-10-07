@@ -15,6 +15,7 @@ struct MeshExportPrompt: Identifiable {
     /// The host's bounds and the axes it accepts. Nil on an older host, which
     /// is the one gate: its exports post the bare format.
     let capabilities: MeshExportGeometryCapabilities?
+    let exportOptions: ExportOptions?
     /// The mesh's own box, when a viewer has reported one, so the sentence can
     /// name what the file will measure.
     let bounds: MeshBounds?
@@ -30,26 +31,32 @@ struct MeshExportPrompt: Identifiable {
     var offersAsStored: Bool { geometry?.sizeMm == nil }
 
     init(entry: LibraryEntry, format: String, geometry: MeshExportGeometry?,
-         capabilities: MeshExportGeometryCapabilities?, bounds: MeshBounds? = nil) {
+         capabilities: MeshExportGeometryCapabilities?, exportOptions: ExportOptions? = nil,
+         bounds: MeshBounds? = nil) {
         id = "\(entry.id.host)#\(entry.id.filename)#\(format)"
         self.entry = entry
         self.format = format
         self.geometry = geometry
         self.capabilities = capabilities
+        self.exportOptions = exportOptions
         self.bounds = bounds
     }
 }
 
 struct MeshExportSheet: View {
     let prompt: MeshExportPrompt
-    let onExport: (MeshExportRequest) -> Void
+    let onExport: (MeshExportRequest) async throws -> Bool
     @Environment(\.dismiss) private var dismiss
 
     @State var geometry: MeshExportGeometry
     @State var turntable = MeshTurntableOptions()
     @State var scaled: Bool
+    @State var gif: GifExportSelection
+    @State private var converting = false
+    @State private var error: String?
+    @State private var conversion: Task<Void, Never>?
 
-    init(prompt: MeshExportPrompt, onExport: @escaping (MeshExportRequest) -> Void) {
+    init(prompt: MeshExportPrompt, onExport: @escaping (MeshExportRequest) async throws -> Bool) {
         self.prompt = prompt
         self.onExport = onExport
         let resolved = prompt.geometry
@@ -58,25 +65,26 @@ struct MeshExportSheet: View {
         // Forced on wherever "as stored" is not a choice, so the toggle can
         // never leave `size_mm` absent on a format whose default is a size.
         _scaled = State(initialValue: resolved.sizeMm != nil)
+        _gif = State(initialValue: GifExportSelection(options: prompt.exportOptions))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title).font(.headline)
-            if prompt.geometry == nil {
-                turntableBody
-            } else {
-                geometryBody
-            }
+            Group {
+                if prompt.geometry == nil { turntableBody } else { geometryBody }
+            }.disabled(converting)
+            if converting { ProgressView("Converting mesh…") }
+            if let error { Text(error).foregroundStyle(.secondary) }
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Cancel", role: .cancel) { conversion?.cancel(); dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Export…") {
-                    onExport(request)
-                    dismiss()
+                    submit()
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(converting || !gif.valid(format: prompt.format, options: prompt.exportOptions))
             }
         }
         .padding(20)
@@ -85,6 +93,7 @@ struct MeshExportSheet: View {
         // the held value follows rather than waiting to be refused.
         .onChange(of: turntable.maxDimension) { _, _ in turntable = turntable.clamped }
         .onChange(of: turntable.transparent) { _, _ in turntable = turntable.clamped }
+        .onDisappear { conversion?.cancel() }
     }
 
     private var title: String {
@@ -95,7 +104,11 @@ struct MeshExportSheet: View {
 
     var request: MeshExportRequest {
         guard prompt.geometry != nil else {
-            return .turntable(format: prompt.format, turntable)
+            var options = turntable
+            options.playback = gif.playback
+            options.repeatMode = gif.repeatMode
+            options.pauseMs = gif.pause(format: prompt.format, options: prompt.exportOptions)
+            return .turntable(format: prompt.format, options)
         }
         var resolved = geometry
         // "As stored" is the ABSENT key, and it is only ever offered where the
@@ -103,5 +116,19 @@ struct MeshExportSheet: View {
         if !scaled, prompt.offersAsStored { resolved.sizeMm = nil }
         return .geometry(format: prompt.format,
                          prompt.capabilities == nil ? nil : resolved)
+    }
+
+    private func submit() {
+        let sending = request
+        converting = true
+        error = nil
+        conversion = Task {
+            defer { converting = false }
+            do {
+                let saved = try await onExport(sending)
+                try Task.checkCancellation()
+                if saved { dismiss() }
+            } catch is CancellationError { return } catch { self.error = error.localizedDescription }
+        }
     }
 }

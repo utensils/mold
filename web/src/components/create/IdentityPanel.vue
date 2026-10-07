@@ -8,7 +8,10 @@ import {
 } from "@studio/lib/identityConditioning";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import { blobToBase64 } from "../../lib/base64";
+import {
+  inputImageBase64 as blobToBase64,
+  inputImageFacts,
+} from "@studio/lib/inputImage";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 
 /**
@@ -104,16 +107,15 @@ async function onFile(file: File) {
   }
   uploadError.value = null;
   const dimensions = imageDimensionsFromBase64(base64);
-  // No fit policy and no resize: an identity photo is a face reference, not
-  // a composition input, and travels to the server exactly as picked.
+  // Transport sizing preserves the whole face reference; it is never fitted to the canvas.
   patch({
     identityImage: {
       kind: "upload",
-      filename: file.name,
+      filename: inputImageFacts(base64, file.name).filename,
       base64,
       width: dimensions?.width ?? null,
       height: dimensions?.height ?? null,
-      mime: file.type || null,
+      mime: inputImageFacts(base64, file.name).mimeType,
     },
   });
 }

@@ -8,6 +8,7 @@ public enum DraftPictureAttachment {
         _ picked: ImportedPicture, in draft: inout RenderDraft, recipe: GenerationRecipe?
     ) {
         let replaced = draft.media.sourceImageOriginal != picked.encoded
+        if replaced { draft.media.maskImage = nil }
         draft.media.sourceImageOriginal = picked.encoded
         draft.media.sourceImageOriginalName = picked.name
         draft.media.sourceImage = picked.encoded

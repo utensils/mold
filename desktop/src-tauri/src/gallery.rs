@@ -108,47 +108,64 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
     let size = std::fs::metadata(path)
         .map_err(|error| format!("Couldn't inspect the dropped image: {error}"))?
         .len();
-    if size > MAX_SOURCE_IMAGE_BYTES {
-        return Err("Drop an image no larger than 64 MiB.".into());
+    if size > 256 * 1024 * 1024 {
+        return Err("Drop an image no larger than 256 MiB.".into());
     }
 
-    let filename = path
+    let mut filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "The dropped image has no valid filename.".to_string())?
         .to_string();
-    let reader = image::ImageReader::open(path)
-        .map_err(|error| format!("Couldn't open the dropped image: {error}"))?
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("Couldn't open the dropped image: {error}"))?;
+    let reader = image::ImageReader::new(std::io::BufReader::new(CappedImageFile(file)))
         .with_guessed_format()
         .map_err(|error| format!("Couldn't identify the dropped image: {error}"))?;
     // WebP is read too: a recipe advertising WebP references (Qwen Image 2.1's
     // `reference_images.formats`) takes one on its strip. Which well may hold
     // it is the web layer's call (`applyDesktopImageDrop`), made against the
-    // resolved recipe — a source well still refuses it. The bytes are handed
-    // on untouched, alpha and all.
+    // resolved recipe — a source well still refuses it. Small imports retain
+    // their exact bytes; oversized imports keep alpha while bounding transport.
     let format = match reader.format() {
         Some(image::ImageFormat::Png) => mold_core::OutputFormat::Png,
         Some(image::ImageFormat::Jpeg) => mold_core::OutputFormat::Jpeg,
         Some(image::ImageFormat::WebP) => mold_core::OutputFormat::Webp,
         _ => return Err("Drop a PNG, JPEG or WebP image.".into()),
     };
-    let (width, height) = reader
+    let (mut width, mut height) = reader
         .into_dimensions()
         .map_err(|error| format!("Couldn't decode the dropped image: {error}"))?;
 
-    // Read through a hard cap as well as checking metadata so a file that grows
-    // between validation and ingestion cannot force an unbounded allocation.
-    let mut bytes = Vec::with_capacity(size as usize);
-    std::fs::File::open(path)
-        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?
-        .take(MAX_SOURCE_IMAGE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?;
-    if bytes.len() as u64 > MAX_SOURCE_IMAGE_BYTES {
-        return Err("Drop an image no larger than 64 MiB.".into());
-    }
-    let metadata = mold_db::metadata_io::read_embedded(path, format);
+    let bytes = if size > MAX_SOURCE_IMAGE_BYTES {
+        let (bytes, dimensions) = bounded_native_input_image(path)?;
+        (width, height) = dimensions;
+        filename = format!(
+            "{}.png",
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("source")
+        );
+        bytes
+    } else {
+        // Retain the original byte/path authority for small imports, including masks.
+        let mut bytes = Vec::with_capacity(size as usize);
+        std::fs::File::open(path)
+            .map_err(|error| format!("Couldn't read the dropped image: {error}"))?
+            .take(MAX_SOURCE_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("Couldn't read the dropped image: {error}"))?;
+        if bytes.len() as u64 > MAX_SOURCE_IMAGE_BYTES {
+            return Err("The dropped image changed while reading it. Choose it again.".into());
+        }
+        bytes
+    };
+    let metadata = if size > MAX_SOURCE_IMAGE_BYTES && format == mold_core::OutputFormat::Jpeg {
+        oversized_jpeg_metadata(path)
+    } else {
+        mold_db::metadata_io::read_embedded(path, format)
+    };
     let sha256 = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -165,6 +182,118 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
     })
 }
 
+/// JPEG metadata lives in bounded header segments; never read the oversized raster payload.
+fn oversized_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
+    use std::io::Seek;
+    let mut reader = std::io::BufReader::new(CappedImageFile(std::fs::File::open(path).ok()?));
+    loop {
+        let mut marker = [0; 2];
+        reader.read_exact(&mut marker).ok()?;
+        if marker[0] != 0xff {
+            return None;
+        }
+        while marker[1] == 0xff {
+            reader.read_exact(&mut marker[1..]).ok()?;
+        }
+        match marker[1] {
+            0xd8 | 0x01 | 0xd0..=0xd7 => continue,
+            0xda | 0xd9 => return None,
+            _ => {}
+        }
+        let mut length = [0; 2];
+        reader.read_exact(&mut length).ok()?;
+        let length = u16::from_be_bytes(length).checked_sub(2)?;
+        if marker[1] == 0xfe {
+            let mut comment = vec![0; usize::from(length)];
+            reader.read_exact(&mut comment).ok()?;
+            if let Some(json) = std::str::from_utf8(&comment)
+                .ok()
+                .and_then(|text| text.strip_prefix("mold:parameters "))
+            {
+                if let Ok(metadata) = serde_json::from_str(json) {
+                    return Some(metadata);
+                }
+            }
+        } else {
+            reader
+                .seek(std::io::SeekFrom::Current(i64::from(length)))
+                .ok()?;
+        }
+    }
+}
+
+struct CappedImageFile(std::fs::File);
+impl std::io::Read for CappedImageFile {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Seek;
+        let remaining = (256_u64 * 1024 * 1024).saturating_sub(self.0.stream_position()?);
+        let count = buffer.len().min(remaining as usize);
+        self.0.read(&mut buffer[..count])
+    }
+}
+impl std::io::Seek for CappedImageFile {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let limit = 256_i128 * 1024 * 1024;
+        let target = match position {
+            std::io::SeekFrom::Start(offset) => i128::from(offset),
+            std::io::SeekFrom::Current(offset) => {
+                i128::from(self.0.stream_position()?) + i128::from(offset)
+            }
+            std::io::SeekFrom::End(offset) => {
+                i128::from(self.0.metadata()?.len().min(limit as u64)) + i128::from(offset)
+            }
+        };
+        if !(0..=limit).contains(&target) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Image exceeds safe input bounds.",
+            ));
+        }
+        self.0.seek(std::io::SeekFrom::Start(target as u64))
+    }
+}
+
+/// Stream oversized imports through the decoder's allocation limit, then bound transport PNGs.
+fn bounded_native_input_image(path: &std::path::Path) -> Result<(Vec<u8>, (u32, u32)), String> {
+    use image::ImageDecoder;
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(CappedImageFile(file)))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    limits.max_image_width = Some(32768);
+    limits.max_image_height = Some(32768);
+    reader.limits(limits);
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|error| format!("Couldn't safely decode the dropped image: {error}"))?;
+    if decoder.total_bytes() > 128 * 1024 * 1024 {
+        return Err("The dropped image exceeds safe decoded pixel bounds.".into());
+    }
+    let orientation = decoder.orientation().map_err(|error| error.to_string())?;
+    let mut picture =
+        image::DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
+    picture.apply_orientation(orientation);
+    let mut side = picture.width().max(picture.height()).min(4096);
+    loop {
+        let resized = picture.resize(side, side, image::imageops::FilterType::Triangle);
+        let dimensions = (resized.width(), resized.height());
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        resized
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        let bytes = encoded.into_inner();
+        if bytes.len() <= 2 * 1024 * 1024 {
+            return Ok((bytes, dimensions));
+        }
+        if side == 1 {
+            return Err("Couldn't resize the dropped image.".into());
+        }
+        side = (side * 3 / 4).max(1);
+    }
+}
+
 /// Read an OS-dropped still and its embedded Mold generation metadata. The
 /// command validates the file's decoded format instead of trusting its suffix.
 #[tauri::command]
@@ -178,11 +307,14 @@ pub async fn import_source_image(
         let imported = import_source_image_from_path(&source_path)?;
         // Path provenance is a best-effort restore aid; a read-only app-data
         // directory must not prevent the image from being attached now.
-        let _ = crate::source_stash::remember_source_path(
-            &app_for_task,
-            &imported.sha256,
-            &source_path,
-        );
+        // Transformed bytes have a new digest; the original path cannot restore them.
+        if std::fs::metadata(&source_path).is_ok_and(|info| info.len() <= MAX_SOURCE_IMAGE_BYTES) {
+            let _ = crate::source_stash::remember_source_path(
+                &app_for_task,
+                &imported.sha256,
+                &source_path,
+            );
+        }
         Ok(imported)
     })
     .await
@@ -2548,7 +2680,49 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oversized_drops_before_reading_them() {
+    fn imports_oversized_valid_png_without_buffering_original() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 0]))
+            .save(&path)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SOURCE_IMAGE_BYTES + 1)
+            .unwrap();
+        let imported = import_source_image_from_path(&path).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&imported.base64)
+            .unwrap();
+        assert!(bytes.len() <= 2 * 1024 * 1024);
+        let decoded = image::load_from_memory(&bytes).unwrap().into_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
+        assert_eq!((imported.width, imported.height), decoded.dimensions());
+        assert_eq!(imported.sha256, {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        });
+    }
+
+    #[test]
+    fn rejects_inputs_beyond_the_native_stream_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("too-large.png");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(256 * 1024 * 1024 + 1)
+            .unwrap();
+        assert_eq!(
+            import_source_image_from_path(&path).unwrap_err(),
+            "Drop an image no larger than 256 MiB."
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_non_image_drops_without_buffering_them() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oversized.png");
         let file = std::fs::File::create(&path).unwrap();
@@ -2556,7 +2730,7 @@ mod tests {
 
         assert_eq!(
             import_source_image_from_path(&path).unwrap_err(),
-            "Drop an image no larger than 64 MiB."
+            "Drop a PNG, JPEG or WebP image."
         );
     }
 

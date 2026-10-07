@@ -32,6 +32,11 @@ struct PrintMenu: View {
                 Label("Delete Immediately", systemImage: "trash.slash")
             }
         } else {
+            if single, let entry = entries.first, entry.print.kind == .picture {
+                Button { router.useAsSource(entry) } label: {
+                    Label("Use as Source", systemImage: "photo.badge.plus")
+                }
+            }
             if single, let entry = entries.first, entry.print.kind != .mesh {
                 Button { router.reuse(entry) } label: {
                     Label("Use These Settings", systemImage: "arrow.uturn.left.circle")

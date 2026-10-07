@@ -74,6 +74,7 @@ extension MeshExportSheet {
             }
         }
         Toggle("Transparent background", isOn: $turntable.transparent)
+        if prompt.format == "gif" { GifExportControls(selection: $gif, options: prompt.exportOptions) }
         Text(duration).font(.callout).foregroundStyle(.secondary)
         if let note = turntable.budgetNote {
             Text(note).font(.callout).foregroundStyle(.secondary)

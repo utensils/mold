@@ -1448,7 +1448,18 @@ describe("CreatePage layout and behavior", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => ({
       ok: true,
-      blob: async () => new Blob(["image"], { type: "image/png" }),
+      blob: async () =>
+        new Blob(
+          [
+            Uint8Array.from(
+              atob(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+              ),
+              (c) => c.charCodeAt(0),
+            ),
+          ],
+          { type: "image/png" },
+        ),
     })) as never;
     const stubs: Record<string, Component> = pageStubs();
     stubs.RecentGrid = defineComponent({
@@ -1473,8 +1484,8 @@ describe("CreatePage layout and behavior", () => {
     expect(form.h3Authoring.firstFrame).toMatchObject({
       filename: entry.filename,
       mimeType: "image/png",
-      width: entry.metadata.width,
-      height: entry.metadata.height,
+      width: 1,
+      height: 1,
     });
     expect(form.imageAttachments).toHaveLength(0);
     wrapper.unmount();

@@ -4,6 +4,7 @@ import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { fileToBase64, isStillImageFile } from "../../lib/image";
+import { inputImageFacts } from "@studio/lib/inputImage";
 import ReferenceImageStrip from "@studio/components/ReferenceImageStrip.vue";
 import {
   referenceOrdinalBase,
@@ -254,8 +255,7 @@ async function onH3ReferenceImagesPicked(picked: PickedImage[]) {
   applyH3(result);
 }
 
-function imageMime(base64: string, declared?: string | null): string {
-  if (declared === "image/png" || declared === "image/jpeg") return declared;
+function imageMime(base64: string): string {
   return base64.startsWith("iVBOR") ? "image/png" : "image/jpeg";
 }
 
@@ -265,8 +265,8 @@ async function setNamedViewFile(role: NamedViewRole, file: File) {
   if (!dimensions) return;
   props.form.namedViews = setNamedView(props.form.namedViews, role, {
     base64,
-    filename: file.name || `${role}.png`,
-    mimeType: imageMime(base64, file.type),
+    filename: inputImageFacts(base64, file.name || `${role}.png`).filename,
+    mimeType: imageMime(base64),
     ...dimensions,
   });
 }
@@ -361,7 +361,7 @@ async function onStripFiles(files: File[]) {
         toasts.push("That picture's format isn't one this style takes.", "error");
         return;
       }
-      picked.push({ filename: file.name, base64 });
+      picked.push({ filename: inputImageFacts(base64, file.name).filename, base64 });
     } catch {
       toasts.push("Couldn't read the image.", "error");
       return;
@@ -451,6 +451,7 @@ type Slot = "source" | "end" | "mask" | "control";
 
 function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
   if (slot === "source") {
+    if (props.form.sourceImage !== b64) props.form.maskImage = null;
     props.form.sourceImage = b64;
     // The label lives and dies with the image (Reuse-settings restore).
     props.form.sourceImageName = b64 ? name : null;
@@ -481,7 +482,12 @@ async function ingest(slot: Slot, file: File | undefined | null) {
     return;
   }
   try {
-    setSlot(slot, await fileToBase64(file), file.name || null);
+    const base64 = await fileToBase64(file, slot !== "mask");
+    setSlot(
+      slot,
+      base64,
+      slot === "mask" ? file.name : inputImageFacts(base64, file.name).filename,
+    );
   } catch {
     toasts.push("Couldn't read the image.", "error");
   }

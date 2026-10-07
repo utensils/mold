@@ -126,7 +126,6 @@ struct LibraryViewer: View {
             // and waiting for all of it before the first frame is not playback.
             guard let url = await actions.playableURL(for: entry) else { return }
             let player = AVPlayer(url: url)
-            player.play()
             self.player = player
             return
         }

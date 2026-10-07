@@ -1,7 +1,7 @@
 import MoldClient
 import SwiftUI
 
-/// Generate (DESIGN.md §5.1): the canvas and a bounded composer above the
+/// Generate: a stable composer and pinned submission action above the
 /// tab bar. The prompt stays in one hierarchy as the keyboard appears;
 /// the model button opens the kind, model, recipe and machine chooser.
 struct GenerateView: View {
@@ -9,9 +9,9 @@ struct GenerateView: View {
     @Environment(HostStore.self) private var hosts
     @Environment(AppRouter.self) private var router
     @Environment(\.dynamicTypeSize) private var size
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var showsOptions = false
     @State private var estimate: String?
+    @State private var choosingSourceRole = false
 
     var body: some View {
         Group {
@@ -22,50 +22,29 @@ struct GenerateView: View {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
             } else {
-                if UIDevice.current.userInterfaceIdiom == .phone && generate.run == .idle {
-                    ScrollView {
-                        Composer(showsOptions: $showsOptions, estimate: estimate,
-                                 maximumHeight: .infinity, inline: true,
-                                 inlineAction: verticalSizeClass == .compact)
-                            // The pinned action overlays the scroll view on iOS;
-                            // leave enough travel to lift Options above it.
-                            .padding(.bottom, verticalSizeClass == .compact ? 0 : (size.isAccessibilitySize ? 160 : 112))
-                    }
-                    .scrollDismissesKeyboard(.interactively)
-                    .accessibilityIdentifier("phone-generate-form")
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        if verticalSizeClass != .compact {
-                            GenerateRow(estimate: estimate)
-                                .padding(16)
-                                .frame(maxWidth: .infinity)
-                                .background(Color(uiColor: .systemBackground))
-                        }
-                    }
-                } else {
-                    GeometryReader { geometry in
-                    Group {
-                        if generate.run == .idle && size.isAccessibilitySize {
-                            Color.clear
-                        } else {
-                            GenerateCanvas()
-                        }
-                    }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(.rect)
-                        .onTapGesture { hideKeyboard() }
-                        .safeAreaBar(edge: .bottom) {
-                            Composer(showsOptions: $showsOptions, estimate: estimate,
-                                     maximumHeight: geometry.size.height * Self.composerHeightFraction(
-                                        run: generate.run, accessibility: size.isAccessibilitySize))
-                        }
-                    }
+                ScrollView {
+                    Composer(showsOptions: $showsOptions, estimate: estimate,
+                             maximumHeight: .infinity, inline: true)
+                        .padding(.bottom, 24)
                 }
+                .scrollDismissesKeyboard(.interactively)
+                .accessibilityIdentifier("phone-generate-form")
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 8) {
+                        QueueStatusLink()
+                        GenerateRow(estimate: estimate)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(uiColor: .systemBackground))
+                }
+
             }
         }
         .navigationTitle(Destination.generate.title)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showsOptions) { MoreOptionsSheet() }
-        .overlay(alignment: .top) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 8) {
                 FailureBanner()
                 if !hosts.hosts.isEmpty { FromShareCard() }
@@ -76,15 +55,28 @@ struct GenerateView: View {
             generate.reuse(entry)
             router.pendingReuse = nil
         }
+        .confirmationDialog("Use Picture as Camera View", isPresented: $choosingSourceRole, titleVisibility: .visible) {
+            ForEach(generate.recipe?.capabilities.mesh?.namedViews?.roles ?? [], id: \.self) { role in
+                Button(role.rawValue.capitalized) {
+                    guard let entry = router.pendingSource else { return }
+                    router.pendingSource = nil
+                    Task { await generate.useAsSource(entry, role: role) }
+                }
+            }
+            Button("Cancel", role: .cancel) { router.pendingSource = nil }
+        }
+        .task(id: router.pendingSource?.id) {
+            guard let entry = router.pendingSource else { return }
+            if generate.recipe?.capabilities.mesh?.namedViews?.mode.isVisible == true {
+                choosingSourceRole = true
+                return
+            }
+            await generate.useAsSource(entry)
+            if router.pendingSource?.id == entry.id { router.pendingSource = nil }
+        }
         .onChange(of: hosts.models, initial: true) { _, _ in generate.settleChoice() }
         .onChange(of: hosts.upHosts.map(\.id)) { _, _ in generate.settleChoice() }
         .task(id: estimateKey) { await refreshEstimate() }
-    }
-
-    /// Idle accessibility text gets the canvas space it needs; submitting,
-    /// progress, results and failures keep their visible canvas.
-    static func composerHeightFraction(run: RunState, accessibility: Bool) -> CGFloat {
-        accessibility && run == .idle ? 0.9 : 0.55
     }
 
     private var estimateKey: String {

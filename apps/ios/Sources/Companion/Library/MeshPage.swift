@@ -11,6 +11,8 @@ import SwiftUI
 struct MeshPage: View {
     @Environment(HostStore.self) private var hosts
     let entry: LibraryEntry
+    var isSelected = true
+    @State private var retry = 0
     @State private var loaded: (MeshRenderer, MeshScene)?
     @State private var problem: String?
 
@@ -24,30 +26,57 @@ struct MeshPage: View {
                     PrintThumbnail(entry: entry, points: 360).frame(width: 280, height: 280)
                         .clipShape(.rect(cornerRadius: 10))
                     Text(problem).foregroundStyle(.white).multilineTextAlignment(.center)
+                    Button("Try Again") { retry += 1 }.buttonStyle(.borderedProminent)
                 }
                 .padding()
             } else {
                 ProgressView().tint(.white)
             }
         }
-        .task(id: entry.id.filename) { await load() }
+        .task(id: identity) {
+            guard isSelected else { loaded = nil; return }
+            await load()
+        }
+    }
+
+    private var identity: String {
+        "\(entry.id)|\(hosts.host(entry.hostID)?.baseURL.absoluteString ?? "")|\(hosts.instanceID(of: entry.hostID) ?? "")|\(isSelected)|\(retry)"
+
     }
 
     private func load() async {
         guard let host = hosts.host(entry.hostID) else { return }
+        loaded = nil
+        problem = nil
+        let requestIdentity = identity
+        var downloaded = false
         do {
-            let data = try await hosts.backend(for: host).media(entry.print.filename, trashed: false)
-            let payload = try await Task.detached { try MeshPayload.load(data) }.value
+            let file = try await hosts.backend(for: host).mediaFile(entry.print.filename, trashed: false)
+            defer { try? FileManager.default.removeItem(at: file) }
+            try Task.checkCancellation()
+            downloaded = true
+            let payload = try await Task.detached {
+                let data = try ResponseCeiling.readFile(file, ceiling: ResponseCeiling.media, what: "3-D print")
+                return try MeshPayload.load(data)
+            }.value
+            try Task.checkCancellation()
+            guard identity == requestIdentity else { return }
             let renderer = try MeshRenderer(pixelFormat: .bgra8Unorm, depthFormat: .depth32Float)
             guard let scene = MeshScene(payload, device: renderer.device) else {
                 problem = String(localized: "This 3-D object can't be drawn here — showing its poster instead.")
                 return
             }
             loaded = (renderer, scene)
+        } catch is CancellationError {
+            return
         } catch let failure as MeshViewFailure {
+            guard identity == requestIdentity else { return }
             problem = failure.sentence
         } catch {
-            problem = String(localized: "This 3-D object can't be drawn here — showing its poster instead.")
+            guard !Task.isCancelled, identity == requestIdentity else { return }
+            problem = downloaded
+                ? String(localized: "This 3-D file couldn't be opened: \(error.localizedDescription)")
+                : String(localized: "This 3-D file couldn't be downloaded: \(error.reasonSentence)")
         }
     }
 }

@@ -50,6 +50,18 @@ public enum PrintDetails {
         ].compactMap(\.self)
     }
 
+    /// A queue may use zero as the placeholder for a seed the host will pick.
+    /// Match the browser's older-host fallback, while respecting explicit fixed zero.
+    public static func groups(for entry: QueueEntry) -> [PrintDetailGroup] {
+        guard let metadata = entry.metadata else { return [] }
+        let pinned = entry.seedPinned ?? (metadata.seed != 0)
+        return groups(for: metadata).map { group in
+            PrintDetailGroup(title: group.title, rows: group.rows.map { row in
+                row.label == "Seed" && !pinned ? PrintDetailRow("Seed", "Random") : row
+            })
+        }
+    }
+
     /// Queued work has metadata but no output file yet.
     public static func groups(for metadata: OutputMetadata) -> [PrintDetailGroup] {
         [promptGroup(metadata), settingsGroup(metadata),

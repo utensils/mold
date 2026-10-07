@@ -8,7 +8,8 @@ struct SettingsSections: View {
     @AppStorage(Preference.notifyFinished) private var finished = true
     @AppStorage(Preference.notifyFailed) private var failed = true
     @AppStorage(Preference.notifyHeld) private var held = true
-    @AppStorage(Preference.liveActivities) private var live = true
+    @AppStorage(VideoPlaybackPreferences.autoplayKey) private var autoplay = VideoPlaybackPreferences.defaultAutoplay
+    @AppStorage(VideoPlaybackPreferences.repeatKey) private var repeats = VideoPlaybackPreferences.defaultRepeat
     @Environment(Notifier.self) private var notifier
     @Bindable var access: SettingsAccess
 
@@ -18,6 +19,10 @@ struct SettingsSections: View {
             requestPhotos()
         }), photosRecovery: PermissionRecovery.photos(access.photosStatus),
         requestPhotos: photosRequestAction)
+        Section {
+            Toggle("Play videos automatically", isOn: $autoplay)
+            Toggle("Repeat videos", isOn: $repeats)
+        } header: { SectionHeader(String(localized: "Video Playback")) }
         Section {
             Toggle("Finished", isOn: $finished)
             Toggle("Didn't Finish", isOn: $failed)
@@ -40,17 +45,7 @@ struct SettingsSections: View {
                  : String(localized: "Notifications are off for Mold Studio in the Settings app."))
                 .foregroundStyle(.secondaryText)
         }
-        if UIDevice.current.userInterfaceIdiom == .phone {
-            Section {
-                Toggle("Show Renders on the Lock Screen", isOn: $live)
-                if !access.systemAllowsLiveActivities { PermissionSettingsButton(recovery: .liveActivities) }
-            } header: {
-                SectionHeader(String(localized: "Live Activities"))
-            } footer: {
-                Text("The server can't reach this iPhone directly, so a render followed from the Lock Screen may show as out of date until you open Mold Studio.")
-                    .foregroundStyle(.secondaryText)
-            }
-        }
+
     }
 
     private var photosRequestAction: (() -> Void)? {

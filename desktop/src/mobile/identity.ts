@@ -138,8 +138,8 @@ export type MobileIdentityIngest = { ok: true; image: PickedImage } | { ok: fals
 /**
  * Stage a picked photo, or say why it cannot be staged.
  *
- * The bytes travel VERBATIM: an identity photo is a face reference, not a
- * composition input, so it is never fitted, cropped, or resized against the
+ * Acquisition bounds oversized transport bytes first. An identity photo is a
+ * face reference, so it is never fitted, cropped, or resized against the
  * canvas the way a source image is. The checks are the phone's budget first
  * (it bounds what may enter the WebView at all) and then the server's own
  * header-only pre-checks, so a photo that could not be admitted never becomes

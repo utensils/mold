@@ -1,3 +1,4 @@
+import { inputImageFacts } from "./inputImage";
 import type {
   GenerationReference,
   GenerationReferenceMetadata,
@@ -389,9 +390,8 @@ export async function setMinimaxH3BoundaryFile(
     return { ok: false, error: "Use a PNG or JPEG image for FL2VA endpoints." };
   }
   return setMinimaxH3PickedImageBoundary(state, endpoint, {
-    filename: file.name,
+    ...inputImageFacts(base64, file.name),
     base64,
-    mimeType: file.type,
   });
 }
 

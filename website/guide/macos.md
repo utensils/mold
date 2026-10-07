@@ -109,3 +109,13 @@ Reused ordered image references have authenticated previews. Prompt, shape and s
 The app stores a byte-free origin locator for retained recipes. After relaunch it verifies the original machine instance, archive and output before enabling Generate. If verification fails, reconnect and reselect the source print, replace the attachments, or explicitly discard retained conditioning. Ordinary inline media and session handles are not persisted. Native shipping builds include the reviewed Metal H3 engine; remote generation uses the selected host's capabilities.
 
 **Save All to This Mac** copies retained inputs with every supported output type, independently of model family. The destination owns the source, identity, mask/control, edit/typed references, audio/video, keyframes, continuation and chain stage media, so reuse does not need the original machine. Incomplete source transfers are reported as failures. Reusing sequence settings restores the first stage's source; later stages remain in the copied archive. Rebuilding the complete authored sequence remains a separate workflow.
+
+## Queue, discovery and video preferences
+
+Click a job in Queue to see its source, settings and live progress or preview where the model supports it. The seed reads **Random** until a random job has an actual seed; explicitly locked zero remains valid.
+
+Discover opens with manifest models from the selected machine. Choose **Browse Community Catalog**, search, or filter by family for community results. **Load More Models** shows the current result count in a prominent footer.
+
+In **Settings → General → Video Playback**, choose autoplay and repeat. Videos use inline controls without the full-video hover overlay. Video and 3-D GIF export provide Loop/Bounce, Forever/Once and pause settings when applicable.
+
+New oversized input pictures are fitted proportionally, with orientation and transparency preserved. Paired remote connections prefer verified LAN routes over Tailscale and relay and recheck when the network changes.

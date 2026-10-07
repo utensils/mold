@@ -8,6 +8,7 @@ import MoldClient
 /// from `hosts.json`; neither is ever written into the other.
 @Observable
 final class HostStore {
+    @ObservationIgnored let refreshCoordinator = RefreshCoordinator()
     private(set) var hosts: [MoldHost]
     private(set) var reachability: [MoldHost.ID: Reachability] = [:]
     /// What each machine says it can do -- read, never guessed.

@@ -302,6 +302,18 @@ struct RelayTransportTests {
         #expect(streamedResponse.statusCode == 206)
         #expect(try await stream.collected(upTo: 100) == Data("{}".utf8))
     }
+    @Test func fileBackedMediaUnwrapsStagedObjects() async throws {
+        RelayTransportStub.requests = []
+        let backend = backend()
+        let (file, response) = try await backend.relayDownload(backend.request("/api/object"))
+        defer { try? FileManager.default.removeItem(at: file) }
+        #expect(try Data(contentsOf: file) == Data("{}".utf8))
+        #expect(response.statusCode == 206)
+        #expect(response.value(forHTTPHeaderField: "Content-Range") == "bytes 0-1/10")
+        let downloaded = try #require(RelayTransportStub.requests.last)
+        #expect(downloaded.value(forHTTPHeaderField: "X-Api-Key") == nil)
+        #expect(downloaded.value(forHTTPHeaderField: "x-mold-request-target") == nil)
+    }
     @Test func fileBackedUploadsUseTheSameGenericStagingContract() async throws {
         RelayTransportStub.requests = []
         let backend = backend()
