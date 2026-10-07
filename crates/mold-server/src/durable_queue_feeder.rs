@@ -1212,6 +1212,7 @@ async fn feed_available(
         // read here is the effective one, the server's own materialized
         // control adapter included, because preparation has already run.
         if let Some(media) = deferred_media.as_mut() {
+            media.project_sealed_keyframes(&preparation_request);
             media.project_sealed_loras(crate::queue_media::effective_request_loras(
                 &preparation_request,
             ));
@@ -1475,6 +1476,17 @@ mod tests {
             !source[stamp..scrub].contains("scrubbed_clone"),
             "nothing may scrub between the read and the publication"
         );
+    }
+
+    #[test]
+    fn endpoint_indices_are_stamped_before_publication_scrubs_them() {
+        let whole = include_str!("durable_queue_feeder.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let stamp = source
+            .find("project_sealed_keyframes(&preparation_request)")
+            .unwrap();
+        let scrub = source.find("preparation_request.scrubbed_clone()").unwrap();
+        assert!(stamp < scrub);
     }
 
     /// The whole durable round trip a built-in-control render takes.

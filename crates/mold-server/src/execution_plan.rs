@@ -2211,10 +2211,10 @@ fn resolve_private_h3_execution_plans(
     // The scheduler resolves the payload-free durable row; what the queue
     // media store holds for it is the projection. Dropping it here read every
     // FL2VA first-frame job as T2AV and refused it at resolve (#1423).
-    let media = mold_core::minimax_h3::ResolvedMediaPresence {
-        source_image: request.source_image.is_some()
-            || projection.is_some_and(|projection| projection.source_image),
-    };
+    let media = projection.map_or_else(
+        || mold_core::minimax_h3::ResolvedMediaPresence::from_request(request),
+        |projection| projection.h3_media_presence(request),
+    );
     let grant = prepared.h3_private_ingress_grant.as_ref().ok_or_else(|| {
         ExecutionPlanError::PreparedInputsStale(
             "MiniMax H3 private planning lost its authenticated ingress grant".into(),
@@ -2272,7 +2272,7 @@ fn resolve_private_h3_execution_plans(
         }
         if let Err(error) = evidence.validate_for(
             request,
-            media,
+            media.clone(),
             &device.id,
             device.ordinal,
             device.compute_capability,

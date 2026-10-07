@@ -370,6 +370,8 @@ The current compact implementation supports this request profile:
   order is first then last, and each image contributes its own conditioning
   and memory charge. Text-only generation remains unavailable (tracked in
   [#1552](https://github.com/utensils/mold/issues/1552))
+- queued jobs retain exact first/last endpoint roles through durable storage
+  and server restart; the same queue behavior applies to FL2VA Turbo tiers
 - MP4 output with synchronized generated audio
 - a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
   keeps the first-only 2,048-row budget and adds 1,040 rows for a second

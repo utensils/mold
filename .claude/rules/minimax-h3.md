@@ -42,3 +42,14 @@ Endpoint VAE encodes are sequential, so their transient peak is not doubled.
 private-UAT records still compare their own endpoint count/anchor and ceilings.
 Never fix a paired-frame refusal by raising only the text cap or truncating the
 prompt. See `docs/plans/h3-endpoint-prompt-budget.md` for upstream citations.
+
+**Durable FL2VA planning preserves every endpoint index.** The fixed-width
+sealed projection continues storing only the keyframe count. After authenticated
+preparation hydration, `DeferredQueueMedia::project_sealed_keyframes` stamps
+exact ordered indices into the ephemeral projection before publication scrubs
+media, for fresh jobs and replay of older sealed sets. All planner, admission,
+and claimed-attempt consumers use `QueueMediaProjection::h3_media_presence`.
+Hydrated request indices take precedence over the projection, never concatenate;
+preserve duplicates and invalid indices for core validation, and fail closed
+if a scrubbed row's authenticated count disagrees with the projected vector.
+Ref2VA rejects projected FL2VA endpoints as it rejects hydrated endpoints.
