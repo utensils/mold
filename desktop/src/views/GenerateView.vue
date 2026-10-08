@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
+import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { relayFetch as fetch } from "@studio/api/relayTransport";
 import VideoSoundToggle from "../components/gallery/VideoSoundToggle.vue";
 import { useVideoPlaybackStore } from "../stores/videoPlayback";
@@ -3344,7 +3346,10 @@ const composerLengthContract = computed<VideoFrameContract | null>(() => {
   };
 });
 const composerRefusal = computed(() => composerBlockerReason.value);
-const composerLocked = computed(() => composerDisabled.value);
+const composerLocked = computed(
+  () =>
+    composerDisabled.value || retainedRestorePending.value || retainedRestoreError.value !== null,
+);
 const composerSubmitting = computed(() => submissionPlanning.value);
 
 function composerGenerate() {
@@ -3620,6 +3625,8 @@ async function generate(batchOverride: number | null = null) {
       request.prompt_transform = quickExpansionSnapshot.value.promptTransform;
     }
     let retainedSourceOption: BatchRequestOptions["retainedSource"];
+    if (retainedRestorePending.value) throw new Error("Restoring the original input files…");
+    if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
     const retained = composer.retainedSource;
     const retainedVersion = retained ? composer.retainedSourceVersion : null;
     if (retained?.inventory.availability === "available" && retained.inventory.members.length > 0) {
@@ -3990,8 +3997,71 @@ watch(
  *  dropped silently. Bumped by every prefill and by ⌘N. */
 let restoreEpoch = 0;
 let authoritativeReuseApply = false;
+const retainedRestoreError = ref<string | null>(null);
+const retainedRestorePending = ref(false);
+let retainedRestoreUnmounted = false;
+const retainedRestoreAbort = new AbortController();
+onBeforeUnmount(() => {
+  retainedRestoreUnmounted = true;
+  retainedRestoreAbort.abort();
+});
+let materializingRetainedVersion: number | null = null;
+watch(
+  () => composer.retainedSource,
+  async (handoff) => {
+    const version = composer.retainedSourceVersion;
+    if (!handoff) {
+      retainedRestorePending.value = false;
+      retainedRestoreError.value = null;
+      return;
+    }
+    if (materializingRetainedVersion === version) return;
+    await nextTick();
+    if (!composer.isRetainedSourceCurrent(version) || retainedRestoreUnmounted) return;
+    materializingRetainedVersion = version;
+    retainedRestoreError.value = null;
+    retainedRestorePending.value = true;
+    const epoch = restoreEpoch;
+    try {
+      const result = await restoreRetainedDraftMedia({
+        ...handoff,
+        read: () => form,
+        layout: {
+          web: false,
+          boundary: caps.value.supportsEndFrame,
+          sourceMode: caps.value.sourceImageMode,
+          h3: Boolean(minimaxH3TaskForModel(form.model)),
+        },
+        signal: retainedRestoreAbort.signal,
+        isCurrent: () =>
+          !retainedRestoreUnmounted &&
+          epoch === restoreEpoch &&
+          composer.isRetainedSourceCurrent(version),
+      });
+      if (!result || !composer.isRetainedSourceCurrent(version)) return;
+      authoritativeReuseApply = true;
+      Object.assign(form, result.patch);
+      composer.setRetainedSourceIfCurrent(version, { ...handoff, inventory: result.inventory });
+      await nextTick();
+    } catch (error) {
+      if (composer.isRetainedSourceCurrent(version)) {
+        retainedRestoreError.value =
+          error instanceof Error
+            ? error.message
+            : "The original inputs could not be restored. Reuse this print again or reattach them.";
+        toasts.push(retainedRestoreError.value, "error");
+      }
+    } finally {
+      if (composer.isRetainedSourceCurrent(version)) retainedRestorePending.value = false;
+      authoritativeReuseApply = false;
+    }
+  },
+  { immediate: true },
+);
 function invalidateRetainedRestore(): void {
   restoreEpoch += 1;
+  retainedRestoreError.value = null;
+  retainedRestorePending.value = false;
   composer.invalidateRetainedSource();
 }
 
@@ -4032,6 +4102,7 @@ function applyPrefill() {
     composer.isRetainedSourceCurrent(pendingRetainedVersion) &&
     "metadata" in prefill
   ) {
+    retainedRestorePending.value = true;
     authoritativeReuseApply = true;
     void nextTick(() => {
       authoritativeReuseApply = false;
@@ -4066,12 +4137,13 @@ function applyPrefill() {
       // without it both endpoints need reattaching and the notice says so.
       Boolean(prefill.metadata.source_image_sha256 ?? prefill.metadata.source_image_name),
     );
-    if (endFrameNotice) toasts.push(endFrameNotice, "error");
-    void restorePrefillSource(prefill.metadata, restoreEpoch);
+    if (endFrameNotice && pendingRetainedVersion === null) toasts.push(endFrameNotice, "error");
+    if (pendingRetainedVersion === null) void restorePrefillSource(prefill.metadata, restoreEpoch);
     // Independent of the source restore above: identity is its own partition,
     // and a print may carry a face photo on a checkpoint that takes no source
     // image at all — the source restore's own early-outs must not skip it.
-    void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
+    if (pendingRetainedVersion === null)
+      void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
   } else if ("request" in prefill && prefill.request) {
     void restoreRequestSource(prefill.request, restoreEpoch);
   }

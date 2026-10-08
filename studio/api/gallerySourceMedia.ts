@@ -279,6 +279,21 @@ export async function relayRetainedSourceMedia<TRequest extends object>(
   ] as const) {
     if (roles.has(role)) assertVacant(request, field);
   }
+  const declaredBytes = members.reduce(
+    (total, member) => total + Math.ceil(member.size_bytes / 3) * 4,
+    0,
+  );
+  if (
+    !Number.isSafeInteger(declaredBytes) ||
+    declaredBytes > 64 * 1024 * 1024 ||
+    members.some(
+      (member) =>
+        !Number.isSafeInteger(member.size_bytes) || member.size_bytes < 0,
+    )
+  ) {
+    throw new Error("Retained source media exceeds the request limit");
+  }
+  let actualBytes = 0;
   const grouped = new Map<string, string[]>();
   for (const member of members) {
     const bytes = new Uint8Array(
@@ -291,6 +306,9 @@ export async function relayRetainedSourceMedia<TRequest extends object>(
         )
       ).arrayBuffer(),
     );
+    actualBytes += Math.ceil(bytes.length / 3) * 4;
+    if (actualBytes > 64 * 1024 * 1024)
+      throw new Error("Retained source media exceeds the request limit");
     const encoded = bytesToBase64(bytes);
     const values = grouped.get(member.role) ?? [];
     values.push(encoded);

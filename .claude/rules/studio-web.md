@@ -85,3 +85,5 @@ captured authenticated host/instance/job, follows every returned download ticket
 shows start/progress/license/reconnection/failure state inline and uses the durable
 retry ambiguity reconciler once. Navigation keeps the recovery; failed/cancelled
 downloads and changed job identity never trigger a retry.
+
+**Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.

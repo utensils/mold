@@ -850,6 +850,7 @@ export interface OutputMetadata {
   prefix_cache?: "retained" | "recomputed" | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
+  reference_weight?: number | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
   references?: GenerationReferenceMetadata[] | null;
   /** Ordered byte-free keyframe provenance (newer servers only). */

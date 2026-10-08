@@ -56,6 +56,14 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
   };
 });
 const { sourceStashGet } = vi.hoisted(() => ({ sourceStashGet: vi.fn() }));
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/client")>()),
+  apiFetchTo: vi.fn(async () => ({ json: async () => ({ instance_id: "fixture" }) })),
+}));
+vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/gallerySourceMedia")>()),
+  relayRetainedSourceMedia: vi.fn(async () => ({ source_image: await sourceStashGet() })),
+}));
 vi.mock("../lib/ipc", () => ({ ipc: { sourceStashGet } }));
 vi.mock("../lib/api/history", () => ({ fetchHistory: vi.fn(() => Promise.resolve([])) }));
 
@@ -334,6 +342,7 @@ describe("GenerateView source-fit submit path", () => {
         },
       }),
     ).toBe(true);
+    await flushPromises();
     resolveRestore("SLOW_RESTORED");
     await flushPromises();
 

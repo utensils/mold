@@ -15,6 +15,7 @@ extension LibraryPane {
         let currentModel = selectedGenerateModel()
         generate.draft = RenderDraft(reusing: metadata)
         let fence = reuseStore.begin()
+        reuseStore.restoring = true
         var adoptedPrintModel = false
         if let name = metadata.model {
             if let model = models.model(named: name, on: entry.hostID) {
@@ -38,6 +39,7 @@ extension LibraryPane {
         // is the draft the pane will show, and the authority is good only
         // while the draft still IS it.
         reuseStore.arm(generate.draft)
+        reuseStore.initialMediaRevisions = generate.mediaRevisions
         reuseStore.selectionModel = generate.modelName
         reuseStore.selectionRecipe = generate.recipeID
         // ALWAYS ask, on every machine that lists this print. The server is
@@ -48,6 +50,7 @@ extension LibraryPane {
         let copies = (library.tile(containing: entry.id)?.everyCopy ?? entry.everyCopy).map(\.id)
         let ordered = [entry.id] + copies.filter { $0 != entry.id }
         Task {
+            defer { if reuseStore.isCurrent(fence), !reuseStore.restorationFailed { reuseStore.restoring = false } }
             await reuseStore.probe(ordered, fence: fence, disclosing: metadata)
             await reuseStore.remember(metadata, model: generate.modelName, recipe: generate.recipeID,
                 draft: generate.draft, fence: fence)
@@ -60,7 +63,7 @@ extension LibraryPane {
                 RetainedSourcePicture.outgoing(generate, on: $0, hosts: hosts)
             }
             if let placed = await reuseStore.placePicture(
-                in: generate.draft, outgoing: outgoing, live: { generate.draft }) {
+                in: generate.draft, outgoing: outgoing, live: { generate.draft }, mediaRevisions: { generate.mediaRevisions }) {
                 generate.draft = placed
             }
         }

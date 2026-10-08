@@ -193,3 +193,5 @@ License dismissal cancels the waiting recovery, including a review over Job Deta
 Fence every mutation by server instance and fresh held-job authority; never retry
 on same-model historical success or after a failed/cancelled companion download.
 Use concise held captions and one reason paragraph; narrow/AX action rows stack.
+
+**Visible reuse media.** Restore supported legacy retained roles into ordinary authoring wells before allowing submission, including all endpoint/keyframe and reference-image inputs. Preserve list order, exact frame indices, manual canvas, continuation overlap and explicit reference strength. Retire each materialized or superseded legacy role, including the mask paired with a replaced source; removal must never revive an archived fallback. Fence every asynchronous operation by reuse identity, immutable origin route/instance, per-role monotonic attachment revisions and component lifetime. Scalar edits remain live. Keep restoration failures blocking until deliberate recovery/discard; descriptor-only typed references retain their exact-set authority.

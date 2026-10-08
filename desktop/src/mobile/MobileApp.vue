@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import {
   connectionHealth,
   selectConnectionRoute,
@@ -194,7 +195,6 @@ import {
 } from "@studio/api/generationAdmission";
 import {
   relayRetainedSourceMedia,
-  retainedSourceMediaBlob,
   retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
@@ -1207,6 +1207,7 @@ const retainedSourceAuthority = new RetainedSourceReuseAuthority<MobileRetainedS
 let authoritativeReuseApply = false;
 function invalidateRetainedSourceReuse(): void {
   retainedSourceAuthority.invalidate();
+  retainedRestoreError.value = null;
   reusePrintEpoch += 1;
   reusePrintController?.abort();
 }
@@ -2543,7 +2544,13 @@ const developBlockerReason = computed<string | null>(() => {
   if (!parameterValid.value) return "Open Advanced and correct the highlighted settings.";
   return null;
 });
-const developDisabled = computed(() => promptMissing.value || developBlockerReason.value !== null);
+const developDisabled = computed(
+  () =>
+    promptMissing.value ||
+    reusingPrint.value ||
+    retainedRestoreError.value !== null ||
+    developBlockerReason.value !== null,
+);
 const estimateRequest = computed(() => {
   if (!form.model) return null;
   return buildGenerationEstimateRequest(
@@ -7233,6 +7240,8 @@ async function generate(): Promise<void> {
     }
   }
 
+  if (reusingPrint.value) throw new Error("Restoring the original input files…");
+  if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
   const retainedSnapshot = retainedSourceAuthority.snapshot();
   const retainedSourceReuse = retainedSnapshot?.value;
   if (retainedSourceReuse?.inventory.availability === "available") {
@@ -8469,7 +8478,8 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       // without source provenance both endpoints need reattaching.
       Boolean(print.metadata.source_image_sha256 ?? print.metadata.source_image_name),
     );
-    if (endFrameNotice) notes.push(endFrameNotice);
+    if (endFrameNotice && !form.endFrame && !form.h3Authoring?.lastFrame?.data)
+      notes.push(endFrameNotice);
     setGenerationStatus(
       notes.join(" · "),
       !!endFrameNotice || !!sourceRestoreNotice || !!identityRestoreNotice,
@@ -8477,7 +8487,13 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // FL2VA reuse leaves bytes-less boundary descriptors; when the original
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
-    void restoreReusedH3BoundaryMedia(print);
+    if (retainedSourceAuthority.snapshot()?.value.inventory.availability !== "available") {
+      await restoreReusedH3BoundaryMedia(
+        print,
+        controller.signal,
+        () => !cancelledReuse(epoch, controller),
+      );
+    }
     dismissSelectedPrint();
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -8602,6 +8618,7 @@ async function restoreReusedIdentityPhoto(
   return outcome.kind === "missing" ? outcome.note : null;
 }
 
+const retainedRestoreError = ref<string | null>(null);
 async function restoreOrdinaryReusedSource(
   print: GalleryPrint,
   signal: AbortSignal,
@@ -8609,6 +8626,7 @@ async function restoreOrdinaryReusedSource(
   retainedVersion: number,
 ): Promise<string | null> {
   const stillCurrent = () => isCurrent() && retainedSourceAuthority.isCurrent(retainedVersion);
+  retainedRestoreError.value = null;
   const restoredSourceFit = parseSourceFitPolicy(print.metadata.source_fit);
   let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
   let retainedInventory: RetainedSourceMediaInventory | null = null;
@@ -8633,6 +8651,50 @@ async function restoreOrdinaryReusedSource(
       });
     } catch {
       // Preserve the pre-feature local and same-name gallery fallbacks.
+    }
+  }
+  if (retainedInventory?.availability === "available") {
+    try {
+      const result = await restoreRetainedDraftMedia({
+        filename: print.filename,
+        origin: print.target,
+        inventory: retainedInventory,
+        metadata: print.metadata,
+        read: () => form,
+        signal,
+        isCurrent: stillCurrent,
+        maxBytes:
+          MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(form, null),
+        layout: {
+          web: false,
+          boundary: caps.value.supportsEndFrame,
+          sourceMode: caps.value.sourceImageMode,
+          h3: Boolean(minimaxH3TaskForModel(form.model)),
+        },
+      });
+      if (!stillCurrent()) return null;
+      if (result) {
+        authoritativeReuseApply = true;
+        Object.assign(form, result.patch);
+        retainedSourceAuthority.setIfCurrent(retainedVersion, {
+          filename: print.filename,
+          origin: print.target,
+          inventory: result.inventory,
+        });
+        await nextTick();
+        if (!stillCurrent()) return null;
+        restoreReusedPrintCanvas(print.metadata);
+        if (restoredSourceFit) form.sourceFit = restoredSourceFit;
+        authoritativeReuseApply = false;
+      }
+      return null;
+    } catch (error) {
+      if (!stillCurrent()) return null;
+      retainedRestoreError.value =
+        error instanceof Error
+          ? error.message
+          : "The original inputs could not be restored. Reuse this print again or reattach them.";
+      return retainedRestoreError.value;
     }
   }
   // A two-well recipe — exclusive (Klein) or additive (IP-Adapter) — still has
@@ -8663,35 +8725,6 @@ async function restoreOrdinaryReusedSource(
     restoreReusedPrintCanvas(print.metadata);
     if (restoredSourceFit) form.sourceFit = restoredSourceFit;
     return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
-  }
-
-  if (retainedInventory?.availability === "available") {
-    try {
-      const retained = retainedInventory.members.find((member) => member.role === "source_image");
-      if (retained) {
-        const blob = await readRetainedSourceBlob(
-          print.target,
-          print.filename,
-          retained.member_id,
-          signal,
-        );
-        if (!stillCurrent()) return null;
-        const base64 = await blobToBase64(blob);
-        preserveRestoredSourceCanvas(base64);
-        form.sourceImage = base64;
-        form.sourceImageName = retained.display_name;
-        await nextTick();
-        if (!stillCurrent()) return null;
-        const dimensions = imageDimensionsFromBase64(base64);
-        form.sourceImageWidth = dimensions?.width ?? null;
-        form.sourceImageHeight = dimensions?.height ?? null;
-        restoreReusedPrintCanvas(print.metadata);
-        if (restoredSourceFit) form.sourceFit = restoredSourceFit;
-        return null;
-      }
-    } catch {
-      // Preserve the pre-feature same-name gallery fallback below.
-    }
   }
 
   const filename = print.metadata.source_image_name;
@@ -8765,17 +8798,6 @@ function readRetainedSourceInventory(target: ApiTarget, filename: string, signal
   );
 }
 
-function readRetainedSourceBlob(
-  target: ApiTarget,
-  filename: string,
-  memberId: string,
-  signal: AbortSignal,
-) {
-  return withReuseSourceDeadline(signal, (bounded) =>
-    retainedSourceMediaBlob(filename, memberId, target, bounded),
-  );
-}
-
 async function readReusedSourceCandidate(
   target: ApiTarget,
   filename: string,
@@ -8823,15 +8845,20 @@ async function readReusedSourceCandidate(
  * picked on another machine (auto-routing rendered elsewhere) resolves
  * through the merged gallery's per-print targets. Failures leave the
  * existing reattach affordance in place. */
-async function restoreReusedH3BoundaryMedia(print: {
-  hostId: string;
-  target: ApiTarget;
-  filename: string;
-}): Promise<void> {
+async function restoreReusedH3BoundaryMedia(
+  print: {
+    hostId: string;
+    target: ApiTarget;
+    filename: string;
+  },
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+): Promise<void> {
   if (minimaxH3TaskForModel(form.model) !== "fl2va") return;
   const wanted = h3BoundariesNeedingMedia(form.h3Authoring);
   if (wanted.length === 0) return;
   const modelAtStart = form.model;
+  let slotsAtStart = JSON.stringify(form.h3Authoring);
   for (const slot of wanted) {
     // Candidate routes: origin host first, then any host whose merged
     // gallery lists the named file — deduped by host id.
@@ -8843,7 +8870,9 @@ async function restoreReusedH3BoundaryMedia(print: {
     }
     for (const target of candidates.values()) {
       try {
-        const response = await apiFetchTo(target, galleryMediaPath(slot.filename, "host"));
+        const response = await apiFetchTo(target, galleryMediaPath(slot.filename, "host"), {
+          signal,
+        });
         const existingBytes = inlineGenerationMediaBytes(form, null);
         const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
         if (
@@ -8857,14 +8886,23 @@ async function restoreReusedH3BoundaryMedia(print: {
         if (blob.size === 0) continue;
         if (existingBytes + blob.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) break;
         const base64 = await blobToBase64(blob);
-        if (form.model !== modelAtStart) return;
+        if (
+          !isCurrent() ||
+          signal.aborted ||
+          form.model !== modelAtStart ||
+          JSON.stringify(form.h3Authoring) !== slotsAtStart
+        )
+          return;
         const live = form.h3Authoring?.[slot.endpoint];
         if (!live || live.data || live.filename !== slot.filename) break;
         const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, slot.endpoint, {
           filename: slot.filename,
           base64,
         });
-        if (result.ok) form.h3Authoring = result.state;
+        if (result.ok) {
+          form.h3Authoring = result.state;
+          slotsAtStart = JSON.stringify(form.h3Authoring);
+        }
         break;
       } catch {
         // Not on this host — try the next candidate; the reattach hint

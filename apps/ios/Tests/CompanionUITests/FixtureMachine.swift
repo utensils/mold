@@ -26,6 +26,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let libraryMutations: Bool
     private let removePrintOnFavorite: String?
     private let retainedMediaFixture: Bool
+    let retainedFrameFixture: Bool
     private let queueFixture: Bool
     private let allRequests = Mutex<[String]>([])
     func requestLog() -> [String] { allRequests.withLock { $0 } }
@@ -45,7 +46,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false) throws {
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
@@ -53,6 +54,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.removePrintOnFavorite = removePrintOnFavorite
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
+        self.retainedFrameFixture = retainedFrameFixture
         self.queueFixture = queueFixture
         self.queueDownloadFixture = queueDownloadFixture
         self.requiresDownloadLicense = requiresDownloadLicense
@@ -85,6 +87,7 @@ final class FixtureMachine: @unchecked Sendable {
              "collections": collectionFixture && index == 0 ? ["fixture-collection"] : [],
              "metadata": retainedMediaFixture ? ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)", "model": "flux-dev:q4"] : ["prompt": "\(galleryID.map { "Photos-" + $0 } ?? "Fixture") \(index)"]] as [String: Any]
         })
+        if retainedFrameFixture { gallery = try Self.frameReuseGallery(gallery) }
         if exportFixture, var rows = try JSONSerialization.jsonObject(with: gallery) as? [[String: Any]] {
             for index in rows.indices where index % 3 == 2 {
                 let bytes = Self.exportImage(format: "png")
@@ -258,6 +261,7 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func response(_ path: String, historyQuery: String? = nil) -> Data {
+        if let retainedFrames = retainedFrameResponse(path) { return retainedFrames }
         // A visible coastal illustration makes queue screenshots useful for
         // visual acceptance, rather than a white one-pixel placeholder.
         if queueFixture && path.hasSuffix("/inputs") {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { restoreRetainedDraftMedia } from "@studio/lib/retainedDraftMedia";
 import { originAuthenticatedFetch as fetch } from "../lib/originAuth";
 
 import {
@@ -137,6 +138,8 @@ import {
   retainedSourceMediaMembersForRequest,
 } from "@studio/api/gallerySourceMedia";
 import {
+  retainedSourceReuseState,
+  setRetainedSourceReuseIntentIfCurrent,
   clearRetainedSourceReuseIntent,
   retainedSourceReuseIsCurrent,
   retainedSourceReuseSnapshot,
@@ -1706,6 +1709,68 @@ function retryPrint(id: string) {
  * rather than guessing from the keyframe count alone — LTX-2 keyframes are a
  * different control, and they restore nothing either way.
  */
+const retainedRestoreError = ref<string | null>(null);
+const retainedRestorePending = ref(false);
+let retainedRestoreUnmounted = false;
+const retainedRestoreAbort = new AbortController();
+onBeforeUnmount(() => {
+  retainedRestoreUnmounted = true;
+  retainedRestoreAbort.abort();
+});
+let materializingRetainedVersion: number | null = null;
+watch(
+  [retainedSourceReuseState, modelsLoaded],
+  async ([intent, loaded]) => {
+    if (!intent) {
+      retainedRestoreError.value = null;
+      retainedRestorePending.value = false;
+      return;
+    }
+    if (!loaded) {
+      retainedRestorePending.value = true;
+      return;
+    }
+    const snapshot = retainedSourceReuseSnapshot();
+    if (!snapshot || materializingRetainedVersion === snapshot.version) return;
+    materializingRetainedVersion = snapshot.version;
+    retainedRestoreError.value = null;
+    retainedRestorePending.value = true;
+    try {
+      const result = await restoreRetainedDraftMedia({
+        ...intent,
+        read: () => form.state.value,
+        layout: {
+          web: true,
+          boundary: capabilities.value.supportsEndFrame,
+          sourceMode: capabilities.value.sourceImageMode,
+          h3: Boolean(minimaxH3TaskForModel(form.state.value.model)),
+        },
+        signal: retainedRestoreAbort.signal,
+        isCurrent: () =>
+          !retainedRestoreUnmounted &&
+          retainedSourceReuseIsCurrent(snapshot.version),
+      });
+      if (!result || !retainedSourceReuseIsCurrent(snapshot.version)) return;
+      form.state.value = { ...form.state.value, ...result.patch };
+      setRetainedSourceReuseIntentIfCurrent(snapshot.version, {
+        ...intent,
+        inventory: result.inventory,
+      });
+    } catch (error) {
+      if (retainedSourceReuseIsCurrent(snapshot.version)) {
+        retainedRestoreError.value =
+          error instanceof Error
+            ? error.message
+            : "The original inputs could not be restored. Reuse this print again or reattach them.";
+        toast("error", retainedRestoreError.value);
+      }
+    } finally {
+      if (retainedSourceReuseIsCurrent(snapshot.version))
+        retainedRestorePending.value = false;
+    }
+  },
+  { immediate: true },
+);
 const pendingEndFrameNotice = ref<OutputMetadata | null>(null);
 function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
   if (!modelsLoaded.value) {
@@ -1719,7 +1784,13 @@ function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
     // without a source provenance handle both endpoints need reattaching.
     Boolean(metadata.source_image_sha256 ?? metadata.source_image_name),
   );
-  if (notice) toast("error", notice);
+  if (
+    notice &&
+    !retainedSourceReuseSnapshot() &&
+    !form.state.value.endFrame &&
+    !form.state.value.h3Authoring?.lastFrame?.data
+  )
+    toast("error", notice);
 }
 watch(modelsLoaded, (loaded) => {
   const pending = pendingEndFrameNotice.value;
@@ -1787,6 +1858,10 @@ watch(
 const attemptedH3BoundaryRestores = new Set<string>();
 async function restoreReusedH3BoundaryMedia() {
   const s = form.state.value;
+  if (
+    retainedSourceReuseSnapshot()?.intent.inventory.availability === "available"
+  )
+    return;
   if (minimaxH3TaskForModel(s.model) !== "fl2va") return;
   const wanted = h3BoundariesNeedingMedia(s.h3Authoring).filter((slot) => {
     const key = `${slot.endpoint}|${slot.filename}|${slot.sha256 ?? ""}`;
@@ -1796,6 +1871,8 @@ async function restoreReusedH3BoundaryMedia() {
   });
   if (wanted.length === 0) return;
   const modelAtStart = s.model;
+  const slotsAtStart = JSON.stringify(s.h3Authoring);
+  const reuseVersion = retainedSourceReuseSnapshot()?.version;
   const outcome = await fetchH3BoundaryMedia(
     {
       firstFrame:
@@ -1820,7 +1897,12 @@ async function restoreReusedH3BoundaryMedia() {
   // The fetches can take seconds; never clobber a slot the user has since
   // reattached, and stand down entirely if the model moved on.
   const live = form.state.value;
-  if (live.model !== modelAtStart) return;
+  if (
+    live.model !== modelAtStart ||
+    JSON.stringify(live.h3Authoring) !== slotsAtStart ||
+    retainedSourceReuseSnapshot()?.version !== reuseVersion
+  )
+    return;
   let authoring = live.h3Authoring;
   let committed = 0;
   for (const media of outcome.restored) {
@@ -2972,6 +3054,13 @@ async function prepareStillSourceToRequest(
 
 // ── Submit (preserved logic) ──────────────────────────────────────────
 function validateSubmit(): boolean {
+  if (retainedRestorePending.value || retainedRestoreError.value) {
+    toast(
+      "error",
+      retainedRestoreError.value ?? "Restoring the original input files…",
+    );
+    return false;
+  }
   composerError.value = null;
   preprocessingStatus.value = null;
   if (!form.state.value.model) {
@@ -3882,6 +3971,9 @@ async function onSubmitInner(
       mime: staged?.mime ?? null,
     });
   }
+  if (retainedRestorePending.value)
+    throw new Error("Restoring the original input files…");
+  if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
   const retainedSnapshot = retainedSourceReuseSnapshot();
   const retainedIntent = retainedSnapshot?.intent;
   if (retainedIntent?.inventory.availability === "available") {
@@ -4395,6 +4487,9 @@ async function queueVariations() {
       return;
     }
     let retainedPreparedBase = prepared.baseRequest;
+    if (retainedRestorePending.value)
+      throw new Error("Restoring the original input files…");
+    if (retainedRestoreError.value) throw new Error(retainedRestoreError.value);
     const retainedSnapshot = retainedSourceReuseSnapshot();
     const retainedIntent = retainedSnapshot?.intent;
     if (retainedIntent?.inventory.availability === "available") {

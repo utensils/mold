@@ -3830,3 +3830,18 @@ describe("Qwen Image 2.1 transparency and references", () => {
     expect(form.transparentBackground).toBe(true);
   });
 });
+
+describe("retained recipe scalars", () => {
+  it("restores explicit zero reference strength and continuation overlap", () => {
+    const form = newGenerateForm();
+    const metadata = {
+      prompt: "reuse",
+      model: "sdxl-base:fp16",
+      reference_weight: 0,
+      extend_overlap_frames: 17,
+    } as OutputMetadata;
+    applyMetadataToForm(form, metadata, []);
+    expect(form.referenceWeight).toBe(0);
+    expect(form.extendOverlapFrames).toBe(17);
+  });
+});

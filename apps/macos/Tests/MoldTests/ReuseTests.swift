@@ -152,6 +152,24 @@ struct ReuseTests {
         #expect(store.notice == nil)
     }
 
+    @Test func unavailableInputsStillBlockWhenAModelNoticeAlreadyExists() async {
+        let workstation = machine("workstation")
+        let backend = FakeBackend(host: workstation)
+        backend.retainedInventories["a.png"] =
+            RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
+        let hosts = HostStore(hosts: [workstation]) { _ in backend }
+        let store = ReuseStore(hosts: hosts)
+        let fence = store.begin()
+        store.notice = "The original model is unavailable."
+
+        await store.probe([PrintID(host: workstation.id, filename: "a.png")],
+                          fence: fence, disclosing: conditioned())
+
+        #expect(store.restorationFailed)
+        #expect(store.notice == "The original model is unavailable.")
+        #expect(store.referenceRefusal(for: RenderDraft()) != nil)
+    }
+
     /// The SECOND reuse, while the first is still in the air. The older
     /// answer describes a print nobody is looking at, and installing it would
     /// hydrate the new render from the old print's archive.
@@ -537,9 +555,27 @@ struct ReuseTests {
         #expect(placed?.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
         #expect(placed?.media.sourceImageName == "a.png")
         // ...and by the well, not a banner, once it is there. The authority
-        // survives the store's own edit.
-        #expect(store.pending(for: placed!) != nil)
+        // belongs to ordinary editable media after restoration.
+        #expect(store.pending(for: placed!) == nil)
         #expect(store.attachmentSentence(for: placed!) == nil)
+    }
+
+    @Test func retainedClosingFrameBecomesAnEditableAttachment() async throws {
+        let host = machine("origin")
+        let backend = FakeBackend(host: host)
+        backend.retainedInventories["clip.mp4"] = .init(availability: .available,
+            members: [member("source_image", "first"), member("keyframes", "last")])
+        backend.retainedMemberBytes["first"] = Data([1, 2, 3])
+        backend.retainedMemberBytes["last"] = try MoldJSON.encoder.encode(KeyframeCondition(frame: 140, image: "last", name: "last.png"))
+        let store = ReuseStore(hosts: HostStore(hosts: [host]) { _ in backend })
+        var draft = RenderDraft()
+        draft.frames = 141
+        store.arm(draft)
+        await store.probe([PrintID(host: host.id, filename: "clip.mp4")], fence: store.currentFence, disclosing: plain())
+        let placed = try #require(await store.placePicture(in: draft, outgoing: request(), live: { draft }))
+        #expect(placed.media.sourceImage == "AQID")
+        #expect(placed.media.keyframes == [.init(frame: 140, image: "last", name: "last.png")])
+        #expect(store.pending(for: placed) == nil)
     }
 
     /// An edit made while the picture downloaded is kept: the placed draft
@@ -561,7 +597,8 @@ struct ReuseTests {
 
         let placed = await store.placePicture(in: draft, outgoing: request(), live: { edited })
 
-        #expect(placed == nil)
+        #expect(placed?.prompt == "a cat, typed meanwhile")
+        #expect(placed?.media.sourceImage == Data([3, 1, 4]).base64EncodedString())
         #expect(store.pending(for: edited) == nil)
     }
 

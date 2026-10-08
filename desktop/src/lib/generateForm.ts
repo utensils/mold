@@ -1597,6 +1597,9 @@ export function applyMetadataToForm(
   form.controlImage = null;
   form.imageAttachments = [];
   form.sourceVideo = null;
+  form.extendVideo = null;
+  form.extendOverlapFrames = metadata.extend_overlap_frames ?? null;
+  form.referenceWeight = metadata.reference_weight ?? null;
   form.keyframes = [];
   // The closing frame is binary media too: a staged end frame from the
   // previous draft must never silently pair with this print's restored or

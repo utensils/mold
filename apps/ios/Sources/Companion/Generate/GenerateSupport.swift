@@ -90,7 +90,7 @@ extension GenerateController {
             if let recipe, let model { draft = draft.adopting(recipe, isNewModel: false, for: model) }
         }
         machine = .pinned(entry.hostID)
-        let fence = retainedReuse.begin(draft, metadata: entry.print.metadata, sourceRevision: sourceMediaRevision)
+        let fence = retainedReuse.begin(draft, metadata: entry.print.metadata, sourceRevision: sourceMediaRevision, mediaRevisions: mediaRevisions)
         Task { await retainedReuse.probe(entry, fence: fence, controller: self) }
     }
 }

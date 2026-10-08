@@ -77,6 +77,8 @@ public extension RenderDraft {
 
     private mutating func restoreConditioning(from metadata: OutputMetadata) {
         if let fit = metadata.sourceFit { media.sourceFit = fit }
+        media.extendOverlapFrames = metadata.extendOverlapFrames
+        media.referenceWeight = metadata.referenceWeight
         media.loras = Self.adapters(of: metadata)
         if metadata.controlModel != nil || metadata.controlScale != nil {
             // The picture is bytes and metadata carries none; the adapter and

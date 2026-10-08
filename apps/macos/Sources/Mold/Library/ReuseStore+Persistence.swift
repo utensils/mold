@@ -72,6 +72,7 @@ extension ReuseStore {
               controller.modelName != nil else { return }
         let fence = currentFence
         let expectedMedia = controller.draft.media
+        initialMediaRevisions = controller.mediaRevisions
         guard !saved.invalidated, saved.version == 1,
               saved.model == controller.modelName, saved.recipe == controller.recipeID,
               let instance = saved.instance, hosts.instanceID(of: saved.origin) == instance,
@@ -99,13 +100,14 @@ extension ReuseStore {
             let outgoing = hosts.host(saved.origin).flatMap {
                 RetainedSourcePicture.outgoing(controller, on: $0, hosts: hosts)
             }
-            if let placed = await placePicture(in: draft, outgoing: outgoing, live: { controller.draft }) {
+            if let placed = await placePicture(in: draft, outgoing: outgoing, live: { controller.draft }, mediaRevisions: { controller.mediaRevisions }) {
                 controller.draft = placed
             }
             guard isCurrent(fence), savedRecipe == saved,
                   hosts.instanceID(of: saved.origin) == instance else { return }
             if authority?.members.contains(where: { $0.role == "source_image" || $0.role == "stage_source:0" }) == true,
                controller.draft.media.sourceImage == nil { return }
+            guard !restorationFailed else { return }
             restoring = false
             notice = nil
             await loadPreviews(in: controller.draft)

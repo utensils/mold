@@ -145,7 +145,6 @@ import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
   retainedSourceMediaDisclosable,
-  retainedSourceMediaBlob,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
   type RetainedSourceMediaAvailability,
@@ -1818,9 +1817,10 @@ async function restoreLibrarySource(
   const disclosable = retainedSourceMediaDisclosable(item.metadata);
   let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
   const retainedRead = retainedTarget
-    ? retainedSourceMediaInventory(item.filename, retainedTarget).catch(
-        () => null,
-      )
+    ? retainedSourceMediaInventory(item.filename, retainedTarget).catch(() => ({
+        availability: "unavailable_missing_or_corrupt" as const,
+        members: [],
+      }))
     : Promise.resolve(null);
   const acceptRetainedInventory = (
     inventory: Awaited<ReturnType<typeof retainedSourceMediaInventory>> | null,
@@ -1831,8 +1831,14 @@ async function restoreLibrarySource(
       filename: item.filename,
       origin: retainedTarget,
       inventory,
+      metadata: item.metadata,
     });
   };
+  const resolvedRetainedInventory = await retainedRead;
+  acceptRetainedInventory(resolvedRetainedInventory);
+  // Create owns visible restoration on the destination page; avoid racing
+  // its archive read with an older local-source-only fallback.
+  if (resolvedRetainedInventory?.availability === "available") return;
   const sha256 = item.metadata.source_image_sha256;
   const stored = await restoreGenerationSourceMedia(sha256).catch(() => null);
   if (stored && stillOwnsEmptySource()) {
@@ -1856,41 +1862,6 @@ async function restoreLibrarySource(
       if (disclosure) toast("error", disclosure);
     });
     return;
-  }
-
-  const resolvedRetainedInventory = await retainedRead;
-  acceptRetainedInventory(resolvedRetainedInventory);
-
-  if (retainedTarget && resolvedRetainedInventory) {
-    try {
-      const retained = resolvedRetainedInventory.members.find(
-        (member) => member.role === "source_image",
-      );
-      if (resolvedRetainedInventory.availability === "available" && retained) {
-        const blob = await retainedSourceMediaBlob(
-          item.filename,
-          retained.member_id,
-          retainedTarget,
-        );
-        const base64 = await blobToBase64(blob);
-        if (!stillOwnsEmptySource()) return;
-        const dimensions = imageDimensionsFromBase64(base64);
-        form.state.value.imageAttachments = [
-          {
-            kind: "gallery",
-            filename: retained.display_name,
-            base64,
-            width: dimensions?.width,
-            height: dimensions?.height,
-            mime: blob.type || undefined,
-          },
-        ];
-        await restoreCanvas(base64);
-        return;
-      }
-    } catch {
-      // Preserve the established same-name gallery fallback below.
-    }
   }
 
   const filename = item.metadata.source_image_name;

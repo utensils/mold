@@ -147,6 +147,7 @@ export interface OutputMetadata {
   source_fit?: unknown;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
+  reference_weight?: number | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
   references?: GenerationReferenceMetadata[] | null;
   /** Ordered byte-free keyframe provenance (newer servers only). */
