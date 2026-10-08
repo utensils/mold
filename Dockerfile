@@ -34,6 +34,7 @@ RUN bun install --frozen-lockfile
 COPY studio studio
 COPY ui ui
 COPY web web
+COPY docs/contracts docs/contracts
 RUN bun run build:web
 
 # ── Stage 1b: Build mold binary ─────────────────────────────────────

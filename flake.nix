@@ -634,6 +634,7 @@
                 ./relay/aws/package.json
                 ./desktop/package.json
                 ./web
+                ./docs/contracts
                 ./studio
                 ./ui
               ];
@@ -685,6 +686,7 @@
                 ./relay/aws/package.json
                 ./desktop
                 ./web/package.json
+                ./docs/contracts
                 ./studio
                 ./ui
               ];

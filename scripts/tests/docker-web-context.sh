@@ -24,10 +24,21 @@ for package in ("mold-web", "mold-desktop-web"):
     definition = flake.split(f"{package} = pkgs.stdenv.mkDerivation {{", 1)[1]
     fileset = definition.split("fileset = lib.fileset.unions [", 1)[1].split("];", 1)[0]
     paths = set(re.findall(r"\./([^\s]+)", fileset))
+    if "docs/contracts" not in paths:
+        sys.exit(f"FAIL: Nix {package} must include docs/contracts for frontend type checking")
     for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
         if workspace not in paths and f"{workspace}/package.json" not in paths:
             sys.exit(f"FAIL: Nix {package} must include {workspace}/package.json before bun install")
 PYTHON
+
+grep -Fq 'COPY docs/contracts docs/contracts' "$dockerfile" || {
+  echo "FAIL: Docker web-builder must copy frontend contract fixtures" >&2
+  exit 1
+}
+grep -Fq '!docs/contracts/**' "$repo_root/.dockerignore" || {
+  echo "FAIL: Docker context must retain frontend contract fixtures" >&2
+  exit 1
+}
 
 studio_copy_line="$(grep -n -m1 '^COPY studio studio$' "$dockerfile" | cut -d: -f1 || true)"
 ui_copy_line="$(grep -n -m1 '^COPY ui ui$' "$dockerfile" | cut -d: -f1 || true)"
