@@ -90,7 +90,7 @@ struct QueueHoldTests {
         fake.serverStatus = FakeFixtures.serverStatus(instanceId: "run-1")
         hosts.reachability[workstation.id] = .up(fake.serverStatus!)
         fake.downloadsListing = DownloadsListing()
-        fake.queueListing = FakeFixtures.queueListing([entry])
+        fake.queueListing = FakeFixtures.queueListing(entries: [entry])
         fake.queueJobDetails[entry.id] = try! MoldJSON.decoder.decode(QueueJobDetail.self, from: MoldJSON.encoder.encode(["job": entry]))
         await queue.poll(workstation.id)
         let orchestration = Task {
@@ -124,7 +124,7 @@ struct QueueHoldTests {
         fake.serverStatus = FakeFixtures.serverStatus(instanceId: "run-1")
         hosts.reachability[workstation.id] = .up(fake.serverStatus!)
         fake.downloadsListing = DownloadsListing()
-        fake.queueListing = FakeFixtures.queueListing([entry])
+        fake.queueListing = FakeFixtures.queueListing(entries: [entry])
         fake.queueJobDetails[entry.id] = try! MoldJSON.decoder.decode(QueueJobDetail.self, from: MoldJSON.encoder.encode(["job": entry]))
         await queue.poll(workstation.id)
         let orchestration = Task {

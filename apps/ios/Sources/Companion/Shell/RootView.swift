@@ -70,7 +70,11 @@ struct RootView: View {
         }, set: { value in
             if value == nil { stores.models.cancelLicense() }
         })) { pending in LicenceSheet(pending: pending) }
-        .onDisappear { actions.cancelExports() }
+        .onDisappear {
+            actions.cancelExports()
+            stores.models.activePresentationOwners.remove(router.presentationID)
+            if stores.models.pendingLicense?.presentationOwner == router.presentationID { stores.models.cancelLicense() }
+        }
         .printSheets(presentsActions: router.openedPrint == nil)
         .modifier(RootLinks(router: router))
         .modifier(UndoBridge())
@@ -80,6 +84,7 @@ struct RootView: View {
         .focusedSceneValue(\.showsSettings, $router.showsSettings)
         .focusedSceneValue(\.refresh, RefreshAction { await stores.becameActive() })
         .onAppear {
+            stores.models.activePresentationOwners.insert(router.presentationID)
             if stored == Self.searchKey { router.selection = .search }
             else if let restored = Destination(rawValue: stored) { router.selection = .go(restored) }
         }

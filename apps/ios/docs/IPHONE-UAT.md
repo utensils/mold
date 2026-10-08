@@ -453,3 +453,15 @@ pending. Full final-matrix UAT and its independent review are therefore not
 claimed complete. Existing unit, encoder, real-host, delivery and independently
 reviewed visual evidence above remains valid with its recorded source provenance.
 The unresolved scroll-audit failure has not been established as a product defect.
+
+### Queue download feedback — 2026-10-07
+
+Local iPhone Simulator fixture UAT passed `testQueueDownloadFeedbackAndAutomaticRetry`
+and `testQueueDetailLicenseDismissalLeavesJobHeld`. The first verifies immediate
+feedback, live 35 / 100 MB progress, duplicate-press disabling, no premature retry,
+and exactly one retry after the acquisition completes. The second exercises
+license presentation above Job Details, dismissal, visible cancellation and a job
+that remains held. The result bundle is `/tmp/mold-queue-ios-confirmed.xcresult`;
+its retained “Queue download feedback” attachment records the rendered row.
+Fixtures perform no real model download or inference. This is Simulator evidence;
+physical-device and multiwindow visual UAT are not claimed.

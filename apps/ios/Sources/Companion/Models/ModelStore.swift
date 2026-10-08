@@ -17,6 +17,8 @@ final class ModelStore {
         var id: String { refusal.id }
     }
 
+    var activePresentationOwners: Set<UUID> = []
+
     private(set) var active: [MoldHost.ID: [String: DownloadProgress]] = [:]
     private(set) var finished: [MoldHost.ID: [DownloadJob]] = [:]
     private(set) var licences: [MoldHost.ID: [ThirdPartyLicense]] = [:]
@@ -217,14 +219,14 @@ final class ModelStore {
               let instance = hosts.instanceID(of: id), let authority = entry.authority(instanceId: instance) else { return }
         queueDownloads.start(entry: entry, host: id, authority: authority, backend: hosts.backend(for: host), hostName: host.name,
             isCurrent: { [weak self] in
-                guard let self, self.hosts.host(id) == host, self.hosts.instanceID(of: id) == instance else { return false }
+                guard let self, presenter == nil || self.activePresentationOwners.contains(presenter!), self.hosts.host(id) == host, self.hosts.instanceID(of: id) == instance else { return false }
                 return self.queue.listings[id] == nil || self.queue.current(entry, on: id)?.state == .held
             }, started: { [weak self] ids, name in
                 guard let self else { return }
                 for job in ids { self.active[id, default: [:]][job] = DownloadProgress(model: name) }
                 self.reconcile()
             }, license: { [weak self] refusal, mismatch, approved in
-                guard let self, self.pendingLicense == nil else { return false }
+                guard let self, presenter == nil || self.activePresentationOwners.contains(presenter!), self.pendingLicense == nil else { return false }
                 self.pendingLicense = PendingLicense(refusal: refusal, mismatch: mismatch, host: id,
                     retry: { approved() }, recoveryJob: entry.id, presentationOwner: presenter)
                 return true
