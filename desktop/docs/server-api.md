@@ -370,3 +370,7 @@ memory estimates and budget shortfalls. Older servers use the shared studio
 formatter. Machine logs retain technical diagnostics; queue detail copy text
 retains diagnostics received from older servers. Error codes and retryability
 remain authoritative. See [the presentation audit](../../docs/error-presentation-audit.md).
+
+Direct-generation failures carry additive `recovery.job_id`, `batch_id` and
+`retryable` fields instead of embedding recovery routes in the displayed sentence.
+License refusals retain their structured terms and give concise review guidance.

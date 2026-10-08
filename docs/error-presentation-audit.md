@@ -85,3 +85,7 @@ cooldown, unsupported hardware, LoRA/video-tool recovery, and plain validation.
 
 Independent review approved the final implementation after regression fixes,
 including a second review of GB-based scheduler refusals and named hosts.
+
+Direct-generation failures carry additive `recovery.job_id`, `batch_id` and
+`retryable` fields instead of embedding recovery routes in the displayed sentence.
+License refusals retain their structured terms and give concise review guidance.

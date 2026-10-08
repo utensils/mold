@@ -28,6 +28,13 @@ use crate::state::{AppState, SseCompletionPayload, SseMessage};
 // ── ApiError — structured JSON error response ────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub struct ErrorRecovery {
+    pub job_id: String,
+    pub batch_id: String,
+    pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ApiError {
     pub error: String,
     pub code: String,
@@ -47,6 +54,9 @@ pub struct ApiError {
     /// transparently so the wire shape is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<Box<mold_core::LicenseRefusal>>,
+    /// Durable recovery identity is data, never embedded in display prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Box<ErrorRecovery>>,
     #[serde(skip)]
     status: StatusCode,
 }
@@ -81,6 +91,7 @@ impl ApiError {
             reference: error.reference,
             field: error.field.map(str::to_string),
             license: None,
+            recovery: None,
             status: StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
@@ -98,6 +109,7 @@ impl ApiError {
             reference,
             field,
             license: None,
+            recovery: None,
             status,
         }
     }
@@ -129,6 +141,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            recovery: None,
             status: StatusCode::CONFLICT,
         }
     }
@@ -143,6 +156,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            recovery: None,
             status: StatusCode::FORBIDDEN,
         }
     }
@@ -201,6 +215,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: None,
+            recovery: None,
             status,
         }
     }
@@ -270,7 +285,21 @@ impl IntoResponse for ApiError {
     fn into_response(mut self) -> axum::response::Response {
         let status = self.status;
         tracing::warn!(code = %self.code, status = %status, error = %self.error, "API request refused");
-        let friendly = mold_core::user_error::message(&self.error);
+        let diagnostic = if self.recovery.is_some() {
+            self.error
+                .split_once(". Durable job ")
+                .map_or(self.error.as_str(), |(reason, _)| reason)
+        } else {
+            self.error.as_str()
+        };
+        let friendly = if let Some(license) = &self.license {
+            format!(
+                "This model needs license acceptance. Review {} under Models on that machine.",
+                license.name
+            )
+        } else {
+            mold_core::user_error::message(diagnostic)
+        };
         if self.code == "INTERNAL_ERROR" && friendly == self.error {
             self.error =
                 "The machine could not complete the request. Check its logs for details.".into();
@@ -3006,7 +3035,7 @@ fn direct_generation_failure(status: &mold_core::GenerationBatchStatus, error: S
         ),
         None => message,
     };
-    match child.and_then(|child| child.error_code.as_deref()) {
+    let mut failure = match child.and_then(|child| child.error_code.as_deref()) {
         Some(
             code @ (mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND
             | mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL),
@@ -3014,7 +3043,15 @@ fn direct_generation_failure(status: &mold_core::GenerationBatchStatus, error: S
         Some("QUEUE_FULL") => ApiError::queue_full(message),
         _ if message.contains("queue is full") => ApiError::queue_full(message),
         _ => ApiError::inference(message),
-    }
+    };
+    failure.recovery = child.map(|child| {
+        Box::new(ErrorRecovery {
+            job_id: child.job_id.clone(),
+            batch_id: status.id.clone(),
+            retryable: child.retryable,
+        })
+    });
+    failure
 }
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
