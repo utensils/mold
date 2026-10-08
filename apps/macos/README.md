@@ -770,7 +770,16 @@ Job Details keeps status, preview and grouped recipe values together, with raw
 identifiers in a separate disclosure. See [the tooltip audit](docs/tooltip-audit.md)
 for the reviewed native surfaces and runtime verification boundaries.
 
-
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
 Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+
+## Error messages
+
+Errors use concise summaries instead of internal traces. Memory refusals show
+estimated requirements, the available budget and the shortfall in decimal GB/MB;
+a shared-memory Mac identifies the shared pool. These are estimates on the
+generation machine, not a promise that freeing exactly that amount guarantees
+a render. Full server diagnostics remain in logs and durable records. Both
+native apps share MoldClient error presentation, including older-server replies;
+local failures are recorded in OSLog with privacy-protected details.

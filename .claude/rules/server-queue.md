@@ -67,3 +67,13 @@ match as permission to replace another print's provenance.
 - **The RAM sampler must never build a process-refreshing `System`.** `resources::ram_snapshot_from_system` runs on the 1 Hz telemetry tick, on both memory watchdogs, and four times per job; a per-call `System::new_with_specifics(..with_processes(..))` walks all of `/proc`, and `ProcessesToUpdate::Some(&[pid])` still `read_dir`s it on Linux. One process-wide memory-only `System` answers the host figures and `process_rss_bytes()` (`/proc/self/statm` on Linux, per-PID `sysinfo` elsewhere) answers RSS in O(1). `sysinfo_process_rss_bytes` is the oracle the reader is tested against and is deliberately off the hot path — its own `/proc` walk inflates the sample it takes by its own working set.
 
 Queue input inspection is model-independent: `/api/queue/:id/inputs` lists sealed media roles and positions, excluding collection markers/provenance/LoRAs. Indexed `input-thumbnail` authenticates the full encrypted stream while retaining only one bounded member in memory, including private-staging image references; keyframe JSON is decoded before rendering. Unknown/nonimage members never become pixels. No client supplies a path. The unindexed route preserves the scalar source image for older clients.
+
+**Error presentation.** `mold_core::user_error` owns concise server summaries at
+HTTP/SSE/queue wire boundaries. Keep original diagnostics in logs and durable
+records, not presentation strings. Stage records reused in portable manifests
+must stay raw; format their wire projections only. Do not classify retryability
+or admission from formatted prose. Cross-language fixtures live in
+`docs/contracts/user-errors.json`; native `MoldClient.UserFacingError` and
+`studio/lib/userFacingError` cover older-server replies. Memory amounts are
+decimal GB/MB and name the graphics/system/shared pool; preserve estimated need,
+available budget, shortfall, and mandatory restart/cooldown advice.

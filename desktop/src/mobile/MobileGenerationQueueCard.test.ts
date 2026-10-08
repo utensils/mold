@@ -1,3 +1,4 @@
+import errorFixtures from "../../../docs/contracts/user-errors.json";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
@@ -18,8 +19,12 @@ describe("MobileGenerationQueueCard", () => {
       props: { title: "Clip", subtitle: "LTX · plato", status: "HELD", detail },
     });
     expect(view.classes()).toContain("mobile-generation-job--detailed-status");
-    expect(view.get("[data-test='mobile-generation-held-error']").text()).toBe(detail);
-    expect(view.attributes("aria-label")).toContain(`HELD. ${detail}`);
+    expect(view.get("[data-test='mobile-generation-held-error']").text()).toBe(
+      "The machine ran out of memory. Try a smaller model, output size or batch.",
+    );
+    expect(view.attributes("aria-label")).toContain(
+      "HELD. The machine ran out of memory. Try a smaller model, output size or batch.",
+    );
   });
 
   it("activates with Enter and Space", async () => {
@@ -151,4 +156,14 @@ describe("MobileGenerationQueueCard", () => {
     // It stays the trailing machine-truth column, not a sentence in the copy.
     expect(code.element.closest(".mobile-generation-job-action")).not.toBeNull();
   });
+});
+
+it("uses readable errors in the visible and spoken legacy held row", () => {
+  const fixture = errorFixtures[0]!;
+  const view = mount(MobileGenerationQueueCard, {
+    props: { title: "H3", subtitle: "Mac", status: "HELD", detail: fixture.raw },
+  });
+  expect(view.text()).toContain(fixture.message);
+  expect(view.attributes("aria-label")).toContain(fixture.message);
+  expect(view.attributes("aria-label")).not.toContain("22683045704");
 });

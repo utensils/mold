@@ -71,6 +71,7 @@ pub struct VideoUpscaleJob {
     pub source_facts: Option<VideoUpscaleMediaFacts>,
     pub output_facts: Option<VideoUpscaleMediaFacts>,
     pub output_filename: Option<String>,
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,

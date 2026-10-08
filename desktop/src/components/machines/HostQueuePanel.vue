@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * One host's live server queue, with management — per-GPU lanes, drag/drop
  * (and a right-click "Move to GPU N" fallback) between lanes on multi-GPU
@@ -148,7 +149,8 @@ function entryCode(entry: EnrichedQueueEntry): string {
  *  operator can act on it rather than just seeing it stuck. */
 function entryHeldReason(entry: EnrichedQueueEntry): string | null {
   if (entry.state !== "held") return null;
-  return entry.held_reason?.trim() || null;
+  const reason = entry.held_reason?.trim();
+  return reason ? userFacingError(reason) : null;
 }
 
 /** Elapsed wall-clock for running entries; re-evaluates on each poll frame. */

@@ -1150,6 +1150,7 @@ async fn try_pull_with_retry(
                     }
                     continue;
                 }
+                tracing::warn!(job_id = %job.id, model = %job.model, error = %msg, "model download failed");
                 job.status = JobStatus::Failed;
                 job.error = Some(msg.clone());
                 job.completed_at = Some(now_ms());

@@ -93,7 +93,7 @@ describe("describeTransportError", () => {
 
   it("passes unknown error copy through and covers empty messages", () => {
     expect(describeTransportError(new Error("host ran out of memory"), "Studio")).toBe(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+      "Studio ran out of memory. Try a smaller model, output size or batch.",
     );
     expect(describeTransportError(new Error(""), "Studio")).toBe(
       "Something went wrong talking to Studio.",

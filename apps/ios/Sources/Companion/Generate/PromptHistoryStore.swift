@@ -36,7 +36,7 @@ import MoldClient
             guard token == generation, !Task.isCancelled else { return }
             if case let MoldClientError.http(status, code, _) = error, status == 503, code == "HISTORY_UNAVAILABLE" {
                 state = .unavailable
-            } else { state = .failed; message = error.localizedDescription }
+            } else { state = .failed; message = error.sentence }
         }
     }
 
@@ -50,7 +50,7 @@ import MoldClient
             clearing = false
             await load(query: requestedQuery)
         } catch {
-            clearing = false; state = .failed; message = error.localizedDescription
+            clearing = false; state = .failed; message = error.sentence
         }
     }
 

@@ -52,7 +52,7 @@ public enum DownloadBoard {
                 model: job.model,
                 fraction: job.bytesTotal > 0 ? Double(job.bytesDone) / Double(job.bytesTotal) : nil,
                 bytesDone: job.bytesDone, bytesTotal: job.bytesTotal,
-                currentFile: job.currentFile, failed: job.error)
+                currentFile: job.currentFile, failed: job.error.map(UserFacingError.message))
         }
         return board
     }
@@ -76,7 +76,7 @@ public enum DownloadBoard {
                 id: id, model: event.model ?? last?.model ?? "", status: status,
                 bytesDone: event.bytesDone ?? last?.bytesDone ?? 0,
                 bytesTotal: event.bytesTotal ?? last?.bytesTotal ?? 0,
-                currentFile: event.currentFile ?? last?.currentFile, error: event.error ?? last?.failed)
+                currentFile: event.currentFile ?? last?.currentFile, error: event.error.map(UserFacingError.message) ?? last?.failed)
         case .forget:
             board.removeValue(forKey: id)
         case .introduce:

@@ -87,7 +87,7 @@ extension ChainRun {
             // `completed` reaching here published nothing this client fetches.
             case .completed: report.finished(nil, host)
             case .cancelled: report.failed("Cancelled")
-            default: report.failed(error ?? "The render didn't finish.")
+            default: report.failed(UserFacingError.message(error ?? "The render didn't finish."))
             }
             return true
         }
@@ -110,7 +110,7 @@ extension ChainRun {
         settle()
         switch detail.state {
         case .cancelled: report.failed("Cancelled")
-        case .failed: report.failed(detail.error ?? "The render didn't finish.")
+        case .failed: report.failed(UserFacingError.message(detail.error ?? "The render didn't finish."))
         default: report.finished(detail.galleryFilename, host)
         }
         return true

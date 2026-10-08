@@ -343,6 +343,7 @@ pub struct MeshWorkflowJobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -353,7 +354,23 @@ pub struct MeshWorkflowJobDetail {
     #[serde(flatten)]
     pub summary: MeshWorkflowJobSummary,
     pub request: CreateMeshWorkflowRequest,
+    #[serde(serialize_with = "serialize_stage_errors")]
     pub stages: Vec<MeshWorkflowStageRecord>,
+}
+
+fn serialize_stage_errors<S: serde::Serializer>(
+    stages: &[MeshWorkflowStageRecord],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let presented: Vec<_> = stages
+        .iter()
+        .cloned()
+        .map(|mut stage| {
+            stage.error = stage.error.map(|error| crate::user_error::message(&error));
+            stage
+        })
+        .collect();
+    presented.serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -392,6 +409,7 @@ pub enum MeshWorkflowEvent {
     StateChanged {
         state: MeshWorkflowJobState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(serialize_with = "crate::user_error::serialize_optional")]
         error: Option<String>,
     },
 }
@@ -941,13 +959,17 @@ mod tests {
                 sha256: "a".repeat(64),
                 byte_length: 123,
             }],
-            error: None,
+            error: Some("tensor shape mismatch: [1, 512]".into()),
         };
         let manifest = MeshWorkflowManifest::new("01WORKFLOW", 42, &request, vec![stage]).unwrap();
         let dir = tempfile::tempdir().unwrap();
         manifest.write_atomic(dir.path()).unwrap();
         let restored = MeshWorkflowManifest::read_from_dir(dir.path()).unwrap();
         assert_eq!(restored.job_id, "01WORKFLOW");
+        assert_eq!(
+            restored.stages[0].error.as_deref(),
+            Some("tensor shape mismatch: [1, 512]")
+        );
         assert_eq!(restored.stages[0].artifacts[0].byte_length, 123);
         assert!(matches!(
             restored.request().unwrap(),

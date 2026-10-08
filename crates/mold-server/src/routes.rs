@@ -28,6 +28,13 @@ use crate::state::{AppState, SseCompletionPayload, SseMessage};
 // ── ApiError — structured JSON error response ────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub struct ErrorRecovery {
+    pub job_id: String,
+    pub batch_id: String,
+    pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ApiError {
     pub error: String,
     pub code: String,
@@ -47,6 +54,9 @@ pub struct ApiError {
     /// transparently so the wire shape is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<Box<mold_core::LicenseRefusal>>,
+    /// Durable recovery identity is data, never embedded in display prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Box<ErrorRecovery>>,
     #[serde(skip)]
     status: StatusCode,
 }
@@ -81,6 +91,7 @@ impl ApiError {
             reference: error.reference,
             field: error.field.map(str::to_string),
             license: None,
+            recovery: None,
             status: StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
@@ -98,6 +109,7 @@ impl ApiError {
             reference,
             field,
             license: None,
+            recovery: None,
             status,
         }
     }
@@ -129,6 +141,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            recovery: None,
             status: StatusCode::CONFLICT,
         }
     }
@@ -143,6 +156,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            recovery: None,
             status: StatusCode::FORBIDDEN,
         }
     }
@@ -201,6 +215,7 @@ impl ApiError {
             reference: None,
             field: None,
             license: None,
+            recovery: None,
             status,
         }
     }
@@ -267,8 +282,30 @@ impl ApiError {
 }
 
 impl IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(mut self) -> axum::response::Response {
         let status = self.status;
+        tracing::warn!(code = %self.code, status = %status, error = %self.error, "API request refused");
+        let diagnostic = if self.recovery.is_some() {
+            self.error
+                .split_once(". Durable job ")
+                .map_or(self.error.as_str(), |(reason, _)| reason)
+        } else {
+            self.error.as_str()
+        };
+        let friendly = if let Some(license) = &self.license {
+            format!(
+                "This model needs license acceptance. Review {} under Models on that machine.",
+                license.name
+            )
+        } else {
+            mold_core::user_error::message(diagnostic)
+        };
+        if self.code == "INTERNAL_ERROR" && friendly == self.error {
+            self.error =
+                "The machine could not complete the request. Check its logs for details.".into();
+        } else {
+            self.error = friendly;
+        }
         // On queue-full (503), hint clients to retry with a short delay.
         if self.code == "QUEUE_FULL" || self.code == "SERVER_RESTARTING" {
             let mut headers = HeaderMap::new();
@@ -2998,7 +3035,7 @@ fn direct_generation_failure(status: &mold_core::GenerationBatchStatus, error: S
         ),
         None => message,
     };
-    match child.and_then(|child| child.error_code.as_deref()) {
+    let mut failure = match child.and_then(|child| child.error_code.as_deref()) {
         Some(
             code @ (mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND
             | mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL),
@@ -3006,7 +3043,15 @@ fn direct_generation_failure(status: &mold_core::GenerationBatchStatus, error: S
         Some("QUEUE_FULL") => ApiError::queue_full(message),
         _ if message.contains("queue is full") => ApiError::queue_full(message),
         _ => ApiError::inference(message),
-    }
+    };
+    failure.recovery = child.map(|child| {
+        Box::new(ErrorRecovery {
+            job_id: child.job_id.clone(),
+            batch_id: status.id.clone(),
+            retryable: child.retryable,
+        })
+    });
+    failure
 }
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
@@ -11807,23 +11852,20 @@ pub async fn create_download(
         Err(EnqueueError::ModelActivation(error)) => {
             ApiError::model_activation(error).into_response()
         }
-        Err(EnqueueError::UnknownModel(_)) => (
+        Err(EnqueueError::UnknownModel(_)) => {
+            tracing::warn!(model = %body.model, "download refused: unknown model");
+            ApiError::unknown_model("That model is not available. Choose another model.")
+                .into_response()
+        }
+        Err(error @ EnqueueError::DerivedTier { .. }) => ApiError::with_code(
+            error.to_string(),
+            "VALIDATION_ERROR",
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("unknown model '{}'. Run 'mold list' to see available models.", body.model)
-            })),
         )
-            .into_response(),
-        Err(error @ EnqueueError::DerivedTier { .. }) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": error.to_string() })),
-        )
-            .into_response(),
-        Err(EnqueueError::LockPoisoned) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "download queue state is corrupt" })),
-        )
-            .into_response(),
+        .into_response(),
+        Err(EnqueueError::LockPoisoned) => {
+            ApiError::internal("download queue state is corrupt").into_response()
+        }
     }
 }
 
@@ -14663,5 +14705,28 @@ mod tests {
 
         record_prompt_history(&state, "a red apple", None, "ltx-2-19b-distilled:fp8");
         assert_eq!(history.recent(10).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod user_error_response_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn friendly_refusals_keep_status_codes_and_retry_headers() {
+        let raw = "private H3 canonical target needs at least 22683045704 device bytes, exceeding the 22434708480 byte device admission sample";
+        let response =
+            ApiError::with_code(raw, "INSUFFICIENT_MEMORY", StatusCode::SERVICE_UNAVAILABLE)
+                .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], mold_core::user_error::message(raw));
+        assert_eq!(body["code"], "INSUFFICIENT_MEMORY");
+        let full = ApiError::queue_full("queue is full").into_response();
+        assert_eq!(full.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

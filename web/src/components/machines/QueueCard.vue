@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * Host queue management card (spec §08 G2). The relocated home of queue
  * controls for a machine: each entry shows its state + model, a per-GPU lane
@@ -230,7 +231,7 @@ function queuedIndexOf(id: string): number {
             class="qc__held"
             :title="entry.held_reason ?? undefined"
           >
-            {{ entry.held_reason }}
+            {{ userFacingError(entry.held_reason) }}
           </span>
 
           <select

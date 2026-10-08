@@ -62,7 +62,7 @@ extension PrintActions {
                 try Task.checkCancellation()
                 deliver(url, destination: destination)
                 staged = nil
-            } catch { if !Task.isCancelled { status = "Couldn't export that file: \(error.localizedDescription)" } }
+            } catch { if !Task.isCancelled { status = "Couldn't export that file: \(error.sentence)" } }
         }
     }
     private func finishFileExport(_ operation: UUID) {
@@ -75,7 +75,7 @@ extension PrintActions {
             do {
                 let saved = try ExportFiles.saveToFolder(url)
                 status = "Saved to Files ▸ Mold ▸ \(saved.lastPathComponent)."
-            } catch { status = "Couldn't save that file: \(error.localizedDescription)" }
+            } catch { status = "Couldn't save that file: \(error.sentence)" }
         } else { sheet = destination == .files ? .files([url]) : .share([url]) }
     }
 }

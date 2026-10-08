@@ -177,3 +177,11 @@ Probe fences cover reuse identity and source authoring revisions. Unavailable
 expected conditioning must block generation until restore, replacement or
 explicit discard; retry after reconnection. Single/plural identity photos are one
 authority when selecting retained members.
+
+**Error presentation.** Both native apps use `MoldClient.UserFacingError` for
+server diagnostics and old-server queue/batch/download replies. Local catches
+use `UserFacingError.describe` (through `Error.sentence` on MainActor); background
+workers call it directly. It records original local diagnostics in OSLog with
+private details, then supplies device/app wording. Do not point a local file
+error at a remote machine’s logs. A held Queue row shows its full-width reason
+once, outside the thumbnail column; keep Retry/Move controls and Dynamic Type.

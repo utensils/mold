@@ -75,7 +75,7 @@ final class MediaExportSession: Identifiable {
                 pauseText = String(pauseControl?.defaultValue ?? 0)
                 selectFormat()
                 if formats.isEmpty { error = "This machine offers no conversions for this print." }
-            } catch { if !cancelled { self.error = error.localizedDescription } }
+            } catch { if !cancelled { self.error = error.sentence } }
             loading = false
         }
     }
@@ -129,7 +129,7 @@ final class MediaExportSession: Identifiable {
                     actions.sheet = nil
                 }
                 if kind == .mesh && animation { UserDefaults.standard.set(transparent, forKey: "turntable-transparent") }
-            } catch { if !cancelled { self.error = error.localizedDescription } }
+            } catch { if !cancelled { self.error = error.sentence } }
         }
     }
 }

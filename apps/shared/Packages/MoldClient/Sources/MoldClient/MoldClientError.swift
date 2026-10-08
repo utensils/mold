@@ -40,8 +40,8 @@ public enum MoldClientError: Error, Sendable, LocalizedError {
             "Couldn't reach this machine. \(reason)"
         case .unauthorized:
             "This machine needs an API key. Add one in Settings."
-        case let .http(status, _, message):
-            message ?? "The machine answered with an error (\(status))."
+        case let .http(status, code, message):
+            UserFacingError.http(status: status, code: code, diagnostic: message)
         case .malformedResponse:
             "The machine sent something this version of Mold can't read."
         case let .licenseRequired(refusal, mismatch):

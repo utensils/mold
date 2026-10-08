@@ -80,7 +80,7 @@ struct PairingScanView: View {
         guard phase == .scanning else { return }
         let payload: MobilePairingPayload
         do { payload = try MobilePairingPayload.parse(raw) } catch {
-            phase = .failed(error.errorDescription ?? error.localizedDescription)
+            phase = .failed(error.errorDescription ?? error.sentence)
             return
         }
         phase = .pairing(payload.name)

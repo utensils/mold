@@ -241,7 +241,9 @@ describe("queueEntryDetailModel", () => {
       }),
     });
     expect(detail.problem?.detail).toContain("dispatch budget exhausted");
-    expect(detail.problem?.detail).toContain("illegal memory access");
+    expect(detail.problem?.detail).toContain(
+      "The render failed. Check the machine’s logs for details.",
+    );
     expect(detail.copyText).toContain("illegal memory access");
   });
 

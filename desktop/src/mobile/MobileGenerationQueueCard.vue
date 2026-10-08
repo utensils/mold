@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * One queue row, for Make's queue and a machine's own queue alike.
  *
@@ -65,6 +66,8 @@ const emit = defineEmits<{
   activate: [];
 }>();
 
+const friendlyDetail = computed(() => (props.detail ? userFacingError(props.detail) : null));
+
 const displayTitle = computed(() => props.title.trim() || props.subtitle);
 /**
  * A long CODE has to wrap onto its own row. A running row's sentence already
@@ -88,7 +91,9 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
     }"
     role="button"
     tabindex="0"
-    :aria-label="[ariaLabel?.trim() || displayTitle, status, detail].filter(Boolean).join('. ')"
+    :aria-label="
+      [ariaLabel?.trim() || displayTitle, status, friendlyDetail].filter(Boolean).join('. ')
+    "
     data-test="mobile-generation-queue-card"
     :data-row-test="rowTestId ?? undefined"
     @click="emit('activate')"
@@ -145,7 +150,7 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
         class="mobile-generation-held-error"
         data-test="mobile-generation-held-error"
       >
-        {{ detail }}
+        {{ friendlyDetail }}
       </p>
     </div>
     <div class="mobile-generation-job-action">

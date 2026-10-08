@@ -160,7 +160,7 @@ describe("QueueEntryDetail", () => {
     const wrapper = mount(QueueEntryDetail, { props: { model: held } });
 
     expect(wrapper.get('[data-test="queue-detail-problem"]').text()).toContain(
-      "illegal memory access",
+      "The render failed. Check the machine’s logs for details.",
     );
     expect(
       wrapper.get('[data-test="queue-detail-retry"]').attributes("disabled"),

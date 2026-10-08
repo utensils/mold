@@ -1,3 +1,4 @@
+import { userFacingError } from "./userFacingError";
 /**
  * Everything one server-queue row can say about itself, decided once for web,
  * desktop, and iPhone.
@@ -385,8 +386,10 @@ function settingsGroups(
 }
 
 function problemFor(entry: QueueEntry): QueueDetailProblem | null {
-  const held = text(entry.held_reason);
-  const error = text(entry.error);
+  const rawHeld = text(entry.held_reason);
+  const held = rawHeld === null ? null : userFacingError(rawHeld);
+  const rawError = text(entry.error);
+  const error = rawError === null ? null : userFacingError(rawError);
   if (held === null && error === null) return null;
   const parts =
     held !== null && error !== null && held !== error
@@ -508,6 +511,12 @@ export function queueEntryDetailModel(
     { label: "Host", value: hostLabel },
     { label: "State", value: entry.state },
     problem ? { label: "Problem", value: problem.detail } : null,
+    text(entry.held_reason) && text(entry.held_reason) !== problem?.detail
+      ? { label: "Technical hold reason", value: entry.held_reason as string }
+      : null,
+    text(entry.error) && text(entry.error) !== problem?.detail
+      ? { label: "Technical error", value: entry.error as string }
+      : null,
     text(metadata?.prompt) === null
       ? null
       : { label: "Prompt", value: text(metadata?.prompt) as string },

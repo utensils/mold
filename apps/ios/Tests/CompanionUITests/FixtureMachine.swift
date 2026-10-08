@@ -31,6 +31,7 @@ final class FixtureMachine: @unchecked Sendable {
     func requestLog() -> [String] { allRequests.withLock { $0 } }
     private let queueRequests = Mutex<[String]>([])
     func queueActionRequests() -> [String] { queueRequests.withLock { $0 } }
+    private let memoryErrorFixture: String?
     private let queueControls: Bool
     private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
     private var clearedHistory = false
@@ -39,7 +40,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil) throws {
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
@@ -49,6 +50,7 @@ final class FixtureMachine: @unchecked Sendable {
         self.retainedMediaFixture = retainedMediaFixture
         self.queueFixture = queueFixture
         self.queueControls = queueControls
+        self.memoryErrorFixture = memoryErrorFixture
         self.collectionFixture = collectionFixture
         modelMemoryFixture = loadedModels
         if loadedModels { residentModels = ["flux-dev:q4", "ltx-2.5-22b-distilled:bf16"] }
@@ -226,7 +228,8 @@ final class FixtureMachine: @unchecked Sendable {
          "position": id == "fixture-video" ? 0 : 1, "durable": true,
          "batch_id": id, "client_batch_id": "client-" + id, "retryable": true,
          "explicitly_paused": true,
-         "held_reason": "Temporary machine pressure",
+         "held_reason": memoryErrorFixture ?? "Temporary machine pressure",
+         "error": memoryErrorFixture ?? "Temporary machine pressure",
          "metadata": ["prompt": id == "fixture-video" ? "A coastal path at sunrise" : "A quiet mountain lake",
                       "model": "ltx-2.5-22b-distilled:bf16", "seed": 42, "steps": 8, "width": 768, "height": 512, "frames": 49, "fps": 24]]
     }

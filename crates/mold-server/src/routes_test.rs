@@ -2340,7 +2340,7 @@ mod tests {
         assert!(json_body(failed).await["error"]
             .as_str()
             .unwrap()
-            .contains("injected preference persistence failure"));
+            .contains("Check its logs for details"));
         let succeeded = succeeding.await.unwrap().unwrap();
         assert_eq!(succeeded.status(), StatusCode::ACCEPTED);
         assert_eq!(json_body(succeeded).await["desired_enabled"], false);
@@ -8599,11 +8599,20 @@ mod tests {
             "{error}"
         );
         let reason = error["error"].as_str().unwrap_or_default();
-        assert!(
-            reason.contains("adapter.safetensors"),
-            "the hold must name the LoRA that vanished: {error}"
-        );
-        assert!(reason.contains("/retry"), "{error}");
+        assert!(reason.contains("LoRA file is missing"), "{error}");
+        assert_eq!(error["recovery"]["retryable"], true);
+        assert!(error["recovery"]["job_id"].as_str().is_some());
+        assert!(error["recovery"]["batch_id"].as_str().is_some());
+        let row = state
+            .queue_journal
+            .list_all()
+            .into_iter()
+            .find(|row| row.id == error["recovery"]["job_id"])
+            .unwrap();
+        assert!(row
+            .held_reason
+            .unwrap_or_default()
+            .contains("adapter.safetensors"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -9329,8 +9338,9 @@ mod tests {
         assert_eq!(body["code"], "INFERENCE_ERROR", "{body}");
         let message = body["error"].as_str().unwrap_or_default();
         assert!(message.contains("mock engine error"), "{body}");
-        assert!(message.contains("POST /api/queue/"), "{body}");
-        assert!(message.contains("/retry"), "{body}");
+        assert!(!message.contains("POST /api/queue/"), "{body}");
+        assert_eq!(body["recovery"]["retryable"], true);
+        assert!(body["recovery"]["job_id"].as_str().is_some());
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();
@@ -9370,7 +9380,9 @@ mod tests {
         let body = json_body(response).await;
         let message = body["error"].as_str().unwrap_or_default();
         assert!(message.contains("mock engine error"), "{body}");
-        assert!(message.contains("belongs to batch "), "{body}");
+        assert!(body["recovery"]["job_id"].as_str().is_some());
+        assert!(body["recovery"]["batch_id"].as_str().is_some());
+        assert!(body["recovery"]["retryable"].is_null());
         assert!(!message.contains("/retry"), "{body}");
 
         feeder_shutdown.cancel();
@@ -13713,8 +13725,9 @@ mod tests {
         assert_eq!(error["code"], "INFERENCE_ERROR", "{error}");
         let message = error["error"].as_str().unwrap_or_default();
         assert!(message.contains("mock engine error"), "{error}");
-        assert!(message.contains("/api/queue/"), "{error}");
-        assert!(message.contains("/retry"), "{error}");
+        assert_eq!(error["recovery"]["retryable"], true);
+        assert!(error["recovery"]["job_id"].as_str().is_some());
+        assert!(error["recovery"]["batch_id"].as_str().is_some());
 
         let batch = app
             .oneshot(
@@ -13731,10 +13744,8 @@ mod tests {
         let child = &batch["children"][0];
         assert_eq!(child["state"], "held", "{batch}");
         assert_eq!(child["retryable"], true, "{batch}");
-        assert!(
-            message.contains(child["job_id"].as_str().unwrap()),
-            "the error must name the held job: {message} vs {batch}"
-        );
+        assert_eq!(error["recovery"]["job_id"], child["job_id"]);
+        assert_eq!(error["recovery"]["batch_id"], batch["id"]);
     }
 
     /// A client-chosen batch id makes `/api/generate` idempotent exactly as
@@ -13845,7 +13856,8 @@ mod tests {
         assert_eq!(body["code"], "INFERENCE_ERROR", "{body}");
         let message = body["error"].as_str().unwrap_or_default();
         assert!(message.contains("returned no images"), "{body}");
-        assert!(message.contains("/retry"), "{body}");
+        assert_eq!(body["recovery"]["retryable"], true);
+        assert!(body["recovery"]["job_id"].as_str().is_some());
     }
 
     // ── /api/generate — known but not downloaded model returns 404 ───────────
@@ -13884,7 +13896,8 @@ mod tests {
         );
         let message = body["error"].as_str().unwrap_or_default();
         assert!(message.contains("flux-schnell:q8"), "{body}");
-        assert!(message.contains("/retry"), "{body}");
+        assert_eq!(body["recovery"]["retryable"], true);
+        assert!(body["recovery"]["job_id"].as_str().is_some());
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -19960,7 +19973,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = json_body(response).await;
         let message = body["error"].as_str().unwrap_or_default();
-        assert!(message.contains("prompt expansion failed"), "{body}");
+        assert!(message.contains("Check its logs for details"), "{body}");
     }
 
     #[tokio::test]
@@ -20229,7 +20242,7 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .unwrap()
-            .contains("--accept-license insightface-antelopev2"));
+            .contains("license acceptance"));
     }
 
     #[tokio::test]

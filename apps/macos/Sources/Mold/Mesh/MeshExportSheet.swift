@@ -128,7 +128,7 @@ struct MeshExportSheet: View {
                 let saved = try await onExport(sending)
                 try Task.checkCancellation()
                 if saved { dismiss() }
-            } catch is CancellationError { return } catch { self.error = error.localizedDescription }
+            } catch is CancellationError { return } catch { self.error = error.sentence }
         }
     }
 }

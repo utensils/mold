@@ -123,7 +123,7 @@ struct Well: View {
                     return
                 }
                 set(picture)
-            } catch is CancellationError {} catch { problem = error.localizedDescription }
+            } catch is CancellationError {} catch { problem = error.sentence }
         }
     }
 }

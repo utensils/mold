@@ -114,7 +114,7 @@ final class PrintMaterializer {
                     try data.write(to: file)
                     return CacheWriteResult.written
                 } catch {
-                    return CacheWriteResult.failed(error.localizedDescription)
+                    return CacheWriteResult.failed(UserFacingError.describe(error))
                 }
             }.value
             switch result {

@@ -85,7 +85,7 @@ extension QueueStore {
             guard let was = previously[child.jobId], was.state != child.state else { continue }
             guard let entry = entries(on: host).first(where: { $0.id == child.jobId }) else { continue }
             if child.state == .failed {
-                onOutcome(host, entry, child.error ?? entry.error ?? "The job failed.")
+                onOutcome(host, entry, UserFacingError.message(child.error ?? entry.error ?? "The job failed."))
             } else if case let .prose(sentence, retryable: false)? = QueueHold.resolve(entry: entry, child: child) {
                 onOutcome(host, entry, sentence)
             }

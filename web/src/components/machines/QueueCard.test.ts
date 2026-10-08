@@ -1,3 +1,4 @@
+import errorFixtures from "../../../../docs/contracts/user-errors.json";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import QueueCard from "./QueueCard.vue";
@@ -361,4 +362,25 @@ describe("scheduler plan work", () => {
     expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='planned-queue-row']")).toHaveLength(1);
   });
+});
+
+it("formats legacy byte diagnostics in the held queue row", () => {
+  const fixture = errorFixtures[0]!;
+  const view = mount(QueueCard, {
+    props: {
+      entries: [
+        {
+          id: "held",
+          model: "h3",
+          state: "held",
+          started_at_unix_ms: 1,
+          position: 0,
+          held_reason: fixture.raw,
+        },
+      ],
+      gpuOrdinals: [],
+    },
+  });
+  expect(view.text()).toContain(fixture.message);
+  expect(view.text()).not.toContain("22683045704");
 });

@@ -638,6 +638,7 @@ pub struct ChainJobSummary {
     pub current_stage: u32,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
     pub ephemeral: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,6 +665,7 @@ pub struct ChainJobStageDetail {
     /// is present. This is authoritative filesystem state, not manifest intent.
     #[serde(default)]
     pub cache_ready: bool,
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
 }
 
@@ -818,6 +820,7 @@ pub enum ChainJobEvent {
     },
     StateChanged {
         state: ChainJobState,
+        #[serde(serialize_with = "crate::user_error::serialize_optional")]
         error: Option<String>,
     },
 }
