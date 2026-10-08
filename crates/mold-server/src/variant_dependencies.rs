@@ -2118,11 +2118,10 @@ async fn prepare_h3_private_inputs_for_devices(
     use sha2::{Digest, Sha256};
     // The row being re-prepared may be payload-free; the projection is what
     // the queue-media store holds for it (a FL2VA first frame in particular).
-    let resolved_media = mold_core::minimax_h3::ResolvedMediaPresence {
-        source_image: request.source_image.is_some()
-            || queue_media_projection.is_some_and(|projection| projection.source_image),
-    };
-
+    let resolved_media = queue_media_projection.map_or_else(
+        || mold_core::minimax_h3::ResolvedMediaPresence::from_request(request),
+        |projection| projection.h3_media_presence(request),
+    );
     let devices = crate::execution_plan::eligible_devices_for_private_h3(config, request, &devices)
         .map_err(|error| error.to_string())?;
     if devices.is_empty() {
@@ -2344,7 +2343,7 @@ async fn prepare_h3_private_inputs_for_devices(
             evidence
                 .validate_for(
                     &next_request,
-                    resolved_media,
+                    resolved_media.clone(),
                     &device.id,
                     device.ordinal,
                     compute_capability,

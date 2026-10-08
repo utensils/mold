@@ -209,6 +209,8 @@ MiniMax H3 FL2VA requires at least one boundary frame: first, last, or both. The
 and memory grants from the validated request mode. Paired frames keep roughly
 1,000 prompt tokens; over-budget prompts report the exact tokenizer budget
 before artifact verification. A paired request may need more host/GPU memory.
+Durable queued FL2VA requests preserve exact endpoint roles on replay for the
+base compact model and all supported Turbo tiers.
 
 The released runtime accepts qualified NVIDIA CUDA and Apple Metal devices.
 Admission uses the selected request's exact device and host-memory budget, so

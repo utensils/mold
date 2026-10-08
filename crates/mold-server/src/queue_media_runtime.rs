@@ -61,6 +61,18 @@ impl DeferredQueueMedia {
         self.projection.loras = loras;
     }
 
+    /// Preserve endpoint roles while the feeder holds authenticated hydrated media.
+    /// The sealed header remains compatible; replay derives these exact indices anew.
+    pub fn project_sealed_keyframes(&mut self, request: &mold_core::GenerateRequest) {
+        self.projection.keyframe_indices = request
+            .keyframes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|frame| frame.frame)
+            .collect();
+    }
+
     pub fn media_set_ref(&self) -> &MediaSetRef {
         &self.media_set
     }
@@ -601,6 +613,89 @@ mod tests {
         extract_request_media, into_seal_media, project_request_media, ProcessPrivateAuthorities,
     };
     use crate::queue_media_store::QueueMediaOperationFingerprint;
+
+    #[test]
+    fn replayed_h3_endpoints_restore_exact_modes_from_legacy_projection() {
+        use mold_core::minimax_h3::{self as h3, Task};
+        for source in [false, true] {
+            for indices in [
+                vec![],
+                vec![0],
+                vec![123],
+                vec![0, 123],
+                vec![123, 123],
+                vec![17],
+            ] {
+                let home = tempfile::tempdir().unwrap();
+                let mut submitted: mold_core::GenerateRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": h3::FL2VA_COMFY, "prompt": "a scene", "width": 1344,
+                        "height": 768, "steps": 21, "guidance": 0.0, "frames": 124,
+                        "strength": 1.0, "seed": 42, "output_format": "mp4"
+                    }))
+                    .unwrap();
+                submitted.source_image = source.then(|| vec![1]);
+                submitted.keyframes = Some(
+                    indices
+                        .iter()
+                        .map(|frame| mold_core::KeyframeCondition {
+                            frame: *frame,
+                            image: vec![2],
+                            name: None,
+                        })
+                        .collect(),
+                );
+                let expected = h3::validate_resolved_request_contract(&submitted, Task::Fl2va)
+                    .map_err(|e| e.code);
+                let (admitted, request_json) =
+                    seal_request_for_test(home.path(), "endpoint-replay", submitted, None);
+                let reference = admitted.media_set_ref().clone();
+                drop(admitted);
+                let store = Arc::new(QueueMediaStore::open(home.path()).unwrap().store);
+                let projection = store.open_projection(&reference).unwrap();
+                assert!(
+                    projection.keyframe_indices.is_empty(),
+                    "unchanged header carries no index vector"
+                );
+                let mut replayed = DeferredQueueMedia::new(store, reference, projection);
+                let mut request: mold_core::GenerateRequest =
+                    serde_json::from_str(&request_json).unwrap();
+                let lease = replayed
+                    .hydrate_into("endpoint-replay", &mut request)
+                    .unwrap();
+                replayed.project_sealed_keyframes(&request);
+                let media = replayed.projection().h3_media_presence(&request);
+                assert_eq!(
+                    h3::validate_resolved_request_contract_with_media(&request, Task::Fl2va, media)
+                        .map_err(|e| e.code),
+                    expected,
+                    "hydrated fallback must not duplicate endpoints"
+                );
+                mold_core::request_media::scrub_request_media(&mut request);
+                drop(lease);
+                let media = replayed.projection().h3_media_presence(&request);
+                assert_eq!(
+                    h3::validate_resolved_request_contract_with_media(&request, Task::Fl2va, media)
+                        .map_err(|e| e.code),
+                    expected,
+                    "source={source}, indices={indices:?}"
+                );
+                if source || !indices.is_empty() {
+                    let media = replayed.projection().h3_media_presence(&request);
+                    assert_eq!(
+                        h3::validate_resolved_request_contract_with_media(
+                            &request,
+                            Task::Ref2va,
+                            media
+                        )
+                        .unwrap_err()
+                        .code,
+                        "MINIMAX_H3_TASK_MISMATCH"
+                    );
+                }
+            }
+        }
+    }
 
     fn request(path: &std::path::Path) -> mold_core::GenerateRequest {
         serde_json::from_value(serde_json::json!({

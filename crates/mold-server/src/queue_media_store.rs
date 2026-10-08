@@ -596,6 +596,10 @@ pub struct QueueMediaProjection {
     pub extend_video_inline: bool,
     pub extend_video_path: bool,
     pub keyframe_count: u32,
+    /// Exact keyframe indices from authenticated deferred-preparation hydration.
+    /// Not encoded in the fixed-width header: the feeder stamps these before
+    /// publication on fresh admissions and replay, including older sealed sets.
+    pub keyframe_indices: Vec<u32>,
     pub identity_present: bool,
     pub identity_photograph_count: u32,
     pub edit_image_count: u32,
@@ -624,6 +628,20 @@ pub struct QueueMediaProjection {
 }
 
 impl QueueMediaProjection {
+    /// The same payload-free H3 facts at planning, admission, and execution.
+    pub fn h3_media_presence(
+        &self,
+        request: &mold_core::GenerateRequest,
+    ) -> mold_core::minimax_h3::ResolvedMediaPresence {
+        let mut presence = mold_core::minimax_h3::ResolvedMediaPresence::from_request(request);
+        presence.source_image |= self.source_image;
+        if request.keyframes.is_none() {
+            presence.keyframe_indices = self.keyframe_indices.clone();
+            presence.keyframe_count = self.keyframe_count as usize;
+        }
+        presence
+    }
+
     pub fn has_keyframes(&self) -> bool {
         self.keyframe_count > 0
     }
@@ -3925,6 +3943,7 @@ fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaErr
         // the stack onto the projection it publishes; a decode alone carries
         // none and every reader falls back to the request.
         loras: Vec::new(),
+        keyframe_indices: Vec::new(),
         source_image: bit(0),
         source_video_inline: bit(1),
         source_video_path: bit(2),
@@ -5030,6 +5049,7 @@ mod tests {
             extend_video_inline: false,
             extend_video_path: true,
             keyframe_count: 2,
+            keyframe_indices: Vec::new(),
             identity_present: true,
             identity_photograph_count: 3,
             edit_image_count: 2,

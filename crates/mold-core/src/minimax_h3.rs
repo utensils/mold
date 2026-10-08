@@ -2509,15 +2509,27 @@ pub fn validate_resolved_request_contract(
 /// `TextToAudioVideo` — unless the resolver says what the store holds. This
 /// is the H3 shape of the queue-media projection; a caller holding a hydrated
 /// request passes `from_request`, which is what the worker does.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResolvedMediaPresence {
     pub source_image: bool,
+    /// Exact ordered indices, preserving duplicate and invalid boundary refusals.
+    pub keyframe_indices: Vec<u32>,
+    /// Authenticated count; a missing or incomplete index projection fails closed.
+    pub keyframe_count: usize,
 }
 
 impl ResolvedMediaPresence {
     pub fn from_request(request: &GenerateRequest) -> Self {
         Self {
             source_image: request.source_image.is_some(),
+            keyframe_count: request.keyframes.as_deref().unwrap_or_default().len(),
+            keyframe_indices: request
+                .keyframes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|keyframe| keyframe.frame)
+                .collect(),
         }
     }
 }
@@ -2719,9 +2731,20 @@ fn validate_request_contract_with_authorities(
         ));
     }
 
+    if req.keyframes.is_none() && media.keyframe_count != media.keyframe_indices.len() {
+        return Err(violation(
+            "MINIMAX_H3_BOUNDARY_PROJECTION_INCOMPLETE",
+            "MiniMax H3 durable keyframe projection is incomplete; authenticated hydration is required",
+        ));
+    }
+
     match task {
         Task::Ref2va => {
-            if req.source_image.is_some() || req.keyframes.as_ref().is_some_and(|v| !v.is_empty()) {
+            if req.source_image.is_some()
+                || media.source_image
+                || req.keyframes.as_ref().is_some_and(|v| !v.is_empty())
+                || !media.keyframe_indices.is_empty()
+            {
                 return Err(violation(
                     "MINIMAX_H3_TASK_MISMATCH",
                     "Ref2VA accepts reference inputs, not FL2VA boundary frames",
@@ -2777,8 +2800,15 @@ fn validate_request_contract_with_authorities(
             let last = frames - 1;
             let mut first = req.source_image.is_some() || media.source_image;
             let mut end = false;
-            for keyframe in req.keyframes.as_deref().unwrap_or_default() {
-                match keyframe.frame {
+            // A hydrated request owns its indices. The projection is a fallback,
+            // never an additional list that would double-count hydrated endpoints.
+            let indices = req
+                .keyframes
+                .as_ref()
+                .map(|items| items.iter().map(|item| item.frame).collect::<Vec<_>>())
+                .unwrap_or(media.keyframe_indices);
+            for frame in indices {
+                match frame {
                     0 if !first => first = true,
                     0 => {
                         return Err(violation(
@@ -3768,7 +3798,10 @@ mod tests {
             validate_resolved_request_contract_with_media(
                 &scrubbed,
                 Task::Fl2va,
-                ResolvedMediaPresence { source_image: true }
+                ResolvedMediaPresence {
+                    source_image: true,
+                    ..Default::default()
+                }
             )
             .unwrap(),
             Mode::FirstFrameToAudioVideo
@@ -3778,7 +3811,8 @@ mod tests {
                 &hydrated,
                 Task::Fl2va,
                 ResolvedMediaPresence {
-                    source_image: false
+                    source_image: false,
+                    ..Default::default()
                 }
             )
             .unwrap(),
@@ -3786,7 +3820,75 @@ mod tests {
         );
         assert_eq!(
             ResolvedMediaPresence::from_request(&hydrated),
-            ResolvedMediaPresence { source_image: true }
+            ResolvedMediaPresence {
+                source_image: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn resolved_media_preserves_durable_boundary_modes_and_refusals() {
+        for model in [FL2VA_COMFY].into_iter().chain(
+            REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .filter(|tier| task_for_model(tier.model) == Some(Task::Fl2va))
+                .map(|tier| tier.model),
+        ) {
+            for source in [false, true] {
+                for indices in [
+                    vec![],
+                    vec![0],
+                    vec![123],
+                    vec![0, 123],
+                    vec![123, 123],
+                    vec![17],
+                ] {
+                    let mut hydrated = request();
+                    hydrated.model = model.into();
+                    hydrated.steps = steps_floor_for_model(model);
+                    hydrated.source_image = source.then(|| vec![1]);
+                    hydrated.keyframes = Some(
+                        indices
+                            .iter()
+                            .map(|frame| crate::KeyframeCondition {
+                                frame: *frame,
+                                image: vec![1],
+                                name: None,
+                            })
+                            .collect(),
+                    );
+                    let media = ResolvedMediaPresence::from_request(&hydrated);
+                    let expected = validate_resolved_request_contract(&hydrated, Task::Fl2va);
+                    let mut scrubbed = hydrated.clone();
+                    crate::request_media::scrub_request_media(&mut scrubbed);
+                    let actual = validate_resolved_request_contract_with_media(
+                        &scrubbed,
+                        Task::Fl2va,
+                        media,
+                    );
+                    assert_eq!(
+                        actual.map_err(|e| e.code),
+                        expected.map_err(|e| e.code),
+                        "source={source}, indices={indices:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_boundary_projection_fails_closed() {
+        let req = request();
+        let media = ResolvedMediaPresence {
+            keyframe_count: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_resolved_request_contract_with_media(&req, Task::Fl2va, media)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_BOUNDARY_PROJECTION_INCOMPLETE"
         );
     }
 

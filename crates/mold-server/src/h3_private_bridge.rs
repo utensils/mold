@@ -1716,13 +1716,10 @@ impl H3PreparedMediaContract {
 pub(crate) fn job_media_presence(
     job: &crate::gpu_pool::GpuJob,
 ) -> mold_core::minimax_h3::ResolvedMediaPresence {
-    mold_core::minimax_h3::ResolvedMediaPresence {
-        source_image: job.request.source_image.is_some()
-            || job
-                .deferred_media
-                .as_ref()
-                .is_some_and(|media| media.projection().source_image),
-    }
+    job.deferred_media.as_ref().map_or_else(
+        || mold_core::minimax_h3::ResolvedMediaPresence::from_request(&job.request),
+        |media| media.projection().h3_media_presence(&job.request),
+    )
 }
 
 pub(crate) struct H3ClaimedRunOutput {
@@ -2256,7 +2253,7 @@ pub(crate) fn run_bound_attempt(
     crate::gpu_worker::validate_h3_prepared_attempt_facts(scope_facts, &facts)?;
     facts
         .media
-        .validate_for_request_with_media(request, media)
+        .validate_for_request_with_media(request, media.clone())
         .map_err(anyhow::Error::msg)?;
     let output = prepared.run_once(scope, progress, allocation_commit)?;
     crate::gpu_worker::validate_h3_terminal_identity(scope_facts, &facts, &output)?;
@@ -3922,13 +3919,28 @@ mod structural_tests {
     /// accepted. Pinned structurally because the site needs a leased worker.
     #[test]
     fn owner_revalidation_reads_the_hydrated_copy_not_the_scrubbed_row() {
-        let source = include_str!("h3_private_bridge.rs");
+        let whole = include_str!("h3_private_bridge.rs");
+        // Scope this guard to the live owner. Other consumers correctly resolve
+        // payload-free requests through job_media_presence, including its
+        // no-deferred-media fallback, and cannot violate this owner's fence.
+        let owner_start = whole.find("pub(crate) fn prepare_for_owner(").unwrap();
+        let owner_end = whole[owner_start..]
+            .find("pub(crate) fn prepare_bound_attempt(")
+            .map(|offset| owner_start + offset)
+            .unwrap();
+        let source = &whole[owner_start..owner_end];
         let hydrated = "validate_for(\n            &request,\n            mold_core::minimax_h3::ResolvedMediaPresence::from_request(&request),";
         // Composed at run time so this test's own literal is not a match.
         let scrubbed = format!("ResolvedMediaPresence::from_request(&job.{})", "request");
+        let revalidation = source
+            .find(hydrated)
+            .expect("owner revalidation must validate the hydrated copy");
+        let hydration = source
+            .find("media.hydrate_into(&job.id, &mut request)")
+            .expect("owner must authenticate and hydrate its private copy");
         assert!(
-            source.contains(hydrated),
-            "owner revalidation must validate the hydrated copy"
+            hydration < revalidation,
+            "owner hydration must precede live revalidation"
         );
         assert!(
             !source.contains(&scrubbed),
@@ -3956,9 +3968,12 @@ mod structural_tests {
 
         let persisted = mold_core::request_media::persisted_request_form(&hydrated);
         assert!(persisted.source_image.is_none());
-        let present = mold_core::minimax_h3::ResolvedMediaPresence { source_image: true };
+        let present = mold_core::minimax_h3::ResolvedMediaPresence {
+            source_image: true,
+            ..Default::default()
+        };
         assert_eq!(
-            super::H3PreparedMediaContract::from_request_with_media(&persisted, present)
+            super::H3PreparedMediaContract::from_request_with_media(&persisted, present.clone())
                 .expect("scrubbed row plus projection derives a contract"),
             contract
         );
@@ -3969,6 +3984,39 @@ mod structural_tests {
             contract.validate_for_request(&persisted).is_err(),
             "the scrubbed row alone resolves as text-only and must not validate"
         );
+    }
+
+    #[test]
+    fn paired_fl2va_prepared_contract_survives_publication_and_revalidation() {
+        let mut hydrated = request(mold_core::minimax_h3::FL2VA_COMFY);
+        hydrated.seed = Some(7);
+        hydrated.guidance = 0.0;
+        hydrated.strength = 1.0;
+        hydrated.source_image = Some(vec![1]);
+        hydrated.keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: hydrated
+                .frames
+                .unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES)
+                - 1,
+            image: vec![2],
+            name: None,
+        }]);
+        let expected = super::H3PreparedMediaContract::from_request(&hydrated).unwrap();
+        assert_eq!(
+            expected.mode,
+            mold_core::minimax_h3::Mode::FirstAndLastFrameToAudioVideo
+        );
+        let present = mold_core::minimax_h3::ResolvedMediaPresence::from_request(&hydrated);
+        let persisted = mold_core::request_media::persisted_request_form(&hydrated);
+        assert_eq!(
+            super::H3PreparedMediaContract::from_request_with_media(&persisted, present.clone())
+                .unwrap(),
+            expected
+        );
+        expected
+            .validate_for_request_with_media(&persisted, present)
+            .unwrap();
+        assert!(expected.validate_for_request(&persisted).is_err());
     }
 
     /// The grant binds the PERSISTED request form — what `mold.db` holds and
