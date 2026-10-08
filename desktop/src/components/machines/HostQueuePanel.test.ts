@@ -1,3 +1,4 @@
+import errorFixtures from "../../../../docs/contracts/user-errors.json";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
@@ -588,4 +589,24 @@ describe("held rows", () => {
       kind: "error",
     });
   });
+});
+
+it("formats legacy byte diagnostics without changing the held state", async () => {
+  const fixture = errorFixtures[0]!;
+  const { wrapper } = await mountPanel(
+    [],
+    [
+      {
+        id: "held",
+        model: "h3",
+        state: "held",
+        started_at_unix_ms: 1,
+        position: 0,
+        held_reason: fixture.raw,
+      },
+    ],
+  );
+  expect(wrapper.text()).toContain(fixture.message);
+  expect(wrapper.text()).toContain("HELD");
+  expect(wrapper.text()).not.toContain("22683045704");
 });

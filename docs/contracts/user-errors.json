@@ -1,0 +1,110 @@
+[
+  {
+    "raw": "no device could produce an execution plan for 'minimax-h3-fl2va:comfy-pruned-int8' while the queue was idle: private H3 canonical target needs at least 22683045704 device bytes, exceeding the 22434708480 byte device admission sample",
+    "message": "Not enough graphics memory. Estimated need: 22.68 GB; available budget: 22.43 GB (248.34 MB short). Close apps on that machine or try a smaller model or output size."
+  },
+  {
+    "raw": "private H3 canonical target needs at least 3000000000 host bytes, exceeding the 2000000000 byte host admission sample",
+    "message": "Not enough system memory. Estimated need: 3 GB; available budget: 2 GB (1 GB short). Close apps on that machine or try a smaller model or output size."
+  },
+  {
+    "raw": "CUDA_ERROR_OUT_OF_MEMORY",
+    "message": "The machine ran out of memory. Try a smaller model, output size or batch."
+  },
+  {
+    "raw": "generation error: allocation failed",
+    "message": "The machine ran out of memory. Try a smaller model, output size or batch."
+  },
+  {
+    "raw": "no device could produce an execution plan for x while the queue was idle",
+    "message": "This machine cannot run those settings. Try another machine, model or output size."
+  },
+  {
+    "raw": "tensor shape mismatch: [1, 512]",
+    "message": "The render failed. Check the machine’s logs for details."
+  },
+  {
+    "raw": "failed to read /srv/models/weights.safetensors: No such file or directory",
+    "message": "A required file is missing on the machine. Restore or download the model again."
+  },
+  {
+    "raw": "failed to write /srv/mold/output.png: No space left on device",
+    "message": "The machine is out of storage. Free some disk space and try again."
+  },
+  {
+    "raw": "permission denied: /srv/private/key",
+    "message": "The machine cannot access a required file. Check its file permissions."
+  },
+  {
+    "raw": "Requires 2000000000 bytes of storage.",
+    "message": "Requires 2 GB of storage."
+  },
+  {
+    "raw": "Choose at least 2 frames.",
+    "message": "Choose at least 2 frames."
+  },
+  {
+    "raw": "Restore the source image before retrying.",
+    "message": "Restore the source image before retrying."
+  },
+  {
+    "raw": "CUDA kernel error at foo.rs:32",
+    "message": "The render failed. Check the machine’s logs for details."
+  },
+  {
+    "raw": "",
+    "message": "The request could not be completed. Check the machine’s logs for details."
+  },
+  {
+    "raw": "opaque\ntrace\n 0: crate::internal",
+    "message": "The request could not be completed. Check the machine’s logs for details."
+  },
+  {
+    "raw": "long diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic ",
+    "message": "The request could not be completed. Check the machine’s logs for details."
+  },
+  {
+    "raw": "private H3 canonical target needs at least 3000000000 unified-memory bytes, exceeding the 2000000000 byte unified-memory admission sample",
+    "message": "Not enough shared memory. Estimated need: 3 GB; available budget: 2 GB (1 GB short). Close apps on that machine or try a smaller model or output size."
+  },
+  {
+    "raw": "fatal CUDA error while running 'model'; this GPU worker was quarantined because its CUDA context is no longer safe to reuse. Restart the mold server to recover the GPU.",
+    "message": "The graphics device needs to recover. Restart Mold on that machine before trying again."
+  },
+  {
+    "raw": "CUDA context is fatally poisoned; server restart required",
+    "message": "The graphics device needs to recover. Restart Mold on that machine before trying again."
+  },
+  {
+    "raw": "this request is temporarily limited after a recent CUDA OOM; retry after the cooldown or reduce the output size",
+    "message": "The machine is recovering from a memory failure. Wait for the cooldown or try a smaller output size."
+  },
+  {
+    "raw": "H3 runtime requires CUDA compute capability 8.0, got 7.5",
+    "message": "This graphics device cannot run that model. Choose another machine or model."
+  },
+  {
+    "raw": "deferred generation preparation failed: LoRA adapter is no longer readable at /tmp/adapter.safetensors; restore the file and retry this job",
+    "message": "A LoRA file is missing or unreadable. Restore it on the machine, then retry the job."
+  },
+  {
+    "raw": "ffprobe is required for Framewise upscale: No such file or directory (os error 2)",
+    "message": "Video processing tools are missing on the machine. Install ffmpeg and ffprobe, then try again."
+  },
+  {
+    "raw": "Choose a safetensors checkpoint before generating.",
+    "message": "Choose a safetensors checkpoint before generating."
+  },
+  {
+    "raw": "'flux:bf16' needs more host memory than this machine has free while the queue is idle: released 9.8 GB by unloading 2 idle models; still 3.7 GB short (requires 45.00 GB, 41.28 GB available, including 15.08 GB evictable ZFS ARC)",
+    "message": "Not enough system memory. Estimated need: 45 GB; available budget: 41.28 GB (3.72 GB short). Close apps on that machine or try a smaller model or output size."
+  },
+  {
+    "raw": "'flux:bf16' needs more device memory than cuda:0 has free while the queue is idle: requires 39.37 GB, which is 16.76 GB over the 22.61 GB admission ceiling (90% of the 25.12 GB usable on this device)",
+    "message": "Not enough graphics memory. Estimated need: 39.37 GB; available budget: 22.61 GB (16.76 GB short). Close apps on that machine or try a smaller model or output size."
+  },
+  {
+    "raw": "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB, over this request's ~13.5 GB admission ceiling (90% of the ~15.0 GB usable) (retry after the cooldown)",
+    "message": "Not enough graphics memory. Estimated need: 16.6 GB; available budget: 13.5 GB (3.1 GB short). Wait for the cooldown or try a smaller output size."
+  }
+]

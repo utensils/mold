@@ -362,3 +362,11 @@ Before importing a source-bearing copy, clients check destination readiness. Win
 Omitted and 0 preserve normal timing. Positive pause with Loop/Once, any pause
 field on a non-GIF, out-of-range values and values not divisible by 10 are 422.
 Clients omit this additive field unless the holding machine advertises support.
+
+## Error messages
+
+Server responses provide concise, human-readable failures with decimal GB/MB
+memory estimates and budget shortfalls. Older servers use the shared studio
+formatter. Machine logs retain technical diagnostics; queue detail copy text
+retains diagnostics received from older servers. Error codes and retryability
+remain authoritative. See [the presentation audit](../../docs/error-presentation-audit.md).

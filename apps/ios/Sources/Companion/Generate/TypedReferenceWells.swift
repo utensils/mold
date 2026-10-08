@@ -113,7 +113,7 @@ struct TypedReferenceWells: View {
             }
             generate.draft.media = next
             problem = nil
-        } catch { problem = error.localizedDescription }
+        } catch { problem = error.sentence }
     }
     private var currentFence: ReferenceImportFence {
         ReferenceImportFence(model: generate.modelName, host: generate.target?.id,
@@ -153,7 +153,7 @@ struct TypedReferenceWells: View {
                     fence = currentFence
                     if replacing != nil { break }
                 }
-            } catch is CancellationError {} catch { problem = error.localizedDescription }
+            } catch is CancellationError {} catch { problem = error.sentence }
         }
     }
 }

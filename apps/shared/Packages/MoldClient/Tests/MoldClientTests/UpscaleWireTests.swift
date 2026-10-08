@@ -38,8 +38,8 @@ struct UpscaleWireTests {
     /// hands it back verbatim rather than saying "failed".
     @Test func aFailedUpscaleSpeaksTheMachinesOwnSentence() throws {
         let failed = try #require(try hostJobs().first { $0.state == .failed })
-        let reason = try #require(failed.error)
-        #expect(UpscalePlan.status(of: failed) == reason)
+        #expect(failed.error?.contains("ffprobe") == true)
+        #expect(UpscalePlan.status(of: failed) == "Video processing tools are missing on the machine. Install ffmpeg and ffprobe, then try again.")
     }
 
     /// A state added after this build must not lose the whole listing --

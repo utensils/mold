@@ -77,7 +77,7 @@ struct QueueEntryRow: View {
                                 .lineLimit(size.isAccessibilitySize ? nil : 2)
                         }
                         HStack {
-                            Text(entry.state == .running ? String(localized: "Rendering") : caption)
+                            Text(entry.state == .held ? String(localized: "Held") : entry.state == .running ? String(localized: "Rendering") : caption)
                             Spacer()
                             Image(systemName: "chevron.right").accessibilityHidden(true)
                         }
@@ -187,6 +187,7 @@ struct QueueHeldActions: View {
 
     var body: some View {
         Text(sentence).font(.callout).foregroundStyle(.secondaryText)
+            .accessibilityIdentifier("queue-held-reason-" + entry.id)
         let stacked = RowAxis.for(size) == .vertical
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 8))
@@ -209,7 +210,7 @@ struct QueueHeldActions: View {
     private var sentence: String {
         switch hold {
         case let .missingModel(_, sentence), let .prose(sentence, _):
-            sentence.isEmpty ? String(localized: "The machine put this job aside.") : sentence
+            sentence.isEmpty ? String(localized: "The machine put this job aside.") : UserFacingError.message(sentence)
         }
     }
 }

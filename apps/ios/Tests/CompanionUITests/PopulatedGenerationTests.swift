@@ -8,6 +8,53 @@ final class PopulatedGenerationTests: XCTestCase {
         acceptCompanionPermissions()
     }
 
+    @MainActor func testMemoryErrorIsConciseAndFitsAtEveryTextSize() async throws {
+        continueAfterFailure = false
+        var root = URL(fileURLWithPath: #filePath)
+        while root.pathComponents.count > 1,
+              !FileManager.default.fileExists(atPath: root.appending(path: "docs/contracts/user-errors.json").path) {
+            root.deleteLastPathComponent()
+        }
+        let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf:
+            root.appending(path: "docs/contracts/user-errors.json"))) as! [[String: String]]
+        let raw = fixtures[0]["raw"]!
+        let friendly = fixtures[0]["message"]!
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, memoryErrorFixture: raw)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.textFields["machine-name"].tap()
+        app.textFields["machine-name"].typeText("Memory Error Fixture")
+        app.textFields["machine-address"].tap()
+        app.textFields["machine-address"].typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+        for size in ["UICTContentSizeCategoryXS", "UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            app.terminate()
+            app.launchArguments = ["-UIPreferredContentSizeCategoryName", size]
+            app.launch()
+            XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+            let reason = app.staticTexts["queue-held-reason-fixture-held"]
+            let list = app.collectionViews["queue-list"]
+            XCTAssertTrue(list.waitForExistence(timeout: 10))
+            for _ in 0..<8 where !reason.exists || !reason.isHittable { list.swipeUp() }
+            XCTAssertTrue(reason.waitForExistence(timeout: 5))
+            XCTAssertEqual(reason.label, friendly)
+            XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == %@", friendly)).count, 1,
+                           "A held error must be shown once, outside the narrow thumbnail column")
+            XCTAssertGreaterThanOrEqual(reason.frame.minX, list.frame.minX)
+            XCTAssertLessThanOrEqual(reason.frame.maxX, list.frame.maxX)
+            XCTAssertFalse(app.debugDescription.contains("22683045704"))
+            XCTAssertFalse(app.debugDescription.contains("execution plan"))
+            attach(app)
+        }
+        XCTAssertTrue(machine.generationRequests.isEmpty)
+    }
+
     @MainActor func testVisibleModelUnloadingKeepsInstalledFiles() async throws {
         try await modelMemory(size: "UICTContentSizeCategoryL")
     }

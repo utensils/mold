@@ -77,7 +77,7 @@ final class PrintActions {
             } catch {
                 if interactive, let recovery = PermissionRecovery.photos(PHPhotoLibrary.authorizationStatus(for: .addOnly)) {
                     permissionRecovery = recovery
-                } else { status = String(localized: "Photos couldn't save that: \(error.localizedDescription)") }
+                } else { status = String(localized: "Photos couldn't save that: \(error.sentence)") }
             }
         }
     }

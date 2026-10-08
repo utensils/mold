@@ -45,7 +45,7 @@ describe("describeTransportError", () => {
         "plato",
       ),
     ).toBe(
-      "plato ran out of memory. Try a smaller model, image size, or batch.",
+      "plato ran out of memory. Try a smaller model, output size or batch.",
     );
   });
 

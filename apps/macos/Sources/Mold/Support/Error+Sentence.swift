@@ -5,12 +5,12 @@ import MoldClient
 /// every site `HostStore.report` is called from, not written out as a stack
 /// trace.
 ///
-/// Internal, and app-side: MoldClient never needs to turn an error into
-/// prose for a person, and a public extension on `Error` in a shared package
-/// is a global nobody asked for.
+/// Domain presentation lives in MoldClient.UserFacingError; this app helper
+/// supplies native navigation advice without adding a global Error extension
+/// to the shared package.
 extension Error {
     var sentence: String {
-        (self as? LocalizedError)?.errorDescription ?? localizedDescription
+        UserFacingError.describe(self)
     }
 
     /// The failure's own clause, with the "couldn't reach this machine" /
@@ -28,8 +28,8 @@ extension Error {
             // The key is the REASON; adding one is the way forward, and that
             // half lives in `advice` so nothing says it twice.
             return "it needs an API key."
-        case let .http(status, _, message):
-            return message.map(lowercasingFirstLetter(of:)) ?? "it answered with an error (\(status))."
+        case let .http(status, code, message):
+            return lowercasingFirstLetter(of: UserFacingError.http(status: status, code: code, diagnostic: message))
         case .malformedResponse:
             return "it answered something this version of Mold can't read."
         case let .licenseRequired(refusal, mismatch):

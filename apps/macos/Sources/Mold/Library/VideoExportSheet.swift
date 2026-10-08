@@ -76,7 +76,7 @@ struct VideoExportSheet: View {
             options = result
             gif = GifExportSelection(options: result)
             error = result.forVideo.contains(prompt.format) ? nil : "This machine no longer offers this format."
-        } catch is CancellationError { return } catch { self.error = error.localizedDescription }
+        } catch is CancellationError { return } catch { self.error = error.sentence }
     }
 
     private func submit() {
@@ -92,7 +92,7 @@ struct VideoExportSheet: View {
                 let saved = try await onExport(request)
                 try Task.checkCancellation()
                 if saved { dismiss() }
-            } catch is CancellationError { return } catch { self.error = error.localizedDescription }
+            } catch is CancellationError { return } catch { self.error = error.sentence }
         }
     }
 }

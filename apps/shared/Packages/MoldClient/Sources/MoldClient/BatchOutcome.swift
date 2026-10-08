@@ -19,7 +19,7 @@ public struct BatchOutcome: Equatable, Sendable {
     /// constructed with no batch behind it.
     public init(chainResults: [BatchResult], failures: [String]) {
         results = chainResults
-        self.failures = failures
+        self.failures = failures.map(UserFacingError.message)
     }
 
     /// The one answer for a status that has come to rest, or nil while
@@ -35,13 +35,13 @@ public struct BatchOutcome: Equatable, Sendable {
         failures = ordered.compactMap { child in
             guard child.result == nil else { return nil }
             if child.state == .held { return Self.heldSentence(child.error) }
-            return child.error ?? "The render didn't finish."
+            return child.error.map(UserFacingError.message) ?? "The render didn't finish."
         }
     }
 
     /// The machine's own reason, then where the decision lives.
     public static func heldSentence(_ reason: String?) -> String {
-        let cause = reason.map { "The machine is holding this render: \($0)" }
+        let cause = reason.map { "The machine is holding this render: \(UserFacingError.message($0))" }
             ?? "The machine is holding this render"
         let stop = cause.hasSuffix(".") ? "" : "."
         return "\(cause)\(stop) Try it again, move it or cancel it in the Queue."

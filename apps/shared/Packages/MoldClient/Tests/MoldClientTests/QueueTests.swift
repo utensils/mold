@@ -35,7 +35,7 @@ private func listing() throws -> QueueListing {
     let held = try #require(listing().entries.first)
     // The host's own sentence names a file to restore. Replacing it with
     // "Held" would throw away the only actionable thing on the row.
-    #expect(held.waitDescription == held.heldReason)
+    #expect(held.waitDescription == "A LoRA file is missing or unreadable. Restore it on the machine, then retry the job.")
     #expect(held.waitDescription.count > 10)
 }
 

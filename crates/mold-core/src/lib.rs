@@ -60,6 +60,7 @@ pub mod still_image;
 pub mod time;
 pub mod transparency;
 pub mod types;
+pub mod user_error;
 pub mod validation;
 pub mod video_upscale;
 pub mod wan_expert_marker;

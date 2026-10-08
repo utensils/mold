@@ -202,3 +202,19 @@ The main opt-in knobs are documented in
 [Configuration → Generation](/guide/configuration#generation).
 Start there for `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`,
 `MOLD_ATTN`, and `MOLD_ATTN_CHUNK` instead of guessing from log messages.
+
+## Reading error messages
+
+Errors use concise summaries instead of internal traces. Memory refusals show
+estimated requirements, the available budget and the shortfall in decimal GB/MB;
+a shared-memory Mac identifies the shared pool. These are estimates on the
+generation machine, not a promise that freeing exactly that amount guarantees
+a render. Full server diagnostics remain in logs and durable records. Both
+native apps share MoldClient error presentation, including older-server replies;
+local failures are recorded in OSLog with privacy-protected details.
+
+A memory shortfall refers to the machine doing the render, even when the message
+appears on your phone. Close other apps on that machine, reduce the model,
+output size or batch, or move the job to another machine. GPU quarantine messages
+explicitly require restarting Mold; a cooldown message explains when waiting
+can help. Job error codes and retry controls retain their original meaning.

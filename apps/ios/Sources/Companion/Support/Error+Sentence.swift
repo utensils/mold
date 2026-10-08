@@ -8,7 +8,7 @@ import MoldClient
 /// it lives in the app and not in MoldClient.
 extension Error {
     var sentence: String {
-        (self as? LocalizedError)?.errorDescription ?? localizedDescription
+        UserFacingError.describe(self)
     }
 
     /// The failure's own clause, lowercased to follow "workstation couldn't…".
@@ -21,8 +21,8 @@ extension Error {
             return lowercasingFirstLetter(of: reason)
         case .unauthorized:
             return "it needs an API key."
-        case let .http(status, _, message):
-            return message.map(lowercasingFirstLetter(of:)) ?? "it answered with an error (\(status))."
+        case let .http(status, code, message):
+            return lowercasingFirstLetter(of: UserFacingError.http(status: status, code: code, diagnostic: message))
         case .malformedResponse:
             return "it answered something this version of Mold Studio can't read."
         case let .licenseRequired(refusal, mismatch):

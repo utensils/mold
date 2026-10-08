@@ -75,7 +75,7 @@ struct MeshPage: View {
         } catch {
             guard !Task.isCancelled, identity == requestIdentity else { return }
             problem = downloaded
-                ? String(localized: "This 3-D file couldn't be opened: \(error.localizedDescription)")
+                ? String(localized: "This 3-D file couldn't be opened: \(error.sentence)")
                 : String(localized: "This 3-D file couldn't be downloaded: \(error.reasonSentence)")
         }
     }

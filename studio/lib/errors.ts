@@ -1,3 +1,5 @@
+import { userFacingError } from "./userFacingError";
+
 /**
  * Turn host/API failures into copy that helps a person recover.
  *
@@ -93,7 +95,7 @@ function memoryFailure(message: string, host: string): string | null {
       message,
     )
   ) {
-    return `${host} ran out of memory. Try a smaller model, image size, or batch.`;
+    return `${host} ran out of memory. Try a smaller model, output size or batch.`;
   }
   return null;
 }
@@ -151,6 +153,9 @@ export function describeTransportError(
   const structured = structuredFailure(error);
   if (structured) {
     const detail = diagnosticDetail(structured);
+    const friendly = userFacingError(detail);
+    if (detail && friendly !== detail)
+      return friendly.replace(/^The machine/, host);
     const memory = memoryFailure(detail, host);
     if (memory) return memory;
     return describeHttpFailure(
@@ -166,6 +171,9 @@ export function describeTransportError(
   }
 
   const message = errorMessage(error).trim();
+  const friendly = userFacingError(message);
+  if (message && friendly !== message)
+    return friendly.replace(/^The machine/, host);
   const memory = memoryFailure(message, host);
   if (memory) return memory;
 

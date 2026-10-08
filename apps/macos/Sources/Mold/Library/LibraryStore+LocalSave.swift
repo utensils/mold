@@ -207,7 +207,7 @@ private func repairCachedSources(_ target: MirrorTarget, to destination: any Mol
             from: target.source, to: destination, as: filename)
         return MirrorResult(filename: filename, alreadyLocal: true, error: nil, sourceMedia: sourceMedia)
     } catch {
-        return MirrorResult(filename: nil, alreadyLocal: false, error: error.localizedDescription)
+        return MirrorResult(filename: nil, alreadyLocal: false, error: error.sentence)
     }
 }
 
@@ -265,7 +265,7 @@ private func mirror(_ target: MirrorTarget, to destination: any MoldBackend,
         }
     } catch {
         return MirrorResult(filename: nil, alreadyLocal: false,
-                            error: error.localizedDescription)
+                            error: error.sentence)
     }
 }
 
@@ -347,12 +347,12 @@ extension LibraryStore {
                             try await source.collections().map { ($0.id, $0) },
                             uniquingKeysWith: { first, _ in first })
                     } catch {
-                        failures.append("Collections on \(hostID): \(error.localizedDescription)")
+                        failures.append("Collections on \(hostID): \(error.sentence)")
                     }
                 }
             } catch {
-                hostErrors[hostID] = error.localizedDescription
-                if syncAll { failures.append("\(hosts.name(of: hostID) ?? hostID.uuidString): \(error.localizedDescription)") }
+                hostErrors[hostID] = error.sentence
+                if syncAll { failures.append("\(hosts.name(of: hostID) ?? hostID.uuidString): \(error.sentence)") }
             }
         }
 
@@ -400,7 +400,7 @@ extension LibraryStore {
             }
             localPrints = prints
         } catch {
-            localSaveReport = "Couldn’t read This Mac’s Library: \(error.localizedDescription)"
+            localSaveReport = "Couldn’t read This Mac’s Library: \(error.sentence)"
             localSaveFailures = failures
             localSaveAlertPresented = true
             return
@@ -413,7 +413,7 @@ extension LibraryStore {
         do {
             localCollections = try await destination.collections()
         } catch {
-            failures.append("This Mac’s collections: \(error.localizedDescription)")
+            failures.append("This Mac’s collections: \(error.sentence)")
             localCollections = collectionsPerHost[local.id] ?? []
         }
         var localNames = Dictionary(localCollections.map {
@@ -438,7 +438,7 @@ extension LibraryStore {
                         localNames[created.slug] = created.name
                         createdCollections += 1
                     } catch {
-                        failures.append("Collection “\(collection.name)”: \(error.localizedDescription)")
+                        failures.append("Collection “\(collection.name)”: \(error.sentence)")
                         failedCollectionSlugs.insert(collection.slug)
                     }
                 }
@@ -571,7 +571,7 @@ extension LibraryStore {
                 try await destination.mutate(GalleryBulkMutation(
                     filenames: Array(Set(filenames)).sorted(), addToCollection: .named(name)))
             } catch {
-                failures.append("Collection “\(name)”: \(error.localizedDescription)")
+                failures.append("Collection “\(name)”: \(error.sentence)")
                 organizationFailedFiles.formUnion(filenames)
             }
         }
@@ -580,7 +580,7 @@ extension LibraryStore {
                 try await destination.mutate(GalleryBulkMutation(
                     filenames: [], titles: titleAssignments))
             } catch {
-                failures.append("Print titles: \(error.localizedDescription)")
+                failures.append("Print titles: \(error.sentence)")
                 organizationFailedFiles.formUnion(titleAssignments.map(\.filename))
             }
         }
@@ -589,7 +589,7 @@ extension LibraryStore {
                 try await destination.mutate(GalleryBulkMutation(
                     filenames: Array(Set(favoriteFiles)).sorted(), favorite: true))
             } catch {
-                failures.append("Favourites: \(error.localizedDescription)")
+                failures.append("Favourites: \(error.sentence)")
                 organizationFailedFiles.formUnion(favoriteFiles)
             }
         }
@@ -598,7 +598,7 @@ extension LibraryStore {
                 try await destination.mutate(GalleryBulkMutation(
                     filenames: Array(Set(tagFiles[tag] ?? [])).sorted(), addTags: [tag]))
             } catch {
-                failures.append("Tag “\(tag)”: \(error.localizedDescription)")
+                failures.append("Tag “\(tag)”: \(error.sentence)")
                 organizationFailedFiles.formUnion(tagFiles[tag] ?? [])
             }
         }

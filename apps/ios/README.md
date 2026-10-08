@@ -295,9 +295,18 @@ collision. Temporary files stay alive until system delivery finishes.
 
 Local validation and qualification limits: [native acceptance record](../../docs/uat/native-authoring-media.md).
 
-
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
 Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
 
 On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.
+
+## Error messages
+
+Errors use concise summaries instead of internal traces. Memory refusals show
+estimated requirements, the available budget and the shortfall in decimal GB/MB;
+a shared-memory Mac identifies the shared pool. These are estimates on the
+generation machine, not a promise that freeing exactly that amount guarantees
+a render. Full server diagnostics remain in logs and durable records. Both
+native apps share MoldClient error presentation, including older-server replies;
+local failures are recorded in OSLog with privacy-protected details.

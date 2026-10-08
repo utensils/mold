@@ -130,7 +130,7 @@ struct FromShareCard: View {
                 try use(picture)
                 finish(item)
             } catch {
-                problem = error.localizedDescription
+                problem = error.sentence
             }
         }
     }

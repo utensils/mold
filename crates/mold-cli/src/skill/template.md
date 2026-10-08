@@ -143,3 +143,12 @@ polls; Create's Recent excludes hidden collection members just like the Library.
 Native iOS Generate is a stable composer; inspect live rendering in Queue and results in Library. Library **Use as Source** keeps prompt/model choices, and its source picker searches all hosts with a machine filter. Mac Queue rows open job details; Discover starts with manifest models. Native Settings offers video autoplay/repeat; Mac GIF export includes playback/repeat/pause controls. GUI still-input imports fit oversized images while preserving orientation and alpha; original exports and retained source/mask pairs remain authoritative. These GUI conveniences do not change CLI/API admission limits or explicit fixed seeds.
 
 Queue GUI rows and Job Details show ordered, role-labeled sealed input images for every model. `/api/queue/{id}/inputs` lists path-free descriptors (`index`, `label`, `preview`); `/api/queue/{id}/input-thumbnail?index=N` reads that exact sealed member. Omit the index for the legacy scalar source image. Audio/video inputs are disclosed without a still preview. These private authenticated routes never resolve provenance filenames. Older servers retain the singular source-image fallback.
+
+## Error diagnostics
+
+Server errors are concise presentation summaries; inspect the server logs for
+technical diagnostics. Memory summaries use decimal GB/MB and distinguish
+graphics, system and shared memory, with estimated need, available budget and
+shortfall. Free memory on the machine doing the render. Do not treat that estimate
+as a guaranteed allocation target or decide retryability from prose: use error
+codes and the queue’s retryable flag. Preserve required restart/cooldown advice.

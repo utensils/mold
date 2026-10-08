@@ -116,10 +116,12 @@ pub struct JobEntry {
     pub dispatch_attempts: Option<u32>,
     /// Why a held job is parked. Present only for `state: held`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "mold_core::user_error::serialize_optional")]
     pub held_reason: Option<String>,
     /// Durable preparation error for a held job. Additive alias with clearer
     /// lifecycle semantics than the legacy `held_reason` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "mold_core::user_error::serialize_optional")]
     pub error: Option<String>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
     #[serde(default, skip_serializing_if = "Option::is_none")]

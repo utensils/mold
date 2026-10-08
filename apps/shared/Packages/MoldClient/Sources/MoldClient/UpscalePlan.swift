@@ -89,7 +89,7 @@ public enum UpscalePlan {
         case .finalizing: "Finalizing video"
         case .paused: "Paused — ready to resume"
         case .completed: "Complete"
-        case .failed: job.error.flatMap { $0.isEmpty ? nil : $0 } ?? "Framewise upscale failed"
+        case .failed: job.error.flatMap { $0.isEmpty ? nil : UserFacingError.message($0) } ?? "Framewise upscale failed"
         case .cancelled: "Cancelled"
         // A state this build has never heard of. It is not settled, so say
         // the true thing -- something is happening -- rather than inventing a

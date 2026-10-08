@@ -4524,10 +4524,12 @@ pub struct QueueJobEntryWire {
     pub durable: Option<bool>,
     /// Why a durable row is parked in the additive `held` state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub held_reason: Option<String>,
     /// Durable preparation error for a held row — the same sentence as
     /// [`Self::held_reason`] under the field name the batch child uses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held row.
     /// A held row that answers `false` needs operator repair, not a retry.
@@ -5720,6 +5722,7 @@ pub struct SseUpscaleCompleteEvent {
 /// Error event sent when generation fails during SSE streaming.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseErrorEvent {
+    #[serde(serialize_with = "crate::user_error::serialize")]
     pub message: String,
     /// The job did not fail — the host is restarting and the job stays queued
     /// to finish there. A terminal frame is sent rather than a quiet close
@@ -11202,6 +11205,7 @@ pub struct GenerationBatchChild {
     pub job_id: String,
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
     /// Typed cause of a `held` child — the preparation refusal's own code
     /// (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence, so a
@@ -13310,6 +13314,7 @@ pub struct DownloadJob {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::user_error::serialize_optional")]
     pub error: Option<String>,
 }
 
@@ -13360,6 +13365,7 @@ pub enum DownloadEvent {
     },
     JobFailed {
         id: String,
+        #[serde(serialize_with = "crate::user_error::serialize")]
         error: String,
     },
     JobCancelled {

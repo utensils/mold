@@ -120,8 +120,8 @@ public extension QueueEntry {
     var waitDescription: String {
         switch state {
         case .running: "Rendering"
-        case .held: heldReason ?? "Waiting on the host"
-        case .failed: error ?? "Failed"
+        case .held: heldReason.map(UserFacingError.message) ?? "Waiting on the host"
+        case .failed: error.map(UserFacingError.message) ?? "Failed"
         case .paused: explicitlyPaused == false ? "Paused after restart" : "Paused"
         case .cancelling: "Stopping"
         case .cancelled: "Cancelled"

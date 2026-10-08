@@ -16,7 +16,7 @@ import {
 } from "./generationPresentation";
 
 const NOW = 9_000;
-const OOM = "ran out of memory. Try a smaller model, image size, or batch.";
+const OOM = "ran out of memory. Try a smaller model, output size or batch.";
 
 function tracker(
   ...actions: GenerationLifecycleAction[]
