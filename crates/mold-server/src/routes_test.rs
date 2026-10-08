@@ -9380,7 +9380,9 @@ mod tests {
         let body = json_body(response).await;
         let message = body["error"].as_str().unwrap_or_default();
         assert!(message.contains("mock engine error"), "{body}");
-        assert!(message.contains("belongs to batch "), "{body}");
+        assert!(body["recovery"]["job_id"].as_str().is_some());
+        assert!(body["recovery"]["batch_id"].as_str().is_some());
+        assert!(body["recovery"]["retryable"].is_null());
         assert!(!message.contains("/retry"), "{body}");
 
         feeder_shutdown.cancel();
@@ -13742,10 +13744,8 @@ mod tests {
         let child = &batch["children"][0];
         assert_eq!(child["state"], "held", "{batch}");
         assert_eq!(child["retryable"], true, "{batch}");
-        assert!(
-            message.contains(child["job_id"].as_str().unwrap()),
-            "the error must name the held job: {message} vs {batch}"
-        );
+        assert_eq!(error["recovery"]["job_id"], child["job_id"]);
+        assert_eq!(error["recovery"]["batch_id"], batch["id"]);
     }
 
     /// A client-chosen batch id makes `/api/generate` idempotent exactly as
