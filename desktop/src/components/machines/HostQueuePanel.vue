@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * One host's live server queue, with management — per-GPU lanes, drag/drop
@@ -676,6 +677,13 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               <div class="truncate text-sm text-fg" :title="ownJob(entry)?.prompt">
                 {{ ownJob(entry)?.prompt ?? modelLabel(entry.model) }}
               </div>
+              <QueueDownloadControl
+                :target="host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null"
+                :instance="host.instanceId"
+                :job="entry.id"
+                :host="host.label"
+                :online="host.status === 'ready' && !host.stale"
+              />
               <div class="mt-0.5 flex items-center gap-2">
                 <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
                   entryCode(entry)

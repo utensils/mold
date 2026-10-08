@@ -160,8 +160,8 @@ export async function acceptAndQueueDownload(
   target: ApiTarget,
   requirement: LicenseRequirement,
   signal?: AbortSignal,
-): Promise<void> {
-  await startAcceptedDownload(target, requirement, signal);
+): Promise<CreateDownloadResponse> {
+  return startAcceptedDownload(target, requirement, signal);
 }
 
 /** Accept exact pinned terms on one host, download the owning bundle there,

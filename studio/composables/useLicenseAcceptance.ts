@@ -28,6 +28,8 @@ export interface LicenseConsentOutcome {
   /** True when this host also fetched the consented bundle, so the caller must
    * NOT enqueue it again. False after a record-only acceptance. */
   downloaded: boolean;
+  /** Exact tickets acquired by a legacy record-only fallback. */
+  downloadJobs?: string[];
 }
 
 const pending = ref<LicensePrompt | null>(null);
@@ -53,7 +55,11 @@ export function useLicenseAcceptance() {
     });
   }
 
-  function close(accepted: boolean, downloaded = false) {
+  function close(
+    accepted: boolean,
+    downloaded = false,
+    downloadJobs?: string[],
+  ) {
     const resolve = settle;
     settle = null;
     pending.value = null;
@@ -61,7 +67,11 @@ export function useLicenseAcceptance() {
     error.value = null;
     busy.value = false;
     controller = null;
-    resolve?.({ accepted, downloaded });
+    resolve?.({
+      accepted,
+      downloaded,
+      ...(downloadJobs?.length ? { downloadJobs } : {}),
+    });
   }
 
   function cancel() {
@@ -80,6 +90,7 @@ export function useLicenseAcceptance() {
     error.value = null;
     try {
       let downloaded = prompt.intent !== "record";
+      const downloadJobs: string[] = [];
       for (const requirement of prompt.requirements) {
         if (prompt.intent === "record") {
           try {
@@ -103,11 +114,12 @@ export function useLicenseAcceptance() {
               (cause.status === 404 || cause.status === 405);
             if (!missingRoute) throw cause;
             downloaded = true;
-            await acceptAndQueueDownload(
+            const ticket = await acceptAndQueueDownload(
               prompt.target,
               requirement,
               controller.signal,
             );
+            downloadJobs.push(ticket.id);
             continue;
           }
         }
@@ -120,7 +132,7 @@ export function useLicenseAcceptance() {
           controller.signal,
         );
       }
-      close(true, downloaded);
+      close(true, downloaded, downloadJobs);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") {
         close(false);
@@ -155,7 +167,9 @@ export function useLicenseAcceptance() {
 }
 
 export type LicenseGatedOutcome<T> =
-  { kind: "ok"; value: T } | { kind: "accepted" } | { kind: "declined" };
+  | { kind: "ok"; value: T }
+  | { kind: "accepted"; jobIds?: readonly string[] }
+  | { kind: "declined" };
 
 /** Serializes licence reviews across every surface.
  *
@@ -214,7 +228,11 @@ export async function runWithLicenseConsent<T>(options: {
     if (!outcome.accepted) return { kind: "declined" };
     // An older host recorded consent by downloading; re-enqueueing would
     // duplicate a transfer already finished.
-    if (outcome.downloaded) return { kind: "accepted" };
+    if (outcome.downloaded)
+      return {
+        kind: "accepted",
+        ...(outcome.downloadJobs ? { jobIds: outcome.downloadJobs } : {}),
+      };
     // Exactly once more. A second refusal means the host re-pinned its terms
     // mid-flight, which the caller must see rather than loop on.
     return { kind: "ok", value: await options.start() };

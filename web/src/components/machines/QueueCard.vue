@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * Host queue management card (spec §08 G2). The relocated home of queue
@@ -234,6 +235,15 @@ function queuedIndexOf(id: string): number {
             {{ userFacingError(entry.held_reason) }}
           </span>
 
+          <QueueDownloadControl
+            v-if="entry.state === 'held'"
+            :target="target"
+            :instance="instanceId"
+            :job="entry.id"
+            host="this machine"
+            :online="!dimmed"
+            controls
+          />
           <select
             v-if="gpuOrdinals.length > 1"
             class="qc__lane"

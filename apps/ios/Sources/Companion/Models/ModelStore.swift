@@ -12,6 +12,8 @@ final class ModelStore {
         let mismatch: Bool
         let host: MoldHost.ID
         let retry: () async -> Void
+        var recoveryJob: String? = nil
+        var presentationOwner: UUID? = nil
         var id: String { refusal.id }
     }
 
@@ -20,6 +22,7 @@ final class ModelStore {
     private(set) var licences: [MoldHost.ID: [ThirdPartyLicense]] = [:]
     private(set) var changing: Set<MoldHost.ID> = []
     var pendingLicense: PendingLicense?
+    let queueDownloads = QueueDownloadRecovery()
     /// One line after a delete: "Removed … and freed 6.8 GB."
     var summary: String?
 
@@ -133,6 +136,7 @@ final class ModelStore {
     }
 
     func apply(_ event: DownloadEvent, on id: MoldHost.ID) {
+        queueDownloads.observe(event, on: id)
         if case .snapshot = event.effect, let listing = event.listing {
             adopt(listing, on: id)
             return reconcile()
@@ -169,11 +173,7 @@ final class ModelStore {
         let client = hosts.backend(for: host)
         let verb = String(localized: "start that download")
         do {
-            let jobs: [String] = if Model.isCatalogName(name) {
-                try await client.installCatalogEntry(id: name).jobIDs
-            } else {
-                [try await client.startDownload(DownloadRequest(model: name)).id]
-            }
+            let jobs = try await DownloadAcquisition.start(name, backend: client)
             var board = active[id] ?? [:]
             for job in jobs where board[job] == nil { board[job] = DownloadProgress(model: name) }
             active[id] = board
@@ -212,23 +212,28 @@ final class ModelStore {
     /// The held row's Pull: fetch the model, and only once that download
     /// settles as a success, try the job again -- never on a cancelled or
     /// failed one, where it would just hold again (the Mac's rule).
-    func pullThenRetry(_ model: String, entry: QueueEntry, on id: MoldHost.ID) {
-        guard queue.canRetry(entry, on: id) else { return }
-        Task {
-            if !isBusy(model, on: id) { await install(model, on: id) }
-            guard await settles(model, on: id) else { return }
-            await queue.poll(id)
-            await queue.retry(entry, on: id)
-        }
+    func pullThenRetry(_ model: String, entry: QueueEntry, on id: MoldHost.ID, presenter: UUID? = nil) {
+        guard queue.canRetry(entry, on: id), let host = hosts.host(id),
+              let instance = hosts.instanceID(of: id), let authority = entry.authority(instanceId: instance) else { return }
+        queueDownloads.start(entry: entry, host: id, authority: authority, backend: hosts.backend(for: host), hostName: host.name,
+            isCurrent: { [weak self] in
+                guard let self, self.hosts.host(id) == host, self.hosts.instanceID(of: id) == instance else { return false }
+                return self.queue.listings[id] == nil || self.queue.current(entry, on: id)?.state == .held
+            }, started: { [weak self] ids, name in
+                guard let self else { return }
+                for job in ids { self.active[id, default: [:]][job] = DownloadProgress(model: name) }
+                self.reconcile()
+            }, license: { [weak self] refusal, mismatch, approved in
+                guard let self, self.pendingLicense == nil else { return false }
+                self.pendingLicense = PendingLicense(refusal: refusal, mismatch: mismatch, host: id,
+                    retry: { approved() }, recoveryJob: entry.id, presentationOwner: presenter)
+                return true
+            }, refreshed: { [weak self] in await self?.queue.poll(id) })
     }
 
-    private func settles(_ model: String, on id: MoldHost.ID) async -> Bool {
-        let deadline = Date.now.addingTimeInterval(60 * 60)
-        while isBusy(model, on: id) || pendingLicense?.host == id {
-            guard Date.now < deadline else { return false }
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return false }
-        }
-        return finished[id]?.first { $0.model == model }?.status == .completed
+    func cancelLicense() {
+        if let pending = pendingLicense, let job = pending.recoveryJob { queueDownloads.cancel(host: pending.host, job: job) }
+        pendingLicense = nil
     }
 
     func load(_ model: Model, on id: MoldHost.ID) async {

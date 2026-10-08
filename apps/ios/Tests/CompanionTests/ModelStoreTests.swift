@@ -74,6 +74,7 @@ struct ModelStoreTests {
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
         fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        fake.stub("queueJob(id:)", returning: try QueueStoreTests.decode(QueueJobDetail.self, #"{"job":{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}}"#))
         await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }
@@ -91,6 +92,7 @@ struct ModelStoreTests {
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
         fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        fake.stub("queueJob(id:)", returning: try QueueStoreTests.decode(QueueJobDetail.self, #"{"job":{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}}"#))
         await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }

@@ -1010,3 +1010,14 @@ memory estimates and budget shortfalls. Older servers use the shared studio
 formatter. Machine logs retain technical diagnostics; queue detail copy text
 retains diagnostics received from older servers. Error codes and retryability
 remain authoritative. See [the presentation audit](../../../docs/error-presentation-audit.md).
+
+### Queue model downloads
+
+A missing-model held job offers **Download and Retry** in Queue or Job Details.
+The job shows Starting, download-queue status, live bytes/progress, license review,
+reconnection and failures in place. Closing details does not stop recovery.
+The download runs on the job’s owning machine; retry occurs only after every
+returned download ticket succeeds and the original held job and server identity
+are revalidated. Failed or cancelled downloads leave the job held. Global queue
+pause stays in effect. Cancelling a job does not cancel a model download that
+other jobs may need.

@@ -6,6 +6,8 @@ import Observation
 /// command or a deep link can send it somewhere else.
 @Observable
 final class AppRouter {
+    let presentationID = UUID()
+    var licenseDetailContext: (host: UUID, job: String)?
     var libraryVisit: LibraryNewMedia.Visit?
     var selection: TabSelection = .go(.generate) {
         didSet {

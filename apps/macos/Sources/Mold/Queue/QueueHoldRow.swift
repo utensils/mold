@@ -5,6 +5,7 @@ import SwiftUI
 /// buttons instead of glyphs -- because it is the only row asking for a
 /// decision (design M6 "Where everything goes").
 struct QueueHoldRow: View {
+    @Environment(DownloadStore.self) private var downloads
     let entry: QueueEntry
     let hold: QueueHold
     var sourceHost: MoldHost? = nil
@@ -33,6 +34,12 @@ struct QueueHoldRow: View {
                 Text(sentence)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if let recovery {
+                    Text(recovery.message).font(.callout).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("queue-download-status-" + entry.id)
+                    if let fraction = recovery.fraction { ProgressView(value: fraction).accessibilityLabel("Model download") }
+                    else if recovery.isBusy { ProgressView().controlSize(.small).accessibilityLabel(recovery.message) }
+                }
                 HStack(spacing: 8) {
                     ForEach(Self.actions(for: hold), id: \.self) { action in
                         button(for: action)
@@ -61,19 +68,21 @@ struct QueueHoldRow: View {
     }
 
     private var sentence: String {
-        switch hold {
-        case let .missingModel(_, sentence): sentence
-        case let .prose(sentence, _): sentence
-        }
+        hold.summary(modelName: entry.modelHeadline, hostName: sourceHost?.name ?? "this machine")
+    }
+
+    var recovery: QueueDownloadRecovery.State? {
+        sourceHost.flatMap { downloads.queueDownloads.state(host: $0.id, job: entry.id) }
     }
 
     private func button(for action: Action) -> some View {
-        Button(action.title) {
+        Button(recovery?.isBusy == true ? "Downloading…" : action.title) {
             switch action {
             case let .pullThenRetry(model): pullThenRetry(model)
             case .tryAgain: tryAgain()
             }
         }
+        .disabled(recovery?.isBusy == true)
     }
 
 }
@@ -88,8 +97,9 @@ extension QueueHoldRow {
         _ model: String, entry: QueueEntry, host: MoldHost,
         downloads: DownloadStore, queue: QueueStore
     ) async {
-        await downloads.install(model, on: host)
-        guard await downloads.awaitSettlement(of: model, on: host.id) else { return }
-        await queue.retry(entry, on: host.id)
+        downloads.recover(entry, on: host, queue: queue)
+        while downloads.queueDownloads.state(host: host.id, job: entry.id)?.isBusy == true {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
     }
 }

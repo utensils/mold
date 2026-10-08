@@ -16,7 +16,7 @@ extension QueueHoldRow {
         /// offer and used to spell it in two places.
         var title: String {
             switch self {
-            case let .pullThenRetry(model): "Pull \(model), then Retry"
+            case .pullThenRetry: "Download and Retry"
             case .tryAgain: "Try Again"
             }
         }
@@ -63,7 +63,7 @@ extension QueueHoldRow {
 
     func perform(_ item: Item) {
         switch item {
-        case let .act(.pullThenRetry(model)): pullThenRetry(model)
+        case let .act(.pullThenRetry(model)): if recovery?.isBusy != true { pullThenRetry(model) }
         case .act(.tryAgain): tryAgain()
         case let .moveTo(host): moveTo(host)
         case .cancel: cancel()

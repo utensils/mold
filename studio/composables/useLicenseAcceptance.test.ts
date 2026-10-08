@@ -86,7 +86,10 @@ describe("runWithLicenseConsent", () => {
     });
     await answerPrompt(true);
 
-    await expect(running).resolves.toEqual({ kind: "accepted" });
+    await expect(running).resolves.toEqual({
+      kind: "accepted",
+      jobIds: ["job-legacy"],
+    });
     expect(useLicenseAcceptance().pending.value).toBeNull();
     expect(
       fetch.mock.calls.filter(

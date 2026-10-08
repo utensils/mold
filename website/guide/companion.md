@@ -86,7 +86,7 @@ keeps its original filename and file type.
   an edge to scroll. Vertical swipes still scroll in Select mode. Search
   understands `is:video`, `is:mesh`, `tag:` and `on:`.
 - **Queue** lists what each machine is rendering and waiting on. A held job
-  says why in words, with **Pull and Retry** when a model is missing, **Retry**
+  says why in words, with **Download and Retry** when a model is missing, **Retry**
   when the machine says it would help, and **Move to…** another machine.
 - **Models** uses the **Show models** menu to switch Installed and Discover.
   An unreachable machine's unread inventory is shown as unavailable, not empty.
@@ -234,3 +234,14 @@ Queue rows show the owning machine’s sealed conditioning images across models.
 Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
 
 On iOS, Use These Settings replaces all active and parked attachments with the selected print’s media. Retained archives restore from the owning machine or another available copy; unavailable conditioning blocks Generate until restored, reattached or explicitly removed. Retry retained media after reconnecting. Late replies cannot replace a newer reuse or revive a source added and removed during restoration.
+
+### Queue model downloads
+
+A missing-model held job offers **Download and Retry** in Queue or Job Details.
+The job shows Starting, download-queue status, live bytes/progress, license review,
+reconnection and failures in place. Closing details does not stop recovery.
+The download runs on the job’s owning machine; retry occurs only after every
+returned download ticket succeeds and the original held job and server identity
+are revalidated. Failed or cancelled downloads leave the job held. Global queue
+pause stays in effect. Cancelling a job does not cancel a model download that
+other jobs may need.

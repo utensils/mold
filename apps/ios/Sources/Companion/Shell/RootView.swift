@@ -62,6 +62,14 @@ struct RootView: View {
             // with the first and last rows under the scroll-edge fades.
             SettingsSheet().presentationSizing(.page)
         }
+        .sheet(item: Binding(get: { () -> ModelStore.PendingLicense? in
+            guard let pending = stores.models.pendingLicense else { return nil }
+            if let owner = pending.presentationOwner, owner != router.presentationID { return nil }
+            if let job = pending.recoveryJob, let context = router.licenseDetailContext, context.host == pending.host, context.job == job { return nil }
+            return pending
+        }, set: { value in
+            if value == nil { stores.models.cancelLicense() }
+        })) { pending in LicenceSheet(pending: pending) }
         .onDisappear { actions.cancelExports() }
         .printSheets(presentsActions: router.openedPrint == nil)
         .modifier(RootLinks(router: router))

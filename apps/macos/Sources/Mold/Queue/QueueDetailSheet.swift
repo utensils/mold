@@ -6,6 +6,7 @@ import SwiftUI
 struct QueueDetailSheet: View {
     let entry: QueueEntry
     let host: MoldHost
+    @Environment(DownloadStore.self) var downloads
     @Environment(QueueStore.self) var queue
     @Environment(HostStore.self) var hosts
     @Environment(\.dismiss) var dismiss
@@ -80,6 +81,13 @@ struct QueueDetailSheet: View {
         }
         .frame(minWidth: 440, idealWidth: 580, maxWidth: 760,
                minHeight: 440, idealHeight: 620, maxHeight: 820)
+        .onAppear { downloads.licenseDetailContext = (host.id, entry.id) }
+        .onDisappear {
+            if downloads.licenseDetailContext?.host == host.id, downloads.licenseDetailContext?.job == entry.id { downloads.licenseDetailContext = nil }
+        }
+        .sheet(item: Binding(get: {
+            downloads.pendingLicense?.host == host.id && downloads.pendingLicense?.recoveryJob == entry.id ? downloads.pendingLicense : nil
+        }, set: { if $0 == nil { downloads.cancelLicense() } })) { pending in LicenseSheet(pending: pending) }
         .accessibilityIdentifier("queue-detail")
         .task(id: identity) { await load() }
         .task(id: previewIdentity) {

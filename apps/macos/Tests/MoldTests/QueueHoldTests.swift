@@ -44,7 +44,7 @@ struct QueueHoldTests {
         #expect(titles(of: oom, canMoveTo: true) == ["Try Again", "Move to", "Cancel Job"])
 
         let missing = QueueHold.missingModel("z-image-turbo", sentence: "Mold can't find z-image-turbo.")
-        #expect(titles(of: missing) == ["Pull z-image-turbo, then Retry", "Cancel Job"])
+        #expect(titles(of: missing) == ["Download and Retry", "Cancel Job"])
     }
 
     /// Cancel Job is destructive, so it is last and behind a divider --
@@ -87,6 +87,12 @@ struct QueueHoldTests {
         let entry = FakeFixtures.queueEntry(
             "job-1", state: "held", batchId: "batch-1", clientBatchId: "client-1", model: "z-image-turbo")
 
+        fake.serverStatus = FakeFixtures.serverStatus(instanceId: "run-1")
+        hosts.reachability[workstation.id] = .up(fake.serverStatus!)
+        fake.downloadsListing = DownloadsListing()
+        fake.queueListing = FakeFixtures.queueListing([entry])
+        fake.queueJobDetails[entry.id] = try! MoldJSON.decoder.decode(QueueJobDetail.self, from: MoldJSON.encoder.encode(["job": entry]))
+        await queue.poll(workstation.id)
         let orchestration = Task {
             await QueueHoldRow.pullThenRetry(
                 "z-image-turbo", entry: entry, host: workstation, downloads: downloads, queue: queue)
@@ -115,6 +121,12 @@ struct QueueHoldTests {
         let entry = FakeFixtures.queueEntry(
             "job-1", state: "held", batchId: "batch-1", clientBatchId: "client-1", model: "z-image-turbo")
 
+        fake.serverStatus = FakeFixtures.serverStatus(instanceId: "run-1")
+        hosts.reachability[workstation.id] = .up(fake.serverStatus!)
+        fake.downloadsListing = DownloadsListing()
+        fake.queueListing = FakeFixtures.queueListing([entry])
+        fake.queueJobDetails[entry.id] = try! MoldJSON.decoder.decode(QueueJobDetail.self, from: MoldJSON.encoder.encode(["job": entry]))
+        await queue.poll(workstation.id)
         let orchestration = Task {
             await QueueHoldRow.pullThenRetry(
                 "z-image-turbo", entry: entry, host: workstation, downloads: downloads, queue: queue)

@@ -8,6 +8,7 @@
  * recently. The per-GPU lane view lives in host detail.
  */
 import { computed } from "vue";
+import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import QueueSourceThumbnail from "@studio/components/QueueSourceThumbnail.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -312,6 +313,14 @@ const active = computed(
             <span class="activity__thumb ms-shimmer" aria-hidden="true" />
           </QueueSourceThumbnail>
           <span class="activity__body">
+            <QueueDownloadControl
+              :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
+              :instance="
+                sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
+              "
+              :job="row.print.serverId ?? ''"
+              :host="row.print.hostLabel ?? 'this machine'"
+            />
             <span class="activity__prompt">
               <span
                 v-if="hostBadge(row.print)"
@@ -402,6 +411,14 @@ const active = computed(
               >{{ queueLabel(row.print) }}</span
             >
             {{ promptFor(row.print) }}
+            <QueueDownloadControl
+              :target="sourceTarget(row.print.hostId ?? ORIGIN_HOST_ID)"
+              :instance="
+                sourceHost(row.print.hostId ?? ORIGIN_HOST_ID)?.instanceId
+              "
+              :job="row.print.serverId ?? ''"
+              :host="row.print.hostLabel ?? 'this machine'"
+            />
             <span v-if="row.print.holdError" class="activity__hold-error">
               · {{ row.print.holdError }}
             </span>

@@ -77,3 +77,11 @@ The web IA uses Create (`/create`, also the `/` default), Library (`/library`), 
 **Style-availability invariant:** the tag under a style row is ONE rule, `studio/lib/modelAvailability.ts`'s `modelAvailabilityTag(hostIds, hosts)` — quiet when none or ALL of the caller's machines hold the style, the single machine's label when one does, `` `${n} machines` `` otherwise. It is structural (`{ id, label }`) because `studio/` may not import a host type, and every caller pre-narrows to the machines it can actually reach (desktop `status === "ready"`, web the ready rows of `useHostRouting().hosts`, the phone `mobileRoutingHosts`) and keeps its own "is this even a fleet" guard (`hosts.multiHost`, `routing.multiHost`, `automaticRouting`) at the call site. `StyleMenu` still takes it as an injected `availabilityTag` function — the menu may not reach a machine list. The word is **machine**: desktop's retired `"N hosts"` shipped because no lexicon scan read a `.ts` module, so `desktop/src/lib/lexicon.test.ts` now reads the rule's own literals and `scripts/tests/frontend-architecture.sh` fails on a second copy of its wording.
 
 **Curated model titles:** `/api/models[].display_name` is the manifest's short authored title, with container/size noise removed and meaningful precision/task variants retained, and queue rows carry additive `model_display_name`. Prefer it across selectors, catalog rows, and queue labels; `name` remains identity and request value. Search both the title and id/repository. Never rewrite upstream filenames or third-party provider titles.
+
+**Queue model recovery.** Shared useQueueDownloadRecovery and QueueDownloadControl
+serve web, desktop and mobile rows/details. Missing-model offers classify the
+batch child's error_code, never error prose. Recovery remains bound to the
+captured authenticated host/instance/job, follows every returned download ticket,
+shows start/progress/license/reconnection/failure state inline and uses the durable
+retry ambiguity reconciler once. Navigation keeps the recovery; failed/cancelled
+downloads and changed job identity never trigger a retry.

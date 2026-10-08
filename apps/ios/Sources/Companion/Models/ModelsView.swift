@@ -39,9 +39,7 @@ struct ModelsView: View {
             }
         }
         .toolbarVisibility(fixedHost != nil && width == .regular ? .hidden : .automatic, for: .tabBar)
-        .sheet(item: Binding(get: { models.pendingLicense }, set: { models.pendingLicense = $0 })) { pending in
-            LicenceSheet(pending: pending)
-        }
+
     }
 
     @ViewBuilder private func content(_ host: MoldHost) -> some View {

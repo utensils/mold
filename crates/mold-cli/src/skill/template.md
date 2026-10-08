@@ -152,3 +152,11 @@ graphics, system and shared memory, with estimated need, available budget and
 shortfall. Free memory on the machine doing the render. Do not treat that estimate
 as a guaranteed allocation target or decide retryability from prose: use error
 codes and the queue’s retryable flag. Preserve required restart/cooldown advice.
+
+GUI queue recovery uses **Download and Retry** for typed missing-model holds,
+with inline starting/queued/progress/license/reconnecting/failure feedback.
+It follows exact returned download tickets, including companions, and revalidates
+server instance and held-job batch identity before retrying. Download failure or
+cancellation never retries a generation. Cancelling a generation leaves shared
+model downloads server-owned. CLI `mold queue retry` remains an explicit retry;
+install a missing model on that same host first with `mold pull`.

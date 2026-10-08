@@ -6,6 +6,7 @@
  * not to watch pixels arrive; selecting a row brings it to the canvas.
  */
 import { computed, ref } from "vue";
+import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
 import { rowSettled, useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
@@ -37,6 +38,19 @@ const commands = useQueueCommands();
 const rowContext = useQueueRowContext();
 const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);
 const status = (row: QueueRow) => rowStatusLine(row, rowContext.contextFor.value(row));
+
+function downloadContext(row: QueueRow) {
+  const host = hosts.all.find((host) => host.id === commands.hostIdFor(row));
+  const job = row.kind === "print" ? row.print.id : row.shared.id;
+  const held = row.kind === "print" ? !!row.print.holdError : row.shared.phase === "held";
+  return {
+    target: host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null,
+    instance: host?.instanceId,
+    job,
+    held,
+    online: host?.status === "ready",
+  };
+}
 
 const doneToday = computed(() => madeTodayCount(gallery.merged));
 const totalEta = computed(() => {
@@ -270,6 +284,15 @@ function previewSrc(row: QueueRow): string | null {
           </div>
           <div class="flex flex-col gap-1 pr-4">
             <span class="text-xs" :class="rowTone(row)">{{ status(row) }}</span>
+            <QueueDownloadControl
+              v-if="downloadContext(row).held"
+              :target="downloadContext(row).target"
+              :instance="downloadContext(row).instance"
+              :job="downloadContext(row).job"
+              :host="machine(row)"
+              :online="downloadContext(row).online"
+              controls
+            />
             <span
               v-if="progress(row) !== null"
               class="block h-[5px] overflow-hidden bg-surface"

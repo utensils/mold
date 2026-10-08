@@ -554,3 +554,76 @@ final class PopulatedGenerationTests: XCTestCase {
         add(screenshot)
     }
 }
+
+extension PopulatedGenerationTests {
+    @MainActor func testQueueDownloadFeedbackAndAutomaticRetry() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueDownloadFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let action = app.buttons["queue-download-fixture-held"]
+        XCTAssertTrue(action.waitForExistence(timeout: 15))
+        XCTAssertEqual(action.label, "Download and Retry")
+        action.tap()
+        let feedback = app.staticTexts["queue-download-status-fixture-held"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 5))
+        XCTAssertFalse(action.isEnabled)
+        XCTAssertTrue(waitForQueueDownloadText(feedback, containing: "35"))
+        XCTAssertEqual(machine.installedRequests.count, 1)
+        XCTAssertFalse(machine.queueActionRequests().contains("/api/queue/fixture-held/retry"))
+        let attachment = XCTAttachment(screenshot: app.screenshot()); attachment.name = "Queue download feedback"; attachment.lifetime = .keepAlways; add(attachment)
+        await machine.completeQueueDownload()
+        let retried = NSPredicate { _, _ in machine.queueActionRequests().contains("/api/queue/fixture-held/retry") }
+        await fulfillment(of: [expectationsForQueueRetry(retried, machine: machine)], timeout: 10)
+        XCTAssertEqual(machine.queueActionRequests().filter { $0 == "/api/queue/fixture-held/retry" }.count, 1)
+    }
+
+    @MainActor func testQueueDetailLicenseDismissalLeavesJobHeld() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(queueFixture: true, queueControls: true, queueDownloadFixture: true, requiresDownloadLicense: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launchArguments = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
+        app.launch()
+        addQueueDownloadMachine(app, port: port)
+        XCTAssertTrue(app.navigateToDestination("Queue", shortcut: "3"))
+        let open = app.buttons["queue-open-fixture-held"]
+        XCTAssertTrue(open.waitForExistence(timeout: 15)); open.tap()
+        let inspector = app.descendants(matching: .any)["queue-detail"].firstMatch
+        let download = app.buttons["queue-detail-download-fixture-held"]
+        for _ in 0..<3 where !download.exists || !download.isHittable { inspector.swipeUp() }
+        XCTAssertTrue(download.waitForExistence(timeout: 5)); download.tap()
+        XCTAssertTrue(app.navigationBars["Fixture Model Terms"].waitForExistence(timeout: 10))
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Job Details"].waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForQueueDownloadText(app.staticTexts["queue-detail-download-status-fixture-held"], containing: "cancelled"))
+        XCTAssertFalse(machine.queueActionRequests().contains("/api/queue/fixture-held/retry"))
+        XCTAssertTrue(download.isEnabled)
+    }
+
+    @MainActor private func addQueueDownloadMachine(_ app: XCUIApplication, port: UInt16) {
+        XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
+        app.buttons["Add a Machine"].firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        let name = app.textFields["machine-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText("Queue Download Fixture \(port)")
+        let address = app.textFields["machine-address"]
+        address.tap(); address.typeText("127.0.0.1:\(port)")
+        app.buttons["Add"].firstMatch.tap()
+    }
+    @MainActor private func waitForQueueDownloadText(_ element: XCUIElement, containing text: String) -> Bool {
+        let expected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS[c] %@", text), object: element)
+        return XCTWaiter.wait(for: [expected], timeout: 10) == .completed
+    }
+    private func expectationsForQueueRetry(_ predicate: NSPredicate, machine: FixtureMachine) -> XCTestExpectation {
+        XCTNSPredicateExpectation(predicate: predicate, object: machine)
+    }
+}

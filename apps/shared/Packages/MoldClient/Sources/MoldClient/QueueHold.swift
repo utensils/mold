@@ -13,6 +13,13 @@ public enum QueueHold: Hashable, Sendable {
     /// (`routes.rs:7651-7655`).
     case prose(String, retryable: Bool)
 
+    public func summary(modelName: String, hostName: String) -> String {
+        switch self {
+        case .missingModel: "\(modelName) isn’t installed on \(hostName)."
+        case .prose(let sentence, _): sentence.isEmpty ? "The machine put this job aside." : sentence
+        }
+    }
+
     /// `nil` unless `entry` is held. `child` is `nil` on a host that answered
     /// no batch status, or on a row with no batch at all -- then the row's
     /// own sentence is all there is, which is exactly the state the pane has

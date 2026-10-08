@@ -32,6 +32,11 @@ final class FixtureMachine: @unchecked Sendable {
     private let queueRequests = Mutex<[String]>([])
     func queueActionRequests() -> [String] { queueRequests.withLock { $0 } }
     private let memoryErrorFixture: String?
+    private let queueDownloadFixture: Bool
+    private let requiresDownloadLicense: Bool
+    private var downloadLicenseAccepted = false
+    private var queueDownloadStarted = false
+    private var queueDownloadComplete = false
     private let queueControls: Bool
     private var jobStates = ["fixture-video": "queued", "fixture-held": "held"]
     private var clearedHistory = false
@@ -40,7 +45,7 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil) throws {
+    init(exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false) throws {
         self.exportFixture = exportFixture
         self.unsupportedExportFormats = unsupportedExportFormats
         self.aspectFixture = aspectFixture
@@ -49,6 +54,8 @@ final class FixtureMachine: @unchecked Sendable {
         self.libraryMutations = libraryMutations
         self.retainedMediaFixture = retainedMediaFixture
         self.queueFixture = queueFixture
+        self.queueDownloadFixture = queueDownloadFixture
+        self.requiresDownloadLicense = requiresDownloadLicense
         self.queueControls = queueControls
         self.memoryErrorFixture = memoryErrorFixture
         self.collectionFixture = collectionFixture
@@ -116,6 +123,12 @@ final class FixtureMachine: @unchecked Sendable {
 
     func stop() { listener.cancel() }
 
+    func completeQueueDownload() async {
+        await withCheckedContinuation { continuation in
+            queue.async { self.queueDownloadComplete = true; continuation.resume() }
+        }
+    }
+
     func addNewClip() async {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
@@ -176,7 +189,11 @@ final class FixtureMachine: @unchecked Sendable {
                     if jobStates[job] != nil { jobStates[job] = action == "pause" ? "paused" : "queued" }
                 }
             }
+            let acceptLicense = queueDownloadFixture && request.first == "POST" && path == "/api/licenses/accept"
+            if acceptLicense { downloadLicenseAccepted = true }
             let install = queueFixture && request.first == "POST" && path == "/api/downloads"
+            let refuseLicense = install && requiresDownloadLicense && !downloadLicenseAccepted
+            if install && !refuseLicense { queueDownloadStarted = true }
             if install, let object = try? JSONSerialization.jsonObject(with: Data(bodyText.utf8)) as? [String: Any],
                let model = object["model"] as? String { downloadedModels.withLock { $0.append(model) } }
             let unload = modelMemoryFixture && request.first == "DELETE" && path == "/api/models/unload"
@@ -207,13 +224,14 @@ final class FixtureMachine: @unchecked Sendable {
             let export = exportFixture && request.first == "POST" && path.hasPrefix("/api/gallery/export/")
             if export { capturedExports.withLock { $0.append(Data(bodyText.utf8)) } }
             let exportRequest = (try? JSONSerialization.jsonObject(with: Data(bodyText.utf8))) as? [String: Any] ?? [:]
-            let allowed = export || libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
+            let allowed = acceptLicense || (queueDownloadFixture && path == "/api/generation-batches/status") || export || libraryMutation || (queueControls && (path.hasPrefix("/api/queue/") || path == "/api/history")) || install || unload || request.first == "GET" || path == "/api/generate/placement-preview" || patchCollection
             let historyQuery = request.count > 1 ? URLComponents(string: "http://fixture" + String(request[1]))?.queryItems?.first { $0.name == "query" }?.value : nil
             let isTrashListing = libraryMutations && path == "/api/gallery" && String(request[1]).contains("view=trash")
             let refusedExport = export && refuseExport
             if refusedExport { refuseExport = false }
-            let body = refusedExport ? Data(#"{"error":"Fixture refused this export"}"#.utf8) : export ? exportResponse(exportRequest) : libraryMutation ? Data("{}".utf8) : isTrashListing ? Data("[]".utf8) : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
-            let status = refusedExport ? "500 Internal Server Error" : allowed ? "200 OK" : "405 Method Not Allowed"
+            let licenseBody = Data(#"{"error":"Accept the model license","code":"LICENSE_NOT_ACCEPTED","license":{"id":"fixture-terms","name":"Fixture Model Terms","url":"https://example.com/terms","canonical":"https://example.com/terms","sha256":"abc","summary":"Fixture terms for a simulated download."}}"#.utf8)
+            let body = refuseLicense ? licenseBody : acceptLicense ? Data("[]".utf8) : refusedExport ? Data(#"{"error":"Fixture refused this export"}"#.utf8) : export ? exportResponse(exportRequest) : libraryMutation ? Data("{}".utf8) : isTrashListing ? Data("[]".utf8) : install ? Data(#"{"id":"fixture-download"}"#.utf8) : unload ? Data("{}".utf8) : patchCollection ? collection() : allowed ? response(path, historyQuery: historyQuery) : Data(#"{"error":"Fixture is read-only"}"#.utf8)
+            let status = refuseLicense ? "403 Forbidden" : refusedExport ? "500 Internal Server Error" : allowed ? "200 OK" : "405 Method Not Allowed"
             let contentType = export ? "application/octet-stream" : path.hasSuffix(".mp4") ? "video/mp4" : path.hasPrefix("/api/gallery/image/") || path.hasPrefix("/api/gallery/thumbnail/") || path.hasSuffix("/input-thumbnail") || (retainedMediaFixture && path.hasSuffix("/fixture-source"))
                 ? "image/png" : "application/json"
             var reply = Data("HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
@@ -223,12 +241,13 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func queueRow(_ id: String) -> [String: Any] {
-        ["id": id, "state": jobStates[id] ?? "queued", "model": "ltx-2.5-22b-distilled:bf16",
+        let missing = queueDownloadFixture && id == "fixture-held"
+        return ["id": id, "state": jobStates[id] ?? "queued", "model": missing ? "flux-dev:q4" : "ltx-2.5-22b-distilled:bf16",
          "model_display_name": "A legacy verbose title that must not appear",
          "position": id == "fixture-video" ? 0 : 1, "durable": true,
          "batch_id": id, "client_batch_id": "client-" + id, "retryable": true,
          "explicitly_paused": true,
-         "held_reason": memoryErrorFixture ?? "Temporary machine pressure",
+         "held_reason": missing ? "deferred generation preparation failed: model 'flux-dev:q4' is not downloaded. Run: mold pull flux-dev:q4" : memoryErrorFixture ?? "Temporary machine pressure",
          "error": memoryErrorFixture ?? "Temporary machine pressure",
          "metadata": ["prompt": id == "fixture-video" ? "A coastal path at sunrise" : "A quiet mountain lake",
                       "model": "ltx-2.5-22b-distilled:bf16", "seed": 42, "steps": 8, "width": 768, "height": 512, "frames": 49, "fps": 24]]
@@ -310,6 +329,16 @@ final class FixtureMachine: @unchecked Sendable {
         case "/api/gallery/tags": json = "[]"
         case "/api/queue/fixture-video", "/api/queue/fixture-held":
             return try! JSONSerialization.data(withJSONObject: ["job": queueRow(path.hasSuffix("fixture-held") ? "fixture-held" : "fixture-video")])
+        case "/api/generation-batches/status":
+            if queueDownloadFixture {
+                return try! JSONSerialization.data(withJSONObject: ["instance_id": "queue-fixture", "missing": ["batch_ids": [], "client_batch_ids": []], "batches": [
+                    ["id": "fixture-held", "client_batch_id": "client-fixture-held", "instance_id": "queue-fixture", "children": [["index": 0, "job_id": "fixture-held", "state": jobStates["fixture-held"] == "held" ? "held" : "accepted", "error_code": "MODEL_NOT_FOUND", "retryable": true]]]
+                ]])
+            }
+            json = "{}"
+        case "/api/downloads":
+            let job: [String: Any] = ["id": "fixture-download", "model": "flux-dev:q4", "status": queueDownloadComplete ? "completed" : "active", "bytes_done": queueDownloadComplete ? 100_000_000 : 35_000_000, "bytes_total": 100_000_000, "files_done": queueDownloadComplete ? 1 : 0, "files_total": 1]
+            return try! JSONSerialization.data(withJSONObject: ["active_jobs": queueDownloadStarted && !queueDownloadComplete ? [job] : [], "queued": [], "history": queueDownloadComplete ? [job] : []])
         case "/api/history":
             if queueControls, !clearedHistory, historyQuery?.isEmpty != false || "A lighthouse in winter".localizedCaseInsensitiveContains(historyQuery ?? "") {
                 return try! JSONSerialization.data(withJSONObject: ["entries": [["prompt": "A lighthouse in winter", "model": "flux-dev:q4", "used_at": 1791017129000]]])

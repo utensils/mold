@@ -150,3 +150,14 @@ New oversized input pictures are fitted proportionally, with orientation and tra
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
 Native Library marks media added since the previous Library visit with a session-only New badge. The first visit establishes a baseline; badges stay through viewer navigation and clear on the next visit. Machine and playback labels share one fitted row on iOS so they never overlap.
+
+### Queue model downloads
+
+A missing-model held job offers **Download and Retry** in Queue or Job Details.
+The job shows Starting, download-queue status, live bytes/progress, license review,
+reconnection and failures in place. Closing details does not stop recovery.
+The download runs on the job’s owning machine; retry occurs only after every
+returned download ticket succeeds and the original held job and server identity
+are revalidated. Failed or cancelled downloads leave the job held. Global queue
+pause stays in effect. Cancelling a job does not cancel a model download that
+other jobs may need.

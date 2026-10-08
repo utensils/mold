@@ -16,14 +16,18 @@ final class DownloadStore {
     /// terms. Held rather than reported through the usual funnel, because it
     /// is the one failure the app can resolve on the spot: a sheet shows the
     /// terms and `accepted(_:)` retries the SAME install.
+    var licenseDetailContext: (host: UUID, job: String)?
+
     struct PendingLicense: Identifiable {
         let refusal: LicenseRefusal
         let mismatch: Bool
         let host: MoldHost.ID
         let retry: () async -> Void
+        var recoveryJob: String? = nil
         var id: String { refusal.id }
     }
 
+    let queueDownloads = QueueDownloadRecovery()
     let hosts: HostStore
     let licenses: LicenseStore
     /// Keyed by host then by the host's job id. Not `private(set)`:

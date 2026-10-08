@@ -416,3 +416,14 @@ generation machine, not a promise that freeing exactly that amount guarantees
 a render. Full server diagnostics remain in logs and durable records. Both
 native apps share MoldClient error presentation, including older-server replies;
 local failures are recorded in OSLog with privacy-protected details.
+
+### Queue model downloads
+
+A missing-model held job offers **Download and Retry** in Queue or Job Details.
+The job shows Starting, download-queue status, live bytes/progress, license review,
+reconnection and failures in place. Closing details does not stop recovery.
+The download runs on the job’s owning machine; retry occurs only after every
+returned download ticket succeeds and the original held job and server identity
+are revalidated. Failed or cancelled downloads leave the job held. Global queue
+pause stays in effect. Cancelling a job does not cancel a model download that
+other jobs may need.

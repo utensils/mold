@@ -2,6 +2,8 @@ import MoldClient
 import SwiftUI
 
 struct QueueDetailSheet: View {
+    @Environment(AppRouter.self) private var router
+    @Environment(ModelStore.self) private var models
     @Environment(QueueStore.self) private var queue
     @Environment(HostStore.self) private var hosts
     @Environment(\.dismiss) private var dismiss
@@ -19,7 +21,7 @@ struct QueueDetailSheet: View {
                     Text(queue.headline(for: current ?? entry, on: host.id)).font(.title3.weight(.semibold))
                     Text(host.name).foregroundStyle(.secondaryText)
                     if let current {
-                        Text(current.waitDescription).foregroundStyle(.secondaryText)
+                        Text(current.state == .held ? "Held" : current.waitDescription).foregroundStyle(.secondaryText)
                         if current.state == .running {
                             Text(ProgressWords.sentence(queue.progress[entry.id]))
                             if let figure = ProgressWords.figure(queue.progress[entry.id]) {
@@ -59,7 +61,7 @@ struct QueueDetailSheet: View {
                 }
                 if let current {
                     Section {
-                        QueueItemActions(entry: current, host: host)
+                        QueueItemActions(entry: current, host: host, detail: true)
                         if queue.canCancel(current, on: host.id) {
                             Button("Cancel Job", role: .destructive) { Task { await queue.cancel(current, on: host.id) } }
                         }
@@ -68,6 +70,7 @@ struct QueueDetailSheet: View {
                 Section {
                     Text(entry.model ?? "Model").textSelection(.enabled)
                     Text(entry.id).font(.caption).textSelection(.enabled)
+                    if let reason = (current ?? entry).heldReason ?? (current ?? entry).error { Text(reason).textSelection(.enabled) }
                 } header: { SectionHeader("Model and job identity") }
                 if let metadata = detail?.metadata ?? current?.metadata ?? entry.metadata {
                     ForEach(detailGroups(metadata)) { group in
@@ -95,6 +98,13 @@ struct QueueDetailSheet: View {
                 await queue.loadSourceThumbnail(for: entry, on: host.id, detailed: true)
             }
         }
+        .onAppear { router.licenseDetailContext = (host.id, entry.id) }
+        .onDisappear {
+            if router.licenseDetailContext?.host == host.id, router.licenseDetailContext?.job == entry.id { router.licenseDetailContext = nil }
+        }
+        .sheet(item: Binding(get: {
+            models.pendingLicense?.host == host.id && models.pendingLicense?.presentationOwner == router.presentationID && models.pendingLicense?.recoveryJob == entry.id ? models.pendingLicense : nil
+        }, set: { if $0 == nil { models.cancelLicense() } })) { pending in LicenceSheet(pending: pending) }
         .presentationDetents([.large])
     }
 
