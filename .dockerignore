@@ -31,4 +31,6 @@ result
 tmp/
 
 # Docs images (not needed in build)
-docs/
+docs/*
+!docs/contracts/
+!docs/contracts/**
