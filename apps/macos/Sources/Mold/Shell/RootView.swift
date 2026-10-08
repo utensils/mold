@@ -44,7 +44,11 @@ struct RootView: View {
         // Models, from a held Queue row's Pull, or from Generate before a
         // render that would fetch its model (Qwen Image 2.1's Qwen Research
         // terms) -- and a sheet only Models drew was silent from the other two.
-        .sheet(item: $downloads.pendingLicense) { pending in
+        .sheet(item: Binding(get: { () -> DownloadStore.PendingLicense? in
+            guard let pending = downloads.pendingLicense else { return nil }
+            if let job = pending.recoveryJob, let context = downloads.licenseDetailContext, context.host == pending.host, context.job == job { return nil }
+            return pending
+        }, set: { if $0 == nil { downloads.cancelLicense() } })) { pending in
             LicenseSheet(pending: pending)
         }
         .task { await hosts.refreshAll() }

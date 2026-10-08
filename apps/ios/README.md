@@ -17,7 +17,7 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                                          |
 | Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                                |
 | Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
-| Queue             | Every machine's work; held jobs in words with Pull and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                                 |
+| Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                                 |
 | Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
 | Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                                          |
 
@@ -310,3 +310,14 @@ generation machine, not a promise that freeing exactly that amount guarantees
 a render. Full server diagnostics remain in logs and durable records. Both
 native apps share MoldClient error presentation, including older-server replies;
 local failures are recorded in OSLog with privacy-protected details.
+
+### Queue model downloads
+
+A missing-model held job offers **Download and Retry** in Queue or Job Details.
+The job shows Starting, download-queue status, live bytes/progress, license review,
+reconnection and failures in place. Closing details does not stop recovery.
+The download runs on the job’s owning machine; retry occurs only after every
+returned download ticket succeeds and the original held job and server identity
+are revalidated. Failed or cancelled downloads leave the job held. Global queue
+pause stays in effect. Cancelling a job does not cancel a model download that
+other jobs may need.

@@ -21,13 +21,7 @@ extension DownloadStore {
     func install(_ name: String, on host: MoldHost) async {
         let client = hosts.backend(for: host)
         do {
-            if Model.isCatalogName(name) {
-                let result = try await client.installCatalogEntry(id: name)
-                track(result.jobIDs, model: name, on: host.id)
-            } else {
-                let ticket = try await client.startDownload(DownloadRequest(model: name))
-                track([ticket.id], model: name, on: host.id)
-            }
+            track(try await DownloadAcquisition.start(name, backend: client), model: name, on: host.id)
             hosts.succeeded(on: host.id, doing: "start that download")
             reconcile()
         } catch let MoldClientError.licenseRequired(refusal, mismatch) {
@@ -92,6 +86,27 @@ extension DownloadStore {
             do { try await Task.sleep(for: every) } catch { return false }
         }
         return finished[host]?.first(where: { $0.model == model })?.status == .completed
+    }
+
+    func recover(_ entry: QueueEntry, on host: MoldHost, queue: QueueStore) {
+        guard let instance = hosts.instanceID(of: host.id), let authority = entry.authority(instanceId: instance) else { return }
+        queueDownloads.start(entry: entry, host: host.id, authority: authority, backend: hosts.backend(for: host), hostName: host.name,
+            isCurrent: { [weak self] in
+                guard let self, self.hosts.host(host.id) == host, self.hosts.instanceID(of: host.id) == instance else { return false }
+                return !self.hosts.isUp(host) || queue.entries(on: host.id).contains { $0.id == entry.id && $0.state == .held }
+            },
+            started: { [weak self] ids, name in self?.track(ids, model: name, on: host.id); self?.reconcile() },
+            license: { [weak self] refusal, mismatch, approved in
+                guard let self, self.pendingLicense == nil else { return false }
+                self.pendingLicense = PendingLicense(refusal: refusal, mismatch: mismatch, host: host.id,
+                    retry: { approved() }, recoveryJob: entry.id)
+                return true
+            }, refreshed: { await queue.poll(host.id) })
+    }
+
+    func cancelLicense() {
+        if let pending = pendingLicense, let job = pending.recoveryJob { queueDownloads.cancel(host: pending.host, job: job) }
+        pendingLicense = nil
     }
 
     private func track(_ jobIDs: [String], model: String, on host: MoldHost.ID) {

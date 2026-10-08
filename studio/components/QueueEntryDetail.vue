@@ -7,6 +7,8 @@
  * only paints it. Actions are emitted rather than performed, because each
  * shell owns its own authenticated target for the exact selected host.
  */
+import { cancelQueueDownloadRecovery } from "../composables/useQueueDownloadRecovery";
+import QueueDownloadControl from "./QueueDownloadControl.vue";
 import QueueSourceThumbnail from "./QueueSourceThumbnail.vue";
 import type { ApiTarget } from "../api/client";
 import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
@@ -63,6 +65,7 @@ const emit = defineEmits<{
 const transfer = useHeldQueueTransfer();
 const cancelArmed = ref(false);
 const copied = ref(false);
+const missingModelDownload = ref(false);
 
 const cancelLabel = computed(() => {
   if (props.cancelling) return "Cancelling…";
@@ -77,6 +80,12 @@ function onCancel(): void {
     return;
   }
   cancelArmed.value = false;
+  if (props.inputTarget && props.inputInstanceId)
+    cancelQueueDownloadRecovery(
+      props.inputTarget,
+      props.inputInstanceId,
+      props.model.jobId,
+    );
   emit("cancel");
 }
 
@@ -203,6 +212,16 @@ async function copyDetail(): Promise<void> {
     </div>
 
     <footer class="qed__foot">
+      <QueueDownloadControl
+        v-if="model.held"
+        :target="inputTarget"
+        :instance="inputInstanceId"
+        :job="model.jobId"
+        :host="model.hostLabel"
+        :online="inputOnline !== false"
+        controls
+        @available="missingModelDownload = $event"
+      />
       <p
         v-if="error"
         class="qed__error"
@@ -251,7 +270,7 @@ async function copyDetail(): Promise<void> {
           {{ copied ? "Copied" : "Copy details" }}
         </button>
         <button
-          v-if="model.retry.applicable"
+          v-if="model.retry.applicable && !missingModelDownload"
           type="button"
           data-test="queue-detail-retry"
           :disabled="!model.retry.available || retrying"

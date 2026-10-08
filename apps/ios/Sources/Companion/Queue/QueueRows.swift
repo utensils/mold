@@ -125,9 +125,9 @@ struct QueueEntryRow: View {
 
     private var caption: String {
         if inBatch, let index = entry.batchIndex {
-            return String(localized: "Picture \(index) · \(entry.waitDescription)")
+            return String(localized: "Picture \(index) · \(entry.state == .held ? "Held" : entry.waitDescription)")
         }
-        return entry.waitDescription
+        return entry.state == .held ? String(localized: "Held") : entry.waitDescription
     }
 
     @ViewBuilder private var inputPreview: some View {
@@ -178,23 +178,51 @@ struct QueueEntryRow: View {
 /// another machine, and Cancel -- side by side, stacked full width at AX
 /// sizes.
 struct QueueHeldActions: View {
+    @Environment(AppRouter.self) private var router
     @Environment(QueueStore.self) private var queue
     @Environment(ModelStore.self) private var models
     @Environment(\.dynamicTypeSize) private var size
     let entry: QueueEntry
     let hold: QueueHold
     let host: MoldHost
+    var detail = false
+
+    private var recovery: QueueDownloadRecovery.State? { models.queueDownloads.state(host: host.id, job: entry.id) }
 
     var body: some View {
-        Text(sentence).font(.callout).foregroundStyle(.secondaryText)
-            .accessibilityIdentifier("queue-held-reason-" + entry.id)
-        let stacked = RowAxis.for(size) == .vertical
-        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-                             : AnyLayout(HStackLayout(spacing: 8))
-        layout {
-            if case let .missingModel(model, _) = hold, queue.canRetry(entry, on: host.id) {
-                Button("Pull and Retry") { models.pullThenRetry(model, entry: entry, on: host.id) }
-                    .frame(maxWidth: stacked ? .infinity : nil)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(hold.summary(modelName: queue.headline(for: entry, on: host.id), hostName: host.name))
+                .font(.callout).foregroundStyle(.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("queue-held-reason-" + entry.id)
+            if let recovery {
+                Text(recovery.message).font(.callout).foregroundStyle(.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier((detail ? "queue-detail-download-status-" : "queue-download-status-") + entry.id)
+                if let fraction = recovery.fraction {
+                    ProgressView(value: fraction).accessibilityLabel("Model download")
+                } else if recovery.isBusy { ProgressView().accessibilityLabel(recovery.message) }
+            }
+            if RowAxis.for(size) == .vertical { buttons(stacked: true) } else {
+                ViewThatFits(in: .horizontal) { buttons(stacked: false); buttons(stacked: true) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.bordered)
+        .padding(.top, 4)
+    }
+
+    private func buttons(stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
+            if case .missingModel = hold, queue.canRetry(entry, on: host.id) {
+                Button(recovery?.isBusy == true ? "Downloading…" : "Download and Retry") {
+                    if let model = entry.model { models.pullThenRetry(model, entry: entry, on: host.id, presenter: router.presentationID) }
+                }
+                .disabled(recovery?.isBusy == true)
+                .frame(maxWidth: stacked ? .infinity : nil)
+                .fixedSize(horizontal: !stacked, vertical: false)
+                .accessibilityIdentifier((detail ? "queue-detail-download-" : "queue-download-") + entry.id)
             } else if queue.canRetry(entry, on: host.id) {
                 Button("Retry") { Task { await queue.retry(entry, on: host.id) } }
                     .frame(maxWidth: stacked ? .infinity : nil)
@@ -203,16 +231,8 @@ struct QueueHeldActions: View {
                 MoveToMenu(entry: entry, host: host)
             }
         }
-        .buttonStyle(.bordered)
-        .padding(.top, 4)
     }
 
-    private var sentence: String {
-        switch hold {
-        case let .missingModel(_, sentence), let .prose(sentence, _):
-            sentence.isEmpty ? String(localized: "The machine put this job aside.") : UserFacingError.message(sentence)
-        }
-    }
 }
 
 /// "Move to…": the other machines that are up and generate. Absent when

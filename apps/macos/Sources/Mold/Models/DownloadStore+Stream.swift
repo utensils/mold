@@ -22,7 +22,7 @@ extension DownloadStore {
                     self?.apply(event, on: host.id)
                 }
             } catch {
-                self?.active[host.id] = nil
+                // Keep the last known board; recovery polls and marks connectivity uncertainty.
             }
         }
     }
@@ -32,6 +32,7 @@ extension DownloadStore {
     /// and `catalog_ready` passes it while naming a CATALOG entry rather than
     /// a job. See that type for what that invented.
     func apply(_ event: DownloadEvent, on host: MoldHost.ID) {
+        queueDownloads.observe(event, on: host)
         // The FIRST frame on every connection -- how this store learns about
         // a job it never started, from a `mold pull` at a terminal or from
         // the web app on the same machine.

@@ -5,6 +5,9 @@ import SwiftUI
 /// plain `QueueRow` instead (`QueueGroup.isExpandable`) -- a disclosure
 /// triangle over a single child is a control that reveals nothing.
 struct QueueBatchRow: View {
+    @Environment(QueueStore.self) private var queue
+    @Environment(DownloadStore.self) private var downloads
+    @Environment(TransferStore.self) private var transfers
     let group: QueueGroup
     var sourceHost: MoldHost? = nil
     /// What the machine will honour for ANY of this batch's children, and
@@ -31,12 +34,22 @@ struct QueueBatchRow: View {
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(group.rows) { entry in
+                if entry.state == .held, let sourceHost, let hold = queue.hold(for: entry, on: sourceHost.id) {
+                    QueueHoldRow(entry: entry, hold: hold, sourceHost: sourceHost,
+                        pullThenRetry: { _ in downloads.recover(entry, on: sourceHost, queue: queue) },
+                        tryAgain: { rowAct(.retry, entry) },
+                        moveToDestinations: transfers.transferDestinations(from: sourceHost.id),
+                        moveTo: { destination in Task { await transfers.transfer(entry, from: sourceHost.id, to: destination); await queue.poll(sourceHost.id) } },
+                        cancel: { rowAct(.cancel, entry) }, inspect: inspect.map { inspect in { inspect(entry) } })
+                        .padding(.leading, 20).tag(entry.id)
+                } else {
                 QueueRow(entry: entry, actions: childActions(entry),
                          caption: entry.batchWaitDescription, sourceHost: sourceHost,
                          inspect: inspect.map { inspect in { inspect(entry) } },
                          act: { rowAct($0, entry) })
                     .padding(.leading, 20)
                     .tag(entry.id)
+                }
             }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 12) {

@@ -2,6 +2,7 @@ import Foundation
 
 /// One download a machine is running, as a client draws it.
 public struct DownloadProgress: Hashable, Sendable {
+    public var status: JobStatus = .active
     public var model: String
     public var fraction: Double?
     public var bytesDone: Int64?
@@ -47,12 +48,14 @@ public enum DownloadBoard {
     /// whole board: running and queued jobs, by job id.
     public static func adopt(_ listing: DownloadsListing) -> [String: DownloadProgress] {
         var board: [String: DownloadProgress] = [:]
-        for job in listing.activeJobs + listing.queued {
-            board[job.id] = DownloadProgress(
+        for job in (listing.activeJobs.isEmpty ? listing.active.map { [$0] } ?? [] : listing.activeJobs) + listing.queued {
+            var row = DownloadProgress(
                 model: job.model,
                 fraction: job.bytesTotal > 0 ? Double(job.bytesDone) / Double(job.bytesTotal) : nil,
                 bytesDone: job.bytesDone, bytesTotal: job.bytesTotal,
                 currentFile: job.currentFile, failed: job.error.map(UserFacingError.message))
+            row.status = job.status
+            board[job.id] = row
         }
         return board
     }
@@ -91,6 +94,8 @@ public enum DownloadBoard {
 
     private static func moved(_ row: DownloadProgress, by event: DownloadEvent) -> DownloadProgress {
         var progress = row
+        if event.type == "enqueued" { progress.status = .queued }
+        if event.type == "started" { progress.status = .active }
         if let model = event.model { progress.model = model }
         progress.fraction = event.fraction ?? progress.fraction
         progress.bytesDone = event.bytesDone ?? progress.bytesDone

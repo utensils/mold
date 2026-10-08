@@ -25,6 +25,11 @@ extension QueueDetailSheet {
                     Text(message).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let recovery = downloads.queueDownloads.state(host: host.id, job: entry.id) {
+                    Text(recovery.message).foregroundStyle(.secondary)
+                    if let fraction = recovery.fraction { ProgressView(value: fraction).accessibilityLabel("Model download") }
+                    else if recovery.isBusy { ProgressView().controlSize(.small).accessibilityLabel(recovery.message) }
+                }
                 if let fraction = status.fraction {
                     ProgressView(value: fraction)
                         .accessibilityLabel("Render progress")
@@ -83,7 +88,11 @@ extension QueueDetailSheet {
         HStack {
             if let current {
                 let actions = QueueRowActions.resolve(current, on: hosts.capabilities[host.id])
-                if actions.retry {
+                if actions.retry, case .missingModel = queue.hold(for: current, on: host.id) {
+                    Button("Download and Retry") { downloads.recover(current, on: activeHost, queue: queue) }
+                        .disabled(downloads.queueDownloads.state(host: host.id, job: entry.id)?.isBusy == true)
+                        .help("Download the missing model on this machine, then retry this held job")
+                } else if actions.retry {
                     Button("Retry Job") { act(.retry, current) }.help("Try this failed job again on its machine")
                 }
                 if actions.pause {

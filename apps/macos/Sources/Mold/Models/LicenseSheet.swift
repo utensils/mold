@@ -54,7 +54,7 @@ struct LicenseSheet: View {
             Spacer()
             // `pendingLicense` is `internal(set)` for exactly this: Cancel
             // needs no store method, only to let go of what it is holding.
-            Button("Cancel") { downloads.pendingLicense = nil }
+            Button("Cancel") { downloads.cancelLicense() }
                 .keyboardShortcut(.cancelAction)
             Button("Accept and Download") { accept() }
                 .keyboardShortcut(.defaultAction)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
 import { userFacingError } from "@studio/lib/userFacingError";
 /*
  * One queue row, for Make's queue and a machine's own queue alike.
@@ -157,5 +158,11 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
       <span v-if="!running" data-test="mobile-generation-status">{{ status }}</span>
       <span v-if="cancelling" data-test="mobile-generation-cancelling"> Cancelling… </span>
     </div>
+    <QueueDownloadControl
+      :target="sourceTarget"
+      :instance="sourceInstanceId"
+      :job="sourceJobId ?? ''"
+      host="this machine"
+    />
   </div>
 </template>

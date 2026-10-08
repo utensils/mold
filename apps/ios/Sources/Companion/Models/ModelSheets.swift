@@ -75,7 +75,7 @@ struct LicenceSheet: View {
             }
             .navigationTitle(pending.refusal.name)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { models.cancelLicense(); dismiss() } } }
         }
         .presentationDetents([.large])
     }

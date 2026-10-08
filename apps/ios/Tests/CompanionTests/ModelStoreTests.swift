@@ -74,6 +74,7 @@ struct ModelStoreTests {
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
         fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        fake.stub("queueJob(id:)", returning: try QueueStoreTests.decode(QueueJobDetail.self, #"{"job":{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}}"#))
         await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }
@@ -91,6 +92,7 @@ struct ModelStoreTests {
         let held = try QueueStoreTests.decode(QueueEntry.self,
             #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
         fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        fake.stub("queueJob(id:)", returning: try QueueStoreTests.decode(QueueJobDetail.self, #"{"job":{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}}"#))
         await queue.poll(id)
         models.pullThenRetry("wan", entry: held, on: id)
         try await waitUntil { models.isBusy("wan", on: id) }
@@ -98,6 +100,31 @@ struct ModelStoreTests {
         try await Task.sleep(for: .milliseconds(600))
         #expect(fake.count("retryJob(_:)") == 0)
         #expect(models.finished[id]?.first?.error == "disk full")
+    }
+
+    @Test func aClosedWindowCannotPresentALateRecoveryLicense() async throws {
+        let (models, queue, hosts, fake) = try await setUp()
+        let id = hosts.hosts[0].id
+        let owner = UUID()
+        models.activePresentationOwners.insert(owner)
+        let held = try QueueStoreTests.decode(QueueEntry.self,
+            #"{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}"#)
+        fake.stub("queue()", returning: try QueueStoreTests.decode(QueueListing.self, #"{"entries":[{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}]}"#))
+        fake.stub("queueJob(id:)", returning: try QueueStoreTests.decode(QueueJobDetail.self, #"{"job":{"id":"h1","model":"wan","state":"held","batch_id":"b1","client_batch_id":"c1"}}"#))
+        let gate = AsyncStream<Void>.makeStream()
+        let refusal = LicenseRefusal(id: "terms", name: "Terms", url: "https://example.com", canonical: "https://example.com", sha256: "abc", summary: "Terms")
+        fake.stub("startDownload(_:)") { _ in
+            for await _ in gate.stream { break }
+            throw MoldClientError.licenseRequired(refusal, mismatch: false)
+        }
+        await queue.poll(id)
+        models.pullThenRetry("wan", entry: held, on: id, presenter: owner)
+        try await waitUntil { fake.count("startDownload(_:)") == 1 }
+        models.activePresentationOwners.remove(owner)
+        gate.continuation.finish()
+        try await waitUntil { models.queueDownloads.state(host: id, job: "h1")?.isBusy == false }
+        #expect(models.pendingLicense == nil)
+        #expect(fake.count("retryJob(_:)") == 0)
     }
 
     @Test func loadedInventoryIncludesResidentModelsWithoutDownloadMetadata() async throws {

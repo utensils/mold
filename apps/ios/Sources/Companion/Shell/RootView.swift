@@ -62,7 +62,19 @@ struct RootView: View {
             // with the first and last rows under the scroll-edge fades.
             SettingsSheet().presentationSizing(.page)
         }
-        .onDisappear { actions.cancelExports() }
+        .sheet(item: Binding(get: { () -> ModelStore.PendingLicense? in
+            guard let pending = stores.models.pendingLicense else { return nil }
+            if let owner = pending.presentationOwner, owner != router.presentationID { return nil }
+            if let job = pending.recoveryJob, let context = router.licenseDetailContext, context.host == pending.host, context.job == job { return nil }
+            return pending
+        }, set: { value in
+            if value == nil { stores.models.cancelLicense() }
+        })) { pending in LicenceSheet(pending: pending) }
+        .onDisappear {
+            actions.cancelExports()
+            stores.models.activePresentationOwners.remove(router.presentationID)
+            if stores.models.pendingLicense?.presentationOwner == router.presentationID { stores.models.cancelLicense() }
+        }
         .printSheets(presentsActions: router.openedPrint == nil)
         .modifier(RootLinks(router: router))
         .modifier(UndoBridge())
@@ -72,6 +84,7 @@ struct RootView: View {
         .focusedSceneValue(\.showsSettings, $router.showsSettings)
         .focusedSceneValue(\.refresh, RefreshAction { await stores.becameActive() })
         .onAppear {
+            stores.models.activePresentationOwners.insert(router.presentationID)
             if stored == Self.searchKey { router.selection = .search }
             else if let restored = Destination(rawValue: stored) { router.selection = .go(restored) }
         }

@@ -185,3 +185,11 @@ workers call it directly. It records original local diagnostics in OSLog with
 private details, then supplies device/app wording. Do not point a local file
 error at a remote machine’s logs. A held Queue row shows its full-width reason
 once, outside the thumbnail column; keep Retry/Move controls and Dynamic Type.
+
+**Queue model recovery.** QueueDownloadRecovery in MoldClient owns the native
+Download and Retry lifecycle. Show synchronous starting feedback, exact-ticket
+progress and visible license/failure/reconnection outcomes in rows and details.
+License dismissal cancels the waiting recovery, including a review over Job Details.
+Fence every mutation by server instance and fresh held-job authority; never retry
+on same-model historical success or after a failed/cancelled companion download.
+Use concise held captions and one reason paragraph; narrow/AX action rows stack.
