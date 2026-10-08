@@ -778,6 +778,7 @@ export function applyMetadataToForm(
     sourceVideoPath: metadata.source_video_path ?? "",
     extendVideoPath: metadata.extend_video_path ?? "",
     extendOverlapFrames: metadata.extend_overlap_frames ?? null,
+    referenceWeight: metadata.reference_weight ?? null,
     pipeline: pipelineForSettingsReuse(metadata),
     // The REQUEST's toggle, never `has_alpha`: an edit of a transparent
     // reference keeps its alpha with the toggle off.

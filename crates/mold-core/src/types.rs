@@ -3324,6 +3324,10 @@ pub struct OutputMetadata {
     /// or private filesystem paths in gallery metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_image_sha256s: Option<Vec<String>>,
+    /// Explicit reference-image injection strength, only when references ran.
+    /// Absent on older prints and untouched requests; an authored zero survives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_weight: Option<f64>,
     /// Ordered, redacted H3 reference provenance. Contains only display-safe
     /// labels, content digests, and probed media facts: never payload bytes,
     /// upload handles, API keys, or server/client filesystem paths.
@@ -3635,6 +3639,11 @@ impl OutputMetadata {
             cfg_start_step: crate::identity::request_uses_true_cfg(req)
                 .then(|| crate::identity::effective_cfg_start_step(req)),
             source_fit: req.source_fit.clone(),
+            reference_weight: req
+                .edit_images
+                .as_ref()
+                .filter(|images| !images.is_empty())
+                .and(req.reference_weight),
             edit_image_sha256s: req.edit_images.as_ref().and_then(|images| {
                 (!images.is_empty()).then(|| {
                     images
@@ -8155,6 +8164,30 @@ mod tests {
             cfg_start_step: None,
             transparent_background: None,
         }
+    }
+
+    #[test]
+    fn output_metadata_preserves_explicit_reference_weight_only_with_references() {
+        let mut req = text_to_image_request();
+        req.reference_weight = Some(0.0);
+        let empty = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(empty.reference_weight, None);
+        assert!(!serde_json::to_value(&empty)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("reference_weight"));
+        req.edit_images = Some(vec![vec![1, 2, 3]]);
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(metadata.reference_weight, Some(0.0));
+        let decoded: OutputMetadata =
+            serde_json::from_value(serde_json::to_value(metadata).unwrap()).unwrap();
+        assert_eq!(decoded.reference_weight, Some(0.0));
+        req.reference_weight = None;
+        assert_eq!(
+            OutputMetadata::from_generate_request(&req, 7, None, "test").reference_weight,
+            None
+        );
     }
 
     #[test]

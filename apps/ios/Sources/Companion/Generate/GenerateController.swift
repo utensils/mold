@@ -12,8 +12,12 @@ import MoldClient
 final class GenerateController {
     let retainedReuse = RetainedReuse()
     private(set) var sourceMediaRevision = 0
+    private(set) var mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]
     var draft = RenderDraft() {
         didSet {
+            for field in RetainedSourceMedia.changedDraftFields(from: oldValue.media, to: draft.media) {
+                mediaRevisions[field, default: 0] += 1
+            }
             if oldValue.media.sourceImage != draft.media.sourceImage
                 || oldValue.media.sourceImageOriginal != draft.media.sourceImageOriginal {
                 sourceMediaRevision += 1

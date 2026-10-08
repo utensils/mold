@@ -19,6 +19,7 @@ extension ReuseStore {
     func pending(for draft: RenderDraft) -> Authority? {
         guard let authority, let restored,
               RetainedReferenceGuard.canReuseDraft(draft, original: restored),
+              authority.route == nil || authority.route == hosts.host(authority.origin),
               authority.instance == nil || authority.instance == hosts.instanceID(of: authority.origin) else { return nil }
         return authority
     }
@@ -31,6 +32,7 @@ extension ReuseStore {
     }
 
     func referenceRefusal(for draft: RenderDraft) -> String? {
+        if restorationFailed { return notice ?? "The original inputs could not be restored. Reselect the print or discard its retained inputs before generating." }
         if attachingSource { return "Loading the retained source picture…" }
         if restoring { return notice ?? "Checking the original input files on their source machine…" }
         if let authority = pending(for: draft), draft.media.sourceImage == nil,

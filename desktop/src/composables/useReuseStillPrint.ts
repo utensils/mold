@@ -60,7 +60,12 @@ export function useReuseStillPrint() {
         try {
           const inventory = await retainedSourceMediaInventory(location.filename, origin);
           if (!composer.isRetainedSourceCurrent(retainedVersion)) return;
-          const handoff = { filename: location.filename, origin, inventory };
+          const handoff = {
+            filename: location.filename,
+            origin,
+            inventory,
+            metadata: entry.item.metadata,
+          };
           if (inventory.availability === "available") {
             composer.setRetainedSourceIfCurrent(retainedVersion, handoff);
             return;
@@ -74,6 +79,17 @@ export function useReuseStillPrint() {
           // One unreachable copy must not hide a reachable source archive.
           // The established local stash/gallery-name restore stays live.
         }
+      }
+      if (!unavailable) {
+        const first = locations[0];
+        const origin = first && gallery.targetOfOrNull(first.sourceKey);
+        if (origin)
+          unavailable = {
+            filename: first.filename,
+            origin,
+            inventory: { availability: "unavailable_missing_or_corrupt", members: [] },
+            metadata: entry.item.metadata,
+          };
       }
       if (!unavailable || !composer.setRetainedSourceIfCurrent(retainedVersion, unavailable))
         return;

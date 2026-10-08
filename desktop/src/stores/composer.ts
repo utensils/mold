@@ -1,7 +1,10 @@
 import { defineStore } from "pinia";
 import type { GeneratePrefill } from "../lib/generateForm";
 import type { ApiTarget } from "@studio/api/client";
-import type { RetainedSourceMediaInventory } from "@studio/api/gallerySourceMedia";
+import type {
+  RetainedSourceMediaInventory,
+  RetainedSourceMediaMetadataLike,
+} from "@studio/api/gallerySourceMedia";
 
 /**
  * Either the legacy scalar shape (CommandPalette, history, jobs, "Generate
@@ -16,6 +19,7 @@ export interface RetainedSourceReuseHandoff {
   filename: string;
   origin: ApiTarget;
   inventory: RetainedSourceMediaInventory;
+  metadata?: RetainedSourceMediaMetadataLike;
 }
 
 /** Carries "Reuse settings" from the gallery into the Generate composer. */

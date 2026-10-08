@@ -4,9 +4,9 @@ import MoldClient
 // The print's own picture goes in the well, on every route.
 extension ReuseStore {
     func sourceForSubmission(in draft: RenderDraft, outgoing: GenerateRequest?,
-                             live: () -> RenderDraft, fence: Int) async -> RenderDraft? {
+                             live: () -> RenderDraft, fence: Int, mediaRevisions: () -> [RetainedSourceMedia.Field: Int] = { [:] }) async -> RenderDraft? {
         guard isCurrent(fence) else { return nil }
-        let placed = await placePicture(in: draft, outgoing: outgoing, live: live)
+        let placed = await placePicture(in: draft, outgoing: outgoing, live: live, mediaRevisions: mediaRevisions)
         guard isCurrent(fence) else { return nil }
         attachingSource = false
         return placed
@@ -25,21 +25,66 @@ extension ReuseStore {
     /// the picture downloaded keeps that edit, and the print's picture is
     /// not placed over it -- the authority is theirs to have moved off.
     func placePicture(in draft: RenderDraft, outgoing: GenerateRequest?,
-                      live: () -> RenderDraft) async -> RenderDraft? {
-        guard let authority = pending(for: draft),
-              let member = RetainedSourcePicture.member(of: authority, forHydrating: outgoing)
-        else { return nil }
+                      live: () -> RenderDraft, mediaRevisions: () -> [RetainedSourceMedia.Field: Int] = { [:] }) async -> RenderDraft? {
+        guard let authority, let route = hosts.host(authority.origin), let original = restored else { return nil }
+        let revisions = initialMediaRevisions ?? mediaRevisions()
+        let inventoryFields = Set(authority.members.compactMap(RetainedSourceMedia.draftField))
+            .intersection(RetainedSourceMedia.materializableFields)
+        var fields = RetainedSourceMedia.vacantDraftFields(in: draft.media)
+        fields = fields.filter { revisions[$0, default: 0] == mediaRevisions()[$0, default: 0] }
+        var members = authority.members.filter { RetainedSourceMedia.draftField(for: $0).map(fields.contains) == true }
+        if !members.contains(where: { RetainedSourceMedia.draftField(for: $0) == .sourceImage }) { members.removeAll { RetainedSourceMedia.draftField(for: $0) == .maskImage } }
+        guard !members.isEmpty else { retireMaterializedFields(inventoryFields); return nil }
         let fence = currentFence
-        switch await RetainedSourcePicture.fetch(member, of: authority, hosts: hosts) {
-        case let .refused(sentence):
-            if isCurrent(fence), notice == nil { notice = sentence }
-            return nil
-        case let .picture(picture):
-            guard isCurrent(fence), pending(for: draft) != nil, live() == draft else { return nil }
-            var placed = draft
-            RetainedSourcePicture.place(picture, named: authority.filename, in: &placed)
+        attachingSource = true
+        defer { if isCurrent(fence) { attachingSource = false } }
+        let backend = hosts.backend(for: route)
+        do {
+            if let refusal = RetainedSourceMedia.relayRefusal(members, copies: 1) { throw refusal }
+            var downloaded: [(member: RetainedSourceMedia.Member, bytes: Data)] = []
+            var bodyBytes = 0
+            for member in members {
+                let bytes = try await backend.retainedSourceMediaBytes(for: authority.filename, member: member.memberId)
+                guard isCurrent(fence), !Task.isCancelled else { return nil }
+                guard (authority.route == nil || authority.route == hosts.host(authority.origin)), authority.instance == nil || authority.instance == hosts.instanceID(of: authority.origin), hosts.host(authority.origin) == route else {
+                    restorationFailed = true
+                    notice = "The source machine changed. Reselect the print before generating."
+                    return nil
+                }
+                bodyBytes += (bytes.count + 2) / 3 * 4
+                guard bodyBytes <= RequestBodyLimit.bytes else {
+                    throw RetainedSourceMedia.RelayFailure.tooLarge(bytes: bodyBytes, copies: 1)
+                }
+                downloaded.append((member, bytes))
+            }
+            var superseded = inventoryFields.filter { revisions[$0, default: 0] != mediaRevisions()[$0, default: 0] }
+            if superseded.contains(.sourceImage) { superseded.insert(.maskImage) }
+            downloaded.removeAll { RetainedSourceMedia.draftField(for: $0.member).map(superseded.contains) == true }
+            let liveDraft = live()
+            var placed = try RetainedSourceMedia.materializedDraft(downloaded, into: liveDraft)
+            if let capabilities = liveDraft.media.adoptedReferenceCapabilities {
+                // Keep the already-adopted older-server reference policy when
+                // no additive reference block was advertised.
+                let references = placed.media.editImages
+                let weight = placed.media.referenceWeight
+                placed.media.reconcile(for: capabilities, model: selectionModel)
+                if capabilities.referenceImages == nil && liveDraft.media.sourceMode != .single {
+                    placed.media.sourceMode = liveDraft.media.sourceMode
+                    placed.media.parked.referenceWeight = nil
+                    placed.media.editImages = references
+                    placed.media.referenceWeight = weight
+                    placed.media.parked.editImages = []
+                }
+                BoundaryFramePolicy.apply(to: &placed, capabilities: capabilities)
+            }
+            if liveDraft.media.generationReferences != original.media.generationReferences { retireMaterializedFields([.references]) }
+            retireMaterializedFields(inventoryFields)
             arm(placed)
             return placed
+        } catch {
+            if isCurrent(fence) { restorationFailed = true }
+            if isCurrent(fence), notice == nil { notice = "The original input files couldn't be restored. Reconnect their machine or attach them again." }
+            return nil
         }
     }
 }

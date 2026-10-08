@@ -1,18 +1,24 @@
+import { shallowRef } from "vue";
 import type { ApiTarget } from "@studio/api/client";
-import type { RetainedSourceMediaInventory } from "@studio/api/gallerySourceMedia";
+import type {
+  RetainedSourceMediaInventory,
+  RetainedSourceMediaMetadataLike,
+} from "@studio/api/gallerySourceMedia";
 
 export interface RetainedSourceReuseIntent {
   filename: string;
   origin: ApiTarget;
   inventory: RetainedSourceMediaInventory;
+  metadata?: RetainedSourceMediaMetadataLike;
 }
 
-let current: RetainedSourceReuseIntent | null = null;
+export const retainedSourceReuseState =
+  shallowRef<RetainedSourceReuseIntent | null>(null);
 let version = 0;
 
 export function beginRetainedSourceReuseIntent(): number {
   version += 1;
-  current = null;
+  retainedSourceReuseState.value = null;
   return version;
 }
 
@@ -20,7 +26,7 @@ export function setRetainedSourceReuseIntent(
   intent: RetainedSourceReuseIntent | null,
 ): void {
   version += 1;
-  current = intent;
+  retainedSourceReuseState.value = intent;
 }
 
 export function setRetainedSourceReuseIntentIfCurrent(
@@ -28,7 +34,7 @@ export function setRetainedSourceReuseIntentIfCurrent(
   intent: RetainedSourceReuseIntent,
 ): boolean {
   if (expectedVersion !== version) return false;
-  current = intent;
+  retainedSourceReuseState.value = intent;
   return true;
 }
 
@@ -36,7 +42,9 @@ export function retainedSourceReuseSnapshot(): {
   version: number;
   intent: RetainedSourceReuseIntent;
 } | null {
-  return current ? { version, intent: current } : null;
+  return retainedSourceReuseState.value
+    ? { version, intent: retainedSourceReuseState.value }
+    : null;
 }
 
 export function retainedSourceReuseIsCurrent(expectedVersion: number): boolean {
@@ -44,10 +52,10 @@ export function retainedSourceReuseIsCurrent(expectedVersion: number): boolean {
 }
 
 export function retainedSourceReuseIntent(): RetainedSourceReuseIntent | null {
-  return current;
+  return retainedSourceReuseState.value;
 }
 
 export function clearRetainedSourceReuseIntent(): void {
   version += 1;
-  current = null;
+  retainedSourceReuseState.value = null;
 }

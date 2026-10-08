@@ -13,7 +13,15 @@ final class GenerateController {
     /// read on adoption, after the recipe's own numbers, and never on a KEPT
     /// draft. See `GenerateController+Defaults.applyStoredDefaults`.
     let defaults: ConfigStore
-    var draft = RenderDraft()
+    private(set) var mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]
+    var draft = RenderDraft() {
+        didSet {
+            for field in RetainedSourceMedia.changedDraftFields(from: oldValue.media, to: draft.media) {
+                mediaRevisions[field, default: 0] += 1
+            }
+        }
+    }
+
     var hostID: MoldHost.ID?
     var modelName: String?
     /// Which of the chosen model's recipes is running -- `nil` means its

@@ -5,6 +5,54 @@ import Testing
 @testable import MoldCompanion
 
 @MainActor extension GenerateControllerTests {
+    @Test(arguments: ["minimax-h3-fl2va:comfy-pruned-int8", "wan22-i2v-a14b:fp8", "ltx-2.5-22b-distilled:bf16"])
+    func reuseMaterializesOriginalFramesInTheirVisibleWells(name: String) async throws {
+        let (generate, fake) = try await setUp()
+        fake.stub("models()", returning: [try model(name)])
+        await generate.hosts.refreshAll()
+        let h3 = name.hasPrefix("minimax")
+        let frames = h3 ? 141 : 97
+        let original = h3 ? [KeyframeCondition(frame: frames - 1, image: "last", name: "last.png")]
+            : [KeyframeCondition(frame: 0, image: "first", name: "first.png"), .init(frame: frames - 1, image: "last", name: "last.png")]
+        var members = original.enumerated().map { RetainedSourceMedia.Member(memberId: "frame-\($0.offset)", role: "keyframes", displayName: "frame", sizeBytes: 80) }
+        if h3 { members.insert(.init(memberId: "first", role: "source_image", displayName: "first.png", sizeBytes: 3), at: 0) }
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: members))
+        fake.stub("retainedSourceMediaBytes(for:member:)") { args in
+            let member = args[1] as! String
+            if member == "first" { return Data([1, 2, 3]) }
+            return try MoldJSON.encoder.encode(original[Int(member.split(separator: "-").last!)!])
+        }
+        generate.reuse(try reuseEntry(generate, name: name, extra: "\"frames\":\(frames)"))
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.draft.media.keyframes.count == original.count)
+        #expect(generate.draft.media.keyframes.map(\.image) == original.map(\.image))
+        if h3 { #expect(generate.draft.media.sourceImage == "AQID") }
+        #expect(generate.retainedReuse.snapshot()?.members.contains { $0.role == "keyframes" } != true)
+        generate.draft.media.keyframes = []
+        generate.retainedReuse.retry(controller: generate)
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.draft.media.keyframes.isEmpty, "Removing restored frames cannot revive hidden conditioning")
+    }
+
+    @Test func lateFrameBytesCannotReviveAnAttachmentAddedThenRemoved() async throws {
+        let (generate, fake) = try await setUp()
+        let gate = ReuseGate()
+        let member = RetainedSourceMedia.Member(memberId: "last", role: "keyframes", displayName: "last.png", sizeBytes: 80)
+        fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [member]))
+        fake.stub("retainedSourceMediaBytes(for:member:)") { _ in
+            await gate.wait()
+            return try MoldJSON.encoder.encode(KeyframeCondition(frame: 96, image: "old"))
+        }
+        generate.reuse(try reuseEntry(generate, name: "flux-dev:q4"))
+        try await waitUntil { fake.count("retainedSourceMediaBytes(for:member:)") == 1 }
+        generate.draft.media.keyframes = [.init(frame: 96, image: "replacement")]
+        generate.draft.media.keyframes = []
+        await gate.release()
+        try await waitUntil { !generate.retainedReuse.probing }
+        #expect(generate.draft.media.keyframes.isEmpty)
+        #expect(generate.retainedReuse.snapshot()?.members.contains { $0.role == "keyframes" } != true)
+    }
+
     @Test(arguments: ["flux-dev:q4", "qwen-image-2.1:q8", "qwen-image-edit-2511:q4", "flux2-klein:bf16", "sdxl-base:fp16", "ltx-2.5-22b-distilled:bf16", "minimax-h3-ref2va:official-bf16", "hunyuan3d-2mv:fp16"])
     func reuseClearsEveryPreviousAttachmentIncludingParkedMedia(name: String) async throws {
         let (generate, fake) = try await setUp()
@@ -115,7 +163,7 @@ import Testing
         #expect(generate.retainedReuse.restorationRefusal(for: nil) != nil)
         let member = RetainedSourceMedia.Member(memberId: "retained", role: pieces[0], displayName: "selected", sizeBytes: 3)
         fake.stub("retainedSourceMedia(for:)", returning: RetainedSourceMedia.Inventory(availability: .available, members: [member]))
-        fake.stub("retainedSourceMediaBytes(for:member:)", returning: Data([1, 2, 3]))
+        fake.stub("retainedSourceMediaBytes(for:member:)", returning: pieces[0] == "keyframes" ? try! MoldJSON.encoder.encode(KeyframeCondition(frame: 0, image: "AQID", name: "frame.png")) : Data([1, 2, 3]))
         generate.retainedReuse.retry(controller: generate)
         try await waitUntil { !generate.retainedReuse.probing }
         var request = GenerateRequest(prompt: "selected", model: "flux", width: 512, height: 512, steps: 4, guidance: 1)
@@ -195,8 +243,8 @@ import Testing
         generate.reuse(entry)
         generate.draft.media.sourceImage = "authored replacement"
         try await waitUntil { !generate.retainedReuse.probing }
-        #expect(generate.retainedReuse.snapshot()?.filename == (completeCopy ? "copy.png" : "selected.png"))
-        #expect(generate.retainedReuse.snapshot()?.members.contains { $0.role == "identity_image" } == true)
+        #expect(generate.retainedReuse.snapshot() == nil)
+        #expect(generate.draft.media.identity?.photos.first?.encoded == "AQID" || generate.draft.media.parked.identity?.photos.first?.encoded == "AQID")
         #expect(generate.draft.media.sourceImage == "authored replacement")
     }
 

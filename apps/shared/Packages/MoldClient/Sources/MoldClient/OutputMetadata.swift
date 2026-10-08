@@ -64,6 +64,7 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     /// property spelled the way a person would spell it decodes as `nil`
     /// forever. Read it through `editImageDigests`, never by this name.
     public let editImageSha256S: [String]?
+    public let referenceWeight: Double?
     public let idImageName: String?
     public let idImageSha256: String?
     public let idImageNames: [String]?

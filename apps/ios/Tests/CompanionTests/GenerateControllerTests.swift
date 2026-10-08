@@ -171,13 +171,16 @@ struct GenerateControllerTests {
             #"{"filename":"a.png","metadata":{"model":"flux-dev:q4","prompt":"reuse"},"timestamp":1790000000,"format":"png"}"#.utf8))
         generate.reuse(LibraryEntry(host: generate.hosts.hosts[0], print: print))
         try await waitUntil { !generate.retainedReuse.probing }
-        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
+        #expect(generate.retainedReuse.snapshot() == nil)
+        #expect(generate.draft.media.audioFile == "AQID" || generate.draft.media.parked.audioFile == "AQID")
         generate.draft.prompt = "another composition"
         generate.draft.seed = 123
-        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
-        #expect(generate.retainedReuse.snapshot()?.members.map(\.role) == ["audio_file"])
+        #expect(generate.retainedReuse.snapshot() == nil)
+        #expect(generate.draft.media.audioFile == "AQID" || generate.draft.media.parked.audioFile == "AQID")
+        #expect(generate.retainedReuse.snapshot() == nil)
+        #expect(generate.draft.media.audioFile == "AQID" || generate.draft.media.parked.audioFile == "AQID")
         generate.draft.media.sourceImage = nil
-        #expect(generate.retainedReuse.snapshot()?.members.contains { $0.role == "source_image" } == false)
+        #expect(generate.retainedReuse.snapshot() == nil)
         generate.retainedReuse.clear()
         #expect(generate.retainedReuse.snapshot() == nil)
         #expect(generate.retainedReuse.notice == nil)

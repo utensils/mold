@@ -17,7 +17,7 @@ beside the Tauri iPhone app (`apps/mobile`), not instead of it.
 | Machines          | Fleet cards, Nearby (Bonjour), add by pairing QR, pasted link or address; keys in the Keychain                                                                                                                                          |
 | Generate          | Stills, clips and 3-D objects with each model's own controls; picture wells from Photos, Camera, Files, Library or Share                                                                                                                |
 | Library           | Every machine's prints as one grid, browsable offline (saved listings, thumbnails and opened prints, within Settings' storage limit); five pinchable tile sizes; favourites, tags, collections, Recently Deleted; video and 3-D viewers |
-| Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                                 |
+| Queue             | Every machine's work; held jobs in words with Download and Retry, Retry and Move to…; reorder, pause, empty                                                                                                                             |
 | Models            | Installed per machine, Discover, downloads, licences                                                                                                                                                                                    |
 | Away from the app | Completion/failure notifications, background refresh, widgets, Share extension                                                                                                                                                          |
 
@@ -69,7 +69,7 @@ Paired connections prefer a verified LAN endpoint over Tailscale and HTTPS relay
 
 ### Reusing retained source media
 
-Use These Settings consumes a pending Library handoff when Generate first appears as well as when it is already open, then clears the handoff so returning to Generate preserves later edits. It asks every known machine copy for the print's retained source media, including inputs that output metadata cannot describe. A retained source picture appears in the normal source well, where it can be inspected, replaced or removed. A paired retained mask enters the draft with its source picture, so aspect, crop and pad-repaint changes transform both together. Explicit attachments win. Other retained files are disclosed beside the composer and restored at admission: a single output on its original machine uses a one-use session; another machine or a batch relays the bounded file contents. Prompt, seed and size edits keep these disclosed files for repeated submissions; Remove retained sources, choosing a model/kind/recipe, Reset, or another reuse clears their authority. Removing the visible source image never restores it secretly. Unavailable media explains when it must be attached again.
+Use These Settings consumes a pending Library handoff when Generate first appears as well as when it is already open, then clears the handoff so returning to Generate preserves later edits. It asks every known machine copy for the print's retained source media, including inputs that output metadata cannot describe. A retained source picture appears in the normal source well, where it can be inspected, replaced or removed. A paired retained mask enters the draft with its source picture, so aspect, crop and pad-repaint changes transform both together. Explicit attachments win. Typed descriptor references are disclosed beside the composer and restored at admission: a single output on its original machine uses a one-use session; another machine or a batch relays the bounded file contents. Prompt, seed and size edits keep these disclosed files for repeated submissions; Remove retained sources, choosing a model/kind/recipe, Reset, or another reuse clears their authority. Removing the visible source image never restores it secretly. Unavailable media explains when it must be attached again.
 
 ## Building
 
@@ -225,9 +225,9 @@ credentials; gated models still ask for their licence. Friendly model titles
 are shared across surfaces, while runnable IDs and filenames stay compatible.
 
 **Use These Settings** asks the print’s machine for its retained inputs. Source
-images and paired repaint masks return together before fitting. Other supported
-conditioning files remain disclosed beside the composer, including across
-prompt edits and repeated renders; **Remove retained sources** clears them.
+images and paired repaint masks return together before fitting. Other supported legacy
+conditioning files return to editable wells. Descriptor-only typed references
+remain disclosed beside the composer across prompt edits and repeated renders; **Remove retained sources** clears them.
 The same-machine request uses a fresh one-use session; another machine or a
 multi-output batch receives bounded relayed bytes. Missing retained inputs are
 explained when the print recorded conditioning; an ordinary text-only print
@@ -321,3 +321,7 @@ returned download ticket succeeds and the original held job and server identity
 are revalidated. Failed or cancelled downloads leave the job held. Global queue
 pause stays in effect. Cancelling a job does not cancel a model download that
 other jobs may need.
+
+### Reuse input media
+
+Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.

@@ -9,20 +9,27 @@ final class RetainedReuse {
         let filename: String
         let origin: MoldHost.ID
         let members: [RetainedSourceMedia.Member]
+        let route: MoldHost
+        let instance: String?
     }
     private(set) var authority: Authority?
     private(set) var probing = false
     var notice: String?
     private var version = 0
-    private var restoreFailed = false
+    var restoreFailed = false
     var canRetry: Bool { restoreFailed && !probing && selectedEntry != nil }
-    private var expectedFields: Set<RetainedSourceMedia.Field> = []
+    var expectedFields: Set<RetainedSourceMedia.Field> = []
     private var originalSourceRevision: Int?
     private var selectedEntry: LibraryEntry?
     var canDiscard: Bool { authority != nil || !expectedFields.isEmpty }
+    var originalRevisions: [RetainedSourceMedia.Field: Int] = [:]
+    var settledFields: Set<RetainedSourceMedia.Field> = []
+    weak var hosts: HostStore?
     private var originalReferences: [GenerationReference] = []
 
-    func begin(_ draft: RenderDraft, metadata: OutputMetadata? = nil, sourceRevision: Int? = nil) -> Int {
+    func begin(_ draft: RenderDraft, metadata: OutputMetadata? = nil, sourceRevision: Int? = nil, mediaRevisions: [RetainedSourceMedia.Field: Int] = [:]) -> Int {
+        originalRevisions = mediaRevisions
+        settledFields = []
         expectedFields = Self.expectedFields(in: metadata)
         originalSourceRevision = sourceRevision
         originalReferences = draft.media.generationReferences
@@ -41,15 +48,19 @@ final class RetainedReuse {
     func probe(_ entry: LibraryEntry, fence: Int, controller: GenerateController) async {
         defer { if version == fence { probing = false } }
         guard version == fence else { return }
+        hosts = controller.hosts
         selectedEntry = entry
         var unavailable: RetainedSourceMedia.Availability?
-        var candidate: (copy: LibraryEntry, inventory: RetainedSourceMedia.Inventory)?
+        var candidate: (copy: LibraryEntry, inventory: RetainedSourceMedia.Inventory, route: MoldHost, instance: String?)?
         var coverage = -1
         for copy in entry.everyCopy {
             guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
-            guard let backend = controller.hosts.backend(for: copy.hostID),
-                  let inventory = try? await backend.retainedSourceMedia(for: copy.print.filename)
-            else { continue }
+            guard let route = controller.hosts.host(copy.hostID) else { continue }
+            let instance = controller.hosts.instanceID(of: copy.hostID)
+            let backend = controller.hosts.backend(for: route)
+            guard let inventory = try? await backend.retainedSourceMedia(for: copy.print.filename),
+                  controller.hosts.host(copy.hostID) == route,
+                  controller.hosts.instanceID(of: copy.hostID) == instance else { continue }
             guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
             guard inventory.availability == .available else {
                 if RetainedSourceMedia.disclosure(inventory.availability) != nil,
@@ -64,13 +75,12 @@ final class RetainedReuse {
             })
             let covered = expectedFields.intersection(availableFields).count
             if covered > coverage {
-                candidate = (copy, inventory)
+                candidate = (copy, inventory, route, instance)
                 coverage = covered
             }
             if expectedFields.isSubset(of: availableFields) { break }
         }
-        guard let (copy, inventory) = candidate,
-              let backend = controller.hosts.backend(for: copy.hostID) else {
+        guard let (copy, inventory, route, instance) = candidate else {
             if isCurrent(fence, draft: controller.draft), !expectedFields.isEmpty {
                 restoreFailed = true
                 notice = unavailable.flatMap(RetainedSourceMedia.disclosure)
@@ -84,73 +94,24 @@ final class RetainedReuse {
             let field = RetainedSourceMedia.fieldForRole[member.role]
             return field == .identityImages ? .identityImage : field
         })
-        authority = Authority(filename: copy.print.filename, origin: copy.hostID, members: inventory.members)
+        let captured = Authority(filename: copy.print.filename, origin: copy.hostID,
+            members: inventory.members, route: route, instance: instance)
+        authority = captured
         if let refusal = sourcePictureRefusal(in: controller.draft) {
             notice = refusal
             return
         }
-        // Show the source in its ordinary well, so it can be replaced,
-        // fitted or removed. Other retained roles hydrate at submission.
-        let outgoing = controller.modelName.flatMap {
-            RenderRequest.batch(controller.draft, model: $0, copies: 1, randomBase: 0,
-                maxIdentityPhotos: controller.hosts.capabilities[copy.hostID]?.maxIdentityPhotos ?? 0).first
+        guard await materialize(captured, fence: fence, controller: controller) else {
+            if isCurrent(fence, draft: controller.draft) { authority = nil }
+            return
         }
-        let sourceUnchanged = originalSourceRevision == nil || originalSourceRevision == controller.sourceMediaRevision
-        if !sourceUnchanged { expectedFields.subtract([.sourceImage, .maskImage]) }
-        if let outgoing, sourceUnchanged, controller.draft.media.sourceImage == nil,
-           let member = RetainedSourceMedia.members(inventory.members, forHydrating: outgoing)
-            .first(where: { RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }) {
-            do {
-                if let refusal = RetainedSourceMedia.relayRefusal([member], copies: 1) { throw refusal }
-                let bytes = try await backend.retainedSourceMediaBytes(for: copy.print.filename, member: member.memberId)
-                guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
-                var pairedMask: String?
-                if controller.draft.media.maskImage == nil,
-                   controller.draft.media.parked.maskImage == nil,
-                   let mask = inventory.members.first(where: { $0.role == "mask_image" }) {
-                    if let refusal = RetainedSourceMedia.relayRefusal([member, mask], copies: 1) { throw refusal }
-                    let maskBytes = try await backend.retainedSourceMediaBytes(
-                        for: copy.print.filename, member: mask.memberId)
-                    guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
-                    pairedMask = maskBytes.base64EncodedString()
-                }
-                let encoded = bytes.base64EncodedString()
-                // A user-selected image wins even if it arrived while
-                // the retained bytes were in flight.
-                if controller.draft.media.sourceImage == nil,
-                   originalSourceRevision == nil || originalSourceRevision == controller.sourceMediaRevision {
-                    controller.draft.media.sourceImage = encoded
-                    controller.draft.media.sourceImageName = member.displayName
-                    controller.draft.media.sourceImageOriginal = encoded
-                    controller.draft.media.sourceImageOriginalName = member.displayName
-                    if controller.draft.media.maskImage == nil {
-                        controller.draft.media.maskImage = controller.draft.media.parked.maskImage ?? pairedMask
-                        controller.draft.media.parked.maskImage = nil
-                    }
-                }
-                // These wells now carry ordinary authored media; removing
-                // either is an explicit choice, never an archive revival.
-                expectedFields.subtract([.sourceImage, .maskImage])
-            } catch {
-                guard isCurrent(fence, draft: controller.draft), !Task.isCancelled else { return }
-                // An invisible source must not be applied after a failed preview.
-                authority = nil
-                restoreFailed = true
-                notice = "The source media couldn't be restored. Attach it again before generating."
-                return
-            }
-        }
-        // A source in the well is now ordinary authored media. Removing
-        // it must never revive a hidden archive attachment.
-        if controller.draft.media.sourceImage != nil {
-            expectedFields.subtract([.sourceImage, .maskImage])
-        }
-        let pairedSource = inventory.members.contains { RetainedSourceMedia.fieldForRole[$0.role] == .sourceImage }
-        let remaining = inventory.members.filter {
-            RetainedSourceMedia.fieldForRole[$0.role] != .sourceImage && !(pairedSource && $0.role == "mask_image")
+        guard isCurrent(fence, draft: controller.draft) else { return }
+        let remaining = inventory.members.filter { member in
+            guard let field = RetainedSourceMedia.draftField(for: member) else { return true }
+            return !settledFields.contains(field)
         }
         authority = remaining.isEmpty ? nil : Authority(filename: copy.print.filename,
-            origin: copy.hostID, members: remaining)
+            origin: copy.hostID, members: remaining, route: route, instance: instance)
         if inventory.members.contains(where: { $0.role.hasPrefix("stage_source:") }) {
             let source = inventory.members.contains { $0.role == "stage_source:0" } ? " and source picture" : ""
             notice = "Reusing the first stage’s settings\(source). Other stage inputs remain in the retained archive."
@@ -176,10 +137,13 @@ final class RetainedReuse {
 
     /// Each press hydrates a fresh request. A failed admission or another
     /// press keeps these disclosed files until explicit dismissal/selection.
-    func snapshot() -> Authority? { authority }
+    func snapshot() -> Authority? {
+        guard let authority, let hosts, originIsCurrent(authority, hosts: hosts) else { return nil }
+        return authority
+    }
 
     func canHydrateReferences(_ references: [GenerationReference]) -> Bool {
-        guard !probing, let authority else { return false }
+        guard !probing, let authority = snapshot() else { return false }
         return RetainedReferenceGuard.canHydrate(references: references, original: originalReferences,
             members: authority.members)
     }
@@ -190,7 +154,7 @@ final class RetainedReuse {
     }
 
     private func hasMissingFields(for request: GenerateRequest?) -> Bool {
-        let retained = Set((authority?.members ?? []).compactMap { member -> RetainedSourceMedia.Field? in
+        let retained = Set((snapshot()?.members ?? []).compactMap { member -> RetainedSourceMedia.Field? in
             let field = RetainedSourceMedia.fieldForRole[member.role]
             return field == .identityImages ? .identityImage : field
         })
@@ -229,6 +193,8 @@ final class RetainedReuse {
 
     func clear() {
         expectedFields = []
+        originalRevisions = [:]
+        settledFields = []
         restoreFailed = false
         selectedEntry = nil
         originalSourceRevision = nil

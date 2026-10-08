@@ -47,6 +47,8 @@ final class ReuseStore {
     var savedInputBaseline: RenderDraft?
     let savedFile: SavedReuseFile?
     var restoring = false
+    var restorationFailed = false
+    var initialMediaRevisions: [RetainedSourceMedia.Field: Int]?
 
     init(hosts: HostStore, savedFile: SavedReuseFile? = nil) {
         self.hosts = hosts
@@ -61,6 +63,7 @@ final class ReuseStore {
         let origin: MoldHost.ID
         let members: [RetainedSourceMedia.Member]
         var instance: String? = nil
+        var route: MoldHost? = nil
     }
 
     /// Opens a reuse. Clears whatever the last one left and returns the fence
@@ -78,6 +81,8 @@ final class ReuseStore {
         savedInputBaseline = nil
         savedFile?.save(nil)
         restoring = false
+        restorationFailed = false
+        initialMediaRevisions = nil
         authority = nil
         restored = nil
         notice = nil
@@ -102,15 +107,19 @@ final class ReuseStore {
         var unavailable: (PrintID, RetainedSourceMedia.Availability)?
         for copy in copies {
             guard isCurrent(fence), !Task.isCancelled else { return }
-            guard let client = hosts.backend(for: copy.host) else { continue }
+            guard let route = hosts.host(copy.host), let client = hosts.backend(for: copy.host) else { continue }
             let instance = hosts.instanceID(of: copy.host)
             guard let inventory = try? await client.retainedSourceMedia(for: copy.filename)
             else { continue }
             guard isCurrent(fence), !Task.isCancelled else { return }
-            guard hosts.instanceID(of: copy.host) == instance else { continue }
+            guard hosts.host(copy.host) == route, hosts.instanceID(of: copy.host) == instance else {
+                restorationFailed = true
+                notice = "The source machine changed. Reselect the print before generating."
+                return
+            }
             if inventory.availability == .available {
                 authority = Authority(filename: copy.filename, origin: copy.host,
-                                      members: inventory.members, instance: instance)
+                                      members: inventory.members, instance: instance, route: route)
                 return
             }
             // Replace a held answer only with one that has something to SAY.
@@ -125,7 +134,7 @@ final class ReuseStore {
                 unavailable = (copy, inventory.availability)
             }
         }
-        guard isCurrent(fence), let unavailable else { return }
+        guard isCurrent(fence) else { return }
         // Only a print whose OWN metadata says conditioning bytes shipped is
         // worth a sentence. A text-to-image print's archive entry has no pins
         // either, and the host cannot tell the two apart.
@@ -133,8 +142,10 @@ final class ReuseStore {
         // Never over the top of one already said: the reuse may have had
         // something more immediate to report -- a model this machine no
         // longer has -- and one line is one line.
+        restorationFailed = true
         guard notice == nil else { return }
-        notice = RetainedSourceMedia.disclosure(unavailable.1)
+        notice = unavailable.flatMap { RetainedSourceMedia.disclosure($0.1) }
+            ?? "The original inputs could not be restored. Reconnect the source machine and reselect the print."
     }
 
     /// A long clip is rendered as a CHAIN JOB, and `POST /api/chain-jobs` is
@@ -158,6 +169,17 @@ final class ReuseStore {
             + "picture. Attach one before developing."
     }
 
+    /// Materialized wells own their bytes. Never retain an invisible fallback
+    /// that could revive a source, mask or endpoint after the user removes it.
+    func retireMaterializedFields(_ fields: Set<RetainedSourceMedia.Field>) {
+        guard let authority else { return }
+        let remaining = authority.members.filter {
+            RetainedSourceMedia.draftField(for: $0).map { !fields.contains($0) } ?? true
+        }
+        self.authority = remaining.isEmpty ? nil : Authority(filename: authority.filename,
+            origin: authority.origin, members: remaining, instance: authority.instance, route: authority.route)
+    }
+
     /// Forgets the print entirely -- a new draft is not that print any more.
     func clear() {
         version += 1
@@ -171,6 +193,8 @@ final class ReuseStore {
         savedInputBaseline = nil
         savedFile?.save(nil)
         restoring = false
+        restorationFailed = false
+        initialMediaRevisions = nil
         authority = nil
         restored = nil
         notice = nil

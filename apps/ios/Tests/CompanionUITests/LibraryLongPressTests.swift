@@ -497,6 +497,41 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(print.isHittable)
     }
 
+    @MainActor func testRetainedOpeningAndClosingFramesAreVisibleAndRemovable() async throws {
+        continueAfterFailure = false
+        let machine = try FixtureMachine(referenceFixture: true, galleryPrints: 1, retainedFrameFixture: true)
+        let port = try await machine.start()
+        let app = XCUIApplication()
+        defer { app.terminate(); machine.stop() }
+        cleanUpFixture(machine, port: port, app: app)
+        app.launch()
+        pair(port, in: app, name: "Frame reuse workstation")
+        XCTAssertTrue(app.navigateToDestination("Library", shortcut: "2"))
+        let print = fixturePrint(in: app)
+        XCTAssertTrue(print.waitForExistence(timeout: 10))
+        print.tap()
+        let more = app.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5)); more.tap()
+        app.buttons["Use These Settings"].firstMatch.tap()
+        XCTAssertTrue(app.navigateToDestination("Generate", shortcut: "1"))
+        let first = app.buttons["First frame"].firstMatch
+        let last = app.buttons["Last frame"].firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(last.waitForExistence(timeout: 15), app.debugDescription)
+        let form = app.scrollViews["phone-generate-form"]
+        for _ in 0..<6 where !last.isHittable && form.exists { form.swipeUp() }
+        XCTAssertTrue(last.isHittable)
+        XCTAssertFalse(app.buttons["Last frame, empty"].exists)
+        attach(app, name: "Reuse restores both retained boundary frames")
+        last.tap()
+        let remove = app.buttons["Remove"].firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()
+        XCTAssertTrue(app.buttons["Last frame, empty"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["First frame"].exists)
+        XCTAssertTrue(machine.generationRequests.isEmpty, "Reuse and removal must never generate")
+        attach(app, name: "Closing frame removal remains explicit")
+    }
+
     @MainActor func testRetainedSourceReuseAppearsInWellAndCanBeRemoved() async throws {
         continueAfterFailure = false
         let app = try await populatedLibrary(retainedMediaFixture: true)

@@ -84,7 +84,7 @@ extension GeneratePane {
         accepted: Set<String> = [], feedbackID: UUID? = nil
     ) async {
         if let placed = await reuse.sourceForSubmission(in: draft, outgoing: outgoing,
-            live: { controller.draft }, fence: fence) {
+            live: { controller.draft }, fence: fence, mediaRevisions: { controller.mediaRevisions }) {
             controller.draft = placed
             startRun(accepted: accepted)
         } else if let feedbackID {
