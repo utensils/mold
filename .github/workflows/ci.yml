@@ -335,6 +335,9 @@ jobs:
             workflow_static:
               - '.github/actionlint.yaml'
               - '.github/workflows/**'
+              - 'scripts/ci/install-actionlint.sh'
+              - 'scripts/tests/actionlint-native.sh'
+              - 'scripts/tests/actionlint-installer.py'
               - 'scripts/tests/ci-routing-contract.sh'
               - 'scripts/tests/ci-affected-packages.sh'
             workflow:
@@ -553,9 +556,16 @@ jobs:
 # #             --manifest-path apps/macos/rust/mold-macos-ffi/Cargo.toml >/dev/null
 # #       - uses: DeterminateSystems/determinate-nix-action@v3
 # #         if: needs.changes.outputs.release == 'true'
+# #       - name: Install pinned native actionlint and analyzers
+# #         if: needs.changes.outputs.workflow_static == 'true'
+# #         run: |
+# #           sudo apt-get update && sudo apt-get install -y shellcheck pyflakes3
+# #           python3 scripts/tests/actionlint-installer.py
+# #           bash scripts/ci/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+# #           bash scripts/tests/actionlint-native.sh "$RUNNER_TEMP/actionlint/actionlint"
 # #       - name: Validate workflow syntax
 # #         if: needs.changes.outputs.workflow_static == 'true'
-# #         uses: docker://rhysd/actionlint:1.7.12
+# #         run: '"$RUNNER_TEMP/actionlint/actionlint" -shellcheck="$(command -v shellcheck)" -pyflakes="$(command -v pyflakes3)"'
 # #       - name: Validate CI routing policy
 # #         if: needs.changes.outputs.workflow_static == 'true'
 # #         run: |
@@ -791,7 +801,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace-build-first
-      - uses: docker://rhysd/actionlint:1.7.12
+      - name: Install pinned native actionlint and analyzers
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck pyflakes3
+          python3 scripts/tests/actionlint-installer.py
+          bash scripts/ci/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+          bash scripts/tests/actionlint-native.sh "$RUNNER_TEMP/actionlint/actionlint"
+      - name: Validate workflow syntax
+        run: '"$RUNNER_TEMP/actionlint/actionlint" -shellcheck="$(command -v shellcheck)" -pyflakes="$(command -v pyflakes3)"'
       - name: Validate temporary CI routing and dependency identity
         run: |
           python3 scripts/tests/ci-build-first.py

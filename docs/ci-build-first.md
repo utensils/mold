@@ -11,6 +11,11 @@ TestFlight processing validation, packaged artifact checks and publication remai
 active. Publishers depend on their artifact build rather than unrelated test jobs.
 No test implementation was deleted; local test commands remain available.
 
+Workflow lint uses actionlint 1.7.12 from its GitHub Linux amd64 release, with a
+checked-in SHA-256 verified before extraction. ShellCheck and Pyflakes are
+explicitly installed and checked with failing fixtures. This preserves the lint
+gate without depending on Docker Hub's unauthenticated image-pull quota.
+
 Observed timings on release main `11462906`:
 
 | Lane | Runtime |

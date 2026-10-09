@@ -19,6 +19,9 @@ for job in ('rust-default', 'cuda-typecheck', 'metal-check', 'coverage', 'linux-
     require('#   ' + job + ':' in (root / '.github/workflows/ci.yml').read_text(), f'{job} restoration definition missing')
 require('cargo nextest' not in ci and 'cargo clippy' not in ci, 'expensive Rust gates still active')
 require('cargo fmt --all -- --check' in ci and 'actionlint' in ci, 'basic static checks missing')
+require('docker://rhysd/actionlint' not in ci, 'static lint depends on rate-limited Docker Hub pulls')
+require('bash scripts/ci/install-actionlint.sh' in ci, 'pinned native actionlint installer missing')
+require('bash scripts/tests/actionlint-native.sh' in ci, 'external actionlint analyzers are not verified')
 for name in ('desktop.yml', 'ios.yml', 'macos-native.yml', 'ios-native.yml'):
     require('cargo clippy' not in active(name), f'{name} retains duplicate clippy builds')
 require('needs: [desktop-nightly]' in active('desktop.yml'), 'desktop publish waits for non-build gates')
