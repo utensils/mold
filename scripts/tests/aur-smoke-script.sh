@@ -48,7 +48,7 @@ for desktop_pkg in mold-ai-desktop mold-ai-desktop-bin; do
   PATH="$scratch/bin:$PATH" TEST_CAPTURE="$scratch/$desktop_pkg" \
     bash "$repo_root/scripts/aur/test-in-docker.sh" --as-is "$desktop_pkg" >/dev/null
   bash -n "$scratch/$desktop_pkg"
-  grep -Fq 'desktop-file-validate /usr/share/applications/com.utensils.mold.desktop' \
+  grep -Fq 'desktop-file-validate /usr/share/applications/mold-desktop.desktop' \
     "$scratch/$desktop_pkg"
 done
 awk '/^for member in .*usr\/bin\/mold-desktop/ {emit=1} emit {print} emit && /^done$/ {exit}' \
@@ -58,7 +58,7 @@ cat > "$scratch/desktop-fixture" <<'STUB'
 set -euo pipefail
 pkgfile=fixture.pkg.tar.zst
 bsdtar() {
-  for entry in usr/bin/mold-desktop usr/share/applications/com.utensils.mold.desktop \
+  for entry in usr/bin/mold-desktop usr/share/applications/mold-desktop.desktop \
     usr/share/metainfo/com.utensils.mold.metainfo.xml \
     usr/share/icons/hicolor/128x128/apps/com.utensils.mold.png \
     usr/share/icons/hicolor/512x512/apps/com.utensils.mold.png; do
@@ -68,7 +68,7 @@ bsdtar() {
 source "$1"
 STUB
 bash "$scratch/desktop-fixture" "$scratch/desktop-checks"
-for entry in usr/bin/mold-desktop usr/share/applications/com.utensils.mold.desktop; do
+for entry in usr/bin/mold-desktop usr/share/applications/mold-desktop.desktop; do
   if TEST_MISSING="$entry" bash "$scratch/desktop-fixture" "$scratch/desktop-checks" > /dev/null 2>&1; then
     echo "generated desktop checks accepted a missing $entry" >&2; exit 1
   fi

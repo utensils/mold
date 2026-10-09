@@ -20,8 +20,12 @@ icons="$repo_root/desktop/src-tauri/icons"
 [[ -f "$binary" ]] || { echo "error: $binary does not exist" >&2; exit 1; }
 
 install -Dm755 "$binary" "$prefix/bin/mold-desktop"
-install -Dm644 "$repo_root/packaging/linux/${app_id}.desktop" \
-  "$prefix/share/applications/${app_id}.desktop"
+# The entry is named for the binary, not the app id: Tauri leaves
+# `app.enableGtkAppId` off, so GTK reports the program name (`mold-desktop`)
+# as both the Wayland app_id and the X11 WM_CLASS, and launchers match windows
+# to the entry by that name.
+install -Dm644 "$repo_root/packaging/linux/mold-desktop.desktop" \
+  "$prefix/share/applications/mold-desktop.desktop"
 install -Dm644 "$repo_root/packaging/linux/${app_id}.metainfo.xml" \
   "$prefix/share/metainfo/${app_id}.metainfo.xml"
 # Tauri's icon set, keyed by the pixel size each file actually is.

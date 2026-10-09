@@ -242,7 +242,8 @@ jobs:
           sudo apt-get install -y \
             build-essential clang lld nasm pkg-config protobuf-compiler \
             libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev \
-            desktop-file-utils appstream
+            desktop-file-utils appstream \
+            xvfb xdotool x11-utils openbox dbus-x11
       - name: Build embedded web SPA and desktop frontend
         run: |
           ./scripts/ensure-web-dist.sh
@@ -263,8 +264,36 @@ jobs:
             echo "::error::the GPU-free desktop binary links a CUDA library"
             exit 1
           fi
-          desktop-file-validate packaging/linux/com.utensils.mold.desktop
+          desktop-file-validate packaging/linux/mold-desktop.desktop
           appstreamcli validate --no-net packaging/linux/com.utensils.mold.metainfo.xml
+      # Launchers match a window to its entry by the class GTK reports, which
+      # is the program name while Tauri's GTK app id is off; the entry is
+      # named and keyed (StartupWMClass) for it.
+      - name: Launch under Xvfb and check the window class
+        run: |
+          set -euo pipefail
+          xvfb-run -a dbus-run-session -- bash -s -- desktop/src-tauri/target/release/mold-desktop <<'EOF'
+          set -euo pipefail
+          openbox >/tmp/mold-openbox.log 2>&1 &
+          wm_pid=$!
+          sleep 1
+          MOLD_HOME="$(mktemp -d)" WEBKIT_DISABLE_COMPOSITING_MODE=1 "$1" &
+          pid=$!
+          trap 'kill "$pid" "$wm_pid" 2>/dev/null || true' EXIT
+          window=
+          for _ in $(seq 1 60); do
+            kill -0 "$pid"
+            window=$(xdotool search --onlyvisible --pid "$pid" 2>/dev/null | head -n 1 || true)
+            [[ -n "$window" ]] || window=$(xdotool search --onlyvisible --name '^Mold$' 2>/dev/null | head -n 1 || true)
+            [[ -n "$window" ]] && break
+            sleep 1
+          done
+          [[ -n "$window" ]] || { echo "::error::mold-desktop opened no window"; exit 1; }
+          wm_class=$(xprop -id "$window" WM_CLASS)
+          echo "$wm_class"
+          grep -Fq '"mold-desktop"' <<<"$wm_class" \
+            || { echo "::error::WM_CLASS no longer names mold-desktop; update packaging/linux/mold-desktop.desktop"; exit 1; }
+          EOF
       - name: Package GPU-free desktop archive
         run: >-
           scripts/package-desktop-linux-archive.sh
@@ -1570,3 +1599,8 @@ jobs:
           # both so we are resilient if either rotates.
           ssh_keyscan_types: "rsa,ed25519"
           allow_empty_commits: false
+          # A package's first publish clones an empty AUR repo, whose unborn
+          # branch takes the container's git default; the action pushes
+          # `master`, so name it explicitly. A no-op on an existing package —
+          # this is what creates new AUR packages with no manual seed push.
+          post_process: git symbolic-ref HEAD refs/heads/master

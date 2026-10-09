@@ -226,7 +226,7 @@ elif [ "$pkgname" = mold-ai-desktop ] || [ "$pkgname" = mold-ai-desktop-bin ]; t
   # the .desktop entry. `libcuda.so.1` is dlopened by cudarc at runtime, so it
   # never shows up in ldd and the source package's check needs no driver.
   desktop_checks=$(cat <<'DESKTOP'
-for member in    usr/bin/mold-desktop    usr/share/applications/com.utensils.mold.desktop    usr/share/metainfo/com.utensils.mold.metainfo.xml    usr/share/icons/hicolor/128x128/apps/com.utensils.mold.png    usr/share/icons/hicolor/512x512/apps/com.utensils.mold.png; do
+for member in    usr/bin/mold-desktop    usr/share/applications/mold-desktop.desktop    usr/share/metainfo/com.utensils.mold.metainfo.xml    usr/share/icons/hicolor/128x128/apps/com.utensils.mold.png    usr/share/icons/hicolor/512x512/apps/com.utensils.mold.png; do
   bsdtar -tf "$pkgfile" | grep -qx "$member"      || { echo "error: $pkgfile is missing $member" >&2; exit 1; }
 done
 DESKTOP
@@ -236,7 +236,7 @@ if ldd /usr/bin/mold-desktop | grep 'not found'; then
   echo "error: mold-desktop has unresolved libraries" >&2
   exit 1
 fi
-desktop-file-validate /usr/share/applications/com.utensils.mold.desktop
+desktop-file-validate /usr/share/applications/mold-desktop.desktop
 DESKTOP
 )
   if [ "$pkgname" = mold-ai-desktop-bin ]; then

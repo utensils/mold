@@ -18,7 +18,7 @@
       It runs its engine in-process or connects to a remote mold server.
     </p>
   </description>
-  <launchable type="desktop-id">com.utensils.mold.desktop</launchable>
+  <launchable type="desktop-id">mold-desktop.desktop</launchable>
   <url type="homepage">https://github.com/utensils/mold</url>
   <url type="bugtracker">https://github.com/utensils/mold/issues</url>
   <categories>

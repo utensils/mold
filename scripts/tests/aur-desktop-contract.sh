@@ -101,16 +101,22 @@ require_text "$bin_recipe" '${_binname}-x86_64-unknown-linux-gnu-cpu.tar.gz'
 require_text "$bin_recipe" 'provides=("${_pkgname}=${pkgver}")'
 
 # The .desktop entry, metainfo, and icons agree with the install script.
-desktop_file="packaging/linux/com.utensils.mold.desktop"
+desktop_file="packaging/linux/mold-desktop.desktop"
 require_text "$desktop_file" 'Exec=mold-desktop %U'
 require_text "$desktop_file" 'Icon=com.utensils.mold'
 require_text "$desktop_file" 'StartupWMClass=mold-desktop'
 require_text "packaging/linux/com.utensils.mold.metainfo.xml" '<id>com.utensils.mold</id>'
 require_text "packaging/linux/com.utensils.mold.metainfo.xml" \
-  '<launchable type="desktop-id">com.utensils.mold.desktop</launchable>'
+  '<launchable type="desktop-id">mold-desktop.desktop</launchable>'
 require_text "desktop/src-tauri/tauri.conf.json" '"identifier": "com.utensils.mold"'
 require_text "scripts/install-linux-desktop-files.sh" 'app_id="com.utensils.mold"'
 require_text "scripts/install-linux-desktop-files.sh" '"$prefix/bin/mold-desktop"'
+require_text "scripts/install-linux-desktop-files.sh" '"$prefix/share/applications/mold-desktop.desktop"'
+# Window-to-launcher matching relies on GTK reporting the program name, which
+# holds only while Tauri's GTK app id stays off.
+if grep -Fq '"enableGtkAppId": true' "$repo_root"/desktop/src-tauri/tauri*.json; then
+  fail "enableGtkAppId changes the Wayland app_id; rename packaging/linux/mold-desktop.desktop to match"
+fi
 require_text "scripts/package-desktop-linux-archive.sh" 'scripts/install-linux-desktop-files.sh'
 
 # The release job: GPU-free features, verified, packaged through the shared
@@ -122,6 +128,7 @@ for text in \
   '--features tauri/custom-protocol,pulid,webp' \
   'scripts/verify-h3-release-exclusion.sh' \
   'scripts/package-desktop-linux-archive.sh' \
+  "grep -Fq '\"mold-desktop\"' <<<\"\$wm_class\"" \
   "scripts/aur/test-in-docker.sh --archive \"\$PWD/$archive\" mold-ai-desktop-bin" \
   "path: $archive"; do
   grep -Fq -- "$text" <<<"$job" || fail "$release job build-linux-desktop-cpu is missing: $text"
@@ -137,6 +144,9 @@ if grep -Fq build-linux-desktop-cpu <<<"$(release_job_needs release-latest)"; th
   fail "the rolling release must not wait for the tag-only desktop job"
 fi
 publish_aur="$(release_job_text publish-aur)"
+# New AUR packages are created by their first CI push, never by hand.
+grep -Fq 'post_process: git symbolic-ref HEAD refs/heads/master' <<<"$publish_aur" \
+  || fail "publish-aur must name the branch of a new package's empty AUR repo"
 for pkg in mold-ai-desktop mold-ai-desktop-bin; do
   grep -Eq "pkgname: \[.*(^|[[:space:],\[])${pkg}([],[:space:]]|$)" <<<"$publish_aur" \
     || fail "publish-aur matrix is missing $pkg"
@@ -146,7 +156,7 @@ done
 require_text "scripts/aur/update-pkgbuild.sh" "$archive"
 require_text "scripts/aur/update-pkgbuild.sh" 'mold-ai|mold-ai-desktop)'
 require_text "scripts/aur/test-in-docker.sh" 'mold-ai-bin|mold-ai|mold-ai-git|mold-ai-desktop|mold-ai-desktop-bin)'
-require_text "scripts/aur/test-in-docker.sh" 'desktop-file-validate /usr/share/applications/com.utensils.mold.desktop'
+require_text "scripts/aur/test-in-docker.sh" 'desktop-file-validate /usr/share/applications/mold-desktop.desktop'
 require_text "packaging/aur/test/Dockerfile" 'desktop-file-utils'
 for doc in packaging/aur/README.md website/guide/installation.md website/guide/desktop.md; do
   require_text "$doc" 'mold-ai-desktop-bin'
