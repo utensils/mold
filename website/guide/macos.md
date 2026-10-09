@@ -141,6 +141,8 @@ Native shipping builds include the reviewed Metal H3 engine; remote generation u
 
 Click a job in Queue to see its source, settings and live progress or preview where the model supports it. The seed reads **Random** until a random job has an actual seed; explicitly locked zero remains valid.
 
+Held jobs offer **Failure Details** beside their controls. Job Details also shows a selectable diagnostic and **Copy Details**, including the machine and job ID. The concise error explains known failures in plain English. Cancel rechecks the owning machine and current state. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.
+
 Discover opens with manifest models from the selected machine. Choose **Browse Community Catalog**, search, or filter by family for community results. **Load More Models** shows the current result count in a prominent footer.
 
 In **Settings → General → Video Playback**, choose autoplay and repeat. Videos use inline controls without the full-video hover overlay. Video and 3-D GIF export provide Loop/Bounce, Forever/Once and pause settings when applicable.

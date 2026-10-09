@@ -163,6 +163,19 @@ async function copyDetail(): Promise<void> {
         <span>{{ model.problem.detail }}</span>
       </p>
 
+      <details
+        v-if="model.technicalDetail"
+        class="qed__technical"
+        data-test="queue-technical-details"
+      >
+        <summary>Technical details</summary>
+        <p>{{ model.hostLabel }} · Job {{ model.jobId }}</p>
+        <pre>{{ model.technicalDetail }}</pre>
+        <button type="button" @click="copyDetail">
+          {{ copied ? "Copied" : "Copy details" }}
+        </button>
+      </details>
+
       <p v-if="model.title" class="qed__printtitle">{{ model.title }}</p>
 
       <section v-if="model.prompt" class="qed__prompt">
@@ -382,6 +395,19 @@ async function copyDetail(): Promise<void> {
   color: var(--mold-text-dim, currentColor);
   font-size: 0.6875rem;
 }
+.qed__technical {
+  min-width: 0;
+  user-select: text;
+}
+.qed__technical pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--mold-fs-xs, 0.75rem);
+}
+.qed__technical summary {
+  cursor: pointer;
+}
+
 .qed__problem {
   display: flex;
   flex-direction: column;

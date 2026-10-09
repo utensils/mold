@@ -105,21 +105,31 @@ pub fn message(raw: &str) -> String {
         "tensor shape",
         "tensor mismatch",
         "tensor(",
-        "cuda",
-        "metal error",
-        "backtrace",
-        "panic",
-        "safetensors error",
         "dtype",
         "shape mismatch",
     ]
     .iter()
     .any(|s| lower.contains(s))
     {
-        return "The render failed. Check the machine’s logs for details.".into();
+        return "The model’s data did not match what the renderer expected. Try another model or report this job’s failure details.".into();
+    }
+    if lower.contains("safetensors error") {
+        return "The model file could not be read. Download that model again on the machine, then retry.".into();
+    }
+    if lower.contains("failed to authenticate the reviewed minimax h3 turbo adapter") {
+        return "The H3 Turbo model file could not be verified. Check its installation on that machine, then retry or move the job.".into();
+    }
+    if lower.contains("minimax h3 preparation evidence was rejected") {
+        return "The model could not be prepared on this machine. Check its installation or move the job to another machine.".into();
+    }
+    if lower.contains("cuda") || lower.contains("metal error") {
+        return "The graphics device could not finish the render. Retry the job or move it to another machine.".into();
+    }
+    if lower.contains("backtrace") || lower.contains("panic") {
+        return "Mold encountered an internal error while handling the request.".into();
     }
     if raw.is_empty() || raw.contains('\n') || raw.chars().count() > 240 {
-        return "The request could not be completed. Check the machine’s logs for details.".into();
+        return "Mold encountered an unexpected error and could not complete the request.".into();
     }
     readable_byte_tokens(raw)
 }

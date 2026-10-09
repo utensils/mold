@@ -123,6 +123,10 @@ pub struct JobEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "mold_core::user_error::serialize_optional")]
     pub error: Option<String>,
+    /// Original job-scoped diagnostic for an authenticated detail inspector.
+    /// `error` and `held_reason` remain concise presentation summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
@@ -870,6 +874,7 @@ impl JobRegistry {
                 dispatch_attempts: None,
                 held_reason: None,
                 error: None,
+                error_detail: None,
                 retryable: None,
                 // Batch membership is durable state, projected by the route
                 // from the journal for the same reason `durable` is.
@@ -1004,6 +1009,7 @@ impl JobRegistry {
                 dispatch_attempts: None,
                 held_reason: None,
                 error: None,
+                error_detail: None,
                 retryable: None,
                 // Batch membership is durable state, projected by the route
                 // from the journal for the same reason `durable` is.
@@ -1191,6 +1197,7 @@ mod tests {
                 dispatch_attempts: None,
                 held_reason: None,
                 error: None,
+                error_detail: None,
                 retryable: None,
                 batch_id: None,
                 client_batch_id: None,

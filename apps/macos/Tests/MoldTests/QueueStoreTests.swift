@@ -15,10 +15,15 @@ struct QueueStoreTests {
         let machine = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
         let fake = FakeBackend(host: machine)
         fake.refuses = ["cancelJob"]
+        fake.serverStatus = FakeFixtures.serverStatus()
+        fake.capabilityBlock = FakeFixtures.capabilities()
+        fake.queueListing = FakeFixtures.queueListing(["job-1"])
         let hosts = HostStore(hosts: [machine]) { _ in fake }
         let queue = QueueStore(hosts: hosts)
         let entry = FakeFixtures.queueEntry("job-1")
 
+        await hosts.refresh(machine)
+        await queue.poll(machine.id)
         await queue.cancel(entry, on: machine.id)
 
         #expect(fake.calls.contains("cancelJob"))
@@ -67,4 +72,25 @@ struct QueueStoreTests {
         #expect(queue.hasLoaded(on: workstation.id) == true)
         #expect(queue.entries(on: workstation.id).map(\.id) == ["job-1"])
     }
+    @Test func heldCancellationCannotStopAJobThatStartedAfterTheRowWasDrawn() async throws {
+        let machine = MoldHost(name: "workstation", baseURL: URL(string: "http://workstation")!)
+        let fake = FakeBackend(host: machine)
+        fake.serverStatus = FakeFixtures.serverStatus()
+        fake.capabilityBlock = FakeFixtures.capabilities()
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        await hosts.refresh(machine)
+        let queue = QueueStore(hosts: hosts)
+        let held = try MoldJSON.decoder.decode(QueueListing.self, from: Data(#"{"entries":[{"id":"h","state":"held"}]}"#.utf8))
+        fake.queueListing = held
+        await queue.poll(machine.id)
+        await queue.cancel(held.entries[0], on: machine.id)
+        #expect(fake.callCount("cancelHeldJob") == 1)
+        #expect(fake.callCount("cancelJob") == 0)
+        fake.queueListing = try MoldJSON.decoder.decode(QueueListing.self, from: Data(#"{"entries":[{"id":"h","state":"running"}]}"#.utf8))
+        await queue.poll(machine.id)
+        await queue.cancel(held.entries[0], on: machine.id)
+        #expect(fake.callCount("cancelHeldJob") == 1)
+        #expect(fake.callCount("cancelJob") == 0)
+    }
+
 }

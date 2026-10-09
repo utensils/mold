@@ -1809,6 +1809,13 @@ pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
     })
 }
 
+/// Preserve the complete cause chain at the durable admission boundary.
+/// Context alone identifies the failed stage but cannot explain its failure.
+#[cfg(feature = "mp4")]
+fn invalid_preparation_evidence(error: anyhow::Error) -> H3PrivateFl2VaPrepareError {
+    H3PrivateFl2VaPrepareError::InvalidEvidence(format!("{error:#}"))
+}
+
 /// FL2VA request and one concrete CUDA route. Endpoint normalization and noise
 /// preparation deliberately remain here and may construct CPU-only Candle
 /// tensors; this function never creates a CUDA `Device` or CUDA tensor. It
@@ -1832,7 +1839,7 @@ pub fn prepare_h3_private_fl2va_admission(
     {
         prepare_reviewed_h3_private_fl2va_admission(input, progress).map_err(|error| {
             // Preserve the one refusal a caller can act on. Everything else
-            // keeps the existing opaque evidence wording.
+            // retains its diagnostic cause chain as invalid evidence.
             let error = match error.downcast::<H3PrivateHostHeadroomShortfall>() {
                 Ok(shortfall) => {
                     return H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall)
@@ -1841,7 +1848,7 @@ pub fn prepare_h3_private_fl2va_admission(
             };
             match error.downcast::<H3PrivateDeviceHeadroomShortfall>() {
                 Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall),
-                Err(error) => H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()),
+                Err(error) => invalid_preparation_evidence(error),
             }
         })
     }
@@ -3201,7 +3208,7 @@ pub fn prepare_h3_private_fl2va_attempt(
     #[cfg(feature = "mp4")]
     {
         prepare_reviewed_h3_private_fl2va_attempt(input, progress)
-            .map_err(|error| H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()))
+            .map_err(invalid_preparation_evidence)
     }
 }
 
@@ -7587,6 +7594,18 @@ mod tests {
     };
     #[cfg(feature = "mp4")]
     use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn preparation_diagnostics_retain_the_underlying_adapter_failure() {
+        let error = anyhow!("reviewed adapter SHA-256 mismatch")
+            .context("failed to authenticate the reviewed MiniMax H3 Turbo adapter at /models/turbo.safetensors");
+        let error = invalid_preparation_evidence(error);
+        let H3PrivateFl2VaPrepareError::InvalidEvidence(reason) = error else {
+            panic!("an adapter verification failure must remain invalid evidence");
+        };
+        assert_eq!(reason, "failed to authenticate the reviewed MiniMax H3 Turbo adapter at /models/turbo.safetensors: reviewed adapter SHA-256 mismatch");
+    }
 
     /// Build the reviewed adapter authority for one tier, so envelope tests
     /// exercise the same value admission passes rather than a bare step count.

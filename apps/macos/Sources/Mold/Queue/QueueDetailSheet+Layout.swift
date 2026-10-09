@@ -45,6 +45,21 @@ extension QueueDetailSheet {
         }
     }
 
+    @ViewBuilder var failureDetails: some View {
+        let row = current ?? entry
+        if let diagnostic = QueueFailureDetails.diagnostic(row, child: queue.child(for: row, on: host.id)) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Failure Details").font(.headline)
+                Text(diagnostic).font(.callout.monospaced()).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("queue-failure-diagnostic")
+                CopyButton(what: "Failure Details", value: QueueFailureDetails.copyText(row, child: queue.child(for: row, on: host.id), machine: activeHost.name))
+                Text("These are the details saved with this job. Older machines may provide only a short reason.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     var technicalDetails: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button { showsTechnicalDetails.toggle() } label: {

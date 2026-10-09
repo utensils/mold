@@ -45,6 +45,11 @@ struct QueueHoldRow: View {
                         button(for: action)
                     }
                     MoveToMenu(destinations: moveToDestinations, send: moveTo)
+                    if let inspect {
+                        Button("Failure Details", action: inspect)
+                            .help("Show the machine’s saved diagnostic for this job")
+                            .accessibilityIdentifier("queue-failure-details-" + entry.id)
+                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

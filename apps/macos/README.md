@@ -834,3 +834,5 @@ removed; use an explicit Save to copy them again deliberately. This is a copy
 workflow: removing a source does not delete a destination copy. Permanent trash
 deletion reports the actual machine refusal; an older machine without the
 trash-only selected-delete endpoint must be updated before retrying.
+
+Actionable held queue jobs offer Cancel independently of Retry or Move availability. Failure Details shows the machine’s saved job diagnostic and supports copying it together with the machine, model and job identifiers; it does not imply access to the complete machine log. Queue explanations remain concise and use plain English. Current Mold servers enforce held-only cancellation, preventing stale Held actions from stopping a render. Update older machines for this safeguard.

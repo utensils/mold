@@ -122,6 +122,7 @@ export interface QueueEntryDetailModel {
   /** Honest explanation when no request is available, else null. */
   settingsNotice: string | null;
   problem: QueueDetailProblem | null;
+  technicalDetail: string | null;
   /** Whole, untruncated text for the Copy control. */
   copyText: string;
   reuse: QueueDetailAction;
@@ -434,6 +435,8 @@ export function queueEntryDetailModel(
       : null;
 
   const problem = problemFor(entry);
+  const technicalDetail =
+    text(entry.error_detail) ?? text(entry.error) ?? text(entry.held_reason);
   const groups = metadata ? settingsGroups(entry, metadata) : [];
 
   const facts = present([
@@ -486,14 +489,24 @@ export function queueEntryDetailModel(
       : null,
   ]);
 
-  const cancel: QueueDetailAction = running
-    ? {
-        applicable: true,
-        available: input.canCancelRunning === true,
-        blockedReason:
-          input.canCancelRunning === true ? null : RUNNING_CANCEL_UNSUPPORTED,
-      }
-    : { applicable: true, available: true, blockedReason: null };
+  const terminal = [
+    "complete",
+    "completed",
+    "cancelled",
+    "canceled",
+    "failed",
+    "done",
+  ].includes(entry.state);
+  const cancel: QueueDetailAction = terminal
+    ? { applicable: false, available: false, blockedReason: null }
+    : running
+      ? {
+          applicable: true,
+          available: input.canCancelRunning === true,
+          blockedReason:
+            input.canCancelRunning === true ? null : RUNNING_CANCEL_UNSUPPORTED,
+        }
+      : { applicable: true, available: true, blockedReason: null };
 
   const retryApplicable = held && entry.retryable === true;
   const retry: QueueDetailAction = {
@@ -511,6 +524,9 @@ export function queueEntryDetailModel(
     { label: "Host", value: hostLabel },
     { label: "State", value: entry.state },
     problem ? { label: "Problem", value: problem.detail } : null,
+    technicalDetail
+      ? { label: "Machine diagnostic", value: technicalDetail }
+      : null,
     text(entry.held_reason) && text(entry.held_reason) !== problem?.detail
       ? { label: "Technical hold reason", value: entry.held_reason as string }
       : null,
@@ -564,6 +580,7 @@ export function queueEntryDetailModel(
     metadataSource,
     settingsNotice: metadata ? null : QUEUE_SETTINGS_PENDING_NOTICE,
     problem,
+    technicalDetail,
     copyText: copyLines.join("\n"),
     reuse: {
       applicable: true,

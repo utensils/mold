@@ -11,7 +11,16 @@ import MoldClient
 extension QueueStore {
 
     func cancel(_ entry: QueueEntry, on host: MoldHost.ID) async {
-        await act(entry, on: host, doing: "cancel that job") { try await $0.cancelJob(id: entry.id) }
+        guard let machine = hosts.host(host), hosts.isUp(machine),
+              let current = entries(on: host).first(where: { $0.id == entry.id }),
+              current.state == entry.state,
+              QueueRowActions.resolve(current, on: hosts.capabilities[host]).cancel else { return }
+        let instance = hosts.instanceID(of: host)
+        await act(current, on: host, doing: "cancel that job") { client in
+            guard self.hosts.host(host) == machine, self.hosts.instanceID(of: host) == instance else { return }
+            if current.state == .held { _ = try await client.cancelHeldJob(id: current.id) }
+            else { try await client.cancelJob(id: current.id) }
+        }
     }
 
     func pause(_ entry: QueueEntry, on host: MoldHost.ID) async {

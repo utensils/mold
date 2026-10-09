@@ -115,3 +115,9 @@ router; the SPA fallback handles everything else and reuses
 
 Vue Router provides the five-workspace shell; composables and module-singleton
 stores provide state without a separate state-library dependency.
+
+Queue details show a plain-language explanation and expandable, selectable
+**Technical details** with the original machine diagnostic and job identity.
+Held work keeps **Cancel job** available even before settings finish loading.
+Cancellation rechecks the original server instance and current job state;
+completed work and an unreachable or replaced machine cannot be cancelled.

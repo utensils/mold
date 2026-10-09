@@ -11,6 +11,7 @@ struct QueueDetailSheet: View {
     let host: MoldHost
     @State private var detail: QueueEntry?
     @State private var unavailable = false
+    @State private var showingFailure = false
 
     private var current: QueueEntry? { queue.current(entry, on: host.id) }
 
@@ -70,7 +71,12 @@ struct QueueDetailSheet: View {
                 Section {
                     Text(entry.model ?? "Model").textSelection(.enabled)
                     Text(entry.id).font(.caption).textSelection(.enabled)
-                    if let reason = (current ?? entry).heldReason ?? (current ?? entry).error { Text(reason).textSelection(.enabled) }
+                    if QueueFailureDetails.diagnostic(current ?? entry, child: queue.child(for: current ?? entry, on: host.id)) != nil {
+                        Button { showingFailure = true } label: {
+                            Text("Failure Details").fixedSize(horizontal: false, vertical: true)
+                        }
+                        .buttonStyle(.borderless)
+                    }
                 } header: { SectionHeader("Model and job identity") }
                 if let metadata = detail?.metadata ?? current?.metadata ?? entry.metadata {
                     ForEach(detailGroups(metadata)) { group in
@@ -105,6 +111,7 @@ struct QueueDetailSheet: View {
         .sheet(item: Binding(get: {
             models.pendingLicense?.host == host.id && models.pendingLicense?.presentationOwner == router.presentationID && models.pendingLicense?.recoveryJob == entry.id ? models.pendingLicense : nil
         }, set: { if $0 == nil { models.cancelLicense() } })) { pending in LicenceSheet(pending: pending) }
+        .sheet(isPresented: $showingFailure) { QueueFailureDetailsSheet(entry: current ?? entry, host: host) }
         .presentationDetents([.large])
     }
 

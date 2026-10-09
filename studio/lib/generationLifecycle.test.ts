@@ -527,3 +527,25 @@ describe("generation child revision ordering", () => {
     expect(onlyJob(state).phase).toBe("accepted");
   });
 });
+
+it("preserves current diagnostic and clears it on a new retry revision", () => {
+  const held = reduceGenerationLifecycle(tracker(), {
+    type: "batch_snapshot",
+    batch: batch("held", 20, {
+      children: [
+        child("held", 20, {
+          error_detail: "CUDA invalid argument",
+          revision: 1,
+        }),
+      ],
+    }),
+  });
+  expect(onlyJob(held).errorDetail).toBe("CUDA invalid argument");
+  const retry = reduceGenerationLifecycle(held, {
+    type: "batch_snapshot",
+    batch: batch("queued", 21, {
+      children: [child("queued", 21, { revision: 2 })],
+    }),
+  });
+  expect(onlyJob(retry).errorDetail).toBeNull();
+});

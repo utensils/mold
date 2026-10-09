@@ -377,6 +377,8 @@ own `batch_id` / `client_batch_id`; a hold that needs operator repair is
 refused by name rather than silently skipped. `--json` prints the raw server
 documents.
 
+Queue listing, job detail and batch-child JSON may include `error_detail`, the original diagnostic for the current failure, alongside the plain-English summary. Use `mold queue show <JOB-ID> --json` when investigating a held job. Retrying clears the previous failure details; older servers may omit this additive field.
+
 ## `mold library`
 
 Browse and organize existing prints on the server selected by `MOLD_HOST`

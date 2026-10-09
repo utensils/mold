@@ -21,7 +21,7 @@
   },
   {
     "raw": "tensor shape mismatch: [1, 512]",
-    "message": "The render failed. Check the machine’s logs for details."
+    "message": "The model’s data did not match what the renderer expected. Try another model or report this job’s failure details."
   },
   {
     "raw": "failed to read /srv/models/weights.safetensors: No such file or directory",
@@ -49,19 +49,19 @@
   },
   {
     "raw": "CUDA kernel error at foo.rs:32",
-    "message": "The render failed. Check the machine’s logs for details."
+    "message": "The graphics device could not finish the render. Retry the job or move it to another machine."
   },
   {
     "raw": "",
-    "message": "The request could not be completed. Check the machine’s logs for details."
+    "message": "Mold encountered an unexpected error and could not complete the request."
   },
   {
     "raw": "opaque\ntrace\n 0: crate::internal",
-    "message": "The request could not be completed. Check the machine’s logs for details."
+    "message": "Mold encountered an unexpected error and could not complete the request."
   },
   {
     "raw": "long diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic diagnostic ",
-    "message": "The request could not be completed. Check the machine’s logs for details."
+    "message": "Mold encountered an unexpected error and could not complete the request."
   },
   {
     "raw": "private H3 canonical target needs at least 3000000000 unified-memory bytes, exceeding the 2000000000 byte unified-memory admission sample",
@@ -106,5 +106,49 @@
   {
     "raw": "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB, over this request's ~13.5 GB admission ceiling (90% of the ~15.0 GB usable) (retry after the cooldown)",
     "message": "Not enough graphics memory. Estimated need: 16.6 GB; available budget: 13.5 GB (3.1 GB short). Wait for the cooldown or try a smaller output size."
+  },
+  {
+    "raw": "no request-eligible device passed MiniMax H3 private admission: cuda:device: MiniMax H3 preparation evidence was rejected: failed to authenticate the reviewed MiniMax H3 Turbo adapter at /srv/models/adapter.safetensors",
+    "message": "The H3 Turbo model file could not be verified. Check its installation on that machine, then retry or move the job."
+  },
+  {
+    "raw": "failed to authenticate the reviewed MiniMax H3 Turbo adapter at /srv/models/adapter.safetensors: adapter rank does not match the reviewed tier",
+    "message": "The H3 Turbo model file could not be verified. Check its installation on that machine, then retry or move the job."
+  },
+  {
+    "raw": "safetensors error: invalid header while opening weights",
+    "message": "The model file could not be read. Download that model again on the machine, then retry."
+  },
+  {
+    "raw": "unsupported dtype in model weights",
+    "message": "The model’s data did not match what the renderer expected. Try another model or report this job’s failure details."
+  },
+  {
+    "raw": "MiniMax H3 preparation evidence was rejected: checkpoint bindings unavailable",
+    "message": "The model could not be prepared on this machine. Check its installation or move the job to another machine."
+  },
+  {
+    "raw": "internal panic while decoding model output",
+    "message": "Mold encountered an internal error while handling the request."
+  },
+  {
+    "raw": "no request-eligible device passed MiniMax H3 private admission: cuda:device: MiniMax H3 preparation evidence was rejected: failed to read weights: No such file or directory",
+    "message": "A required file is missing on the machine. Restore or download the model again."
+  },
+  {
+    "raw": "no request-eligible device passed MiniMax H3 private admission: cuda:device: MiniMax H3 preparation evidence was rejected: failed to read weights: Permission denied",
+    "message": "The machine cannot access a required file. Check its file permissions."
+  },
+  {
+    "raw": "no request-eligible device passed MiniMax H3 private admission: cuda:device: MiniMax H3 preparation evidence was rejected: safetensors error: InvalidHeader",
+    "message": "The model file could not be read. Download that model again on the machine, then retry."
+  },
+  {
+    "raw": "MiniMax H3 preparation evidence was rejected: failed to authenticate the reviewed MiniMax H3 Turbo adapter at /models/turbo.safetensors: Permission denied (os error 13)",
+    "message": "The machine cannot access a required file. Check its file permissions."
+  },
+  {
+    "raw": "MiniMax H3 preparation evidence was rejected: failed to authenticate the reviewed MiniMax H3 Turbo adapter at /models/turbo.safetensors: No such file or directory (os error 2)",
+    "message": "A required file is missing on the machine. Restore or download the model again."
   }
 ]

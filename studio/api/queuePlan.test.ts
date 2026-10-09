@@ -884,3 +884,19 @@ describe("queue plan contract", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+it("fences a held cancellation at the server even after its confirmation was opened", async () => {
+  const fetch = vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  await cancelQueueJob(
+    { baseUrl: "https://gpu.example", apiKey: null },
+    "held/job",
+    { onlyHeld: true },
+  );
+  expect(fetch.mock.calls[0]?.[0]).toBe(
+    "https://gpu.example/api/queue/held%2Fjob?only_held=true",
+  );
+});

@@ -74,6 +74,7 @@ export interface Job {
   error: string | null;
   /** Nonterminal durable hold details and host-owned retry fence. */
   holdError: string | null;
+  holdErrorDetail?: string | null;
   /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
   holdCode: string | null;
   retryable: boolean;

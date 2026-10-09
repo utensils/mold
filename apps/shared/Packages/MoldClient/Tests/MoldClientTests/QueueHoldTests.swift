@@ -59,3 +59,11 @@ private func child(errorCode: String?, retryable: Bool? = nil) -> BatchChild {
         gpu: nil, targetGpu: nil, batchIndex: nil, explicitlyPaused: nil, replayed: nil)
     #expect(QueueHold.resolve(entry: queued, child: nil) == nil)
 }
+
+@Test func legacyTechnicalHeldReasonGetsPlainEnglishWithoutLosingDiagnostic() {
+    let raw = "tensor shape mismatch in attention kernel"
+    let entry = heldEntry(heldReason: raw)
+    let hold = QueueHold.resolve(entry: entry, child: nil)
+    #expect(hold?.summary(modelName: "Model", hostName: "Machine") == UserFacingError.message(raw))
+    #expect(QueueFailureDetails.diagnostic(entry) == raw)
+}

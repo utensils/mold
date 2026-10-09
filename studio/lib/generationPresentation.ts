@@ -47,6 +47,7 @@ export type GenerationChildPresentation =
       kind: "held";
       label: string;
       error: string | null;
+      errorDetail?: string | null;
       code: string | null;
       retryable: boolean;
     }
@@ -245,6 +246,7 @@ export function presentGenerationChild({
         kind: "held",
         label: GENERATION_STAGE_LABELS.held,
         error: child.error,
+        ...(child.errorDetail ? { errorDetail: child.errorDetail } : {}),
         code: child.errorCode,
         retryable: child.retryable === true,
       };

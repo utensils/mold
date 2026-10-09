@@ -27,6 +27,12 @@ public enum UserFacingError {
         if lower.contains("permission denied") {
             return "This device cannot access that file. Check its permissions."
         }
+        if lower.contains("failed to authenticate the reviewed minimax h3 turbo adapter") {
+            return "The H3 Turbo model file could not be verified. Check its installation on that machine, then retry or move the job."
+        }
+        if lower.contains("minimax h3 preparation evidence was rejected") {
+            return "The model could not be prepared on this machine. Check its installation or move the job to another machine."
+        }
         if raw.isEmpty || raw.contains("\n") || raw.count > 240 || lower.contains("operation couldn’t be completed") || lower.contains("operation couldn't be completed") {
             return "That action failed. Check the app’s logs for details."
         }
@@ -79,11 +85,26 @@ public enum UserFacingError {
         if lower.contains("no device could produce an execution plan") {
             return "This machine cannot run those settings. Try another machine, model or output size."
         }
-        if ["tensor shape", "tensor mismatch", "tensor(", "cuda", "metal error", "backtrace", "panic", "safetensors error", "dtype", "shape mismatch"].contains(where: lower.contains) {
-            return "The render failed. Check the machine’s logs for details."
+        if ["tensor shape", "tensor mismatch", "tensor(", "dtype", "shape mismatch"].contains(where: lower.contains) {
+            return "The model’s data did not match what the renderer expected. Try another model or report this job’s failure details."
+        }
+        if lower.contains("safetensors error") {
+            return "The model file could not be read. Download that model again on the machine, then retry."
+        }
+        if lower.contains("failed to authenticate the reviewed minimax h3 turbo adapter") {
+            return "The H3 Turbo model file could not be verified. Check its installation on that machine, then retry or move the job."
+        }
+        if lower.contains("minimax h3 preparation evidence was rejected") {
+            return "The model could not be prepared on this machine. Check its installation or move the job to another machine."
+        }
+        if lower.contains("cuda") || lower.contains("metal error") {
+            return "The graphics device could not finish the render. Retry the job or move it to another machine."
+        }
+        if lower.contains("backtrace") || lower.contains("panic") {
+            return "Mold encountered an internal error while handling the request."
         }
         if raw.isEmpty || raw.contains("\n") || raw.count > 240 {
-            return "The request could not be completed. Check the machine’s logs for details."
+            return "Mold encountered an unexpected error and could not complete the request."
         }
         return readableByteTokens(raw)
     }
@@ -148,7 +169,7 @@ public enum UserFacingError {
         default:
             if code == "QUEUE_FULL" { return "The queue is full. Try again shortly." }
             if code == "SERVER_RESTARTING" { return "The machine is restarting. Try again shortly." }
-            return diagnostic.map(message) ?? "The request could not be completed. Check the machine’s logs for details."
+            return diagnostic.map(message) ?? "Mold encountered an unexpected error and could not complete the request."
         }
     }
 }

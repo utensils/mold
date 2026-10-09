@@ -4752,6 +4752,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn held_queue_and_batch_reports_keep_job_scoped_technical_details() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        admit_one_durable_batch(&state, "diagnostic-child", "diagnostic-batch");
+        let raw = "MiniMax H3 preparation evidence was rejected: failed to authenticate the reviewed MiniMax H3 Turbo adapter at /models/turbo.safetensors: reviewed adapter SHA-256 mismatch";
+        let claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        state
+            .queue_journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold(raw);
+        for (path, pointer) in [
+            ("/api/queue", "/entries/0"),
+            ("/api/queue/diagnostic-child", "/job"),
+            ("/api/generation-batches/diagnostic-batch", "/children/0"),
+        ] {
+            let response = app_with_state(state.clone())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = json_body(response).await;
+            let row = body.pointer(pointer).unwrap();
+            assert_eq!(row["error_detail"], raw, "{path}: {row}");
+            assert_eq!(row["error"], mold_core::user_error::message(raw), "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn delete_queue_terminalizes_a_held_batch_child_before_acknowledging() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6802,6 +6831,23 @@ mod tests {
         let row = state.queue_journal.list_all().pop().unwrap();
         assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
         assert_eq!(row.held_reason, None);
+        for (path, pointer) in [
+            ("/api/queue", "/entries/0"),
+            ("/api/queue/retryable-preparation", "/job"),
+            ("/api/generation-batches/batch-retry", "/children/0"),
+        ] {
+            let body = json_body(
+                app_with_state(state.clone())
+                    .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(
+                body.pointer(pointer).unwrap().get("error_detail").is_none(),
+                "{path}: {body}"
+            );
+        }
     }
 
     #[tokio::test]

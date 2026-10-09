@@ -60,6 +60,7 @@ struct QueueEntryRow: View {
     let host: MoldHost
     let inBatch: Bool
     @State private var inspecting: QueueEntry?
+    @State private var showingFailure = false
 
     var body: some View {
         let layout = RowAxis.for(size) == .horizontal
@@ -96,10 +97,18 @@ struct QueueEntryRow: View {
             .accessibilityIdentifier("queue-open-" + entry.id)
             .accessibilityHint("Show job details and controls")
             QueueItemActions(entry: entry, host: host)
+            if QueueFailureDetails.diagnostic(entry, child: queue.child(for: entry, on: host.id)) != nil {
+                Button { showingFailure = true } label: {
+                    Text("Failure Details").fixedSize(horizontal: false, vertical: true)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("queue-failure-details-" + entry.id)
+            }
         }
         .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("queue-entry-" + entry.id)
+        .sheet(isPresented: $showingFailure) { QueueFailureDetailsSheet(entry: entry, host: host) }
         .sheet(item: $inspecting) { row in QueueDetailSheet(entry: row, host: host) }
         .task(id: "\(host.id)|\(hosts.instanceID(of: host.id) ?? "unknown")|\(hosts.isUp(host))|\(entry.id)") {
             await queue.loadSourceThumbnail(for: entry, on: host.id)
@@ -175,8 +184,8 @@ struct QueueEntryRow: View {
 
 /// A held row's paragraph and its named buttons: Pull (then Retry) for a
 /// missing model, Retry where the machine says it would help, Move to…
-/// another machine, and Cancel -- side by side, stacked full width at AX
-/// sizes.
+/// another machine -- side by side, stacked full width at AX sizes.
+/// QueueItemActions draws Cancel independently of this recovery layout.
 struct QueueHeldActions: View {
     @Environment(AppRouter.self) private var router
     @Environment(QueueStore.self) private var queue
@@ -230,6 +239,7 @@ struct QueueHeldActions: View {
             if entry.authority(instanceId: "") != nil, entry.state == .held {
                 MoveToMenu(entry: entry, host: host)
             }
+
         }
     }
 

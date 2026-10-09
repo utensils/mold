@@ -32,7 +32,7 @@ nonisolated let failureVoiceTable: [FailureVoiceRow] = [
     .init(error: .http(status: 429, code: nil, message: "Too many."), reason: "Too many.",
           advice: "Try again in a moment."),
     .init(error: .http(status: 500, code: nil, message: nil),
-          reason: "The request could not be completed. Check the machine’s logs for details.", advice: "Try again in a moment."),
+          reason: "Mold encountered an unexpected error and could not complete the request.", advice: "Try again in a moment."),
     .init(error: .malformedResponse,
           reason: "It answered something this version of Mold can't read.",
           advice: "Update Mold here, or on that machine."),

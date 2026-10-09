@@ -3116,6 +3116,7 @@ pub(crate) fn generation_batch_status(
                     index: child.batch_index,
                     job_id: child.job_id,
                     state,
+                    error_detail: child.error.clone().or_else(|| corrupt_state_error.clone()),
                     error: child.error.or(corrupt_state_error),
                     error_code: (child.state == "held")
                         .then_some(child.error_code)
@@ -7422,6 +7423,7 @@ fn job_entry_from_durable_projection(
         replayed: Some(row.replay_seen > 0),
         dispatch_attempts: Some(row.dispatch_attempts),
         held_reason: row.held_reason,
+        error_detail: error.clone(),
         error,
         retryable: (state == crate::job_registry::JobLifecycle::Held).then_some(row.retryable),
         batch_id: row.batch_id,

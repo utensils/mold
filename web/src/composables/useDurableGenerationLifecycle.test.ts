@@ -554,6 +554,7 @@ describe("web durable generation lifecycle", () => {
           jobId: `job-${clientBatchId}-1`,
         },
         "cancel",
+        { onlyHeld: false },
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
@@ -596,10 +597,55 @@ describe("web durable generation lifecycle", () => {
           jobId: `job-${clientBatchId}-1`,
         },
         "cancel",
+        { onlyHeld: false },
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
   });
+
+  it.each([409, 503])(
+    "keeps held-only cancellation fenced after failure %s and a running snapshot",
+    async (status) => {
+      admitGenerationBatch.mockImplementation(
+        (_target: unknown, body: { client_batch_id: string }) =>
+          Promise.resolve(batch(body.client_batch_id)),
+      );
+      const stream = useGenerateStream();
+      const id = stream.submit(
+        request("held cancel"),
+        { kind: "single" },
+        route,
+      );
+      await vi.waitFor(() =>
+        expect(
+          stream.jobs.value.find((job) => job.id === id)?.serverId,
+        ).toBeTruthy(),
+      );
+      const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+      const client = job.durableBatch!.clientBatchId;
+      const held = batch(client, ["held"]);
+      held.children[0]!.error = "Held failure";
+      reconcileGenerationBatches.mockResolvedValue(statusResponse([held]));
+      await __testing__.reconcileDurableHost(route.hostId);
+      mutateQueueJobOnExpectedInstance.mockRejectedValue(
+        Object.assign(new Error("held job changed"), { status }),
+      );
+      await expect(stream.cancel(id)).rejects.toThrow("held job changed");
+      const running = batch(client, ["running"]);
+      running.children[0]!.updated_at_ms = 30;
+      reconcileGenerationBatches.mockResolvedValue(statusResponse([running]));
+      await __testing__.reconcileDurableHost(route.hostId);
+      await vi.waitFor(() => expect(job.holdError).toBeNull());
+      expect(
+        mutateQueueJobOnExpectedInstance.mock.calls.every(
+          (call) => call[3]?.onlyHeld === true,
+        ),
+      ).toBe(true);
+      expect(
+        __testing__.loadDurableRecoveryJobs(localStorage)[0]?.cancelOnlyHeld,
+      ).toBe(status === 409 ? false : true);
+    },
+  );
 
   it("announces a held child once, with the machine's own reason", async () => {
     // A print is admitted BEFORE its model is resolved, so "nobody has this

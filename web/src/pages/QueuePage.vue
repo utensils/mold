@@ -50,6 +50,15 @@ function inspectLocal(job: Job, opener: HTMLElement) {
       },
       opener,
     );
+  else if (job.durableBatch)
+    void inspection.openLocal(
+      {
+        job,
+        cancel: () => stream.cancel(job.id),
+        retry: () => stream.retry(job.id),
+      },
+      opener,
+    );
   else
     toast(
       "error",

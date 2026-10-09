@@ -70,6 +70,7 @@ struct QueueDetailSheet: View {
                                 .help("Try loading the full settings for this job again")
                         }
                     }
+                    failureDetails
                     technicalDetails
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

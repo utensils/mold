@@ -1035,3 +1035,9 @@ Collection Hide/Show remains shared across matching names, with ordered local
 retry intentions bound to each machine route and installation; pending changes
 retry while this client runs and refreshes. Removing or organizing a media copy
 under a machine filter affects that machine's copy.
+
+Queue details show a plain-language explanation and expandable, selectable
+**Technical details** with the original machine diagnostic and job identity.
+Held work keeps **Cancel job** available even before settings finish loading.
+Cancellation rechecks the original server instance and current job state;
+completed work and an unreachable or replaced machine cannot be cancelled.

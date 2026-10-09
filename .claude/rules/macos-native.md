@@ -82,3 +82,5 @@ observe deferred sheet requests in the presenter body. Keep issue acknowledgment
 controls out of clean reports. Quit-drain panels use constrained content margins
 and native button padding, sized to fit their wrapped message. Verify actual
 presented sheets and rendered quit-panel geometry, not only detached views.
+
+Queue Cancel remains visibly available for every currently actionable row, independently of batch metadata, retryability and transfer destinations. Failure Details preserves optional `error_detail` separately from the plain-English row explanation, falling back to the older machine’s reason. Copy includes machine and job identity. Cancel rechecks current state; Held actions always use the held-only endpoint and must never widen their intent after a state change. Current servers enforce this guard atomically; older servers may ignore the query, so do not promise that safeguard on older hosts.
