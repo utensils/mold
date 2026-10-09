@@ -11,6 +11,78 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-09
+
+- **Held queue controls and failure details.** Native iOS and Tauri mobile keep Cancel available while job metadata loads. Native Mac, web and mobile surfaces expose copyable job failure details, and stale held cancellations cannot stop a job that has started running.
+- **Clearer render failures.** Shared error messages explain model verification, model data and graphics-device failures in plain English. Queue APIs preserve the current raw diagnostic, retries clear old details, and MiniMax H3 verification failures retain their underlying cause.
+- **Mold desktop app on the AUR.** Two new Arch packages install the desktop app
+  beside any `mold-ai*` CLI package: `mold-ai-desktop-bin`, a prebuilt GPU-free
+  build for remote GPU hosts, and `mold-ai-desktop`, which builds the CUDA app
+  from source (`CUDA_COMPUTE_CAP=86`, `89` or `120`). Both ship a launcher
+  entry, AppStream metadata and icons. Tagged releases now also attach the
+  GPU-free Linux desktop archive, `mold-desktop-x86_64-unknown-linux-gnu-cpu.tar.gz`.
+- Harden macOS Sync Details dismissal with native dismissal on Done and Escape, and remove issue controls from successful reports.
+- Give the macOS Quit Now dialog native button padding and consistent margins around its wrapped message.
+- **Remember sync warning choices.** Show saved acknowledgment state when reopening native Mac sync issue details; new issues remain unchecked and Reset updates the control immediately.
+- **Accurate shared Library management.** Machine filters now scope collection membership,
+  counts and media actions consistently across native Mac/iOS, web and desktop/mobile.
+  Missing collections and unavailable inventories are distinguished. Hidden collections
+  protect every known copy; visibility changes retry across machines and copied
+  collections preserve their visibility and organization.
+- **Quiet, recurring native Mac sync.** Sync runs immediately and every five minutes
+  during the app session, with completion status, a next-run indicator and Stop.
+  Acknowledge unchanged media issues without hiding new errors or stopping retries.
+  Intentionally removed local copies stay removed. Trash deletion failures explain
+  the machine’s actual refusal instead of only reporting zero confirmed copies.
+- **Control library copies by machine.** Machine-filtered trash, restore, permanent deletion and Empty Trash preserve copies on other hosts across native Mac/iOS, web, desktop and mobile. Native Mac Trash is easier to find, clears stale shelf filters, shows hidden collection members and supports inspecting deleted videos before recovery.
+- **Preserve restored files during trash deletion.** Selected Trash deletion uses a dedicated server operation that rechecks current trash membership; older hosts and offline local deletion fail safely. Permanent deletion on native iOS always asks for confirmation.
+- **Restore editable input media when reusing settings.** Restore retained opening and closing frames, keyframes and other supported inputs across native iOS/macOS, web, desktop and mobile. Shorter clips target their current final frame. Preserve continuation overlap and authored reference strength, and prevent late restoration from reviving removed or replaced inputs.
+- **Queue model download feedback.** Download and Retry now shows immediate acknowledgement,
+  queued/download progress, license review, reconnection and failure outcomes beside the job
+  across native iOS/macOS and web/desktop/mobile queue controls. Recovery follows exact
+  download tickets and retries only the unchanged held job after every required download succeeds.
+  Native iOS held rows avoid duplicated error paragraphs and stack crowded actions.
+- **Restore packaged frontend builds.** Include shared error contract fixtures in Nix and Docker build sources so web and desktop type checking succeeds.
+- **Readable errors across Mold Studio.** Native macOS/iOS, web and Tauri clients
+  show concise recovery messages, readable memory estimates and shortfalls, and
+  preserve GPU restart/cooldown advice. iOS held jobs show their reason once at
+  full row width; detailed diagnostics remain in logs and durable records.
+- **MiniMax H3 paired-frame queue recovery.** Preserve first and last frame
+  conditioning through durable queue planning and replay for FL2VA and its
+  supported Turbo tiers, fixing jobs held before dispatch despite adequate GPU
+  memory. Existing sealed queued media remain compatible.
+- **Queue reference images on every surface.** Queue rows and Job Details show
+  sealed conditioning images across models, including ordered edit references,
+  identity photos, named views, masks, control images and boundary frames. Details
+  list each input separately and disclose audio/video references and unavailable
+  previews. Web, desktop, mobile and native iOS/macOS use the owning machine's
+  authenticated media rather than filenames or denoise previews.
+- **Native Library badge parity.** iOS and macOS mark new media since the previous
+  Library visit, matching desktop session behavior. iOS machine labels fit beside
+  clip playback badges without overlap.
+- **Reliable native iOS settings reuse.** Collection items replace stale draft
+  attachments with their own retained inputs. Missing/offline media can be retried
+  and blocks generation until restored or explicitly removed; late downloads
+  cannot revive removed sources or replace a newer selection.
+- Native Mac and iOS reference images larger than a model's processing budget now remain usable; engines automatically prepare their pixels. Large identity photos and fresh Discord image attachments are bounded before transport and admission, and Library use-as-source applies the normal image import policy.
+- Native macOS images and videos fit the available viewer space, including tall clips, without hiding media behind the Library toolbar. Playback controls no longer dim the picture on hover.
+- Native macOS image and video viewers offer Actual Size at one image pixel per display pixel, with scrolling for larger media and Fit to return to the complete picture.
+- **Keep Mac draft attachments across relaunch.** Save local authoring inputs privately alongside the prompt and settings, including first/last frames and parked attachments. Retained references still require validation from their original machine. Save failures are visible, and missing or corrupt saved inputs require explicit recovery before generating.
+- **Clearer native Mac generation.** Confirm Generate presses and queue acceptance, explain input restoration, make random and fixed seeds explicit, and let the prompt editor resize vertically.
+- **More usable native Mac controls.** Make settings headings reliably collapsible, resize the inspector, search and page recent prompts, and explain controls with plain-English tooltips.
+- **Organized job details.** Group live progress, preview and recipe settings, with technical identifiers available separately.
+- **Sync historical prints without retained inputs.** Native Mac library sync recognizes verified finished prints with unavailable historical inputs as saved, reports those inputs separately, and stops repeatedly classifying existing copies as failed while preserving output and retained-media integrity checks.
+- **More focused native generation.** iOS keeps Generate stable while jobs run, opens progress in Queue, adds Library Use as Source and a searchable all-machine source picker, and preserves incompatible attachments for later use. Completion notifications remain; generic ongoing Live Activities are removed.
+- **Native queue and discovery.** Mac queue jobs open into details and live previews. Model discovery starts with manifest models and offers prominent community pagination. Unpinned queue seeds read Random instead of placeholder zero.
+- **Input and media parity.** GUI still-image imports fit oversized inputs with correct orientation and transparency. Native video settings add autoplay/repeat, Mac playback avoids the hover scrim, and Mac GIF export offers playback/repeat/pause controls. Paired routes prefer verified LAN after network changes; iOS 3-D loading uses checked temporary files, selected-page loading and retryable errors.
+- **Random seeds for long clips.** Newly created chains resolve omitted seeds once and persist the same seed for every stage and resume; explicit zero remains a fixed seed. Local scripted chains follow the same policy.
+- **Restore Nix builds after the API-only toggle.** Initialize `web_ui_enabled`
+  in explicit CLI test fixtures and remove the stale static-key count assertion
+  so package checks can run with the new configuration field.
+- **Stable web media previews.** Preserve source thumbnails and pending requests across unchanged activity polls, avoiding flashing and redraws.
+- **Hidden collections stay out of Recent.** Create follows the Library visibility policy and refreshes collection visibility with its gallery.
+- **API-only servers.** Add default-on `web_ui_enabled` / `MOLD_WEB_UI_ENABLED` and NixOS `services.mold.webUi.enable`; disabling the browser interface preserves all API functionality ([#1815](https://github.com/utensils/mold/issues/1815)).
+
 ## [0.33.0] - 2026-10-06
 
 - **Native macOS release builds.** Keep the engine lockfile synchronized with workspace version bumps and validate the locked shipping dependency graph before release.
@@ -6230,7 +6302,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/utensils/mold/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/utensils/mold/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/utensils/mold/compare/v0.30.1...v0.31.0

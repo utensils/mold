@@ -1,2 +1,0 @@
-- Harden macOS Sync Details dismissal with native dismissal on Done and Escape, and remove issue controls from successful reports.
-- Give the macOS Quit Now dialog native button padding and consistent margins around its wrapped message.

@@ -1,2 +1,0 @@
-- **Held queue controls and failure details.** Native iOS and Tauri mobile keep Cancel available while job metadata loads. Native Mac, web and mobile surfaces expose copyable job failure details, and stale held cancellations cannot stop a job that has started running.
-- **Clearer render failures.** Shared error messages explain model verification, model data and graphics-device failures in plain English. Queue APIs preserve the current raw diagnostic, retries clear old details, and MiniMax H3 verification failures retain their underlying cause.

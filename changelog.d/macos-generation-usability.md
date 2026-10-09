@@ -1,3 +1,0 @@
-- **Clearer native Mac generation.** Confirm Generate presses and queue acceptance, explain input restoration, make random and fixed seeds explicit, and let the prompt editor resize vertically.
-- **More usable native Mac controls.** Make settings headings reliably collapsible, resize the inspector, search and page recent prompts, and explain controls with plain-English tooltips.
-- **Organized job details.** Group live progress, preview and recipe settings, with technical identifiers available separately.

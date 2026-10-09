@@ -1,1 +1,0 @@
-- **Restore packaged frontend builds.** Include shared error contract fixtures in Nix and Docker build sources so web and desktop type checking succeeds.
