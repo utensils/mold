@@ -80,7 +80,7 @@ struct AlsoRunningRow: Identifiable, Equatable {
         switch work {
         case let .reported(row):
             !row.stale && !row.unavailableKind && row.item.kind == "generation" && row.item.execution == "chain"
-                && row.item.canCancel && ["queued", "held", "paused", "running", "preparing"].contains(row.item.phase)
+                && row.item.canCancel && ["queued", "held", "paused", "running", "loading", "preparing"].contains(row.item.phase)
         case let .upscale(_, job): [.queued, .running, .finalizing, .paused].contains(job.state)
         // The request IS the work and the machine is already doing it;
         // there is no route that would call it off.

@@ -1284,12 +1284,15 @@ describe("MobileApp generation lifecycle", () => {
   );
 
   it.each([
-    { cooperative: true, replaced: false },
-    { cooperative: false, replaced: false },
-    { cooperative: true, replaced: true },
+    { phase: "running", cooperative: true, replaced: false },
+    { phase: "loading", cooperative: true, replaced: false },
+    { phase: "loading", cooperative: false, replaced: false },
+    { phase: "loading", cooperative: true, replaced: true },
+    { phase: "running", cooperative: false, replaced: false },
+    { phase: "running", cooperative: true, replaced: true },
   ])(
-    "gates shared cancellation with capability $cooperative and replacement $replaced",
-    async ({ cooperative, replaced }) => {
+    "gates shared cancellation in $phase with capability $cooperative and replacement $replaced",
+    async ({ phase, cooperative, replaced }) => {
       let reportedInstance = status.instance_id;
       apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/models") return Promise.resolve([model]);
@@ -1308,7 +1311,7 @@ describe("MobileApp generation lifecycle", () => {
               {
                 id: "foreign-running",
                 kind: "generation",
-                phase: "running",
+                phase,
                 model: model.name,
                 created_at_unix_ms: 1,
                 updated_at_unix_ms: 9,
@@ -1458,53 +1461,56 @@ describe("MobileApp generation lifecycle", () => {
     );
   });
 
-  it("cancels a running auto-chain through its durable chain authority", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/activity") {
-        return Promise.resolve({
-          instance_id: status.instance_id,
-          observed_at_unix_ms: 10,
-          items: [
-            {
-              id: "running-auto-chain",
-              kind: "generation",
-              execution: "chain",
-              phase: "running",
-              model: model.name,
-              created_at_unix_ms: 1,
-              updated_at_unix_ms: 9,
-              can_cancel: true,
-            },
-          ],
-        });
-      }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
+  it.each(["running", "loading"])(
+    "cancels a %s auto-chain through its durable chain authority",
+    async (phase) => {
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/activity") {
+          return Promise.resolve({
+            instance_id: status.instance_id,
+            observed_at_unix_ms: 10,
+            items: [
+              {
+                id: "running-auto-chain",
+                kind: "generation",
+                execution: "chain",
+                phase,
+                model: model.name,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 9,
+                can_cancel: true,
+              },
+            ],
+          });
+        }
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
 
-    const row = wrapper.get("[data-test='mobile-fleet-job']");
-    const control = row.get("[data-test='swipe-action-fleet-cancel']");
-    expect(control.text()).toBe("Cancel");
-    await control.trigger("click");
-    await flushPromises();
-    const confirm = wrapper.get("[data-test='mobile-queue-fallback-cancel']");
-    await confirm.trigger("click");
-    expect(apiFetchTo).not.toHaveBeenCalledWith(
-      target,
-      "/api/chain-jobs/running-auto-chain/cancel",
-      { method: "POST" },
-    );
-    await confirm.trigger("click");
-    await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {
-      method: "POST",
-    });
-  });
+      const row = wrapper.get("[data-test='mobile-fleet-job']");
+      const control = row.get("[data-test='swipe-action-fleet-cancel']");
+      expect(control.text()).toBe("Cancel");
+      await control.trigger("click");
+      await flushPromises();
+      const confirm = wrapper.get("[data-test='mobile-queue-fallback-cancel']");
+      await confirm.trigger("click");
+      expect(apiFetchTo).not.toHaveBeenCalledWith(
+        target,
+        "/api/chain-jobs/running-auto-chain/cancel",
+        { method: "POST" },
+      );
+      await confirm.trigger("click");
+      await flushPromises();
+      expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {
+        method: "POST",
+      });
+    },
+  );
 
   it("cancels a fallback running chain without singleton cooperative capability", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {

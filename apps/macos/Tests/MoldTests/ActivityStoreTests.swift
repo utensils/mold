@@ -79,6 +79,30 @@ struct ActivityStoreTests {
         #expect(backend.callCount("cancelJob") == 0)
     }
 
+    @Test func loadingChainsCancelOnlyWithCurrentPhaseAndOwnAuthority() async {
+        let host = machine()
+        let backend = fake(for: host)
+        backend.serverStatus = FakeFixtures.serverStatus(instanceId: "inst-1")
+        backend.extras.activitySnapshot = chainSnapshot("loading")
+        let (store, _, _) = await bench(backend, host: host)
+        await store.refresh(on: host.id)
+        let offered = store.rows[0]
+        #expect(store.canAct(.cancel, on: offered))
+        backend.extras.activitySnapshot = chainSnapshot("running")
+        await store.act(.cancel, on: offered)
+        #expect(backend.callCount("cancelChainJob") == 0)
+        backend.extras.activitySnapshot = chainSnapshot("loading", canCancel: false)
+        await store.refresh(on: host.id)
+        #expect(!store.canAct(.cancel, on: store.rows[0]))
+        await store.act(.cancel, on: store.rows[0])
+        #expect(backend.callCount("cancelChainJob") == 0)
+        backend.extras.activitySnapshot = chainSnapshot("loading")
+        await store.refresh(on: host.id)
+        await store.act(.cancel, on: store.rows[0])
+        #expect(backend.callCount("cancelChainJob") == 1)
+        #expect(backend.callCount("cancelJob") == 0)
+    }
+
     @Test func changedChainStateInstanceAndOfflineHostNeverMutate() async {
         let host = machine()
         let backend = fake(for: host)

@@ -40,6 +40,8 @@ vi.mock("@studio/composables/useQueueDownloadRecovery", () => ({
   startQueueDownloadRecovery: recovery.start,
 }));
 
+import { apiJsonTo, apiFetchTo } from "@studio/api/client";
+
 import { __resetQueueCommandState, useQueueCommands, type QueueCommands } from "./useQueueCommands";
 import { useConnectionStore } from "../stores/connection";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -492,6 +494,9 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     ["running", false, false],
     ["running", true, true],
     ["preparing", undefined, false],
+    ["loading", undefined, false],
+    ["loading", false, false],
+    ["loading", true, true],
     ["cancelling", true, false],
     ["unknown", true, false],
     ["completed", true, false],
@@ -505,6 +510,64 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     } as never;
     expect(commands().canCancel(pausedChainRow({ execution: null, phase, can_cancel: true }))).toBe(
       expected,
+    );
+  });
+
+  it.each([null, "chain"])("stops loading work through its owning %s route", async (execution) => {
+    liveHost();
+    useJobsStore().queues.local = {
+      ...(snapshot(false) as object),
+      caps: { canCancelRunning: execution === null },
+    } as never;
+    const activity = {
+      instance_id: "i-1",
+      items: [{ id: "chain-7", kind: "generation", phase: "loading", can_cancel: true }],
+    };
+    vi.mocked(apiJsonTo).mockReset().mockResolvedValue(activity);
+    vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
+    const api = commands();
+    const row = pausedChainRow({ execution, phase: "loading", can_cancel: true });
+    expect(api.canCancel(row)).toBe(true);
+    const cancelJob = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue();
+    await api.cancel(row);
+    if (execution === null) {
+      expect(cancelJob).toHaveBeenCalledWith("local", "chain-7", { onlyHeld: false });
+      return;
+    }
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      expect.anything(),
+      execution === "chain" ? "/api/chain-jobs/chain-7/cancel" : "/api/queue/chain-7",
+      { method: execution === "chain" ? "POST" : "DELETE" },
+    );
+  });
+
+  it.each([true, false])(
+    "rechecks cooperative authority when queued work starts loading (%s)",
+    async (cooperative) => {
+      liveHost();
+      useJobsStore().queues.local = {
+        ...(snapshot(false) as object),
+        caps: { canCancelRunning: cooperative },
+      } as never;
+      vi.mocked(apiJsonTo)
+        .mockReset()
+        .mockResolvedValue({
+          instance_id: "i-1",
+          items: [{ id: "chain-7", kind: "generation", phase: "loading", can_cancel: true }],
+        });
+      vi.spyOn(useLiveActivityStore(), "refresh").mockResolvedValue(undefined as never);
+      const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue();
+      await commands().cancel(
+        pausedChainRow({ execution: null, phase: "queued", can_cancel: true }),
+      );
+      expect(cancel).toHaveBeenCalledTimes(cooperative ? 1 : 0);
+    },
+  );
+
+  it("keeps a loading chain without cancellation authority read-only", () => {
+    liveHost();
+    expect(commands().canCancel(pausedChainRow({ phase: "loading", can_cancel: false }))).toBe(
+      false,
     );
   });
 
